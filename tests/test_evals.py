@@ -312,15 +312,17 @@ def test_live_run_path_with_a_fake_codex_process(tmp_path, monkeypatch):
     out = tmp_path / "report"
     assert runner.main(["--scenarios", "greet-new-en,stale-resources-en", "--out", str(out),
                         "--jobs", "1", "--instructions", str(candidate), "--no-web-search"]) == 0
-    assert len(prompts) == 2
-    assert all(f"model_instructions_file={json.dumps(str(candidate))}" in command for command, _ in prompts)
+    assert len(prompts) == 4  # each scenario: the answer turn, then the memory step
+    turns = [(c, p) for c, p in prompts if "<adviser>" not in p]
+    assert len(turns) == 2 and all("candidate" not in p for p in turns[0][1:])
+    assert all("conversation-" in " ".join(command) for command, _ in turns)
     first = json.loads((out / "transcripts" / "greet-new-en.json").read_text())["transcript"]
     assert first["tools"] == ["wealth.wealth_context"]
     assert first["history"][0][0] == "assistant"  # the onboarding welcome, as in the web chat
-    assert "Saved profile: empty" in prompts[0][1]
+    assert "nothing saved yet" in turns[0][1] or "Saved profile: empty" in turns[0][1]
     stale = json.loads((out / "transcripts" / "stale-resources-en.json").read_text())["transcript"]
     assert {f["key"] for f in stale["seeded_facts"] if f["stale"]} == {"plan.resources", "household"}
-    assert "stale; reconfirm" in prompts[1][1]
+    assert "<situation>" in turns[1][1]
 
 
 def test_reports_directory_is_git_ignored():

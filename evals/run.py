@@ -76,19 +76,29 @@ def run_scenario(data: dict, scenario: dict, options: argparse.Namespace) -> dic
         before_ids = {fact["id"] for fact in before}
         turns = scenario_lib.history(scenario, ONBOARDING_WELCOME)
         started = time.monotonic()
-        response, error = None, None
+        response, error, memory_s = None, None, None
+        brief = None
         try:
+            brief, _ = agent.situation_brief(db, scenario_lib.CLIENT_ID, scenario["message"])
             response = agent.run_turn(
                 scenario["message"], client_id=scenario_lib.CLIENT_ID, db_path=db,
                 model=options.model, history=turns, timeout=options.timeout,
                 profile_empty=not before,
-                profile=agent.profile_state(db, scenario_lib.CLIENT_ID),
+                profile=agent.profile_state(db, scenario_lib.CLIENT_ID), brief=brief,
                 web_search=scenario.get("web_search", options.web_search),
-                reasoning=options.reasoning, ephemeral=True,
+                reasoning=options.reasoning, ephemeral=True, defer_memory=True,
             )
         except agent.AgentError as exc:
             error = str(exc)
         elapsed = round(time.monotonic() - started, 1)
+        if response:
+            saved_at = time.monotonic()
+            try:
+                agent.remember_exchange(scenario["message"], response, client_id=scenario_lib.CLIENT_ID,
+                                        db_path=db, model=options.model, brief=brief)
+            except agent.AgentError as exc:
+                error = f"memory step: {exc}"
+            memory_s = round(time.monotonic() - saved_at, 1)
         after = service.inspect(scenario_lib.CLIENT_ID)["facts"]
     events = agent.parse_events("\n".join(getattr(_captured, "lines", [])))
     return {
@@ -102,6 +112,7 @@ def run_scenario(data: dict, scenario: dict, options: argparse.Namespace) -> dic
         "tools": list(events.tools),
         "saved_keys": sorted({f["key"] for f in after if f["id"] not in before_ids}),
         "elapsed_s": elapsed,
+        "memory_s": memory_s,
         "model": agent.resolve_model(options.model),
         "reasoning": options.reasoning,
     }
