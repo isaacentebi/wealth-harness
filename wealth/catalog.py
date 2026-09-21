@@ -55,6 +55,34 @@ _LEDGER: dict[str, Any] = {
     "fx": [], "assertions": [], "labels": [], "category_rules": [],
 }
 
+_PROACTIVE_FACTS: list[dict[str, Any]] = [
+    {"key": "client.profile", "value": {"name": "Lucía", "residence": {"country": "MX"}, "tax_residence": ["MX"],
+                                        "language": "es", "timezone": "America/Mexico_City"}},
+    {"key": "income.salary", "value": {"amount": 42000, "currency": "MXN", "frequency": "monthly", "net": True,
+                                       "kind": "salary"}},
+    {"key": "spending.monthly", "value": {"essential": 22000, "discretionary": 8000, "currency": "MXN"}},
+    {"key": "cash.nu", "value": {"amount": 40000, "currency": "MXN", "purpose": "reserve"}},
+    {"key": "reserve", "value": {"target_months": 6}},
+]
+_MX_SOURCE = {"kind": "document", "ref": "estado de cuenta"}
+_PROACTIVE_LEDGER: dict[str, Any] = {
+    "accounts": [{"id": "nomina", "institution": "BBVA", "type": "checking", "currency": "MXN", "owners": _OWNER}],
+    "instruments": [],
+    "entries": [
+        {"id": "p0", "account_id": "nomina", "kind": "opening_balance", "date": "2026-08-31", "amount": "15000",
+         "currency": "MXN", "confidence": "reported", "source": _MX_SOURCE},
+        *({"id": f"p{i}", "account_id": "nomina", "kind": "income", "subtype": "salary", "date": day, "amount": "21000",
+           "currency": "MXN", "description": "PAGO DE NOMINA", "confidence": "reported", "source": _MX_SOURCE}
+          for i, day in enumerate(["2026-09-15", "2026-09-30", "2026-10-15", "2026-10-30", "2026-11-15", "2026-11-30"], 1)),
+        *({"id": f"r{i}", "account_id": "nomina", "kind": "expense", "date": day, "amount": "-26000",
+           "currency": "MXN", "description": "RENTA DEPARTAMENTO", "confidence": "reported", "source": _MX_SOURCE}
+          for i, day in enumerate(["2026-09-02", "2026-10-02", "2026-11-02", "2026-12-02"], 1)),
+        {"id": "ag", "account_id": "nomina", "kind": "income", "date": "2026-12-15", "amount": "42000",
+         "currency": "MXN", "description": "PAGO AGUINALDO", "confidence": "reported", "source": _MX_SOURCE},
+    ],
+    "fx": [], "assertions": [], "labels": [], "category_rules": [],
+}
+
 _PRICE_SOURCE = ["prices {currency, source, rows:[{date, SYMBOL: price}]}", "price_csv + price_source",
                  "years (live Yahoo prices, default 5)"]
 _MARKET_COMMON = [
@@ -588,6 +616,27 @@ CATALOG: dict[str, dict[str, Any]] = {
                                        {"account_id": "gbm", "instrument_id": "CSPXN", "value": 300000, "sic_listed": True, "issuer_domicile": "IE", "distributing": False}]},
                                    {"name": "cetes", "kind": "mx_fixed_income", "holdings": [{"account_id": "gbm", "value": 200000}]}]},
         },
+    },
+    "today": {
+        "purpose": "Proactive nudges: at most 3 ranked items for today (money at risk > deadline within 14 days > "
+                   "opportunity > info, one per kind) plus upcoming dates, from the saved picture, ledger and the "
+                   "MX/US/life calendar. Each item: id, kind, severity act|consider|fyi, title/why/next_step in en "
+                   "and es, due, data, sources, fingerprint. Unknown inputs never fire a nudge; they are listed in "
+                   "result.unknown.",
+        "required": ["client_id (or facts [{key, value}] and an optional ledger for a run without a client)"],
+        "optional": ["as_of (default today in the client's timezone)", "jurisdiction: MX|US|'MX,US' (default "
+                     "stated tax residence, plus US for US persons)", "timezone (IANA)",
+                     "dismiss: [item id] (hidden until its trigger changes)",
+                     "snooze: [{id, until: YYYY-MM-DD} | {id, days}]", "restore: [item id]"],
+        "example": {"as_of": "2026-12-18", "facts": _PROACTIVE_FACTS, "ledger": _PROACTIVE_LEDGER},
+        "variants": {"us_person_in_mexico": {"as_of": "2026-09-08", "jurisdiction": "MX,US", "facts": _PROACTIVE_FACTS}},
+    },
+    "weekly": {
+        "purpose": "The weekly letter: the week in at most 5 lines of data (cash flow, new merchants, today's items, "
+                   "the next date) for the model to phrase. Replaces a stream of notifications.",
+        "required": ["client_id (or facts [{key, value}] and an optional ledger)"],
+        "optional": ["as_of", "jurisdiction", "timezone"],
+        "example": {"as_of": "2026-12-18", "facts": _PROACTIVE_FACTS, "ledger": _PROACTIVE_LEDGER},
     },
     "monitor": {
         "purpose": "Evaluate opt-in review, expiry, drift, goal, threshold, or thesis rules and return only state changes to the caller.",

@@ -46,6 +46,9 @@ def _client_today(snapshot: dict, inputs: dict) -> tuple[date, str]:
     return datetime.now(zone).date(), f"{basis} ({name})"
 
 
+client_today = _client_today  # public for callers that judge "today" the same way (wealth.proactive)
+
+
 def _acknowledged(inputs: dict) -> set[str]:
     raw = inputs.get("acknowledge", [])
     if not isinstance(raw, list) or any(not isinstance(item, str) or not item for item in raw):
