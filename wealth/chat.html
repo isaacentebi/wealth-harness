@@ -664,9 +664,9 @@
           'Searching the web': 'Buscando en la web'
         },
         starters: {
-          'Share my situation': ['Compartir mi situación', 'Esta es una idea general de mis finanzas: '],
-          'How big should my emergency fund be?': ['¿De qué tamaño debe ser mi fondo de emergencia?', '¿Cuánto debería tener en un fondo de emergencia y dónde conviene guardarlo?'],
-          'Help me evaluate an investment': ['Ayúdame a evaluar una inversión', 'Estoy considerando una inversión y quiero entender los riesgos antes de comprar.']
+          'Upload a statement': ['Subir un estado de cuenta', ''],
+          'Where does my money go each month?': ['¿En qué se me va el dinero cada mes?', '¿En qué se me va el dinero cada mes y cuánto podría invertir?'],
+          'Should I invest in something?': ['¿Debería invertir en algo?', 'Estoy pensando invertir en ']
         }
       }
     };
@@ -1195,6 +1195,7 @@
           const button = el('button', 'starter', label);
           button.type = 'button';
           button.addEventListener('click', () => {
+            if (item.attach) { fileInput.click(); return; }
             if (item.send) { submit(prompt); return; }
             input.value = prompt;
             resize();

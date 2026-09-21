@@ -29,19 +29,15 @@ from .agent import (
 )
 from .behavior import ONBOARDING_WELCOME, ONBOARDING_WELCOME_ES
 from .service import WealthService, database_path
-from .store import ClientExistsError, ClientNotFoundError, StoreError
+from .profile import fact_action, fact_detail, form_facts, profile_view
+from .store import ClientExistsError, ClientNotFoundError, StaleRevisionError, StoreError
 
-WELCOME = (
-    "Welcome. A good place to begin is a rough picture of your finances: what comes in "
-    "each month, roughly what you spend, and what you have in savings, investments or "
-    "debt. Estimates are fine. If a particular decision is on your mind, we can start there."
-)
 STARTERS = (
-    {"label": "Share my situation", "prompt": "Here’s a rough picture of my finances: ", "send": False},
-    {"label": "How big should my emergency fund be?",
-     "prompt": "How much should I keep in an emergency fund, and where should it sit?", "send": True},
-    {"label": "Help me evaluate an investment",
-     "prompt": "I’m considering an investment and want to understand the risks before I buy.", "send": True},
+    {"label": "Upload a statement", "prompt": "", "send": False, "attach": True},
+    {"label": "Where does my money go each month?",
+     "prompt": "Where does my money go each month, and how much could I invest?", "send": True},
+    {"label": "Should I invest in something?",
+     "prompt": "I’m thinking about investing in ", "send": False},
 )
 ERROR_TEXT = {
     "not_installed": "Codex isn’t installed on this computer. Install the Codex CLI, then retry.",
@@ -64,6 +60,7 @@ UPLOAD_TYPES = {
     "image/webp": ".webp",
 }
 _UPLOAD_ID = re.compile(r"^[0-9a-f]{32}$")
+_FACT_PATH = re.compile(r"^/api/facts/([^/]{1,200})$")
 _TURN_PATH = re.compile(r"^/api/turns/([0-9a-f]{16})(/events|/cancel)?$")
 _MEMORY_LABELS = {
     "client.profile": "Profile", "goals": "Goals", "plan.resources": "Planning resources",
@@ -252,7 +249,7 @@ class Chat:
                 pass
         snapshot = service.inspect(client_id)
         self.display_name = friendly_name(client_id, (snapshot.get("client") or {}).get("display_name"))
-        self.welcome = WELCOME if not snapshot.get("facts") else ""
+        self.welcome = ONBOARDING_WELCOME if not snapshot.get("facts") else ""
 
     def state(self):
         turn = self.turn
@@ -277,7 +274,7 @@ class Chat:
             self.thread_id = None
             self.turn = None
             facts = WealthService(self.db).inspect(self.client_id).get("facts")
-            self.welcome = WELCOME if not facts else ""
+            self.welcome = ONBOARDING_WELCOME if not facts else ""
         finally:
             self.lock.release()
 
@@ -479,6 +476,10 @@ def create_server(chat, port=8765, host="127.0.0.1"):
         def handle_failure(self, exc):
             if isinstance(exc, BlockingIOError):
                 return self.respond(409, _error_payload("busy", str(exc)))
+            if isinstance(exc, StaleRevisionError):
+                return self.respond(409, _error_payload("conflict", "This changed elsewhere. Reload and try again."))
+            if type(exc) is LookupError:  # raised by profile lookups; KeyError stays a 500
+                return self.respond(422, _error_payload("missing", "That item is no longer there."))
             if isinstance(exc, AgentError):
                 return self.respond(502, _error_payload(exc.kind, None, exc.detail))
             if isinstance(exc, (StoreError, sqlite3.Error)):
@@ -500,6 +501,13 @@ def create_server(chat, port=8765, host="127.0.0.1"):
                     return self.respond(200, Path(__file__).with_name("chat.html").read_bytes(), "text/html")
                 if url.path == "/api/state":
                     return self.respond(200, chat.state())
+                if url.path == "/profile":
+                    return self.respond(200, Path(__file__).with_name("profile.html").read_bytes(), "text/html")
+                if url.path == "/api/profile":
+                    return self.respond(200, profile_view(WealthService(chat.db), chat.client_id))
+                fact = _FACT_PATH.match(url.path)
+                if fact:
+                    return self.respond(200, fact_detail(WealthService(chat.db), chat.client_id, unquote(fact.group(1))))
                 match = _TURN_PATH.match(url.path)
                 if match and match.group(2) == "/events":
                     if not self.authorized():
@@ -558,6 +566,11 @@ def create_server(chat, port=8765, host="127.0.0.1"):
                     return self.respond(200, chat.state())
                 if path == "/api/upload":
                     return self.upload()
+                if path == "/api/profile/form":
+                    return self.profile_write(self.read_json(), form=True)
+                fact = _FACT_PATH.match(path)
+                if fact:
+                    return self.profile_write(self.read_json(), key=unquote(fact.group(1)))
                 match = _TURN_PATH.match(path)
                 if match and match.group(2) == "/cancel":
                     if not chat.cancel(match.group(1)):
@@ -566,6 +579,22 @@ def create_server(chat, port=8765, host="127.0.0.1"):
             except Exception as exc:  # noqa: BLE001 - every failure returns JSON
                 return self.handle_failure(exc)
             self.respond(404, {"error": "Not found."})
+
+        def profile_write(self, body, *, key=None, form=False):
+            service = WealthService(chat.db)
+            snapshot = service.inspect(chat.client_id)
+            if form:
+                facts = form_facts(snapshot, body.get("form"))
+                if not facts:
+                    raise ValueError("Nothing to save.")
+            else:
+                action = body.get("action")
+                if action not in {"edit", "confirm", "delete"}:
+                    raise ValueError("Choose edit, confirm or delete.")
+                facts = fact_action(snapshot, key, action, field=body.get("field"), value=body.get("value"))
+            revision = body.get("expected_revision")
+            service.remember(chat.client_id, facts, revision if isinstance(revision, int) else None)
+            return self.respond(200, {"profile": profile_view(service, chat.client_id)})
 
         def upload(self):
             try:
