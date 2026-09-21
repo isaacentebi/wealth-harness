@@ -198,7 +198,8 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = True,
           Saves the stored proposal and posts it to the ledger.
         confirm_duplicates: proposal_id, entry_ids (held lines the person says are separate transactions).
         diff: proposal_id, previous_proposal_id? — changes since the last confirmed statement.
-        connector: name ("ibkr_flex"), query_id — fetch a read-only proposal; same confirm rule.
+        connector: name ("ibkr_flex" with query_id; "alpaca" with paper?, since?; "cuenca" with since?) — fetch a
+          read-only proposal; same confirm rule. Credentials come from the keychain, never inputs.
         connector_status: name — whether a credential is configured and the last sync (never the secret).
         """
         return service.ingest(client_id=client_id, action=action, inputs=inputs)

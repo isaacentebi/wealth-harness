@@ -53,6 +53,25 @@ restart the gateway. It installs the skill, registers the MCP server and creates
 a private data directory. Setup, text-channel onboarding, images and privacy
 notes: [docs/openclaw.md](docs/openclaw.md).
 
+## Connections
+
+Account connections are optional and read-only. If you have the account and
+its API keys, Wealth pulls it on demand; everyone else keeps uploading
+statements, which go through the same proposal and confirmation. A sync never
+saves anything by itself: it returns a proposal, and only the person's yes
+(`ingest action=confirm`) records it. Keys live in the OS keychain or
+environment variables and never reach the database, logs or the chat.
+
+| Provider | How | What comes in |
+| --- | --- | --- |
+| Interactive Brokers | `ibkr_flex`: Flex Web Service token (keychain `wealth-ibkr-flex`) and an Activity Flex Query id | Positions with lots, trades, dividends, withholding, interest, fees, cash, FX, splits, NAV |
+| Alpaca | `alpaca`: API key id and secret (keychain `wealth-alpaca`, accounts `key_id` and `secret`); paper with `WEALTH_ALPACA_PAPER=1` | Positions at average cost (Alpaca has no lots), fills, dividends and NRA withholding, interest, fees, cash transfers, equity history |
+| Cuenca | `cuenca`: API key and secret issued by Cuenca (keychain `wealth-cuenca`, accounts `api_key` and `api_secret`) | MXN balance and apartados, SPEI (by clave de rastreo), card purchases categorised by merchant, ATM withdrawals, commissions |
+| Vest | No API for individual users: upload the monthly statement, or a CSV with `preset=vest` (a generic layout, labelled as such) | Holdings and activity from the file |
+
+Check what is configured with `ingest action=connector_status`. Setup steps
+and sources are in the [CLI reference](docs/cli.md#connectors).
+
 ## What it can run
 
 | Area | Tasks | Current capability |
@@ -74,9 +93,10 @@ printf '{}' | uv run wealth context
 
 ## Boundaries
 
-- No brokerage connection, order placement, transfer, external message, or
-  claim that an accepted decision was executed. Statements are read from local
-  uploads; no aggregator connector ships.
+- No order placement, transfer, external message, or claim that an accepted
+  decision was executed. Account connectors (IBKR Flex, Alpaca, Cuenca) only
+  read, only on request, and need the person's confirmation before anything is
+  saved; no aggregator connector ships.
 - Tax covers the scenarios listed above. It does not compute state taxes or
   AFORE/IRA internals, prepare a return, take filing positions, or replace
   professional review.

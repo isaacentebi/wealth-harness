@@ -1,0 +1,15 @@
+{
+  "orders": [
+    {"id": "aa11bb22-cc33-4d44-8e55-ff6677889900", "client_order_id": "fictional-open-1", "symbol": "VOO",
+     "qty": "1", "filled_qty": "0", "filled_avg_price": null, "side": "buy", "type": "limit", "limit_price": "500",
+     "status": "new", "submitted_at": "2026-09-18T14:00:00Z", "filled_at": null}
+  ],
+  "portfolio_history": {
+    "base_value": 4100.0,
+    "timeframe": "1D",
+    "timestamp": [1767225600, 1767312000, 1767571200],
+    "equity": [null, 4100.0, 4120.35],
+    "profit_loss": [0, 0, 20.35],
+    "profit_loss_pct": [0, 0, 0.005]
+  }
+}
