@@ -406,6 +406,7 @@ _TOOL_STEPS = {
     "wealth_context": "Checking your saved profile",
     "wealth_recall": "Recalling what you have shared",
     "wealth_inspect": "Reviewing your saved details",
+    "wealth_ingest": "Reading your statement",
     "wealth_client": "Reviewing your profile",
     "wealth_remember": "Saving to memory",
     "wealth_decision": "Recording the decision",

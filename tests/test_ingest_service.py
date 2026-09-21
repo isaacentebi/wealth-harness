@@ -9,7 +9,7 @@ from tests.fixtures.ingest import statements as fixtures
 from wealth import server
 from wealth.service import WealthService, dispatch, upload_dir
 from wealth.store import WealthStore
-from wealth.web import Uploads
+from wealth import web
 
 
 @pytest.fixture
@@ -31,9 +31,11 @@ def test_upload_dir_matches_the_browser_chat_and_honours_the_override(tmp_path, 
     monkeypatch.delenv("WEALTH_UPLOAD_DIR", raising=False)
     db = tmp_path / "data" / "wealth.sqlite3"
     for client in ("ana", "a/b c", "..x"):
-        assert upload_dir(client, db) == Uploads(db.resolve().parent, client).dir
+        assert upload_dir(client, db) == db.resolve().parent / "uploads" / upload_dir(client, db).name
+        assert ".." not in upload_dir(client, db).name and "/" not in upload_dir(client, db).name
     monkeypatch.setenv("WEALTH_UPLOAD_DIR", str(tmp_path / "elsewhere"))
     assert upload_dir("ana", db) == tmp_path / "elsewhere" / "ana"
+    assert web.Chat(db, "ana").uploads.dir == upload_dir("ana", db)
 
 
 def test_statement_flows_from_upload_to_ledger_household_and_exposure(service):

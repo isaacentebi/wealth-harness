@@ -28,7 +28,7 @@ from .agent import (
     run_turn, seed_demo, stream_turn,
 )
 from .behavior import ONBOARDING_WELCOME, ONBOARDING_WELCOME_ES
-from .service import WealthService, database_path
+from .service import WealthService, database_path, upload_dir
 from .profile import fact_action, fact_detail, form_facts, profile_view
 from .store import ClientExistsError, ClientNotFoundError, StaleRevisionError, StoreError
 
@@ -104,9 +104,8 @@ class Uploads:
     ever display text. Types are allowlisted and checked against file content.
     """
 
-    def __init__(self, root: Path, client_id: str):
-        safe = re.sub(r"[^A-Za-z0-9._-]", "_", client_id).strip(".") or "client"
-        self.dir = Path(root) / "uploads" / safe[:64]
+    def __init__(self, directory: Path):
+        self.dir = Path(directory)
 
     @staticmethod
     def clean_name(raw: str) -> str:
@@ -238,7 +237,7 @@ class Chat:
         self.messages: list[dict[str, Any]] = []
         self.thread_id: str | None = None
         self.turn: Turn | None = None
-        self.uploads = Uploads(Path(db).expanduser().resolve().parent, client_id)
+        self.uploads = Uploads(upload_dir(client_id, db))
         service = WealthService(db)
         try:
             service.inspect(client_id)
