@@ -280,7 +280,7 @@ class PriceProvider:
     offline: bool | None = None
     clock: Callable[[], datetime] = field(default=lambda: datetime.now(timezone.utc))
     stale_after_days: int = STALE_AFTER_DAYS
-    _pending: dict[tuple[str, str], futures.Future] = field(default_factory=dict, init=False, repr=False)
+    _pending: dict[tuple[str, str, date, date], futures.Future] = field(default_factory=dict, init=False, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     # -- plumbing
@@ -324,7 +324,8 @@ class PriceProvider:
 
     def _submit(self, symbol: str, kind: str, start: date, end: date) -> futures.Future:
         with self._lock:
-            key = (symbol, kind)
+            key = (symbol, kind, start, end)  # a different window is a different fetch
+            self._pending = {k: j for k, j in self._pending.items() if not j.done()}
             running = self._pending.get(key)
             if running is not None and not running.done():
                 return running

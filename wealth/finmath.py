@@ -208,7 +208,7 @@ def xirr_solve(cashflows: Iterable[tuple[Any, Any]]) -> XirrResult:
             exact.append(grid[-1])
 
     scan(0)
-    while not brackets and not exact and upper < XIRR_CEILING:  # expand upward
+    while upper < XIRR_CEILING:  # expand to the ceiling: a second root can sit far above the first
         upper *= 2
         grid.append(upper)
         values.append(npv(upper))

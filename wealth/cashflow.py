@@ -437,6 +437,8 @@ def investable_surplus(ledger: Mapping[str, Any], start: str, end: str, currency
     a zero reserve.  Uncategorized spending counts as essential.
     """
 
+    if str(start)[:7] > str(end)[:7]:
+        raise ValueError(f"start ({start}) is after end ({end}); give the earlier month first")
     spending = spending_report(ledger, start, end, currency, include_inferred=include_inferred,
                                fx_max_age_days=fx_max_age_days)
     income = income_report(ledger, start, end, currency, include_inferred=include_inferred,

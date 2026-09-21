@@ -435,3 +435,20 @@ def test_profile_state_never_asks_to_reconfirm_activity_or_never_known_balances(
     state = profile_state(db, "p")
     assert "investment.gbm" not in state["stale"]
     assert not any(k.endswith(".activity") for keys in state.values() for k in keys)
+
+
+def test_xirr_reports_a_second_root_far_above_the_first():
+    from datetime import date
+    from wealth.finmath import xirr_solve
+    import inspect
+    flows = [(date(2020, 1, 1), -1.0), (date(2021, 1, 1), 23.0), (date(2022, 1, 1), -42.0)]
+    params = inspect.signature(xirr_solve).parameters
+    result = xirr_solve(flows) if len(params) == 1 else xirr_solve([d for d, _ in flows], [a for _, a in flows])
+    assert len(result.roots) == 2 and result.warning
+
+
+def test_surplus_rejects_a_reversed_period():
+    import pytest
+    from wealth.cashflow import investable_surplus
+    with pytest.raises(ValueError, match="after end"):
+        investable_surplus({"entries": []}, "2026-06-01", "2026-01-31", "MXN")
