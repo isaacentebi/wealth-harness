@@ -1,30 +1,204 @@
 # CLI and MCP reference
 
-The CLI and MCP tools share the same service and task catalog.
-See [agent setup](agent.md) for interactive chat.
+The JSON CLI, the MCP server and the browser chat share one service
+([wealth/service.py](../wealth/service.py)) and one task catalog
+([wealth/catalog.py](../wealth/catalog.py)). Every example below runs offline
+against a fictional profile `ana`; point `WEALTH_DB` at a scratch file first:
 
-## Surface
+```sh
+export WEALTH_DB=/tmp/wealth-demo/wealth.sqlite3 && mkdir -p /tmp/wealth-demo
+```
 
-| MCP tool | CLI | What it does |
+## Programs
+
+| Program | What it runs |
+| --- | --- |
+| `wealth` | The JSON CLI below, plus text-channel commands |
+| `wealth-chat` | The local browser chat and You page ([agent.md](agent.md)) |
+| `wealth-agent` | The same assistant in a terminal ([agent.md](agent.md)) |
+| `wealth-mcp` | The stdio MCP server for your own agent |
+
+```sh
+uv run wealth-chat --client ana          # http://127.0.0.1:8765/
+uv run wealth-agent --demo --prompt "Where should I start?"
+uv run wealth-mcp                         # speaks MCP on stdin/stdout
+```
+
+The two assistants need a signed-in Codex CLI; `wealth` and `wealth-mcp` need
+no model at all. `WEALTH_MCP_TOOLS=wealth_context,wealth_run` limits the MCP
+server to the named tools, and `WEALTH_BEHAVIOR_IN_HOST=1` leaves the
+conversation policy out of its instructions when the host already has it.
+
+## MCP tools
+
+Nine tools. `wealth_context`, `wealth_recall` and `wealth_inspect` are
+read-only; none is destructive. Arguments are strict: unknown fields are
+rejected, and errors name the field and the expected inputs.
+
+| Tool | What it does | Example arguments |
 | --- | --- | --- |
-| `wealth_context` | `context` | Task schemas without a client; with one, the facts relevant to a task |
-| `wealth_remember` | `remember` | Atomically record sourced facts, corrections or `merge` patches; returns a receipt |
-| `wealth_run` | `run` | Run one catalog task, optionally with client facts and ledger; optionally save the result |
-| `wealth_recall` | `recall` | Search all remembered facts; optional host-supplied vectors |
-| `wealth_decision` | `decision` | Propose, accept, or dismiss an evidence-bound decision; acceptance is not execution |
-| `wealth_ingest` | `ingest` | Statement, image-text, export or chat facts into a reconciled proposal; `confirm` saves it |
-| `wealth_inspect` | `client` action `inspect`/`export` | Current facts (`key`/`keys`), one key's `history`, or a full `export` |
-| `wealth_client` | `client` action `create`/`index` | Create the profile or attach a host-provided vector |
-| none | `forget`, `client` action `forget` | Delete a profile; interactive terminal only |
-| none | `watch` | Foreground polling of one client's monitor rules |
+| `wealth_context` | Task schemas without `client_id`; with it, the facts relevant to a task, or the whole picture with `intent="situation"` | `{"intent": "debt_payoff"}` |
+| `wealth_client` | `create` the profile once; `index` a host-supplied embedding for a fact | `{"action": "create", "client_id": "ana", "inputs": {"display_name": "Ana"}}` |
+| `wealth_remember` | Save sourced facts, corrections or `merge` patches atomically; returns a receipt with `needs_user` | `{"client_id": "ana", "facts": [{"key": "spending.monthly", "value": {"total": 30000, "currency": "MXN"}, "source": {"kind": "user", "ref": "conversation", "observed_on": "2026-09-21"}}]}` |
+| `wealth_recall` | Search all remembered facts | `{"client_id": "ana", "query": "spending"}` |
+| `wealth_run` | Run one task; optional `save_as` with `expires_on` | `{"task": "debt_payoff", "inputs": {"monthly_amount": 3000, "liabilities": [{"id": "card", "balance": 18000, "annual_rate": 0.42, "monthly_payment": 1200, "currency": "MXN"}]}}` |
+| `wealth_inspect` | Current facts (`key`/`keys`), one key's `history`, pending `contradictions`, or an `export` | `{"client_id": "ana", "key": "spending.monthly", "detail": "history"}` |
+| `wealth_resolve_contradiction` | Save the person's answer (`keep`, `use_new`, `changed`) to a contradiction | `{"client_id": "ana", "contradiction_id": "<id from needs_user>", "choice": "keep"}` |
+| `wealth_ingest` | Uploads, extractions, stated balances and connector syncs into a held proposal; `confirm` saves it after the person's yes | `{"client_id": "ana", "action": "connector_status", "inputs": {}}` |
+| `wealth_decision` | Propose, accept or dismiss an evidence-bound decision; acceptance is not execution | `{"action": "propose", "client_id": "ana", "inputs": {"title": "Pay the card first", "rationale": "42% costs more than any safe return", "expected_revision": 1, "evidence_ids": ["<fact id>"]}}` |
 
-`wealth_context`, `wealth_recall` and `wealth_inspect` are annotated read-only.
-No MCP tool is destructive. Every CLI command reads one JSON object from
-`--input request.json` or stdin; `--db` overrides `WEALTH_DB`. Errors name the
-offending field and the expected inputs; a stale revision error reports the
-current revision.
+## CLI commands
 
-Compound operations use a small action envelope:
+Every command reads one JSON object from stdin or `--input request.json` and
+prints JSON; `--db` overrides `WEALTH_DB`. Errors go to stderr as
+`{"error", "error_type"}` with exit code 2.
+
+| Command | MCP equivalent | What it does |
+| --- | --- | --- |
+| `context` | `wealth_context` | Task schemas or relevant facts |
+| `client` | `wealth_client`, `wealth_inspect` | `create`, `inspect`, `export`, `index`; `forget` in a terminal only |
+| `remember` | `wealth_remember` | Save facts |
+| `recall` | `wealth_recall` | Search facts |
+| `run` | `wealth_run` | Run a task |
+| `decision` | `wealth_decision` | Propose, accept, dismiss |
+| `ingest` | `wealth_ingest` | Proposals and confirmation |
+| `history` | `wealth_inspect` `detail=history` | One key's timeline |
+| `contradictions` | `wealth_inspect` `detail=contradictions` | Pending contradictions |
+| `resolve_contradiction` | `wealth_resolve_contradiction` | The person's answer |
+| `execution_status` | none | Trading mode, whether keys exist, limits, today's usage |
+| `order_status` | none | Order tickets and line states; `refresh` reads the broker |
+| `forget` | none | Delete a profile; interactive terminal only |
+| `watch` | none | Foreground monitor polling |
+| `onboarding`, `today`, `view` | none | Text-channel helpers ([openclaw.md](openclaw.md)) |
+
+**context**, with no client, returns the catalog; name one task for its inputs
+and example:
+
+```sh
+printf '{"intent":"debt_payoff"}' | uv run wealth context
+```
+
+**client** creates the profile (then `inspect`, `export`, `index`, below):
+
+```sh
+printf '%s' '{"action":"create","client_id":"ana","inputs":{"display_name":"Ana"}}' | uv run wealth client
+```
+
+**remember** records sourced facts. A new key needs no revision:
+
+```sh
+printf '%s' '{"client_id":"ana","facts":[
+  {"key":"income.salary","value":{"amount":42000,"currency":"MXN","frequency":"monthly","net":true,"kind":"salary"},
+   "source":{"kind":"user","ref":"conversation","observed_on":"2026-09-21"}},
+  {"key":"liability.card","value":{"kind":"card","balance":18000,"annual_rate":0.42,"payment":1200,"payment_frequency":"monthly","currency":"MXN"},
+   "source":{"kind":"user","ref":"conversation","observed_on":"2026-09-21"}}]}' | uv run wealth remember
+```
+
+**recall** searches what is remembered:
+
+```sh
+printf '%s' '{"client_id":"ana","query":"salary"}' | uv run wealth recall
+```
+
+**run** runs one task. With `client_id` it reads the saved picture and ledger;
+direct inputs override them for that call. `save_as` (`analysis.<name>`,
+`research.<symbol>`, or `household` for `import`) also needs `expires_on`.
+
+```sh
+printf '%s' '{"task":"debt_payoff","client_id":"ana","inputs":{"monthly_amount":3000}}' | uv run wealth run
+```
+
+**client inspect / export** read facts, and **decision** cites them. A proposal
+needs the current revision and eligible evidence:
+
+```sh
+FACT=$(printf '%s' '{"action":"inspect","client_id":"ana","inputs":{"key":"liability.card"}}' \
+  | uv run wealth client | python3 -c 'import json,sys; print(json.load(sys.stdin)["facts"][0]["id"])')
+REV=$(printf '%s' '{"action":"inspect","client_id":"ana"}' \
+  | uv run wealth client | python3 -c 'import json,sys; print(json.load(sys.stdin)["client"]["revision"])')
+printf '%s' "{\"action\":\"propose\",\"client_id\":\"ana\",\"inputs\":{\"title\":\"Pay the card first\",
+  \"rationale\":\"42% costs more than any safe return\",\"expected_revision\":$REV,\"evidence_ids\":[\"$FACT\"]}}" \
+  | uv run wealth decision
+printf '%s' '{"action":"export","client_id":"ana"}' | uv run wealth client > /tmp/wealth-demo/ana-export.json
+```
+
+Accept or dismiss later with `{"action":"accept","client_id":"ana","inputs":{"decision_id":"..."}}`.
+
+**ingest** turns a statement or stated balances into a held proposal; confirm
+only after the person's yes:
+
+```sh
+PID=$(printf '%s' '{"client_id":"ana","action":"chat","inputs":{"currency":"MXN","as_of":"2026-09-21",
+  "items":[{"kind":"cash","label":"Nu","amount":40000,"quote":"tengo unos 40 mil en Nu"}]}}' \
+  | uv run wealth ingest | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["proposal_id"])')
+printf '%s' "{\"client_id\":\"ana\",\"action\":\"confirm\",\"inputs\":{\"proposal_id\":\"$PID\"}}" | uv run wealth ingest
+```
+
+**history** prints one key's timeline in words and entries:
+
+```sh
+printf '%s' '{"client_id":"ana","key":"income.salary"}' | uv run wealth history
+```
+
+**contradictions** and **resolve_contradiction**: evidence that disagrees with
+what the person said is held, not saved, until they answer:
+
+```sh
+printf '%s' '{"client_id":"ana","facts":[{"key":"income.salary",
+  "value":{"amount":39000,"currency":"MXN","frequency":"monthly","net":true,"kind":"salary"},
+  "source":{"kind":"document","ref":"payslip-2026-09.pdf","observed_on":"2026-09-21"}}]}' | uv run wealth remember
+CID=$(printf '%s' '{"client_id":"ana"}' | uv run wealth contradictions \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["contradictions"][0]["id"])')
+printf '%s' "{\"client_id\":\"ana\",\"contradiction_id\":\"$CID\",\"choice\":\"keep\"}" | uv run wealth resolve_contradiction
+```
+
+**client index** attaches a host-computed embedding to a fact (Wealth creates
+none):
+
+```sh
+printf '%s' "{\"action\":\"index\",\"client_id\":\"ana\",\"inputs\":{\"fact_id\":\"$FACT\",\"embedding\":[0.1,0.2,0.3],\"model\":\"example-embed-3\"}}" \
+  | uv run wealth client
+```
+
+**run order_ticket, execution_status, order_status**: a ticket stores exact
+orders and their pre-trade checks. Without Alpaca keys it is `partial`, with the
+checks it could not run marked `unknown`. Nothing here can place an order; only
+the person's tap on the card in `wealth-chat` does ([trading.md](trading.md)).
+
+```sh
+printf '%s' '{"task":"order_ticket","client_id":"ana","inputs":{"source":"user_request",
+  "rationale":"Invest USD 500 in the total-market fund.","orders":[{"symbol":"VTI","side":"buy","notional":500}]}}' \
+  | uv run wealth run
+printf '%s' '{"client_id":"ana"}' | uv run wealth execution_status
+printf '%s' '{"client_id":"ana"}' | uv run wealth order_status
+```
+
+**watch** evaluates the client's opt-in monitor rules and prints only changed
+events; it runs in the foreground until stopped (`--interval` seconds, default
+300), sends no notifications and places no trades:
+
+```sh
+uv run wealth watch --client ana --once
+```
+
+**onboarding, today, view** print person-facing text for text channels. Exit
+code 3 means the reply needs the host model, 4 means there is nothing to send.
+
+```sh
+uv run wealth onboarding next --client ana --lang en
+uv run wealth today --client ana --lang en
+uv run wealth view --client ana --task situation --svg /tmp/wealth-demo/picture.svg
+```
+
+**forget** deletes one profile and its uploads. It asks you to type the client
+ID followed by `DELETE` and refuses piped or scripted input, so an agent with
+shell access cannot delete a profile:
+
+```sh
+uv run wealth forget --client ana
+```
+
+## Action envelopes
 
 | Operation | Action | `inputs` |
 | --- | --- | --- |
@@ -39,10 +213,11 @@ Compound operations use a small action envelope:
 | `ingest` | `connector` | `name` (`ibkr_flex`, `alpaca`, `cuenca`); `query_id` for `ibkr_flex`; optional `owner_id`, `sic_listed` (`ibkr_flex`, `alpaca`), `paper` (`alpaca`), `since` (`alpaca`, `cuenca`); the credential is never an input |
 | `ingest` | `connector_status` | optional `name`; whether a credential is available and the last sync (never the credential) |
 | `client` | `create` | `display_name` |
-| `client` | `inspect` | optional `detail: current|history|export`; `key` or `keys` filters current facts; `key` is required for history |
-| `client` | `export` | none; full private history including superseded facts and decision events |
+| `client` | `inspect` | optional `detail: current|history|contradictions|export`; `key` or `keys` filters current facts; `key` is required for history |
+| `client` | `export` | none; full private history including superseded facts, decisions and the order audit |
 | `client` | `index` | `fact_id`, host-supplied `embedding`, exact `model` identifier |
-| `client` | `forget` | `confirm_client_id` matching the requested client (CLI only) |
+| `client` | `forget` | `confirm_client_id` matching the requested client (interactive terminal only) |
+| `order_status` | none | `client_id`, optional `ticket_id`, `refresh` |
 
 ## Ingestion
 
@@ -242,113 +417,37 @@ assumptions.
 ## Facts
 
 A fact has `key`, `value`, `source` (`kind`, `ref`, `observed_on`), optional
-`confidence` (default `reported`), optional `expires_on` and optional `merge`.
+`confidence` (default `reported`), `expires_on`, `merge` and `valid_from`.
+`fact_contract` (in any `context` result) has the full schema.
 
-- `source.kind`: `user` for what the person said, `document` for a supplied file,
-  `web` for a page (`ref` is the URL), `connector` for an account aggregator,
-  `tool` for a Wealth result, `inference` for an interpretation. Goals, profile,
-  preferences, constraints and tax profile from `document`/`web`/`connector` are
+- `source.kind`: `user` for what the person said, `document` for a supplied
+  file, `web` for a page (`ref` is the URL), `tool` for a Wealth result,
+  `inference` for an interpretation, `pattern` for something noticed in their
+  transactions. Confirmed statements, connector syncs and chat balances are saved with kind
+  `document`, `connector` or `user` by Wealth itself. Goals, profile, preferences,
+  constraints and tax profile from documents, web pages or connectors are
   stored as `inferred` until the person confirms them.
+- Evidence never overwrites what the person said: such a write is held as a
+  contradiction and returned in the receipt's `needs_user`.
 - `expires_on` defaults to `observed_on` plus the review horizon for the key
-  (`store.REVIEW_DAYS`: 30 days for holdings, balances, `account.*` and
-  `liability.*`, 90 for plan resources, `income.*` and research, 180 for
-  theses, 365 otherwise).
-  Past-review facts remain in recall and context, marked stale, and are
-  excluded from calculations and decisions.
+  (`store.REVIEW_DAYS`: 30 days for holdings, `account.*`, `liability.*` and
+  saved analyses; 90 for `cash.*`, `investment.*`, `income.*`, `spending.*`,
+  planning inputs and research; 180 for theses and threads; 365 otherwise).
+  Past-review facts stay visible, marked stale, and are excluded from
+  calculations and decisions.
 - Without `expected_revision`, a write may add new keys or apply `merge: true`
   patches (RFC 7386 for objects; lists of objects merge by `id`). Replacing an
-  existing value wholesale requires `expected_revision`.
+  existing value wholesale requires `expected_revision`. A `null` value forgets
+  a key and leaves a tombstone in the history.
 - Government IDs, account or card numbers, addresses and credentials are
   rejected.
 
 `remember` returns `client`, `written` (key, id, confidence, expiry, source
-kind), `write_result` and `warnings`; use `inspect` to read values.
-
-## A client journey from the CLI
-
-Provision the instance’s profile during setup. The assistant then remembers relevant
-explicit facts automatically; it respects requests not to save a detail.
-The following examples use a fictional profile:
-
-```sh
-printf '%s' '{"action":"create","client_id":"ana","inputs":{"display_name":"Ana"}}' \
-  | uv run wealth client
-```
-
-Record a sourced fact (a new key needs no revision):
-
-```sh
-printf '%s' '{
-  "client_id":"ana",
-  "request_id":"ana-profile-1",
-  "facts":[{
-    "key":"client.profile",
-    "value":{"reporting_currency":"USD"},
-    "source":{"kind":"user","ref":"conversation 2026-09-20","observed_on":"2026-09-20"},
-    "confidence":"confirmed"
-  }]
-}' | uv run wealth remember
-```
-
-Recall relevant context, then run a calculation. Direct inputs override memory
-for that call. Saving requires `save_as`, `client_id`, and `expires_on`;
-validated imports may save `household`, while other results use an
-`analysis.<name>` or `research.<symbol>` key.
-
-```sh
-printf '%s' '{"client_id":"ana","intent":"exposure","query":"current household exposure"}' \
-  | uv run wealth context
-
-printf '%s' '{
-  "task":"analyze",
-  "client_id":"ana",
-  "inputs":{"currency":"USD","weights":{"SPY":0.6,"BND":0.4},"benchmark":"SPY","years":5}
-}' | uv run wealth run
-```
-
-Proposals cite eligible evidence and the current client revision. Resolve them
-with a separate call; stale or inferred evidence cannot support acceptance.
-
-```sh
-printf '%s' '{
-  "action":"propose","client_id":"ana",
-  "inputs":{"title":"Keep a reserve","rationale":"The home goal has a hard date","expected_revision":1,"evidence_ids":["REPLACE_WITH_FACT_ID"],"alternatives":[]}
-}' | uv run wealth decision
-```
-
-Update one field later without re-reading the revision:
-
-```sh
-printf '%s' '{"client_id":"ana","facts":[{"key":"client.profile","merge":true,
-  "value":{"spending_currency":"MXN"},
-  "source":{"kind":"user","ref":"conversation 2026-09-21","observed_on":"2026-09-21"}}]}' \
-  | uv run wealth remember
-```
-
-Inspect selected keys, one key's history, or export everything:
-
-```sh
-printf '%s' '{"action":"inspect","client_id":"ana","inputs":{"keys":["client.profile","goals"]}}' | uv run wealth client
-printf '%s' '{"action":"inspect","client_id":"ana","inputs":{"detail":"history","key":"goals"}}' | uv run wealth client
-printf '%s' '{"action":"export","client_id":"ana"}' | uv run wealth client > ana-export.json
-```
-
-Delete one named client (CLI only). Run it from an interactive terminal; it asks
-you to type the client ID followed by `DELETE`. Piped or scripted input is
-refused, so an agent with shell access cannot delete a profile:
-
-```sh
-uv run wealth forget --client ana
-```
+kind), `write_result`, `needs_user` and `warnings`; use `inspect` to read values.
 
 ## Monitoring
 
-Nothing starts automatically. `wealth watch` runs an explicitly started polling
-loop for one client’s opt-in rules. It prints only changed monitor events to
-stdout. It does not send notifications, place trades, move money, or keep running
-after the process stops. A one-shot `monitor` task is available through
-`wealth_run` for hosts that provide their own scheduler.
-
-```sh
-uv run wealth watch --client ana --interval 300
-```
+Nothing starts automatically. Rules are opt-in facts (`monitor.rules`). A host
+with its own scheduler calls `run` task `monitor`; otherwise `wealth watch`
+polls in the foreground. Both return only state changes, and neither sends
+notifications, places trades or moves money.

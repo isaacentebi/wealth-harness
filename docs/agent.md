@@ -12,7 +12,8 @@ codex login
 uv run wealth-chat --client my-profile --model sol
 ```
 
-Open **http://127.0.0.1:8765/**. Use `--model luna` for Luna. The page streams
+Open **http://127.0.0.1:8765/**. `--model` defaults to `sol` and `--client` to
+`personal`. Use `--model luna` for Luna. The page streams
 progress ("Checking your saved profile", "Searching the web", "Running a stress
 test"), can stop a response, and renders headings, lists, tables and source
 links. Response depth is Fast, Balanced or Deep (Codex reasoning low, medium,
@@ -31,17 +32,33 @@ added with the paperclip or by drag and drop. They are stored in `uploads/<clien
 next to the database, under server-generated names, and deleted once a statement
 is confirmed, after 30 days otherwise, or when the client is deleted (see
 [cli.md](cli.md#ingestion) for the settings). The assistant is told each
-file's name, type and local path; reading their contents is not implemented yet.
+file's name, type and local path and reads PDF and CSV statements with
+`wealth_ingest`; it shows what the statement means and saves it only after you
+say yes. Photos need a host that can read images, since the local launcher
+turns image viewing off.
 
-Onboarding begins with the person's financial situation. Rough figures and
-partial answers are welcome; goals and commitments develop through conversation.
-A specific investment question can be explored alongside onboarding.
+Onboarding is a short run of one-question cards (name and residence, age and
+dependents, income, spending, savings and investments, debts, goals, risk,
+statements) that write facts directly; each can be skipped, and a statement
+upload can replace typing. A first synthesis of where you stand follows. Design notes: [onboarding.md](onboarding.md).
+
+**The You page** (`/profile`, linked from the chat) shows what Wealth knows,
+where each fact came from and when it was last checked. Facts can be edited,
+confirmed or deleted, their history opened, and contradictions between what you
+said and a document settled there.
+
+**Order cards** appear when you ask to buy or sell and Wealth prepares an order
+ticket. The card shows PAPER or LIVE, every line, and any problem the checks
+found; only tapping **Place orders** sends it. See [trading.md](trading.md).
 
 ## Memory and fresh tests
 
 The profile ID is an internal storage identifier. The same ID and database resume
 saved facts. Relevant explicit facts and corrections are remembered automatically;
-you can ask not to save a detail. Hypothetical scenarios are not personal facts.
+you can ask not to save a detail. In the browser chat the answering turn cannot
+write facts: after each answer is shown, a separate short Codex run with only
+the memory tools records what the exchange established, so saving never delays
+an answer. The terminal agent saves during the turn. Hypothetical scenarios are not personal facts.
 The browser transcript lasts only for the running server session.
 
 `--db` selects a database; otherwise `WEALTH_DB` or the default local data directory
@@ -86,15 +103,17 @@ launcher to keep nothing there, at the cost of that continuity. SQLite remains t
 durable financial memory.
 
 Each turn's prompt carries only per-turn context: the date, the browser's time
-zone, which saved facts are current, inferred or past their review date, the
-profile ID, whether web search is on, and the conversation. Standing policy lives
+zone, the `<situation>` brief (the saved picture in numbers), the views of that
+picture, which saved facts are current, inferred or past their review date, the
+profile ID, attachments, whether web search is on, and the conversation. Standing policy lives
 in the instructions file below.
 
 The launcher uses a read-only execution sandbox and turns off Codex features a
 financial assistant does not need: shell and unified exec, apps, plugins,
 subagents, browser and computer use, image viewing and generation, Codex
 memories, tool suggestions and skill search. Wealth tools can write to their
-configured database. No trades, transfers or background monitors start. Stopping
+configured database. No transfers, messages or background monitors start, and
+the model cannot place an order: only the tap on an order card does. Stopping
 a response ends the whole Codex process group, including the Wealth MCP server.
 
 [wealth/instructions.md](../wealth/instructions.md) replaces Codex's built-in
