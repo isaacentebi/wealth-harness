@@ -65,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
         return text_main(argv)
     parser = argparse.ArgumentParser(description="Wealth JSON CLI: one JSON object in (stdin or --input), JSON out")
     parser.add_argument("operation", choices=(*OPERATIONS, "watch"),
-                        help="context | run | remember | recall | decision | ingest | client | forget | watch "
+                        help=" | ".join((*OPERATIONS, "watch")) + " "
                              "(text channels: onboarding | today | view, see docs/openclaw.md)")
     parser.add_argument("--db", help="SQLite path (default WEALTH_DB or user data directory)")
     parser.add_argument("--input", default="-", help="JSON argument file; '-' reads stdin")

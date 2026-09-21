@@ -151,8 +151,10 @@ exercise it.
 
 - Unknown is not zero, in the engines, the brief and the page.
 - Inferred or past-review facts never drive a calculation or support a decision.
-- Evidence (documents, web, connectors, inference, patterns) never overwrites
-  what the person said; the conflict is held as a contradiction for them.
+- Statements and connectors are the source of truth for the figures they
+  cover and replace stated estimates. Other evidence (web, inference, patterns)
+  never overwrites what the person said; the conflict is held as a
+  contradiction for them.
 - Nothing from an upload or connector is saved without the person's yes; a
   confirm is one transaction and is idempotent.
 - The ledger is append-only; removing an account posts reversals.

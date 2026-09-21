@@ -845,7 +845,7 @@ def regimes_frame(px: pd.DataFrame, bench: str, weights=None, window: int = 126,
 # --------------------------------------------------------------------------
 # 13F holdings (SEC EDGAR — free, no key; be polite: one request a second)
 # --------------------------------------------------------------------------
-SEC_UA = os.environ.get("SEC_USER_AGENT", "")
+SEC_UA = os.environ.get("WEALTH_SEC_USER_AGENT") or os.environ.get("SEC_USER_AGENT", "")
 _SEC_LAST = [0.0]
 _NAME_NOISE = re.compile(
     r"\b(INC|CORP|CORPORATION|CO|COMPANY|COMPANIES|LTD|LIMITED|PLC|SA|NV|AG|GROUP|"
@@ -854,7 +854,7 @@ _NAME_NOISE = re.compile(
 
 def _sec_get(url: str, as_json: bool = False):
     if not SEC_UA or "@" not in SEC_UA:
-        raise ValueError("set SEC_USER_AGENT to your app name and contact email before EDGAR access")
+        raise ValueError("set WEALTH_SEC_USER_AGENT to your app name and contact email before EDGAR access")
     import urllib.request
 
     gap = 1.0 - (time.time() - _SEC_LAST[0])

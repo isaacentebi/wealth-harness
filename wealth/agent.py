@@ -1265,7 +1265,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model",
         default=DEFAULT_MODEL,
-        help="sol, luna, or a full Codex model ID (default: sol)",
+        help="sol, luna, or a full Codex model ID (default: the model in your Codex config)",
     )
     parser.add_argument("--client", help="stable Wealth client identifier")
     parser.add_argument("--db", help="SQLite path (default: Wealth user-data database)")

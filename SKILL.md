@@ -177,9 +177,12 @@ passwords, tokens or other credentials; the store rejects them.
   replace a value wholesale with the `client_revision` you read. `valid_from`
   says when a change happened. Omit `expires_on` unless the source gives a
   shorter validity. After a conflict, reload, reconcile and retry.
-- Evidence never overwrites what the person said: such writes come back in
-  `needs_user`. Ask with each item's question, then save their answer with
-  `wealth_resolve_contradiction`; never pick a side silently.
+- Statements, payslips and connectors settle the figures they cover (income,
+  cash, investments, liabilities, spending, accounts): the newer evidence
+  replaces a stated estimate, and the difference is mentioned once if it
+  matters. Other evidence (web, inference, patterns) never overwrites what the
+  person said: it comes back in `needs_user`. Ask with each item's question,
+  then save their answer with `wealth_resolve_contradiction`.
 - Facts past review stay visible but are excluded from calculations; reconfirm
   one in a short question before relying on it.
 - Save consequential advice or a commitment as `thread.<id>`
