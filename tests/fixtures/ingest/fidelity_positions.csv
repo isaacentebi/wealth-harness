@@ -1,0 +1,8 @@
+Account Number,Account Name,Symbol,Description,Quantity,Last Price,Last Price Change,Current Value,Today's Gain/Loss Dollar,Total Gain/Loss Dollar,Percent Of Account,Cost Basis Total,Average Cost Basis,Type
+Z12345678,Individual - TOD,SPAXX**,HELD IN MONEY MARKET,,,,$1200.00,,,10.71%,,,Cash
+Z12345678,Individual - TOD,FXAIX,FIDELITY 500 INDEX FUND,50,$200.00,+$1.00,$10000.00,+$50.00,+$2000.00,89.29%,$8000.00,$160.00,Cash
+Z12345678,Individual - TOD,Pending Activity,,,,,$150.00,,,,,,
+123456789,ROTH IRA,QQQ,INVESCO QQQ TR UNIT SER 1,10,$500.00,+$2.00,$5000.00,+$20.00,+$1000.00,100%,$4000.00,$400.00,Cash
+
+"The data and information in this spreadsheet is provided to you solely for your use and is not for distribution."
+"Date downloaded 08/31/2026 10:15 AM ET"
