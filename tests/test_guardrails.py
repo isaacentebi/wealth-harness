@@ -416,3 +416,13 @@ def test_service_uses_the_saved_picture_and_preference(tmp_path):
     assert report["evidence_ids"]
     with pytest.raises(ValueError, match="unknown"):
         service.run("scam_check", inputs={"item": "x", "bogus": 1})
+
+
+def test_an_exact_thirty_percent_drawdown_stops_and_negative_buys_are_rejected():
+    for peak, value in ((1.0, 0.7), (3.0, 2.1), (10.0, 7.0)):  # 1 - 0.7/1.0 is 0.29999... in floats
+        out = g.speculation_check({**_buy(1), "sleeve": {"value": value, "peak": peak}}, _sit(),
+                                  policy={"max_position_loss_share": 1})
+        assert next(r for r in out["rules"] if r["rule"] == "drawdown_stop")["status"] == "decline", (peak, value)
+    for amount in (-50000, 0):
+        with pytest.raises(ValueError, match="positive"):
+            g.speculation_check({**_buy(amount), "sleeve": {"value": 20000, "peak": 20000}}, _sit())

@@ -115,6 +115,13 @@ def external_flows(ledger: Mapping[str, Any], start: str, end: str, currency: st
             continue
         account = entry["account_id"]
         kind = entry["kind"]
+        if kind in {"buy", "sell"} and _d(entry.get("fee")) and account in scope:
+            # A commission is a cost of the return, not a price move.  The trade's cash amount already includes
+            # it, so TWR and XIRR (value based) carry it; the decomposition shows it under costs.
+            converted = fx.convert(-_d(entry["fee"]), entry["currency"], currency, entry["date"])
+            if converted is None:
+                gaps.append(f"fx {entry['currency']}/{currency} on {entry['date']}")
+            costs.append({"entry_id": entry["id"], "kind": "trade_fee", "amount": converted})
         if kind in _INCOME or kind in {"fee", "tax_withheld"}:
             if account in scope:
                 converted = fx.convert(_d(entry["amount"]), entry["currency"], currency, entry["date"])
@@ -322,6 +329,7 @@ def performance(ledger: Mapping[str, Any], start: str, end: str, currency: str, 
     status = "partial" if missing or twr is None else "ready"
     return envelope(status, result, missing=missing, warnings=warnings, sources=_sources(series["meta"]), assumptions=[
         "Flows occur at the end of their day; dividends, interest, fees and withholding are part of the return.",
+        "Trade commissions reduce TWR and XIRR through the cash they cost and are shown under fees, not price change.",
         "Transfers between accounts inside the scope are internal; transfers to or from accounts outside it are flows.",
         "Returns under one year are not annualized. Historical results, not a forecast.",
         f"Values use the latest price and FX rate on or up to their provider's allowed age before each date (FX {fx_max_age_days} days).",

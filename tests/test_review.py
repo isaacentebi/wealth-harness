@@ -35,8 +35,13 @@ def test_decomposition_identity_holds_within_a_cent():
     data = report["result"]["sections"]["net_worth"]["data"]
     start, end = D(data["start"]), D(data["end"])
     contributions, growth = D(data["contributions"]["net"]), D(data["growth"]["total"])
-    assert abs(start + contributions + growth - end) <= Decimal("0.01")
-    assert D(data["identity"]["residual"]) == 0
+    residual = D(data["identity"]["residual"])
+    assert abs(start + contributions + growth + residual - end) <= Decimal("0.01")
+    # Market growth is measured on its own from the holdings, so the residual is real, not zero by definition:
+    # here it is the peso value of the USD cash moving with the exchange rate, by hand
+    # 1,000 USD x (18.00 - 18.60) + 27 USD of net dividend x (18.00 - 18.10).
+    assert residual == Decimal("1000") * (Decimal("18.00") - Decimal("18.60")) + 27 * (Decimal("18.00") - Decimal("18.10"))
+    assert any("not explained" in w for w in report["result"]["sections"]["net_worth"]["warnings"])
     parts = data["growth"]
     assert D(parts["investment_income"]) + D(parts["fees_and_withholding"]) + D(parts["market"]) == growth
     flows = data["contributions"]
@@ -341,3 +346,36 @@ def test_missing_period_or_ledger_needs_input():
     assert _run({"period_start": "2026-04-01", "period_end": "2026-06-30", "ledger": {"accounts": []}})["status"] == "needs_input"
     with pytest.raises(ValueError):
         _run({"period_start": "2026-04-01", "period_end": "2026-06-30", "bogus": 1})
+
+
+# -- QA round 2 ----------------------------------------------------------------------------------
+
+
+def test_trade_commissions_are_costs_not_market_gain():
+    ledger = _simple_ledger()
+    ledger["entries"].append({"id": "b", "account_id": "brk", "kind": "buy", "date": "2026-06-01", "instrument_id": "X",
+                              "quantity": "10", "price": "11", "fee": "7", "amount": "-117", "currency": "USD",
+                              "confidence": "reported", "source": {"kind": "document", "ref": "s"}})
+    prices = {"X": [{"date": "2026-03-31", "price": "10"}, {"date": "2026-06-01", "price": "11"},
+                    {"date": "2026-06-30", "price": "12"}]}
+    report = _run({"period_start": "2026-04-01", "period_end": "2026-06-30", "currency": "USD", "ledger": ledger,
+                   "prices": prices})
+    growth = report["result"]["sections"]["net_worth"]["data"]["growth"]
+    # 100 shares 10 -> 12 plus 10 shares 11 -> 12 is 210 of price change; the 7 commission is a cost.
+    assert growth["market"] == "210.00" and growth["fees_and_withholding"] == "-7.00" and growth["total"] == "203.00"
+    assert report["result"]["sections"]["net_worth"]["data"]["identity"]["residual"] == "0.00"
+    direct = performance(ledger, "2026-03-31", "2026-06-30", "USD", price_table(prices))["result"]
+    assert direct["decomposition"]["fees_and_withholding"] == "-7.00"
+    assert direct["decomposition"]["price_and_fx_change"] == "210.00"
+    # TWR and XIRR carry the commission through the cash it cost (end value 1,703, not 1,710).
+    assert direct["end_value"] == "1703.00"
+
+
+def test_a_synced_account_in_the_ledger_is_not_a_stated_balance_outside_it():
+    facts = list(_MX_REVIEW_EXAMPLE["facts"]) + [{"key": "account.gbm", "value": {
+        "proposal_id": "p-gbm", "as_of": "2026-06-30", "currency": "MXN",
+        "account": {"id": "gbm", "institution": "GBM", "type": "brokerage", "currency": "MXN"},
+        "positions": [{"symbol": "CETES", "value": 151650, "currency": "MXN", "quantity": 15000}]}}]
+    report = _run(_mx(facts=facts))
+    outside = report["result"]["sections"]["net_worth"]["data"]["situation_end"]["stated_outside_ledger"]
+    assert outside == ["nu"]  # the stated Nu cash is outside the ledger; the synced GBM account is not

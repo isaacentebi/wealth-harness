@@ -553,7 +553,7 @@ def ledger_batch(proposal: Mapping[str, Any], *, batch_id: str, ledger: Mapping[
     sold out during the period gets an opening quantity so its sale has
     something to relieve.  Unposted Alpaca rows keep their reason.
     """
-    from ..ingest_posting import _s, proposal_to_batch
+    from ..ingest_posting import _s, established_accounts, proposal_to_batch
 
     result = proposal["result"]
     postable = [tx for tx in result.get("transactions") or [] if not tx.get("not_posted_reason")]
@@ -585,7 +585,7 @@ def ledger_batch(proposal: Mapping[str, Any], *, batch_id: str, ledger: Mapping[
             instrument["name"] = info["name"]
         if info.get("asset_class") and "asset_class" not in instrument:
             instrument["asset_class"] = info["asset_class"]
-    active = {e["account_id"] for e in ledger.get("entries", [])}
+    active = established_accounts(ledger)  # fills posted by execution alone do not make an account known
     held = {(p["account_id"], p["instrument_id"]) for p in result["household"]["positions"]}
     periods = {a["account_id"]: a for a in result.get("balance_assertions") or []}
     extra_lines, extra_checks = [], []

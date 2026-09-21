@@ -77,9 +77,10 @@ def _src(key: str) -> dict:
 
 
 def _range(low: float | None, high: float | None) -> list[float] | None:
+    """A rounded, non-negative ``[low, high]`` that is always ordered."""
     if low is None or high is None:
         return None
-    return [round(max(0.0, low), -2), round(max(0.0, high), -2)]
+    return sorted([round(max(0.0, low), -2), round(max(0.0, high), -2)])
 
 
 def _pair(value: Any, field: str) -> tuple[float, float]:
@@ -118,6 +119,14 @@ def life_need(situation: Mapping[str, Any], policies: Any = None, life: Mapping[
     profile = sit.get("profile") or {}
     currency = sit.get("currency")
     dependents = profile.get("dependents")
+    if isinstance(dependents, str):  # "2", "0" from a form; anything else is not a count
+        dependents = int(dependents.strip()) if dependents.strip().isdigit() else None
+    elif isinstance(dependents, (list, tuple)):
+        dependents = len(dependents)
+    elif isinstance(dependents, bool):
+        dependents = int(dependents)
+    elif dependents is not None and (_num(dependents) is None or float(dependents) < 0):
+        raise ValueError("profile.dependents must be a count of people")
     if dependents is None:
         return {"applies": None, "missing": ["client.profile.dependents"],
                 "why": "Life cover matters when someone depends on your income; I don't know yet whether anyone does."}
@@ -128,6 +137,11 @@ def life_need(situation: Mapping[str, Any], policies: Any = None, life: Mapping[
     assumptions = ["Income replacement is not discounted: returns on the payout and inflation are assumed to "
                    "roughly offset."]
     monthly = _num((sit.get("income") or {}).get("monthly"))
+    if monthly is not None and monthly < 0:
+        # A loss-making month is not income to replace; replacing it would lower the need (and invert the range).
+        assumptions.append("Monthly income is negative, so no income replacement is counted; pass a typical "
+                           "positive income to size it.")
+        monthly = 0.0
     annual = monthly * 12 if monthly is not None else None
     if annual is None:
         missing.append("income")
@@ -147,6 +161,8 @@ def life_need(situation: Mapping[str, Any], policies: Any = None, life: Mapping[
             missing.append("client.profile.dependent_ages")
     ratio = _pair(life["replacement_ratio"], "life.replacement_ratio") if life.get("replacement_ratio") is not None \
         else tuple(PARAMETERS["life_replacement_ratio"]["value"])
+    if min(years) < 0 or min(ratio) < 0:
+        raise ValueError("life.years and life.replacement_ratio must not be negative")
     replacement = (annual * ratio[0] * years[0], annual * ratio[1] * years[1]) if annual is not None else None
 
     debts, unknown_debts = 0.0, []
@@ -175,6 +191,8 @@ def life_need(situation: Mapping[str, Any], policies: Any = None, life: Mapping[
     liquid = _num((sit.get("net_worth") or {}).get("liquid"))
     if liquid is None:
         missing.append("liquid assets")
+    elif liquid < 0:  # negative liquid wealth is debt, already counted under debts; it is not a resource
+        liquid = 0.0
     life_policies = _policies(policies, ("life", "vida"))
     cover = None
     if life_policies is None:

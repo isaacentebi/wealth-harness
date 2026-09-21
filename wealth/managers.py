@@ -642,6 +642,15 @@ def _resolve_quarter(client: Edgar, cik: str, period: str, filings: list[dict[st
     cover: dict[str, Any] = {}
     sources: list[str] = []
     notice = None
+    # The summary page's total in dollars for the quarter as amended: each filing's own summary in its own unit
+    # (thousands before 2023-01-03); a RESTATEMENT's summary covers the whole quarter, a NEW HOLDINGS amendment's
+    # summary only the rows it adds.  None when a filing in the chain has no summary total.
+    summary_total: float | None = None
+
+    def _summary_dollars(doc: Mapping[str, Any], unit: str) -> float | None:
+        value = doc.get("table_value_total")
+        return None if value is None else float(value) * (1000 if unit == "thousands" else 1)
+
     for filing in [base] + [f for f in ordered if f["form"].endswith("/A") and f["filing_date"] >= base["filing_date"]
                             and f is not base]:
         primary, table, folder = _documents(client, cik, filing["accession"])
@@ -660,6 +669,7 @@ def _resolve_quarter(client: Edgar, cik: str, period: str, filings: list[dict[st
             rows = parsed["rows"]
             units.add(parsed["value_unit"])
             warnings += parsed["warnings"]
+            summary_total = _summary_dollars(doc, parsed["value_unit"])
             continue
         kind = doc.get("amendment_type") or "RESTATEMENT"
         if table is None:
@@ -670,11 +680,14 @@ def _resolve_quarter(client: Edgar, cik: str, period: str, filings: list[dict[st
         parsed = parse_infotable(table, filing_date=filing["filing_date"])
         units.add(parsed["value_unit"])
         warnings += parsed["warnings"]
+        added = _summary_dollars(doc, parsed["value_unit"])
         if kind.startswith("NEW"):
             rows = rows + parsed["rows"]
             effect = f"added {len(parsed['rows'])} holdings"
+            summary_total = summary_total + added if summary_total is not None and added is not None else None
         else:
             rows = parsed["rows"]
+            summary_total = added
             effect = f"replaced the quarter with {len(parsed['rows'])} rows"
             notice = None
         amendments.append({"accession": filing["accession"], "form": filing["form"],
@@ -684,6 +697,7 @@ def _resolve_quarter(client: Edgar, cik: str, period: str, filings: list[dict[st
             "report_type": cover.get("report_type"), "rows": rows, "value_unit": sorted(units),
             "amendments": amendments, "notice": notice, "warnings": warnings, "sources": sources,
             "table_value_total": cover.get("table_value_total"),
+            "summary_value_dollars": summary_total,
             "table_entry_total": cover.get("table_entry_total"),
             "manager": cover.get("manager")}
 
@@ -1097,13 +1111,17 @@ def holdings(cik: Any, period: Any = None, *, client: Edgar | None = None, ticke
         warnings.append("Tickers matched by name only, below 0.8 confidence: " +
                         ", ".join(f"{p['issuer']} -> {p['ticker']} ({p['ticker_confidence']})" for p in low) + ".")
     total_check = None
-    if current.get("table_value_total") is not None:
+    reported = current.get("summary_value_dollars")
+    if reported is None and "summary_value_dollars" not in current and current.get("table_value_total") is not None:
         reported = current["table_value_total"] * (1000 if current["value_unit"] == ["thousands"] else 1)
-        total_check = {"summary_page": int(reported), "parsed": book["total"],
+    if reported is not None:
+        # Compared with the summary pages of the filings actually applied (original plus NEW HOLDINGS, or the
+        # latest RESTATEMENT plus later NEW HOLDINGS), each converted from its own unit.
+        total_check = {"summary_page": int(round(reported)), "parsed": book["total"],
                        "matches": abs(reported - book["total"]) <= max(1000.0, 0.001 * reported)}
-        if not total_check["matches"] and not current["amendments"]:
-            warnings.append("The parsed total differs from the filing's summary page total; the information table "
-                            "may be incomplete.")
+        if not total_check["matches"]:
+            warnings.append("The parsed total differs from the summary page total of the filings applied; the "
+                            "information table may be incomplete.")
     result = _meta({
         "manager": {"cik": cik, "name": name or current.get("manager")},
         "period": current["period"],

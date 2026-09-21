@@ -345,3 +345,23 @@ def test_birth_year_from_saved_profile():
     report = R.retirement_us({"contributions": {"tax_year": 2026}}, {"client.profile": {"birth_year": 1964}})
     assert report["result"]["contributions"]["age_at_year_end"] == 62
     assert any("client.profile" in a for a in report["assumptions"])
+
+
+def test_ley73_cesantia_applies_the_percentage_after_assignments_and_the_cap():
+    # Arts. 164, 169, 171: assignments and the 100%-of-salary cap act on the vejez pension; cesantia then pays
+    # its age percentage of it.  Here the own-right vejez cuantia already exceeds the salary, so the spouse
+    # assignment adds nothing and the pension at 60 is 75% of the own-right amount (x 1.11).
+    out = R.ley73_pension(1000, 2500, 60, 100, dependants={"spouse": True}, params=P())
+    vejez = out["annual_cuantia_at_65_mxn"] / 12
+    assert vejez > 1000 * 365 / 12
+    assert out["monthly_pension_mxn"] == pytest.approx(vejez * 0.75 * 1.11, abs=0.01)
+    # Where the cap does not bind, the order does not change the result: 1.15 x 0.75 x 1.11.
+    low = R.ley73_pension(300, 1500, 60, 100, dependants={"spouse": True}, params=P())
+    assert low["monthly_pension_mxn"] == pytest.approx(low["annual_cuantia_at_65_mxn"] / 12 * 1.15 * 0.75 * 1.11,
+                                                       abs=0.01)
+    # A cap that binds on the vejez pension with assignments is then reduced by the cesantia percentage.
+    capped = R.ley73_pension(400, 2000, 62, 100, dependants={"spouse": True, "children_under_16": 2}, params=P())
+    vejez = capped["annual_cuantia_at_65_mxn"] / 12
+    salary = 400 * 365 / 12
+    assert vejez < salary < vejez * 1.35
+    assert capped["monthly_pension_mxn"] == pytest.approx(salary * 0.85 * 1.11, abs=0.01)

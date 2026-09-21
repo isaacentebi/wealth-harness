@@ -219,3 +219,18 @@ def test_service_runs_life_event_from_the_saved_residence(tmp_path):
     assert report["result"]["jurisdiction"] == "US"
     assert any("COBRA" in s["en"] for s in report["result"]["steps"])
     assert report["evidence_ids"]
+
+
+def test_life_need_range_is_ordered_and_inputs_are_validated():
+    sit = {"currency": "USD", "profile": {"dependents": 2, "dependent_ages": [5, 9]}, "income": {"monthly": -1000},
+           "liabilities": [{"name": "mortgage", "value": 200000}], "net_worth": {"liquid": 50000}, "goals": []}
+    out = p.life_need(sit, [], {})
+    low, high = out["need_range"]
+    assert low <= high and out["gross_need_range"][0] <= out["gross_need_range"][1]
+    assert any("negative" in a for a in out["assumptions"])
+    assert p.life_need({**sit, "profile": {"dependents": "0"}}, [], {})["applies"] is False
+    assert p.life_need({**sit, "profile": {"dependents": "2"}}, [], {})["applies"] is True
+    negative_liquid = p.life_need({**sit, "income": {"monthly": 10000}, "net_worth": {"liquid": -80000}}, [], {})
+    assert negative_liquid["need_range"] == negative_liquid["gross_need_range"]  # debt is not a resource
+    with pytest.raises(ValueError):
+        p.life_need(sit, [], {"years": [-5, 10]})

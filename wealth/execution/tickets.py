@@ -13,7 +13,15 @@ Principle, enforced here rather than in prompts:
   not an MCP tool, so a model — or a "yes" typed in chat — cannot reach it.
 * :func:`refresh` reconciles order status and posts fills to the ledger through
   :func:`wealth.ledger.post` with Alpaca fill ids as external ids, the same ids
-  the read-only Alpaca connector uses, so a later sync dedupes them.
+  the read-only Alpaca connector uses, so a later sync dedupes them.  It reads
+  every page of fills, retries a failed read on the next refresh, keeps a
+  ticket open until every filled share is posted, and reconciles a ticket left
+  "submitting" by a crash, looking each line up by its ``client_order_id``.
+* The live daily limit is enforced by a reservation taken in the same write
+  transaction that claims the ticket; lines that never reach the broker give
+  their share back.
+* A last trade older than 15 minutes (market open) or one trading day (closed)
+  is not a price: the order is blocked with a plain reason.
 * Every request and response is written, redacted, to the append-only
   ``orders`` audit table.
 
@@ -36,6 +44,7 @@ from typing import Any, Callable, Mapping
 from zoneinfo import ZoneInfo
 
 from ..connectors.alpaca import _external_id  # the read connector's FILL ids, so a later sync dedupes
+from ..ingest_posting import EXECUTION_BATCH_PREFIX  # so a first connector sync still posts opening balances
 from .brokers import alpaca_orders
 from .brokers.alpaca_orders import AlpacaOrders, BrokerError
 
@@ -48,6 +57,16 @@ KEEP_TICKETS = 60
 DEFAULT_MAX_ORDER = Decimal("1000")
 DEFAULT_MAX_DAILY = Decimal("5000")
 DEFAULT_COLLAR = Decimal("0.01")      # a limit may sit at most 1% through the last price
+# A last trade older than this is no price at all (a halted or illiquid symbol): while the market is open,
+# 15 minutes; while it is closed, one trading day (weekdays; exchange holidays are not modelled, so the first
+# session after a holiday may need a fresh trade first).  WEALTH_TRADING_MAX_TRADE_AGE_MINUTES and
+# WEALTH_TRADING_MAX_TRADE_AGE_DAYS change them.
+DEFAULT_TRADE_AGE_MINUTES = Decimal(15)
+DEFAULT_TRADE_AGE_DAYS = Decimal(1)
+# A "submitting" ticket older than this with no live submission in this process was interrupted (a crash or a
+# kill mid-submit); refresh() reconciles it with the broker by client_order_id.
+SUBMIT_LEASE = timedelta(minutes=2)
+_IN_FLIGHT: set[str] = set()  # tickets this process is submitting right now
 FAR_FROM_MARKET = Decimal("0.05")     # a passive limit 5% away may never fill: said quietly
 LIVE_ENV = "WEALTH_TRADING_LIVE"
 TYPED_LIVE = ("LIVE", "EN VIVO")
@@ -96,7 +115,9 @@ def limits(environ: Mapping[str, str] | None = None) -> dict[str, Decimal]:
     environ = os.environ if environ is None else environ
     return {"max_order": _env_decimal(environ, "WEALTH_TRADING_MAX_ORDER_USD", DEFAULT_MAX_ORDER),
             "max_daily": _env_decimal(environ, "WEALTH_TRADING_MAX_DAILY_USD", DEFAULT_MAX_DAILY),
-            "collar": min(_env_decimal(environ, "WEALTH_TRADING_COLLAR", DEFAULT_COLLAR), Decimal("0.1"))}
+            "collar": min(_env_decimal(environ, "WEALTH_TRADING_COLLAR", DEFAULT_COLLAR), Decimal("0.1")),
+            "trade_age_minutes": _env_decimal(environ, "WEALTH_TRADING_MAX_TRADE_AGE_MINUTES", DEFAULT_TRADE_AGE_MINUTES),
+            "trade_age_days": _env_decimal(environ, "WEALTH_TRADING_MAX_TRADE_AGE_DAYS", DEFAULT_TRADE_AGE_DAYS)}
 
 
 def broker_for(mode: str, environ: Mapping[str, str] | None = None) -> AlpacaOrders | None:
@@ -185,42 +206,80 @@ def _nonce_hash(ticket_id: str, nonce: str) -> str:
 
 # -- normalising the model's proposal --------------------------------------------------
 
+def order_symbol(raw: Any) -> str | None:
+    """Alpaca's form of a US ticker: ``BRK-B``, ``BRK/B``, ``brk b`` and ``BRK.B`` are all ``BRK.B``.
+
+    Built on :func:`wealth.household.normalize_symbol`, but only separators may
+    change: a venue suffix (``VOD.L``, ``WALMEX.MX``) names another listing, so
+    it is refused rather than stripped into a different US security.
+    """
+    from ..household import normalize_symbol
+
+    text = str(raw or "").strip().upper()
+    if not text:
+        return None
+    normal = normalize_symbol(text)
+    if not normal:
+        return None
+    symbol = normal.replace("-", ".")
+    if re.sub(r"[^A-Z0-9]", "", symbol) != re.sub(r"[^A-Z0-9]", "", text):
+        return None
+    return symbol if re.fullmatch(r"[A-Z][A-Z0-9.]{0,9}", symbol) else None
+
+
 def _normalize_order(raw: Any, index: int) -> dict[str, Any]:
+    """One order line; raises ValueError listing every problem with it at once."""
     field = f"orders[{index}]"
     if not isinstance(raw, Mapping):
         raise ValueError(f"{field} must be an object")
+    errors: list[str] = []
+
+    def attempt(call: Callable[[], Any]) -> Any:
+        try:
+            return call()
+        except ValueError as exc:
+            errors.append(str(exc))
+            return None
+
     unknown = sorted(set(raw) - _ORDER_FIELDS)
     if unknown:
-        raise ValueError(f"{field} has unknown fields {unknown}; orders carry {sorted(_ORDER_FIELDS)}")
-    symbol = str(raw.get("symbol") or raw.get("instrument_id") or "").strip().upper()
-    if not re.fullmatch(r"[A-Z][A-Z0-9.]{0,9}", symbol):
-        raise ValueError(f"{field}.symbol must be a US ticker such as VTI")
-    side = raw.get("side")
+        errors.append(f"{field} has unknown fields {unknown}; orders carry {sorted(_ORDER_FIELDS)}")
+    symbol = order_symbol(raw.get("symbol") or raw.get("instrument_id"))
+    if symbol is None:
+        errors.append(f"{field}.symbol must be a US ticker such as VTI or BRK.B")
+    side = str(raw.get("side") or "").strip().lower()
     if side not in ("buy", "sell"):
-        raise ValueError(f"{field}.side must be buy or sell")
-    kind = raw.get("type") or "limit"
+        errors.append(f"{field}.side must be buy or sell")
+    kind = str(raw.get("type") or "limit").strip().lower()
     if kind not in ("limit", "market"):
-        raise ValueError(f"{field}.type must be limit (default) or market")
-    tif = raw.get("time_in_force") or "day"
+        errors.append(f"{field}.type must be limit (default) or market")
+    tif = str(raw.get("time_in_force") or "day").strip().lower()
     if tif not in ("day", "gtc"):
-        raise ValueError(f"{field}.time_in_force must be day (default) or gtc")
+        errors.append(f"{field}.time_in_force must be day (default) or gtc")
     qty_raw = raw.get("qty", raw.get("quantity"))
     notional_raw = raw.get("notional")
+    if isinstance(notional_raw, str):
+        notional_raw = notional_raw.strip().lstrip("$").strip()  # "$500" is USD 500
     if qty_raw is None and notional_raw is None and raw.get("estimated_amount") is not None:
-        notional_raw = abs(_dec(raw["estimated_amount"], f"{field}.estimated_amount", positive=False))
-    if (qty_raw is None) == (notional_raw is None):
-        raise ValueError(f"{field} needs exactly one of qty or notional (USD)")
+        amount = attempt(lambda: _dec(raw["estimated_amount"], f"{field}.estimated_amount", positive=False))
+        notional_raw = abs(amount) if amount is not None else None
+    if qty_raw is None and notional_raw is None or qty_raw is not None and notional_raw is not None:
+        errors.append(f"{field} needs exactly one of qty or notional (USD)")
+    qty = attempt(lambda: _s(_dec(qty_raw, f"{field}.qty"))) if qty_raw is not None else None
+    notional = attempt(lambda: _s(_money(_dec(notional_raw, f"{field}.notional")))) \
+        if notional_raw is not None else None
     line: dict[str, Any] = {"index": index, "symbol": symbol, "side": side, "type": kind, "time_in_force": tif,
-                            "qty": _s(_dec(qty_raw, f"{field}.qty")) if qty_raw is not None else None,
-                            "notional": _s(_money(_dec(notional_raw, f"{field}.notional"))) if notional_raw is not None else None,
-                            "limit_input": None, "state": "proposed"}
+                            "qty": qty, "notional": notional, "limit_input": None, "state": "proposed"}
     if raw.get("limit_price") is not None:
         if kind == "market":
-            raise ValueError(f"{field}: a market order has no limit_price")
-        price = _dec(raw["limit_price"], f"{field}.limit_price")
-        if not _valid_tick(price):
-            raise ValueError(f"{field}.limit_price: at or above $1 use cents; below $1 at most 4 decimals")
-        line["limit_input"] = _s(price)
+            errors.append(f"{field}: a market order has no limit_price")
+        price = attempt(lambda: _dec(raw["limit_price"], f"{field}.limit_price"))
+        if price is not None and not _valid_tick(price):
+            errors.append(f"{field}.limit_price: at or above $1 use cents; below $1 at most 4 decimals")
+        elif price is not None:
+            line["limit_input"] = _s(price)
+    if errors:
+        raise ValueError("; ".join(errors))
     account = raw.get("account_id") or raw.get("account")
     if account is not None:
         line["account"] = str(account)[:40]
@@ -247,17 +306,68 @@ def _safe(call: Callable[[], Any]) -> tuple[Any, str | None]:
         return None, str(exc)
 
 
-def _live_used_today(store: Any, client_id: str, now: datetime) -> Decimal:
-    """Live notional already confirmed today (US Eastern date), from the append-only audit trail."""
-    if store is None or not client_id:
-        return Decimal(0)
-    today = now.astimezone(_EASTERN).date().isoformat()
+def _trade_cutoff(now: datetime, market_open: bool | None, config: Mapping[str, Decimal]) -> datetime:
+    """The oldest last-trade time that still counts as a price."""
+    if market_open:
+        return now - timedelta(minutes=float(config["trade_age_minutes"]))
+    cutoff, days = now.astimezone(_EASTERN), int(config["trade_age_days"].to_integral_value(rounding=ROUND_CEILING))
+    while days > 0:  # walk back whole weekdays: Monday before the open reaches back to Friday
+        cutoff -= timedelta(days=1)
+        if cutoff.weekday() < 5:
+            days -= 1
+    return cutoff
+
+
+def _reserved_today(state: Mapping[str, Any], today: str) -> Decimal:
+    return sum((_opt(r.get("notional")) or Decimal(0) for r in (state.get("live_reserved") or {}).values()
+                if r.get("date_et") == today), Decimal(0))
+
+
+def _legacy_confirmed_today(store: Any, client_id: str, today: str, reserved: Mapping[str, Any]) -> Decimal:
+    """Live confirms recorded before reservations existed (tickets with no reservation row)."""
     used = Decimal(0)
     for row in store.order_events(client_id):
         payload = row["payload"]
-        if row["event"] == "confirm" and row["mode"] == "live" and payload.get("date_et") == today:
+        if row["event"] == "confirm" and row["mode"] == "live" and payload.get("date_et") == today \
+                and row["ticket_id"] not in reserved:
             used += _opt(payload.get("notional")) or Decimal(0)
     return used
+
+
+def _live_used_today(store: Any, client_id: str, now: datetime) -> Decimal:
+    """Live notional reserved today (US Eastern date).
+
+    Each live confirmation reserves its notional inside the same write
+    transaction that claims the ticket (:func:`confirm`), so two confirmations
+    racing each other cannot both fit under the daily limit; lines that never
+    reached the broker give their share back.
+    """
+    if store is None or not client_id:
+        return Decimal(0)
+    today = now.astimezone(_EASTERN).date().isoformat()
+    state = store.auxiliary(client_id, "execution")
+    reserved = state.get("live_reserved") or {}
+    return _reserved_today(state, today) + _legacy_confirmed_today(store, client_id, today, reserved)
+
+
+def _reservation_after(lines: list[dict]) -> Decimal:
+    """What a submitted ticket still holds of the daily limit: every line except those never placed."""
+    return _money(sum((_opt(l.get("estimated_amount")) or Decimal(0) for l in lines if l.get("state") != "failed"),
+                      Decimal(0)))
+
+
+def _release(state: dict, ticket_id: str, lines: list[dict]) -> dict:
+    """Shrink a ticket's live reservation to the lines that reached the broker (called inside a write)."""
+    reserved = dict(state.get("live_reserved") or {})
+    if ticket_id not in reserved:
+        return state
+    row = dict(reserved[ticket_id])
+    keep = _reservation_after(lines)
+    if (_opt(row.get("notional")) or Decimal(0)) > keep:
+        row["released"] = _s(_money((_opt(row.get("notional")) or Decimal(0)) - keep + (_opt(row.get("released")) or 0)))
+        row["notional"] = _s(keep)
+        reserved[ticket_id] = row
+    return {**state, "live_reserved": reserved}
 
 
 def _policy_rows(snapshot: Mapping[str, Any] | None, line: dict, amount: Decimal | None, positions: list,
@@ -382,6 +492,8 @@ def run_checks(lines: list[dict], *, mode: str, broker: AlpacaOrders | None, sna
         open_orders, _ = _safe(broker.open_orders)
     positions = positions or []
     account_id = _ledger_account_id(store, client_id, account, mode)
+    market_open = clock.get("is_open") if isinstance(clock, Mapping) else None
+    trade_cutoff = _trade_cutoff(now, market_open is True, config)
 
     seen: dict[tuple[str, str], int] = {}
     for line in lines:
@@ -392,6 +504,7 @@ def run_checks(lines: list[dict], *, mode: str, broker: AlpacaOrders | None, sna
                                  i, symbol=symbol))
         seen[key] = i
         asset = last = None
+        stale = False
         if broker is not None:
             asset, error = _safe(lambda: broker.asset(symbol))
             if error:
@@ -400,8 +513,25 @@ def run_checks(lines: list[dict], *, mode: str, broker: AlpacaOrders | None, sna
             elif asset is None or not asset.get("tradable") or str(asset.get("status", "active")) != "active":
                 checks.append(_check("not_tradable", "block", f"{symbol} is not tradable at Alpaca.", i,
                                      symbol=symbol))
-            last_text, error = _safe(lambda: broker.last_price(symbol))
-            last = _opt(last_text) if last_text else None
+            trade, error = _safe(lambda: broker.latest_trade(symbol))
+            last = _opt((trade or {}).get("price")) if trade else None
+            if last is not None:
+                try:
+                    traded_at = _parse(str(trade.get("at") or ""))
+                    if traded_at.tzinfo is None:
+                        raise ValueError
+                except ValueError:
+                    traded_at = None
+                if traded_at is None or traded_at < trade_cutoff:
+                    when = traded_at.astimezone(_EASTERN).strftime("%Y-%m-%d %H:%M ET") if traded_at else "an unknown time"
+                    age = (f"{int(config['trade_age_minutes'])} minutes" if market_open
+                           else f"{int(config['trade_age_days'])} trading day(s)")
+                    checks.append(_check("price_stale", "unknown",
+                                         f"The last {symbol} trade was at {when}, older than {age}, so its price "
+                                         "is not current (the symbol may be halted or thinly traded). No order is "
+                                         "priced from it.", i, symbol=symbol, traded_at=trade.get("at"),
+                                         last=last))
+                    last, stale = None, True
         line["last_price"] = _s(last)
         fractionable = bool(asset and asset.get("fractionable"))
 
@@ -419,7 +549,9 @@ def run_checks(lines: list[dict], *, mode: str, broker: AlpacaOrders | None, sna
                 else _tick(last * (1 - config["collar"] / 2), ROUND_FLOOR)
         if line["type"] == "limit":
             line["limit_price"] = _s(limit)
-            if limit is None:
+            if limit is None and stale:
+                pass  # already said, plainly, by price_stale
+            elif limit is None:
                 checks.append(_check("price_unknown", "unknown", f"The last price of {symbol} could not be read, so "
                                      "no limit price was set.", i, symbol=symbol))
             elif last is not None:
@@ -432,7 +564,7 @@ def run_checks(lines: list[dict], *, mode: str, broker: AlpacaOrders | None, sna
                 elif -through > FAR_FROM_MARKET:
                     checks.append(_check("far_from_market", "warn", f"The {symbol} limit is far from the last price "
                                          f"{last}; it may not fill.", i, symbol=symbol, last=last))
-            elif line.get("limit_input") is not None:
+            elif line.get("limit_input") is not None and not stale:
                 checks.append(_check("price_unknown", "unknown", f"The last price of {symbol} could not be read to "
                                      "check the limit.", i, symbol=symbol))
 
@@ -622,20 +754,31 @@ def create_ticket(store: Any, client_id: str | None, inputs: Mapping[str, Any], 
     now = _now(now)
     if not isinstance(inputs, Mapping):
         raise ValueError("order_ticket inputs must be an object")
+    errors: list[str] = []  # every schema problem at once, so one retry can fix them all
     unknown = sorted(set(inputs) - {"orders", "rationale", "source"})
     if unknown:
-        raise ValueError(f"order_ticket inputs: unknown {unknown}; expected {{orders, rationale, source}}. "
-                         "Tickets are only proposals: the person confirms them in the app.")
+        errors.append(f"order_ticket inputs: unknown {unknown}; expected {{orders, rationale, source}}. "
+                      "Tickets are only proposals: the person confirms them in the app.")
     orders = inputs.get("orders")
+    if isinstance(orders, Mapping):
+        orders = [orders]  # one order given without its list
     if not isinstance(orders, list) or not 1 <= len(orders) <= MAX_ORDERS:
-        raise ValueError(f"orders must be a list of 1-{MAX_ORDERS} orders")
+        errors.append(f"orders must be a list of 1-{MAX_ORDERS} orders")
+        orders = []
     source = inputs.get("source") or "user_request"
     if source not in SOURCES:
-        raise ValueError(f"source must be one of {', '.join(SOURCES)}")
+        errors.append(f"source must be one of {', '.join(SOURCES)}")
     rationale = inputs.get("rationale")
     if not isinstance(rationale, str) or not rationale.strip():
-        raise ValueError("rationale is required: one or two sentences the person will read")
-    lines = [_normalize_order(raw, i) for i, raw in enumerate(orders)]
+        errors.append("rationale is required: one or two sentences the person will read")
+    lines = []
+    for i, raw in enumerate(orders):
+        try:
+            lines.append(_normalize_order(raw, i))
+        except ValueError as exc:
+            errors.append(str(exc))
+    if errors:
+        raise ValueError("; ".join(errors))
     mode = trading_mode(environ)
     ticket_id = "t" + secrets.token_hex(8)
     if broker is None and store is not None:  # a preview without a client stays offline
@@ -790,55 +933,108 @@ def confirm(store: Any, client_id: str, ticket_id: str, *, nonce: Any, override:
     record = {"at": _iso(now), "codes": sorted({c.get("params", {}).get("rule", c["code"]) for c in violations})} \
         if violations and override else None
 
+    notional = _money(sum((Decimal(l["estimated_amount"]) for l in lines if l.get("estimated_amount")), Decimal(0)))
+    today_et = now.astimezone(_EASTERN).date().isoformat()
+    config = limits(environ)
+    legacy = Decimal(0)
+    if mode == "live":  # confirms from before reservations existed; they cannot grow any more
+        legacy = _legacy_confirmed_today(store, client_id, today_et,
+                                         store.auxiliary(client_id, "execution").get("live_reserved") or {})
+
     def claim(current: dict) -> dict:
+        # One write transaction (BEGIN IMMEDIATE): claim the ticket AND, for live orders, re-check and reserve
+        # its notional against the daily limit, so two confirmations racing each other cannot both fit.
         tickets = dict(current.get("tickets") or {})
         item = tickets.get(ticket_id)
         if item is None or item["status"] != "pending":
             raise ConfirmError("used", "This ticket was already handled.", 409)
+        result = dict(current)
+        if mode == "live":
+            used = _reserved_today(current, today_et) + legacy
+            if used + notional > config["max_daily"]:
+                raise ConfirmError("blocked", f"This would bring today's live orders to USD {_money(used + notional)}, "
+                                   f"above the daily limit of USD {config['max_daily']}.", 409)
+            result["live_reserved"] = {
+                **{k: v for k, v in (current.get("live_reserved") or {}).items()
+                   if v.get("date_et", today_et) >= (now - timedelta(days=7)).astimezone(_EASTERN).date().isoformat()},
+                ticket_id: {"date_et": today_et, "notional": _s(notional), "at": _iso(now)}}
         tickets[ticket_id] = {**item, "status": "submitting", "lines": lines, "checks": checks,
                               "nonce": None, "nonce_hash": None, "confirmed_at": _iso(now), "override": record}
-        result = {**current, "tickets": tickets}
+        result["tickets"] = tickets
         if mode == "live" and not acknowledged:
             result["live_ack"] = {**(current.get("live_ack") or {}), BROKER: _iso(now)}
         return result
 
-    store.update_auxiliary(client_id, "execution", claim)
+    try:
+        store.update_auxiliary(client_id, "execution", claim)
+    except ConfirmError as exc:
+        if exc.kind != "blocked":
+            raise
+        _audit(store, client_id, ticket, "blocked", {"reasons": ["live_daily_limit"], "at": _iso(now)})
+        fresh = {**ticket, "lines": lines, "checks": checks + [_check("live_daily_limit", "block", str(exc))]}
+        raise ConfirmError("blocked", str(exc), 409,
+                           public_ticket(fresh, include_nonce=True, now=now, live_acknowledged=acknowledged)) from None
+    _IN_FLIGHT.add(ticket_id)
     ticket = {**ticket, "lines": lines, "checks": checks, "override": record}
-    if mode == "live" and not acknowledged:
-        _audit(store, client_id, ticket, "live_acknowledged", {"typed": True, "at": _iso(now)})
-    notional = sum((Decimal(l["estimated_amount"]) for l in lines if l.get("estimated_amount")), Decimal(0))
-    _audit(store, client_id, ticket, "confirm", {
-        "at": _iso(now), "date_et": now.astimezone(_EASTERN).date().isoformat(), "notional": _s(_money(notional)),
-        "override": record, "lines": [_line_audit(l) for l in lines]})
-
-    submitted = []
-    for line in lines:
-        line = dict(line)
-        body = {"symbol": line["symbol"], "qty": line["order_qty"], "side": line["side"], "type": line["type"],
-                "time_in_force": line["time_in_force"], "client_order_id": line["client_order_id"]}
-        if line["type"] == "limit":
-            body["limit_price"] = line["limit_price"]
-        broker.audit = lambda kind, payload, _line=line: _audit(store, client_id, ticket, kind, payload, _line)
+    submitted: list[dict] = []
+    sent_any = False
+    try:
+        if mode == "live" and not acknowledged:
+            _audit(store, client_id, ticket, "live_acknowledged", {"typed": True, "at": _iso(now)})
+        _audit(store, client_id, ticket, "confirm", {
+            "at": _iso(now), "date_et": today_et, "notional": _s(notional), "reserved": mode == "live",
+            "override": record, "lines": [_line_audit(l) for l in lines]})
+        for line in lines:
+            line = dict(line)
+            body = {"symbol": line["symbol"], "qty": line["order_qty"], "side": line["side"], "type": line["type"],
+                    "time_in_force": line["time_in_force"], "client_order_id": line["client_order_id"]}
+            if line["type"] == "limit":
+                body["limit_price"] = line["limit_price"]
+            broker.audit = lambda kind, payload, _line=line: _audit(store, client_id, ticket, kind, payload, _line)
+            try:
+                sent_any = True
+                order = broker.submit(body)
+            except BrokerError as exc:
+                line["state"] = "unknown" if exc.retryable else "failed"
+                line["reason"] = str(exc)[:200]
+            else:
+                line["broker_order_id"] = str(order.get("id") or "") or None
+                line["broker_status"] = order.get("status")
+                line["state"] = _LINE_STATE.get(str(order.get("status")), "sent")
+                line["filled_qty"] = order.get("filled_qty")
+                line["filled_avg_price"] = order.get("filled_avg_price")
+                line["submitted_at"] = order.get("submitted_at") or _iso(now)
+            finally:
+                broker.audit = None
+            submitted.append(line)
+    except BaseException:
+        # Interrupted mid-submit.  If nothing was sent, the ticket failed cleanly and gives its reservation back;
+        # otherwise it stays "submitting", marked interrupted, and refresh() reconciles it by client_order_id.
+        def interrupted(current: dict) -> dict:
+            items = dict(current.get("tickets") or {})
+            item = dict(items[ticket_id])
+            if not sent_any:
+                failed = [{**l, "state": "failed", "reason": "Submission stopped before anything reached Alpaca."}
+                          for l in lines]
+                item.update(status="done", lines=failed)
+                current = _release(current, ticket_id, failed)
+            else:
+                known = {l["index"]: l for l in submitted}
+                item.update(interrupted=_iso(now), lines=[known.get(l["index"], l) for l in lines])
+            items[ticket_id] = item
+            return {**current, "tickets": items}
         try:
-            order = broker.submit(body)
-        except BrokerError as exc:
-            line["state"] = "unknown" if exc.retryable else "failed"
-            line["reason"] = str(exc)[:200]
-        else:
-            line["broker_order_id"] = str(order.get("id") or "") or None
-            line["broker_status"] = order.get("status")
-            line["state"] = _LINE_STATE.get(str(order.get("status")), "sent")
-            line["filled_qty"] = order.get("filled_qty")
-            line["filled_avg_price"] = order.get("filled_avg_price")
-            line["submitted_at"] = order.get("submitted_at") or _iso(now)
-        finally:
-            broker.audit = None
-        submitted.append(line)
+            store.update_auxiliary(client_id, "execution", interrupted)
+        except Exception:
+            pass  # the lease on "submitting" still lets refresh() reconcile it
+        raise
+    finally:
+        _IN_FLIGHT.discard(ticket_id)
 
     def finish(current: dict) -> dict:
         tickets = dict(current.get("tickets") or {})
         tickets[ticket_id] = {**tickets[ticket_id], "status": "submitted", "lines": submitted}
-        return {**current, "tickets": tickets}
+        return _release({**current, "tickets": tickets}, ticket_id, submitted)
 
     store.update_auxiliary(client_id, "execution", finish)
     ticket = {**ticket, "status": "submitted", "lines": submitted}
@@ -880,8 +1076,10 @@ def post_fills(store: Any, client_id: str, ticket: Mapping[str, Any], line: Mapp
     if not order_id:
         return [], Decimal(0)
     after = (_parse(line["submitted_at"]) - timedelta(days=1)).date().isoformat() if line.get("submitted_at") else None
-    activities, error = _safe(lambda: broker.fills(after))
-    if error or not activities:
+    # Every page (Alpaca pages FILL activities by page_token); a read error raises BrokerError to the caller,
+    # which keeps the line open and tries again later: an unreadable page is never "no fills".
+    activities = broker.all_fills(after)
+    if not activities:
         return [], Decimal(0)
     fills = [a for a in activities if str(a.get("order_id")) == order_id and _external_id(a)]
     posted = set(line.get("posted_fills") or [])
@@ -915,7 +1113,7 @@ def post_fills(store: Any, client_id: str, ticket: Mapping[str, Any], line: Mapp
     if not transactions:
         return [], Decimal(0)
     ids = sorted(t["external_id"] for t in transactions)
-    batch = {"batch_id": "alpaca-orders:" + hashlib.sha256("|".join(ids).encode()).hexdigest()[:24],
+    batch = {"batch_id": EXECUTION_BATCH_PREFIX + hashlib.sha256("|".join(ids).encode()).hexdigest()[:24],
              "source": {"kind": "tool", "ref": f"alpaca-orders:{ticket['mode']}:{order_id}",
                         "observed_on": now.astimezone(_EASTERN).date().isoformat()},
              "confidence": "reported", "accounts": [account_row], "instruments": [instrument],
@@ -933,8 +1131,16 @@ def refresh(store: Any, client_id: str, ticket_ids: list[str] | None = None, *, 
     now = _now(now)
     state = store.auxiliary(client_id, "execution")
     tickets = state.get("tickets") or {}
+
+    def interrupted(ticket: Mapping[str, Any]) -> bool:
+        """A "submitting" ticket nobody is submitting any more: a crash or kill mid-submit."""
+        if ticket["status"] != "submitting" or ticket["id"] in _IN_FLIGHT:
+            return False
+        started = ticket.get("confirmed_at")
+        return bool(ticket.get("interrupted")) or not started or _parse(started) + SUBMIT_LEASE <= now
+
     targets = [t for tid, t in tickets.items() if (ticket_ids is None or tid in ticket_ids)
-               and t["status"] == "submitted"]
+               and (t["status"] == "submitted" or interrupted(t))]
     clients: dict[str, AlpacaOrders | None] = {}
     for ticket in targets:
         mode = ticket["mode"]
@@ -944,6 +1150,8 @@ def refresh(store: Any, client_id: str, ticket_ids: list[str] | None = None, *, 
         if api is None:
             continue
         lines = []
+        reconciling = ticket["status"] == "submitting"
+        unresolved = False
         for line in ticket["lines"]:
             line = dict(line)
             filled = _opt(line.get("filled_qty")) or Decimal(0)
@@ -958,26 +1166,48 @@ def refresh(store: Any, client_id: str, ticket_ids: list[str] | None = None, *, 
                     if order:
                         line = _update_line(line, order)
                         line.setdefault("submitted_at", order.get("submitted_at") or _iso(now))
-                    elif line.get("state") == "unknown":
+                    elif line.get("state") in ("unknown", "proposed"):
+                        # looked up by its client_order_id: Alpaca never saw it (lost response, or the process
+                        # stopped before sending it)
                         line["state"] = "failed"
                         line["reason"] = "Alpaca has no record of this order; it was not placed."
                 except (BrokerError, ValueError):
-                    pass
+                    unresolved = unresolved or line.get("state") == "proposed"
                 finally:
                     api.audit = None
                 if (_opt(line.get("filled_qty")) or Decimal(0)) > (_opt(line.get("posted_qty")) or Decimal(0)):
-                    ids, qty = post_fills(store, client_id, ticket, line, api, now)
-                    if ids:
-                        line["posted_fills"] = sorted(set(line.get("posted_fills") or []) | set(ids))
-                        line["posted_qty"] = _s((_opt(line.get("posted_qty")) or Decimal(0)) + qty)
+                    api.audit = lambda kind, payload, _line=line: _audit(store, client_id, ticket, kind, payload,
+                                                                         _line)
+                    try:
+                        ids, qty = post_fills(store, client_id, ticket, line, api, now)
+                    except (BrokerError, ValueError) as exc:
+                        line["fills_error"] = str(exc)[:200]  # retried on the next refresh
+                        _audit(store, client_id, ticket, "error", {"action": "fills", "error": str(exc)[:200]},
+                               line)
+                    else:
+                        line.pop("fills_error", None)
+                        if ids:
+                            line["posted_fills"] = sorted(set(line.get("posted_fills") or []) | set(ids))
+                            line["posted_qty"] = _s((_opt(line.get("posted_qty")) or Decimal(0)) + qty)
+                    finally:
+                        api.audit = None
             lines.append(line)
-        done = all(l.get("state") in _FINAL for l in lines)
+        # Done only when every order is final AND every filled share is in the ledger.
+        done = not unresolved and all(
+            l.get("state") in _FINAL
+            and (_opt(l.get("posted_qty")) or Decimal(0)) >= (_opt(l.get("filled_qty")) or Decimal(0))
+            for l in lines)
+        status = "done" if done else ("submitting" if unresolved and reconciling else "submitted")
+        if reconciling:
+            _audit(store, client_id, ticket, "status", {"action": "reconcile_interrupted", "status": status,
+                                                        "lines": [{"index": l["index"], "state": l.get("state")}
+                                                                  for l in lines]})
 
-        def update(current: dict, _tid=ticket["id"], _lines=lines, _done=done) -> dict:
+        def update(current: dict, _tid=ticket["id"], _lines=lines, _status=status) -> dict:
             items = dict(current.get("tickets") or {})
             if _tid in items:
-                items[_tid] = {**items[_tid], "lines": _lines, "status": "done" if _done else "submitted",
-                               "refreshed_at": _iso(now)}
+                items[_tid] = {**items[_tid], "lines": _lines, "status": _status, "refreshed_at": _iso(now)}
+                current = _release(current, _tid, _lines)
             return {**current, "tickets": items}
 
         store.update_auxiliary(client_id, "execution", update)

@@ -554,6 +554,8 @@ def speculation_check(proposal: Mapping[str, Any], situation: Mapping[str, Any] 
     # -- the cap on liquid net worth
     liquid = _num((sit.get("net_worth") or {}).get("liquid"))
     amount = _num(proposal.get("amount"))
+    if amount is not None and amount <= 0:  # a negative "buy" would shrink the sleeve and slip under the cap
+        raise ValueError("proposal.amount must be a positive number for a buy")
     sleeve = proposal.get("sleeve") if isinstance(proposal.get("sleeve"), Mapping) else {}
     held = _num(sleeve.get("value"))
     if amount is None:
@@ -616,7 +618,7 @@ def speculation_check(proposal: Mapping[str, Any], situation: Mapping[str, Any] 
     if value is not None and peak:
         drawdown = max(0.0, 1 - value / peak)
         limits_out["sleeve_drawdown"] = round(drawdown, 4)
-        if drawdown >= pol["drawdown_stop"]:
+        if drawdown >= pol["drawdown_stop"] - 1e-9:  # an exact 30% fall (0.7/1.0 in floats is 0.2999...) stops
             rule("drawdown_stop", "decline",
                  f"Play money is {_pct(drawdown)} below its high; the plan pauses adding at {_pct(pol['drawdown_stop'])}. "
                  "A written look back at what happened comes first.",

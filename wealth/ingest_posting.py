@@ -37,6 +37,23 @@ _KIND = {
 _SIGN_FALLBACK = {"deposit": "transfer", "withdrawal": "transfer", "loan_payment": "transfer"}
 _VENUES = {"bmv", "biva", "sic", "us", "other"}
 _ZERO = Decimal(0)
+# Ledger batches posted by guarded trade execution (wealth/execution/tickets.py) carry this batch-id prefix.
+EXECUTION_BATCH_PREFIX = "alpaca-orders:"
+
+
+def established_accounts(ledger: Mapping[str, Any] | None) -> set[str]:
+    """Accounts a connector or statement sync has established in the ledger.
+
+    An account is *known* for posting purposes only once a sync or statement
+    has put its opening balances and history there.  Fills posted by trade
+    execution alone do not count: otherwise a fill posted before the first
+    connector sync would make that sync skip the account's opening balances
+    and history.  Both orders (fill first, sync first) end with the same
+    ledger because the fill carries the connector's own external id and is
+    deduplicated.
+    """
+    return {e["account_id"] for e in (ledger or {}).get("entries", [])
+            if not str(e.get("batch_id") or "").startswith(EXECUTION_BATCH_PREFIX)}
 
 
 def _d(value: Any) -> Decimal | None:
@@ -145,7 +162,9 @@ def missing_positions(proposal: Mapping[str, Any], ledger: Mapping[str, Any] | N
     as_of = result.get("as_of")
     if not as_of:
         return []
-    accounts = {a["id"] for a in household.get("accounts") or [] if is_newest(ledger, a["id"], as_of)}
+    established = established_accounts(ledger)
+    accounts = {a["id"] for a in household.get("accounts") or []
+                if a["id"] in established and is_newest(ledger, a["id"], as_of)}
     if not accounts:
         return []
     positions = [p for p in household.get("positions") or [] if not _is_cash(p)]
@@ -240,7 +259,7 @@ def proposal_to_batch(proposal: Mapping[str, Any], *, batch_id: str, ledger: Map
                               "observed_on": as_of}
     if provenance.get("sha256"):
         source["file_hash"] = provenance["sha256"]
-    active = {e["account_id"] for e in ledger.get("entries", [])}
+    active = established_accounts(ledger)
     missing = missing_positions(proposal, ledger)
     notes: list[str] = []
     not_posted: list[dict[str, Any]] = []
@@ -375,5 +394,6 @@ def proposal_to_batch(proposal: Mapping[str, Any], *, batch_id: str, ledger: Map
     return {"batch": batch, "not_posted": not_posted, "notes": notes, "prices": prices}
 
 
-__all__ = ["describe_changes", "is_newest", "latest_ledger_date", "missing_positions", "proposal_to_batch",
+__all__ = ["EXECUTION_BATCH_PREFIX", "describe_changes", "established_accounts", "is_newest", "latest_ledger_date",
+           "missing_positions", "proposal_to_batch",
            "reconciliation_lines"]

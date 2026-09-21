@@ -520,10 +520,20 @@ def ley73_pension(average_daily_salary: float, weeks: float, age: float, minimum
                   dependants: dict[str, Any] | None, params: _Params) -> dict[str, Any] | None:
     """Monthly Ley 73 pension (cesantia 60-64 or vejez 65+) in the units of the inputs.
 
-    Order follows IMSS's worked examples: annual cuantia (basic + increments on the
-    average salary), /12, x cesantia percentage, x 1.11 decree factor (age 60+),
-    family assignments, cap at 100% of the average salary (also x 1.11) unless
-    own-right weeks exceed it, and floor at one salario minimo (x 1.11).
+    Statutory order (LSS 1973, as reproduced by IMSS):
+
+    1. Art. 167: the vejez cuantia, basic + increments on the average salary, /12.
+    2. Art. 164: family assignments or ayuda asistencial on that vejez pension.
+    3. Art. 169: the vejez pension with assignments is capped at 100% of the
+       average salary, unless the own-right cuantia alone already exceeds it.
+    4. Art. 171: cesantia en edad avanzada (60-64) pays the age percentage
+       (75% at 60 ... 95% at 64) of the vejez pension that would apply, i.e. of
+       the result of steps 1-3; vejez (65+) pays 100%.
+    5. Decree DOF 20-12-2001 (reformed 05-01-2004), art. Decimo Cuarto
+       transitorio: x 1.11 (age 60+), and the floor of one salario minimo (x 1.11).
+
+    At 65 this reproduces IMSS's worked vejez example; before 65 the cap now
+    binds on the vejez pension, not on the reduced cesantia amount.
     """
     table = params.get("ley73_art167_table")
     cesantia = params.get("ley73_cesantia_percent_by_age")
@@ -546,9 +556,13 @@ def ley73_pension(average_daily_salary: float, weeks: float, age: float, minimum
     factor = factor_raw if effective >= 60 else 1.0
     cuantia_f = cuantia * factor
     share, basis = _assignments(dependants, family)
-    cap = average_daily_salary * 365 / 12 * factor
-    with_family = cuantia_f * (1 + (share or 0.0))
-    total = min(with_family, max(cap, cuantia_f))
+    # Arts. 164 and 169: assignments on the vejez pension, capped at 100% of the average salary unless the
+    # own-right cuantia is already above it.
+    salary_monthly = average_daily_salary * 365 / 12
+    vejez_with_family = min(vejez_monthly * (1 + (share or 0.0)), max(salary_monthly, vejez_monthly))
+    # Art. 171: the cesantia percentage applies to that vejez pension; then the 1.11 decree factor.
+    total = vejez_with_family * percent * factor
+    cap = salary_monthly * factor  # the Art. 169 cap, shown with the decree factor like the pension
     minimum = minimum_wage_daily * minimum_multiple * 365 / 12 * factor
     floor_applied = total < minimum
     total = max(total, minimum)

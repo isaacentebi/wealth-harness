@@ -611,3 +611,56 @@ def test_acknowledgement_errors(client):
         client.run("today", {"as_of": AS_OF, "dismiss": ["reserve_low"], "facts": []})
     with pytest.raises(ValueError, match="unknown"):
         client.run("weekly", {"as_of": AS_OF, "dismiss": ["reserve_low"]}, client_id="ana")
+
+
+# ------------------------------------------------------------------ QA round 2
+
+
+def _reserve_facts(target=6):
+    return [("client.profile", MX), ("spending.monthly", {"essential": 20000, "total": 20000, "currency": "MXN"}),
+            ("cash.nu", {"amount": 30000, "currency": "MXN", "purpose": "reserve"}),
+            ("reserve", {"target_months": target})]
+
+
+def test_idle_cash_that_covers_the_reserve_gap_is_one_item_that_does_the_arithmetic():
+    # Reserve 1.5 of 6 months (gap 90,000) while checking holds 285,000 more than it needs: never two items
+    # that contradict each other ("reserve short" next to "cash with no job").
+    found = kinds(evaluate(_reserve_facts(), _checking(300000)))
+    assert "surplus" not in found
+    item = found["reserve_low"]
+    assert item["title"]["es"] == "Tienes $285,000 sin destino: con $90,000 completas tu fondo de 6 meses"
+    assert item["title"]["en"] == "You have $285,000 unassigned; $90,000 of it fills your 6-month reserve"
+    assert "$90,000" in item["next_step"]["es"] and "fondo de emergencia" in item["next_step"]["es"]
+    assert item["data"]["fills_gap"] == 90000 and item["data"]["left_after"] == 195000
+    shown = today(_reserve_facts(), _checking(300000))["today"]
+    assert [i["kind"] for i in shown].count("reserve_low") == 1 and "surplus" not in [i["kind"] for i in shown]
+
+
+def test_idle_cash_short_of_the_gap_keeps_both_items_and_says_what_is_still_missing():
+    found = kinds(evaluate(_reserve_facts(), _checking(100000)))  # idle 85,000 against a 90,000 gap
+    assert {"reserve_low", "surplus"} <= set(found)
+    assert "$5,000" in found["reserve_low"]["why"]["es"] and "$5,000" in found["surplus"]["why"]["es"]
+    assert found["reserve_low"]["data"]["still_missing"] == 5000
+    assert "fondo de emergencia" in found["surplus"]["next_step"]["es"]
+
+
+def test_dismissed_reserve_nudge_stays_dismissed_while_the_fund_moves_within_its_condition(tmp_path):
+    source = {"kind": "user", "ref": "chat", "observed_on": "2026-09-01"}
+    service = WealthService(tmp_path / "w.sqlite3")
+    service.create("ana", "Ana")
+    service.remember("ana", [{"key": k, "value": v, "source": source} for k, v in _reserve_facts()])
+    service.run("today", {"as_of": AS_OF, "dismiss": ["reserve_low"]}, client_id="ana")
+    service.remember("ana", [{"key": "cash.nu", "merge": True, "value": {"amount": 41000},
+                              "source": {**source, "observed_on": "2026-09-20"}}])  # 1.5 -> 2.05 months
+    shown = service.run("today", {"as_of": AS_OF}, client_id="ana")["result"]
+    assert "reserve_low" not in [i["id"] for i in shown["today"] + shown["upcoming"]]
+
+
+def test_cash_drag_without_a_target_states_its_default():
+    facts = [("client.profile", MX), ("spending.monthly", {"essential": 20000, "currency": "MXN"}),
+             ("reserve", {"target_months": None}), ("cash.nu", {"amount": 300000, "currency": "MXN",
+                                                                  "purpose": "reserve"})]
+    item = kinds(evaluate(facts))["cash_drag"]
+    assert item["data"]["keep_basis"] == "default" and "12" in item["why"]["en"] and "default" in item["why"]["en"]
+    no_spending = [f for f in facts if f[0] != "spending.monthly"]
+    assert "cash_drag" not in kinds(evaluate(no_spending))  # never measured against an unknown

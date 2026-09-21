@@ -207,6 +207,54 @@ class _Book:
 # ------------------------------------------------------------------ net worth and performance
 
 
+def _market_change(book: _Book, opening: str, end: str) -> tuple[Decimal | None, list[dict]]:
+    """Price (and FX) change of the holdings over (opening, end], measured on its own from the ledger.
+
+    The valuation change of every position minus what moved into positions:
+    trades at their gross value (fees are costs, not price), and securities
+    transferred in or opened in the period at that day's price.  Cash, income,
+    costs and external flows are not part of it, so the net-worth identity
+    ``end = start + contributions + income + costs + market + residual`` is a
+    real check: the residual is what none of them explains (cash FX moves,
+    unmatched entries), not zero by construction.
+    """
+    start_rows, missing = book.positions(opening)
+    end_rows, more = book.positions(end)
+    missing = list(missing) + list(more)
+
+    def held(rows: list[dict]) -> Decimal | None:
+        return _sum(r["value"] for r in rows if r["kind"] == "position")
+
+    moved: Decimal | None = ZERO
+    entries, _ = active_entries(book.ledger)
+    for entry in entries:
+        if not (opening < entry["date"] <= end) or not entry.get("instrument_id") or entry.get("quantity") is None:
+            continue
+        kind = entry["kind"]
+        if kind in {"buy", "sell"} and entry.get("amount") is not None:
+            # buy: amount = -(gross + fee); sell: amount = gross - fee.  Value into the position: -amount - fee.
+            into = -_d(entry["amount"]) - (_d(entry.get("fee")) or ZERO)
+            value = book.convert(into, entry.get("currency"), entry["date"])
+            if value is None:
+                missing.append(_miss(f"fx.{entry.get('currency')}/{book.currency}@{entry['date']}",
+                                     f"Cannot convert the {entry['instrument_id']} trade on {entry['date']}."))
+        elif kind in {"transfer", "opening_balance"}:
+            price = book.prices(entry["instrument_id"], entry["date"])
+            meta = book.instruments.get(entry["instrument_id"], {})
+            value = None if price is None else book.convert(_d(entry["quantity"]) * price, meta.get("currency"),
+                                                            entry["date"])
+            if value is None:
+                missing.append(_miss(f"prices.{entry['instrument_id']}@{entry['date']}",
+                                     f"Cannot value the {entry['instrument_id']} moved in on {entry['date']}."))
+        else:
+            continue
+        moved = None if value is None or moved is None else moved + value
+    start_value, end_value = held(start_rows), held(end_rows)
+    if None in (start_value, end_value, moved):
+        return None, missing
+    return end_value - start_value - moved, missing
+
+
 def _net_worth(book: _Book, start: str, end: str, sit: Mapping[str, Any] | None,
                perf: Mapping[str, Any]) -> dict:
     total = perf["result"]["total"]
@@ -220,10 +268,11 @@ def _net_worth(book: _Book, start: str, end: str, sit: Mapping[str, Any] | None,
         buckets[bucket] = None if amount is None or buckets[bucket] is None else buckets[bucket] + amount
     opening, closing = _d(total["start_value"]), _d(total["end_value"])
     contributions = _d(total["decomposition"]["net_flows"])
-    growth = None if None in (opening, closing, contributions) else closing - opening - contributions
     income = _d(total["decomposition"]["investment_income"])
     costs = _d(total["decomposition"]["fees_and_withholding"])
-    market = None if None in (growth, income, costs) else growth - income - costs
+    market, market_missing = _market_change(book, _day_before(start), end)
+    missing += market_missing
+    growth = None if None in (income, costs, market) else income + costs + market
     residual = None if None in (opening, closing, contributions, growth) else closing - (opening + contributions + growth)
     data = {
         "currency": book.currency, "opening_date": _day_before(start), "closing_date": end,
@@ -244,9 +293,16 @@ def _net_worth(book: _Book, start: str, end: str, sit: Mapping[str, Any] | None,
                    "Opening balances posted inside the period are shown apart: they record money already owned, "
                    "not new saving."]
     warnings = []
+    if residual is not None and abs(residual) >= Decimal("1"):
+        warnings.append(f"{money(residual)} {book.currency} of the change is not explained by contributions, income, "
+                        "costs or market moves (for example currency moves on cash, or entries that do not match).")
     if sit is not None:
         nw = sit.get("net_worth") or {}
-        outside = [a["label"] for a in sit.get("accounts") or [] if a.get("source") != "ledger" and a.get("value") is not None]
+        # Outside the ledger means no ledger entries for that account, whatever fed the picture (a synced
+        # connector account is a statement source but lives in the ledger).
+        in_ledger = {e.get("account_id") for e in book.ledger.get("entries") or []}
+        outside = [a["label"] for a in sit.get("accounts") or []
+                   if a.get("id") not in in_ledger and a.get("value") is not None]
         outside += [c.get("name") or c.get("id") for c in sit.get("cash") or [] if c.get("counted") and c.get("value") is not None]
         data["situation_end"] = {"total": nw.get("total"), "currency": nw.get("currency"), "complete": nw.get("complete"),
                                  "stated_outside_ledger": outside}
