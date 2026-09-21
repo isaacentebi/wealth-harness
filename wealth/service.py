@@ -37,9 +37,12 @@ TASK_MODULES = {
     "rebalance": "rebalance", "asset_location": "rebalance",
 }
 # Tasks answered by the service itself rather than one module.
-SERVICE_TASKS = ("plan", "calendar", "monitor", "debt_payoff", "policy_draft", "policy_check")
+SERVICE_TASKS = ("plan", "calendar", "monitor", "debt_payoff", "policy_draft", "policy_check", "today", "weekly")
 # Investment policy tasks (wealth/policy.py) read the canonical picture, so the service runs them.
 POLICY_TASKS = frozenset({"policy_draft", "policy_check"})
+# Proactive tasks (wealth/proactive.py) read the whole picture and keep dismissals in the monitor namespace.
+PROACTIVE_TASKS = frozenset({"today", "weekly"})
+PROACTIVE_STATE = "_proactive"  # key inside the ``monitor`` auxiliary namespace
 TASKS = (*TASK_MODULES, *SERVICE_TASKS)
 # Tasks whose module reads the client's transaction ledger from context["ledger"].
 LEDGER_TASKS = frozenset({"ledger", "performance", "spending", "dca", "rebalance"})
@@ -263,6 +266,7 @@ class WealthService:
             "policy_draft": "goals reserve preference constraint client.profile policy",
             "policy_check": "policy constraint goals reserve",
             "rebalance": "household account tax goals reserve constraint", "asset_location": "household account tax",
+            "today": "reserve goals income spending policy thread", "weekly": "reserve goals income spending",
         }
         from .recall import recall
         with WealthStore(self.db_path) as store:
@@ -327,8 +331,8 @@ class WealthService:
         if client_id:
             with WealthStore(self.db_path) as store:
                 snapshot = store.snapshot(client_id)
-                if (task in LEDGER_TASKS or task in {"plan", "calendar", "debt_payoff"} or task in POLICY_TASKS) \
-                        and "ledger" not in inputs:
+                if (task in LEDGER_TASKS or task in {"plan", "calendar", "debt_payoff"} or task in POLICY_TASKS
+                        or task in PROACTIVE_TASKS) and "ledger" not in inputs:
                     ledger = store.ledger(client_id)
         eligible = [f for f in snapshot["facts"] if f["confidence"] != "inferred"
                     and (not f.get("expires_on") or f["expires_on"] >= today)]
@@ -348,6 +352,9 @@ class WealthService:
             derived_evidence = report.pop("_evidence", [])
         elif task in POLICY_TASKS:
             report = self._policy(task, inputs, client_id, snapshot, ledger, today)
+            derived_evidence = report.pop("_evidence", [])
+        elif task in PROACTIVE_TASKS:
+            report = self._proactive(task, inputs, client_id, snapshot, ledger, today)
             derived_evidence = report.pop("_evidence", [])
         elif task in {"plan", "calendar"}:
             # Direct inputs may supply the same canonical facts without requiring a profile.
@@ -393,13 +400,16 @@ class WealthService:
                 def update(old):
                     nonlocal report
                     report = evaluate(snapshot, old, inputs)
-                    return report.pop("state")
+                    state = report.pop("state")
+                    if PROACTIVE_STATE in old:  # dismissals of proactive items share this namespace
+                        state[PROACTIVE_STATE] = old[PROACTIVE_STATE]
+                    return state
                 report = {}
                 store.update_auxiliary(client_id, "monitor", update)
         else:
             module = importlib.import_module("." + TASK_MODULES[task], __package__)
             report = module.run(task, inputs, context)
-        if task in {"plan", "calendar", "debt_payoff"} or task in POLICY_TASKS:
+        if task in {"plan", "calendar", "debt_payoff"} or task in POLICY_TASKS or task in PROACTIVE_TASKS:
             used_ids = set(packet["evidence_ids"] if task in {"plan", "calendar"} else []) | set(derived_evidence)
             consumed = [f for f in eligible if f["id"] in used_ids and f["key"] not in inputs]
         elif task == "monitor":
@@ -419,6 +429,8 @@ class WealthService:
             relevant = {f["key"] for f in snapshot["facts"] if f["key"].startswith(POLICY_FACT_KEYS)}
         elif task in {"plan", "calendar"}:
             relevant = set(keys)
+        elif task in PROACTIVE_TASKS:
+            relevant = set()  # stale facts that matter are a proactive item of their own
         else:
             relevant = {f["key"] for f in snapshot["facts"]} if task == "monitor" else context.requested
         for fact in snapshot["facts"]:
@@ -482,6 +494,62 @@ class WealthService:
             with WealthStore(self.db_path) as store:
                 report["decision"] = policy.propose(store, client_id, report, snapshot["client"]["revision"])
         return report
+
+    def _proactive(self, task: str, inputs: dict, client_id: str | None, snapshot: dict, ledger, today: str) -> dict:
+        """today / weekly: ranked nudges and the annual calendar; dismiss/snooze/restore persist per client."""
+        from . import policy, proactive
+        from .monitor import client_today
+        allowed = {"as_of", "jurisdiction", "timezone", "facts", "ledger"}
+        if task == "today":
+            allowed |= {"dismiss", "snooze", "restore"}
+        unknown = sorted(set(inputs) - allowed)
+        if unknown:
+            raise ValueError(f"{task} inputs: unknown {unknown}; expected {{{', '.join(sorted(a + '?' for a in allowed))}}}")
+        acks = {name: inputs.get(name) or [] for name in ("dismiss", "snooze", "restore")}
+        for name, value in acks.items():
+            if not isinstance(value, list):
+                raise ValueError(f"{name} must be a list")
+        if any(acks.values()) and not client_id:
+            raise ValueError("dismiss, snooze and restore need client_id: they are remembered for the person")
+        if "facts" in inputs:
+            if client_id:
+                raise ValueError("facts are for runs without a client; with client_id the saved picture is used")
+            snapshot = policy.snapshot_from_facts(inputs["facts"], inputs.get("as_of") or today)
+        if "ledger" in inputs:
+            ledger = inputs["ledger"]
+        if inputs.get("as_of") is not None:
+            as_of = proactive.resolve_as_of(inputs["as_of"])
+        else:
+            as_of, _ = client_today(snapshot, {"timezone": inputs["timezone"]} if inputs.get("timezone") else {})
+        sit = situation_module.build(snapshot, ledger, as_of)
+        options = {"jurisdiction": inputs.get("jurisdiction"), "timezone": inputs.get("timezone")}
+        run = proactive.today if task == "today" else proactive.weekly
+        state: dict = {}
+        if client_id and any(acks.values()):
+            result: dict = {}
+
+            def update(old):
+                nonlocal result
+                current = old.get(PROACTIVE_STATE) or {}
+                found = proactive.today(sit, ledger, snapshot, as_of, state=current, **options)
+                new_state = proactive.acknowledge(current, found["_all"], as_of, dismiss=acks["dismiss"],
+                                                  snooze=acks["snooze"], restore=acks["restore"])
+                result = run(sit, ledger, snapshot, as_of, state=new_state, **options)
+                return {**old, PROACTIVE_STATE: new_state}
+            with WealthStore(self.db_path) as store:
+                store.update_auxiliary(client_id, "monitor", update)
+        else:
+            if client_id:
+                with WealthStore(self.db_path) as store:
+                    state = store.auxiliary(client_id, "monitor").get(PROACTIVE_STATE) or {}
+            result = run(sit, ledger, snapshot, as_of, state=state, **options)
+        result = proactive.public(result)
+        return {"status": "ready", "result": result, "missing": [], "warnings": [],
+                "sources": [{"title": "Wealth proactive rules (wealth/proactive.py; docs/scope.md sections 2-3)"}],
+                "assumptions": ["Triggers read only known data; a trigger with missing inputs is listed under "
+                                "result.unknown and does not fire.",
+                                "Calendar dates are statutory defaults; weekends, holidays and SAT/IRS relief can move them."],
+                "_evidence": [sit["evidence"][k] for k in sorted(sit["evidence"])]}
 
     def client(self, action: str, client_id: str, inputs: dict | None = None) -> dict:
         """CLI client actions. MCP exposes create/index here and reads via wealth_inspect."""
