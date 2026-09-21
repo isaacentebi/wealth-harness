@@ -642,6 +642,19 @@ def _resolve_quarter(client: Edgar, cik: str, period: str, filings: list[dict[st
     cover: dict[str, Any] = {}
     sources: list[str] = []
     notice = None
+    incomplete = False
+    # One entry per information table applied: "thousands_as_dollars", "dollars_as_thousands" or None when the
+    # implied prices look like the declared unit.
+    unit_flags: list[str | None] = []
+
+    def _unit_flag(parsed: Mapping[str, Any]) -> str | None:
+        text = " ".join(parsed["warnings"])
+        if "look like thousands" in text:
+            return "thousands_as_dollars"
+        if "look like whole dollars" in text:
+            return "dollars_as_thousands"
+        return None
+
     # The summary page's total in dollars for the quarter as amended: each filing's own summary in its own unit
     # (thousands before 2023-01-03); a RESTATEMENT's summary covers the whole quarter, a NEW HOLDINGS amendment's
     # summary only the rows it adds.  None when a filing in the chain has no summary total.
@@ -659,6 +672,12 @@ def _resolve_quarter(client: Edgar, cik: str, period: str, filings: list[dict[st
         report_type = doc.get("report_type") or ("13F NOTICE" if filing["form"].startswith("13F-NT") else None)
         if filing is base:
             cover = doc
+            if filing["form"].endswith("/A") and (doc.get("amendment_type") or "").startswith("NEW"):
+                # A NEW HOLDINGS amendment only adds rows to an original we do not have.
+                incomplete = True
+                warnings.append(f"The quarter {period} starts from a NEW HOLDINGS amendment ({filing['accession']}) "
+                                "whose original 13F is not available, so its holdings are incomplete; it is left out "
+                                "of turnover and new-position counts.")
             if report_type == "13F NOTICE" or filing["form"].startswith("13F-NT"):
                 notice = {"reported_by": [m for m in doc.get("other_managers") or []],
                           "note": doc.get("additional_information")}
@@ -669,6 +688,7 @@ def _resolve_quarter(client: Edgar, cik: str, period: str, filings: list[dict[st
             rows = parsed["rows"]
             units.add(parsed["value_unit"])
             warnings += parsed["warnings"]
+            unit_flags = [_unit_flag(parsed)]
             summary_total = _summary_dollars(doc, parsed["value_unit"])
             continue
         kind = doc.get("amendment_type") or "RESTATEMENT"
@@ -683,19 +703,23 @@ def _resolve_quarter(client: Edgar, cik: str, period: str, filings: list[dict[st
         added = _summary_dollars(doc, parsed["value_unit"])
         if kind.startswith("NEW"):
             rows = rows + parsed["rows"]
+            unit_flags.append(_unit_flag(parsed))
             effect = f"added {len(parsed['rows'])} holdings"
             summary_total = summary_total + added if summary_total is not None and added is not None else None
         else:
             rows = parsed["rows"]
+            unit_flags = [_unit_flag(parsed)]
             summary_total = added
             effect = f"replaced the quarter with {len(parsed['rows'])} rows"
             notice = None
+            incomplete = False
         amendments.append({"accession": filing["accession"], "form": filing["form"],
                            "filing_date": filing["filing_date"], "amendment_type": kind, "effect": effect})
     return {"period": period, "accession": base["accession"], "form": base["form"],
             "filing_date": base["filing_date"], "url": _filing_url(cik, base["accession"]),
             "report_type": cover.get("report_type"), "rows": rows, "value_unit": sorted(units),
             "amendments": amendments, "notice": notice, "warnings": warnings, "sources": sources,
+            "incomplete": incomplete, "unit_flags": unit_flags,
             "table_value_total": cover.get("table_value_total"),
             "summary_value_dollars": summary_total,
             "table_entry_total": cover.get("table_entry_total"),
@@ -714,7 +738,11 @@ def _by_period(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
 
 
 def positions_from_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """Aggregate rows by CUSIP into long equity, options and other (principal amounts)."""
+    """Aggregate rows by CUSIP into long equity, options and other (principal amounts).
+
+    A line whose merged value is zero is not a position (it holds nothing at quarter end) and is left out;
+    ``zero_value_lines`` counts them.
+    """
     merged: dict[tuple, dict[str, Any]] = {}
     for row in rows:
         key = (row["cusip"], row.get("put_call") or "", row.get("amount_type") or "SH")
@@ -726,6 +754,11 @@ def positions_from_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             item = merged[key]
         item["shares"] += row["shares"]
         item["value"] += row["value"]
+        if row.get("figi") and not item.get("figi"):
+            item["figi"] = row["figi"]
+    zero = [k for k, item in merged.items() if not item["value"]]
+    for k in zero:
+        del merged[k]
     equity = [p for p in merged.values() if not p["put_call"] and p["amount_type"] == "SH"]
     options = [p for p in merged.values() if p["put_call"]]
     other = [p for p in merged.values() if not p["put_call"] and p["amount_type"] != "SH"]
@@ -741,7 +774,7 @@ def positions_from_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {"equity": equity, "options": options, "other": other, "total": total, "equity_total": equity_total,
             "calls": sum(p["value"] for p in options if p["put_call"] == "call"),
             "puts": sum(p["value"] for p in options if p["put_call"] == "put"),
-            "other_total": sum(p["value"] for p in other)}
+            "other_total": sum(p["value"] for p in other), "zero_value_lines": len(zero)}
 
 
 def diff(previous: list[dict[str, Any]], current: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1092,6 +1125,9 @@ def holdings(cik: Any, period: Any = None, *, client: Edgar | None = None, ticke
             sources=_sources(client))
     view = _quarter_view(current)
     prev_quarter = next((q for q in quarters[1:] if not q["notice"]), None)
+    skipped_prev = None
+    if prev_quarter is not None and prev_quarter.get("incomplete"):
+        skipped_prev, prev_quarter = prev_quarter["period"], None
     prev_view = _quarter_view(prev_quarter) if prev_quarter else None
     book = view["book"]
     items = book["equity"] + book["options"] + (prev_view["book"]["equity"] if prev_view else [])
@@ -1112,8 +1148,6 @@ def holdings(cik: Any, period: Any = None, *, client: Edgar | None = None, ticke
                         ", ".join(f"{p['issuer']} -> {p['ticker']} ({p['ticker_confidence']})" for p in low) + ".")
     total_check = None
     reported = current.get("summary_value_dollars")
-    if reported is None and "summary_value_dollars" not in current and current.get("table_value_total") is not None:
-        reported = current["table_value_total"] * (1000 if current["value_unit"] == ["thousands"] else 1)
     if reported is not None:
         # Compared with the summary pages of the filings actually applied (original plus NEW HOLDINGS, or the
         # latest RESTATEMENT plus later NEW HOLDINGS), each converted from its own unit.
@@ -1151,9 +1185,13 @@ def holdings(cik: Any, period: Any = None, *, client: Edgar | None = None, ticke
             p["weight_with_options"] = _r(p["value"] / combined) if combined else None
         warnings.append("Weights with options treat each option as its underlying stock value, which overstates "
                         "the money at stake in the option.")
-    if prev_view is None:
+    if skipped_prev:
+        warnings.append(f"The earlier quarter {skipped_prev} is incomplete (a NEW HOLDINGS amendment without its "
+                        "original), so there is no quarter-over-quarter comparison.")
+    elif prev_view is None:
         warnings.append("No earlier quarter is available, so there is no quarter-over-quarter comparison.")
-    status = "partial" if unmapped or low or any("look like" in w for w in warnings) else "ready"
+    status = "partial" if (unmapped or low or current.get("incomplete") or any(current.get("unit_flags") or [])
+                           or any("look like" in w for w in warnings)) else "ready"
     return envelope(status, result, warnings=warnings + client.warnings, sources=_sources(client),
                     assumptions=["Values are the filing's quarter-end market values in US dollars.",
                                  "Long-equity weights exclude options and principal-amount (debt) rows."])
@@ -1225,15 +1263,81 @@ def _sectors(client: Edgar, tickers: Iterable[str]) -> tuple[dict[str, dict[str,
 _SPLITS = (2, 3, 4, 5, 8, 10, 15, 20, 25, 40, 50)
 
 
+SPLIT_VALUE_TOLERANCE = 0.03
+
+
 def _split_ratio(old_shares: float, new_shares: float, old_price: float | None, new_price: float | None) -> float | None:
-    """A share-count change that matches a common split ratio with the price moving inversely."""
+    """A share-count change that matches a common split ratio with the price moving inversely.
+
+    Only a candidate: doubling a position while the price halves looks the same, so ``_split_evidence`` decides.
+    """
     if not old_shares or not new_shares or not old_price or not new_price:
         return None
     ratio = new_shares / old_shares
     for k in _SPLITS:
         for r in (k, 1 / k):
-            if abs(ratio / r - 1) < 0.005 and 0.6 < (new_price * r / old_price) < 1.6:
+            if abs(ratio / r - 1) < 0.005 and _inverse_price(old_price, new_price, r):
                 return r
+    return None
+
+
+def _inverse_price(old_price: float | None, new_price: float | None, ratio: float) -> bool:
+    return bool(old_price and new_price) and 0.6 < (new_price * ratio / old_price) < 1.6
+
+
+def _clean_multiple(old_shares: float, new_shares: float, ratio: float) -> bool:
+    """New shares are exactly the old shares times the ratio (a reverse split may round down a fraction)."""
+    expected = old_shares * ratio
+    return abs(new_shares - expected) <= max(1.0, 1e-4 * expected)
+
+
+def _line_price(line: Mapping[str, Any] | None) -> float | None:
+    return line["value"] / float(line["shares"]) if line and line.get("shares") else None
+
+
+def _split_evidence(old: Mapping[str, Any], new: Mapping[str, Any],
+                    peers: list[tuple[Mapping[str, Any], Mapping[str, Any]]]) -> tuple[float | None, str, float | None]:
+    """(split ratio or None, basis, uncorroborated candidate ratio).
+
+    A split is accepted when (a) at least two of the issuer's lines (this one, other share classes, options on
+    the same CUSIP), and most of them, show the same share ratio with the inverse price move, and this line's
+    price moved inversely too, so a trade on top of the split is measured on split-adjusted shares; or (b) the
+    share ratio is a clean multiple and the position's value changed by at most SPLIT_VALUE_TOLERANCE.  Anything
+    else is a trade.
+    """
+    old_shares, new_shares = float(old["shares"]), float(new["shares"])
+    old_price, new_price = _line_price(old), _line_price(new)
+    candidate = _split_ratio(old_shares, new_shares, old_price, new_price)
+    lines = [candidate] + [_split_ratio(float(a["shares"]), float(b["shares"]), _line_price(a), _line_price(b))
+                           for a, b in peers]
+    agreed = [r for r in lines if r]
+    if agreed:
+        ratio = max(set(agreed), key=agreed.count)
+        n = agreed.count(ratio)
+        if n >= 2 and n * 2 > len(lines) and _inverse_price(old_price, new_price, ratio):
+            return ratio, f"{n} of the issuer's {len(lines)} lines show the same split", None
+    if candidate is None:
+        return None, "", None
+    value_change = new["value"] / old["value"] - 1 if old["value"] else None
+    if (_clean_multiple(old_shares, new_shares, candidate) and value_change is not None
+            and abs(value_change) <= SPLIT_VALUE_TOLERANCE):
+        return candidate, "clean share ratio with the position value unchanged", None
+    return None, "", candidate
+
+
+def _quarter_number(period: str) -> int:
+    d = _date(period)
+    return d.year * 4 + (d.month - 1) // 3 if d else 0
+
+
+def _same_security(old: Mapping[str, Any], new: Mapping[str, Any]) -> str | None:
+    """How two lines with different CUSIPs are known to be the same security (FIGI, then a confident ticker)."""
+    if old.get("figi") and old.get("figi") == new.get("figi"):
+        return "figi"
+    if (old.get("ticker") and old.get("ticker") == new.get("ticker")
+            and (old.get("ticker_confidence") or 0) >= MIN_CONFIDENCE
+            and (new.get("ticker_confidence") or 0) >= MIN_CONFIDENCE):
+        return "ticker"
     return None
 
 
@@ -1265,27 +1369,68 @@ def profile_from_history(quarters: list[Mapping[str, Any]], *, sectors: Mapping[
                        "calls_share": _r(book["calls"] / total, 4) if total else None,
                        "puts_share": _r(book["puts"] / total, 4) if total else None,
                        "sectors": {k: _r(v, 4) for k, v in sorted(sector_weights.items(), key=lambda kv: -kv[1])}})
-    transitions = []
-    entries: dict[str, dict[str, Any]] = {}   # cusip -> entry info for names that appear inside the window
-    splits = []
+    # A CUSIP that changes (reorganisation, redomicile) is followed through FIGI or a confident ticker; without
+    # either, an exit and a new line with the same issuer name become a caveat.
+    canon: dict[str, str] = {}
+    identifier_changes, caveats = [], []
+
+    def key(line: Mapping[str, Any]) -> str:
+        return canon.get(line["cusip"], line["cusip"])
+
     for i in range(1, len(quarters)):
-        before = {p["cusip"]: p for p in quarters[i - 1]["book"]["equity"]}
-        after = {p["cusip"]: p for p in quarters[i]["book"]["equity"]}
+        before = {key(p): p for p in quarters[i - 1]["book"]["equity"]}
+        current = quarters[i]["book"]["equity"]
+        gone = [k for k in before if k not in {key(p) for p in current}]
+        for p in current:
+            if key(p) in before:
+                continue
+            match = next(((k, how) for k in gone if (how := _same_security(before[k], p))), None)
+            if match:
+                canon[p["cusip"]] = match[0]
+                gone.remove(match[0])
+                identifier_changes.append({"period": quarters[i]["period"], "issuer": p["issuer"],
+                                           "old_cusip": before[match[0]]["cusip"], "new_cusip": p["cusip"],
+                                           "matched_by": match[1]})
+            elif any(_norm_name(before[k]["issuer"]) == _norm_name(p["issuer"]) for k in gone):
+                caveats.append(f"{p['issuer']} appears under a new CUSIP in {quarters[i]['period']} with no FIGI or "
+                               "confident ticker to link it; it is counted as a sale and a new purchase.")
+    transitions = []
+    entries: dict[str, dict[str, Any]] = {}   # key -> entry info for names that appear inside the window
+    splits, possible_splits = [], []
+    split_factor: dict[tuple[str, int], float] = {}   # (key, transition index) -> share ratio of a split
+    numbers = [_quarter_number(q["period"]) for q in quarters]
+    for i in range(1, len(quarters)):
+        before = {key(p): p for p in quarters[i - 1]["book"]["equity"]}
+        after = {key(p): p for p in quarters[i]["book"]["equity"]}
+        options_before = {(key(o), o["put_call"]): o for o in quarters[i - 1]["book"]["options"]}
+        options_after = {(key(o), o["put_call"]): o for o in quarters[i]["book"]["options"]}
         buys = sells = new_value = add_value = 0.0
         new_names, adds, trims, exits = [], 0, 0, 0
-        for cusip in set(before) | set(after):
-            old, new = before.get(cusip), after.get(cusip)
+        for k in sorted(set(before) | set(after)):
+            old, new = before.get(k), after.get(k)
             old_shares = float(old["shares"]) if old else 0.0
             new_shares = float(new["shares"]) if new else 0.0
             old_price = old["value"] / old_shares if old and old_shares else None
             new_price = new["value"] / new_shares if new and new_shares else None
             price = new_price or old_price or 0.0
             if old and new:
-                ratio = _split_ratio(old_shares, new_shares, old_price, new_price)
+                # The issuer's other lines: its other share classes and options on any of its CUSIPs.
+                name = _norm_name(new["issuer"])
+                family = {k} | {c for c in before if c in after and name and _norm_name(after[c]["issuer"]) == name}
+                peers = [(before[c], after[c]) for c in sorted(family - {k})]
+                peers += [(options_before[o], options_after[o]) for o in sorted(options_before)
+                          if o[0] in family and o in options_after]
+                ratio, basis, candidate = _split_evidence(old, new, peers)
                 if ratio:
-                    splits.append({"period": quarters[i]["period"], "cusip": cusip, "issuer": new["issuer"],
-                                   "ratio": _r(ratio, 4)})
-                    continue
+                    old_shares *= ratio
+                    split_factor[(k, i)] = ratio
+                    splits.append({"period": quarters[i]["period"], "cusip": new["cusip"], "issuer": new["issuer"],
+                                   "ratio": _r(ratio, 4), "basis": basis})
+                    if _clean_multiple(old_shares, new_shares, 1.0):
+                        continue
+                elif candidate:
+                    possible_splits.append({"period": quarters[i]["period"], "cusip": new["cusip"],
+                                            "issuer": new["issuer"], "ratio": _r(candidate, 4)})
             change = new_shares - old_shares
             if change > 0:
                 buys += change * price
@@ -1295,8 +1440,8 @@ def profile_from_history(quarters: list[Mapping[str, Any]], *, sectors: Mapping[
                 else:
                     new_value += change * price
                     new_names.append(new)
-                    entries[cusip] = {"period_index": i, "weight": new["weight"], "shares": new_shares,
-                                      "issuer": new["issuer"], "ticker": new.get("ticker")}
+                    entries[k] = {"period_index": i, "weight": new["weight"], "shares": new_shares,
+                                  "issuer": new["issuer"], "ticker": new.get("ticker")}
             elif change < 0:
                 sells += -change * price
                 if new:
@@ -1304,30 +1449,44 @@ def profile_from_history(quarters: list[Mapping[str, Any]], *, sectors: Mapping[
                 else:
                     exits += 1
         average = (quarters[i - 1]["book"]["equity_total"] + quarters[i]["book"]["equity_total"]) / 2
+        elapsed = max(1, numbers[i] - numbers[i - 1])
+        turnover = min(buys, sells) / average if average else None
         transitions.append({
-            "from": quarters[i - 1]["period"], "to": quarters[i]["period"],
+            "from": quarters[i - 1]["period"], "to": quarters[i]["period"], "quarters_elapsed": elapsed,
             "buys_estimate": int(buys), "sells_estimate": int(sells),
-            "turnover": _r(min(buys, sells) / average, 4) if average else None,
+            "turnover": _r(turnover, 4) if turnover is not None else None,
+            "turnover_per_quarter": _r(turnover / elapsed, 4) if turnover is not None else None,
             "new_positions": len(new_names), "added_to": adds, "trimmed": trims, "exited": exits,
             "buying_into_existing_share": _r(add_value / (add_value + new_value), 4) if add_value + new_value else None,
             "new_position_weights": [_r(p["weight"], 4) for p in sorted(new_names, key=lambda p: -(p["weight"] or 0))],
         })
-    turnovers = [t["turnover"] for t in transitions if t["turnover"] is not None]
-    quarterly = statistics.fmean(turnovers) if turnovers else None
+    # Each transition's turnover is spread over the quarters it spans (a missed filing or a 13F-NT leaves a gap),
+    # so the quarterly rate is total turnover / total quarters elapsed.
+    counted = [(float(t["turnover"]), t["quarters_elapsed"]) for t in transitions if t["turnover"] is not None]
+    quarterly = sum(v for v, _ in counted) / sum(n for _, n in counted) if counted else None
     annual = quarterly * 4 if quarterly is not None else None
+    gaps = [t for t in transitions if t["quarters_elapsed"] > 1]
+    if gaps:
+        caveats.append("Quarters are missing between " + ", ".join(f"{t['from']} and {t['to']}" for t in gaps) +
+                       " (a missed filing, a 13F notice or an incomplete quarter); turnover there is spread over the "
+                       "quarters elapsed, and trades inside the gap are invisible.")
+    if possible_splits:
+        caveats.append("Share counts of " + ", ".join(f"{x['issuer']} ({x['period']})" for x in possible_splits) +
+                       " changed by a common split ratio, but nothing corroborates a split, so they are counted as "
+                       "trades.")
     # holding periods: runs of consecutive quarters per CUSIP
     presence: dict[str, list[int]] = {}
     for i, q in enumerate(quarters):
         for p in q["book"]["equity"]:
-            presence.setdefault(p["cusip"], []).append(i)
+            presence.setdefault(key(p), []).append(i)
     runs, completed = [], []
-    for cusip, idx in presence.items():
+    for idx in presence.values():
         start = prev = idx[0]
         for j in idx[1:] + [None]:
             if j is not None and j == prev + 1:
                 prev = j
                 continue
-            length = prev - start + 1
+            length = numbers[prev] - numbers[start] + 1   # calendar quarters, across any gap in the filings
             runs.append(length)
             if start > 0 and prev < len(quarters) - 1:
                 completed.append(length)
@@ -1335,9 +1494,9 @@ def profile_from_history(quarters: list[Mapping[str, Any]], *, sectors: Mapping[
                 start = prev = j
     # build-up of names first bought inside the window
     build = []
-    for cusip, info in entries.items():
+    for k, info in entries.items():
         later = [q["book"]["equity"] for q in quarters[info["period_index"] + 1:]]
-        path = [next((p for p in book if p["cusip"] == cusip), None) for book in later]
+        path = [next((p for p in book if key(p) == k), None) for book in later]
         held = []
         for p in path:
             if p is None:
@@ -1345,11 +1504,15 @@ def profile_from_history(quarters: list[Mapping[str, Any]], *, sectors: Mapping[
             held.append(p)
         if not held:
             continue
+        # Entry shares restated in the last held quarter's terms, so a split is not read as buying more.
+        adjusted = info["shares"]
+        for j in range(info["period_index"] + 1, info["period_index"] + len(held) + 1):
+            adjusted *= split_factor.get((k, j), 1.0)
         peak = max(held, key=lambda p: p["weight"] or 0)
         build.append({"issuer": info["issuer"], "ticker": info["ticker"], "entry_weight": _r(info["weight"], 4),
                       "peak_weight": _r(peak["weight"], 4),
                       "quarters_to_peak": held.index(peak) + 1 if (peak["weight"] or 0) > (info["weight"] or 0) else 0,
-                      "built_up": float(held[-1]["shares"]) > info["shares"] * 1.1})
+                      "built_up": float(held[-1]["shares"]) > adjusted * 1.1})
     initial = [w for t in transitions for w in t["new_position_weights"] if w is not None]
     first, last = (series[0], series[-1]) if series else ({}, {})
     drift = None
@@ -1360,24 +1523,30 @@ def profile_from_history(quarters: list[Mapping[str, Any]], *, sectors: Mapping[
     result = {
         "manager": dict(manager or {}),
         "quarters": len(quarters),
+        "span_quarters": numbers[-1] - numbers[0] + 1 if quarters else 0,
         "periods": [q["period"] for q in quarters],
         "turnover": {
             "per_quarter": transitions,
             "average_quarterly": _r(quarterly, 4), "annualised": _r(annual, 4),
-            "method": "min(buys, sells) / average long-equity value per quarter, with buys and sells estimated as "
-                      "share changes x the quarter-end price (value / shares); average of quarters x 4.",
+            "method": "min(buys, sells) / average long-equity value between two filings, with buys and sells "
+                      "estimated as share changes x the quarter-end price (value / shares); the sum over "
+                      "transitions / the calendar quarters they span, x 4.",
             "estimate": True,
             "caveat": "An estimate: a 13F shows only quarter-end snapshots, so trades within a quarter, and "
                       "round trips between filings, are invisible and real turnover is usually higher.",
+            "caveats": caveats,
             "splits_ignored": splits,
+            "possible_splits_counted_as_trades": possible_splits,
+            "identifier_changes": identifier_changes,
         },
         "holding_period": {
             "average_quarters": _r(statistics.fmean(runs), 2) if runs else None,
             "median_quarters": _r(float(statistics.median(runs)), 2) if runs else None,
             "completed_average_quarters": _r(statistics.fmean(completed), 2) if completed else None,
             "implied_years": _r(1 / annual, 2) if annual else None,
-            "note": f"Counted inside a {len(quarters)}-quarter window, so positions held before or after it are "
-                    "cut short (censored); implied years = 1 / annual turnover.",
+            "note": f"Counted in calendar quarters inside a {numbers[-1] - numbers[0] + 1 if quarters else 0}-quarter "
+                    "window, so positions held before or after it are cut short (censored); a position filed on "
+                    "both sides of a missing quarter counts as held through it; implied years = 1 / annual turnover.",
         },
         "concentration": {
             "by_quarter": [{k: s[k] for k in ("period", "positions", "top5", "top10", "hhi", "effective_positions",
@@ -1488,10 +1657,11 @@ def character(profile: Mapping[str, Any]) -> dict[str, str]:
     es = head_es + (": " + ", ".join(facts_es) if facts_es else "") + "."
     hp = profile["holding_period"]
     if hp.get("median_quarters") is not None:
+        window = profile.get("span_quarters") or profile["quarters"]
         en += f" A position is typically held about {hp['median_quarters']:g} quarters within the " \
-              f"{profile['quarters']}-quarter window"
+              f"{window}-quarter window"
         es += f" Una posición suele mantenerse unos {hp['median_quarters']:g} trimestres dentro de la ventana de " \
-              f"{profile['quarters']} trimestres"
+              f"{window} trimestres"
         if hp.get("implied_years") and hp["implied_years"] > 30:
             en += " (turnover implies holding for decades)"
             es += " (la rotación implica mantenerlas por décadas)"
@@ -1533,10 +1703,39 @@ _SECTOR_ES = {"Technology": "tecnología", "Health care": "salud", "Financials":
 
 
 def _history(client: Edgar, cik: str, quarters: int, tickers: Mapping[str, str] | None,
-             with_sectors: bool) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any], list[str]]:
+             with_sectors: bool) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any], list[str],
+                                          dict[str, list[str]]]:
+    """(submissions, quarter views, sectors, warnings, flags).
+
+    ``flags`` names the quarters that make a profile partial: ``unit_suspect`` (values in the other unit,
+    rescaled when every table in the quarter points the same way, else left out) and ``incomplete`` (a NEW
+    HOLDINGS amendment without its original, left out).
+    """
     sub, loaded, rows = _load_quarters(client, cik, quarters)
-    views = [_quarter_view(q) for q in loaded if not q["notice"]]
     warnings = [w for q in loaded for w in q["warnings"]]
+    flags: dict[str, list[str]] = {"unit_suspect": [], "incomplete": []}
+    usable = []
+    for q in loaded:
+        if q["notice"]:
+            continue
+        if q.get("incomplete"):
+            flags["incomplete"].append(q["period"])
+            continue
+        marks = q.get("unit_flags") or []
+        if any(marks):
+            flags["unit_suspect"].append(q["period"])
+            if len(set(marks)) == 1:
+                factor = 1000 if marks[0] == "thousands_as_dollars" else 0.001
+                q = {**q, "rows": [{**r, "value": int(round(r["value"] * factor))} for r in q["rows"]],
+                     "rescaled": factor}
+                warnings.append(f"Values for {q['period']} were rescaled "
+                                f"{'x1000 (read as thousands)' if factor == 1000 else '/1000 (read as dollars)'} "
+                                "to match the other quarters before computing turnover.")
+            else:
+                warnings.append(f"{q['period']} mixes tables in different units and is left out of the profile.")
+                continue
+        usable.append(q)
+    views = [_quarter_view(q) for q in usable]
     notices = [q["period"] for q in loaded if q["notice"]]
     if notices:
         warnings.append(f"Quarters {', '.join(notices)} are 13F notices (holdings reported by another manager) and "
@@ -1552,7 +1751,7 @@ def _history(client: Edgar, cik: str, quarters: int, tickers: Mapping[str, str] 
         if missing:
             warnings.append(f"No sector for {len(missing)} tickers ({', '.join(missing[:8])}"
                             f"{'…' if len(missing) > 8 else ''}); they count as Unknown.")
-    return sub, views, sectors, warnings
+    return sub, views, sectors, warnings, flags
 
 
 def profile(cik: Any, quarters: int = 8, *, client: Edgar | None = None, tickers: Mapping[str, str] | None = None,
@@ -1563,7 +1762,7 @@ def profile(cik: Any, quarters: int = 8, *, client: Edgar | None = None, tickers
         raise ValueError("quarters must be 2-40")
     client = _client(client)
     try:
-        sub, views, sector_map, warnings = _history(client, cik, quarters, tickers, sectors)
+        sub, views, sector_map, warnings, flags = _history(client, cik, quarters, tickers, sectors)
     except UserAgentRequired as exc:
         return _needs(str(exc), SEC_UA_ENV)
     except TransportError as exc:
@@ -1581,7 +1780,9 @@ def profile(cik: Any, quarters: int = 8, *, client: Edgar | None = None, tickers
         warnings.append("Only one quarter is available: turnover, holding period and drift need at least two.")
     if len(views) < quarters:
         warnings.append(f"{len(views)} of the {quarters} quarters asked for are available.")
-    status = "ready" if len(views) >= 2 and result["sector_data_available"] else "partial"
+    warnings += result["turnover"]["caveats"]
+    status = ("ready" if len(views) >= 2 and result["sector_data_available"]
+              and not flags["unit_suspect"] and not flags["incomplete"] else "partial")
     return envelope(status, result, warnings=warnings + client.warnings, sources=_sources(client),
                     assumptions=["Turnover and holding period are estimates from quarter-end snapshots."])
 
@@ -2049,7 +2250,7 @@ def backtest(cik: Any, *, quarters: int = 8, price_inputs: Mapping[str, Any] | N
     cik = normalize_cik(cik)
     client = _client(client)
     try:
-        sub, views, _, warnings = _history(client, cik, quarters, tickers, False)
+        sub, views, _, warnings, _flags = _history(client, cik, quarters, tickers, False)
     except UserAgentRequired as exc:
         return _needs(str(exc), SEC_UA_ENV)
     except TransportError as exc:
