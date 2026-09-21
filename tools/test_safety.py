@@ -411,7 +411,7 @@ def test_opt_in_flag_attaches_coverage_and_a_stated_caveat(monkeypatch):
 # --------------------------------------------------------------------------
 @pytest.mark.parametrize('text', [
     'risk-free series ends 2026-07-31; the last published rate is carried forward',
-    'no matching-currency risk-free series for MXN; the US daily risk-free rate is substituted',
+    'no matching-currency risk-free series for MXN; Sharpe and alpha omitted',
     'complete weighted expense ratio unavailable; fee coverage is partial',
     'fewer than 126 return observations; estimates are particularly unstable',
     'report refreshed from a new price sample; all statistics recomputed',
@@ -458,7 +458,7 @@ def test_report_page_carries_no_method_warning(tmp_path, px):
 # masthead meta reads in months, not ISO dates
 # --------------------------------------------------------------------------
 def test_masthead_meta_uses_months_not_iso_dates():
-    res = {'window_start': '2021-09-15', 'window_end': '2026-09-14',
+    res = {'window': {'start': '2021-09-15', 'end': '2026-09-14'},
            'bench': 'SPY', 'currency': 'MXN'}
     meta = wm._meta(res, 'the S&P 500')
     assert meta.startswith('Sep 2021')
@@ -467,17 +467,18 @@ def test_masthead_meta_uses_months_not_iso_dates():
 
 
 # --------------------------------------------------------------------------
-# fees: provider lookup, unit guard, stocks are a known zero, 90% headline rule
+# fees: provider units are never guessed, stocks are a known zero, 90% headline rule
 # --------------------------------------------------------------------------
+# The provider quotes the same field in percent for some funds and as a decimal
+# for others (0.02 is 0.02% for one ETF and 2% for another), so any threshold
+# rule is a 100x error one way. Every provider value is kept raw and unused.
 @pytest.mark.parametrize('raw,kind,expected', [
-    ({'netExpenseRatio': 0.03}, 'ETF', 0.0003),      # quoted in percent
-    ({'netExpenseRatio': 0.0945}, 'ETF', 0.000945),  # still percent
-    ({'netExpenseRatio': 0.35}, 'ETF', 0.0035),
-    ({'annualReportExpenseRatio': 0.0009}, 'ETF', 0.0009),  # already decimal
+    ({'netExpenseRatio': 0.03}, 'ETF', None),
+    ({'netExpenseRatio': 0.02}, 'ETF', None),        # 0.02% or 2%: undecidable
+    ({'annualReportExpenseRatio': 0.0009}, 'ETF', None),
     ({}, 'EQUITY', 0.0),                             # a share is not a fund
     ({}, 'MUTUALFUND', None),                        # genuinely unknown
-    ({'netExpenseRatio': 250.0}, 'ETF', None),       # survives neither reading
-    ({'netExpenseRatio': -1.0}, 'ETF', None),
+    ({'netExpenseRatio': 250.0}, 'ETF', None),
 ])
 def test_provider_expense_ratio_units_and_guards(monkeypatch, raw, kind, expected, tmp_path):
     info = dict(raw); info['quoteType'] = kind; info['currency'] = 'USD'
@@ -490,7 +491,8 @@ def test_provider_expense_ratio_units_and_guards(monkeypatch, raw, kind, expecte
     assert (got['expense_ratio'] is None if expected is None
             else got['expense_ratio'] == pytest.approx(expected))
     assert got['fee_status'] == ('not-a-fund' if kind == 'EQUITY' and not raw
-                                 else 'provider' if expected is not None else 'unavailable')
+                                 else 'ambiguous-units' if raw else 'unavailable')
+    assert got['raw_fee_fields'] == raw
 
 
 def test_annual_cost_quotes_the_blend_above_ninety_percent_coverage():
@@ -512,16 +514,15 @@ def test_annual_cost_stays_an_em_dash_with_no_coverage_at_all():
 
 
 # --------------------------------------------------------------------------
-# a non-USD investor still gets Sharpe and alpha, with the substitution stated
+# a non-USD investor never gets a US T-bill passed off as the local cash rate
 # --------------------------------------------------------------------------
-def test_non_usd_substitutes_the_us_risk_free_and_says_so(monkeypatch):
+def test_non_usd_omits_the_risk_free_with_an_explicit_reason(monkeypatch):
     idx = pd.bdate_range('2024-01-01', periods=300)
     _ff_stub(monkeypatch, str(idx[-1].date()), idx)
     warnings = []
-    rf = wm._rf_daily(idx, warnings, 'MXN')
-    assert rf is not None and not rf.isna().any()
-    assert any('no matching-currency risk-free series for MXN' in w for w in warnings)
-    assert any('substituted' in w for w in warnings)
+    assert wm._rf_daily(idx, warnings, 'MXN') is None
+    assert any('no matching-currency risk-free series for MXN; Sharpe and alpha omitted' in w
+               for w in warnings)
 
 
 def test_undeclared_currency_still_omits_the_risk_free():
