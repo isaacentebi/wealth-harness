@@ -346,3 +346,20 @@ def test_unknown_balances_are_never_zero_and_never_folded_into_a_statement(tmp_p
     afore = next(r for r in after["investments"] if r["key"] == "investment.afore")
     assert afore["counted"] and afore["balance_unknown"]
     situation.brief(after, "es")  # renders without error
+
+
+def test_confirming_a_statement_that_showed_the_difference_settles_it(tmp_path):
+    service = _client(tmp_path, {
+        "investment.gbm": {"amount": 200000, "currency": "MXN", "institution": "GBM", "kind": "brokerage",
+                           "approximate": True},
+    })
+    path = upload_dir("ana", service.db_path) / "gbm.pdf"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(fixtures.gbm_multicurrency())
+    proposal = service.ingest("ana", "file", {"path": "gbm.pdf"})
+    assert any(i["kind"] == "stated_vs_statement" for i in proposal["result"]["insights"])
+    done = service.ingest("ana", "confirm", {"proposal_id": proposal["result"]["proposal_id"],
+                                             "acknowledge_discrepancies": True})
+    assert not done["result"]["needs_user"]
+    assert service.contradictions("ana")["contradictions"] == []
+    assert not service.situation("ana")["differences"]

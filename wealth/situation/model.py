@@ -1199,7 +1199,8 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
                     native[cur] = num((D(native.get(cur)) or Decimal(0)) + D(amount_))
             stated_value = fx.convert(amount, item.get("currency"), currency)
             differences.append({
-                "institution": institution, "key": item["key"], "stated": _money(amount, item.get("currency")),
+                "institution": institution or item.get("name"), "key": item["key"],
+                "stated": _money(amount, item.get("currency")),
                 "stated_approximate": row["approximate"], "statement": native,
                 "statement_value": num(statement_value), "currency": currency,
                 "as_of": max((a["as_of"] for a in matching if a["as_of"]), default=None),

@@ -1349,6 +1349,17 @@ class WealthService:
                     return state
 
                 store.update_auxiliary(client_id, "ingest", update)
+        # The summary the person said yes to led with "you told me X; the statement shows Y" (the agent is
+        # required to show that insight first), so their yes settles that difference in favour of the statement.
+        seen = {i.get("key") for i in situation_module.statement_insights(proposal.get("result") or {}, before)
+                if i.get("kind") == "stated_vs_statement" and i.get("key")}
+        waiting = report["result"].get("needs_user") or []
+        settled = [item for item in waiting if item.get("key") in seen and item.get("id")]
+        for item in settled:
+            self.resolve_contradiction(client_id, item["id"], "use_new")
+        if settled:
+            report["result"]["needs_user"] = [item for item in waiting if item not in settled]
+            report["result"]["settled_by_confirmation"] = [item["key"] for item in settled]
         sha = ((proposal.get("result") or {}).get("provenance") or {}).get("sha256")
         if sha and purge_on_confirm():
             try:

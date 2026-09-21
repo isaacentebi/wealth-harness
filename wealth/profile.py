@@ -902,20 +902,21 @@ def goals_view(snapshot: dict, today: date) -> dict:
 
 # ---------------------------------------------------------------- upcoming
 
-def fact_labels(sit: dict | None) -> dict[str, str]:
+def fact_labels(sit: dict | None, language: str | None = None) -> dict[str, str]:
     """Human names for canonical fact keys (institution, account type, debt kind), never raw ids."""
     if not sit:
         return {}
+    lang = language if language in _LABELS else "en"
     labels = {a["key"]: a["label"] for a in sit["accounts"] if a.get("key")}
     for row in [*sit["cash"], *sit["investments"]]:
         if row["key"].startswith(("cash.", "investment.")):
             labels[row["key"]] = row.get("institution") or row.get("name") or _humanize(row["id"])
     for row in sit["liabilities"]:
         if row["key"].startswith("liability."):
-            labels[row["key"]] = row.get("name") or _LABELS["en"].get(row["kind"], "Loan")
+            labels[row["key"]] = row.get("name") or _LABELS[lang].get(row["kind"], _LABELS[lang].get("other", "Loan"))
     for row in sit["income"]["items"] + sit["income"]["extras"]:
         if row["key"].startswith("income.") and row["key"] != "income.schedule":
-            labels[row["key"]] = row.get("name") or _LABELS["en"].get(row.get("kind") or "income", "Income")
+            labels[row["key"]] = row.get("name") or _LABELS[lang].get(row.get("kind") or "income", "Income")
     return labels
 
 
@@ -1287,7 +1288,7 @@ def profile_view(service: Any, client_id: str, today: Any = None, language: str 
         # What Wealth knows, as sentences grouped by life area (see memory_view).
         "memory": memory,
         "completeness": known,
-        "upcoming": upcoming(snapshot, today, labels=fact_labels(sit)),
+        "upcoming": upcoming(snapshot, today, labels=fact_labels(sit, language or (sit.get("profile") or {}).get("language"))),
         # The accepted investment policy (profile, sleeves with ranges, reserve, review), or None.
         "policy": policy_summary(current_policy(snapshot, today)),
         # Saved facts left out of every number because they cannot be read; each can be removed.

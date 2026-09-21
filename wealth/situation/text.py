@@ -652,7 +652,12 @@ def summaries(sit: Mapping[str, Any], language: str | None = None) -> dict[str, 
     owned = [r for r in sit["cash"] if r["counted"]] + [r for r in sit["investments"] if r["counted"]]
     institutions = {a.get("institution") or a["label"] for a in sit["accounts"] if a["source"] != "ledger" and a.get("native")}
     if nw.get("assets") is not None and not nw.get("unconverted") and len(owned) + len(institutions) >= 2:
-        put("own", "En total tienes {x}." if es else "In all, you have {x}.", x=money(nw["assets"]))
+        missing = ", ".join(nw.get("unknown_balances") or [])
+        if missing:
+            put("own", f"En total tienes {{x}}, sin contar {missing}." if es else
+                f"In all, you have {{x}}, not counting {missing}.", x=money(nw["assets"]))
+        else:
+            put("own", "En total tienes {x}." if es else "In all, you have {x}.", x=money(nw["assets"]))
     debts = sit["liabilities"]
     if len(debts) >= 2 and nw.get("liabilities") is not None:
         put("owe", "Debes {x} en total." if es else "You owe {x} in all.", x=money(nw["liabilities"]))
