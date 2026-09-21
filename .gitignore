@@ -27,3 +27,6 @@ build/
 
 # Agent worktrees
 .claude/worktrees/
+
+# Conversation eval reports (may contain model transcripts)
+/evals/reports/
