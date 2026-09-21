@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<edgarSubmission xmlns="http://www.sec.gov/edgar/thirteenffiler" xmlns:com="http://www.sec.gov/edgar/common">
+  <schemaVersion>X0202</schemaVersion>
+  <headerData>
+    <submissionType>13F-HR</submissionType>
+    <filerInfo>
+      <liveTestFlag>LIVE</liveTestFlag>
+      <filer>
+        <credentials>
+          <cik>0009990001</cik>
+          <ccc>XXXXXXXX</ccc>
+        </credentials>
+      </filer>
+      <periodOfReport>03-31-2023</periodOfReport>
+    </filerInfo>
+  </headerData>
+  <formData>
+    <coverPage>
+      <reportCalendarOrQuarter>03-31-2023</reportCalendarOrQuarter>
+      <isAmendment>false</isAmendment>
+      <filingManager>
+        <name>Fixture Capital LP</name>
+        <address>
+          <com:street1>1 EXAMPLE PLAZA</com:street1>
+          <com:city>NEW YORK</com:city>
+          <com:stateOrCountry>NY</com:stateOrCountry>
+          <com:zipCode>10001</com:zipCode>
+        </address>
+      </filingManager>
+      <reportType>13F HOLDINGS REPORT</reportType>
+      <form13FFileNumber>028-99999</form13FFileNumber>
+      <provideInfoForInstruction5>N</provideInfoForInstruction5>
+    </coverPage>
+    <summaryPage>
+      <otherIncludedManagersCount>2</otherIncludedManagersCount>
+      <tableEntryTotal>9</tableEntryTotal>
+      <tableValueTotal>40290000</tableValueTotal>
+      <isConfidentialOmitted>true</isConfidentialOmitted>
+    </summaryPage>
+  </formData>
+</edgarSubmission>

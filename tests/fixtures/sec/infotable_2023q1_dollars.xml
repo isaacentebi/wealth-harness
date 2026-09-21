@@ -1,0 +1,156 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Sample 13F information table in the current layout: default namespace, <value> in whole DOLLARS.
+     Fictional filer and fictional holdings of real securities, plus two fictional issuers for mapping tests.
+     Covers: one position split across two rows (different other managers), a call and a put reported at the
+     underlying's value, a principal-amount (PRN) convertible row, a non-US (CINS) issuer, a name that only
+     matches SEC names, and a name that matches nothing. -->
+<informationTable xmlns="http://www.sec.gov/edgar/document/thirteenf/informationtable" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.sec.gov/edgar/document/thirteenf/informationtable eis_13FDocument.xsd">
+  <infoTable>
+    <nameOfIssuer>APPLE INC</nameOfIssuer>
+    <titleOfClass>COM</titleOfClass>
+    <cusip>037833100</cusip>
+    <value>16000000</value>
+    <shrsOrPrnAmt>
+      <sshPrnamt>100000</sshPrnamt>
+      <sshPrnamtType>SH</sshPrnamtType>
+    </shrsOrPrnAmt>
+    <investmentDiscretion>SOLE</investmentDiscretion>
+    <votingAuthority>
+      <Sole>100000</Sole>
+      <Shared>0</Shared>
+      <None>0</None>
+    </votingAuthority>
+  </infoTable>
+  <infoTable>
+    <nameOfIssuer>MICROSOFT CORP</nameOfIssuer>
+    <titleOfClass>COM</titleOfClass>
+    <cusip>594918104</cusip>
+    <value>5760000</value>
+    <shrsOrPrnAmt>
+      <sshPrnamt>20000</sshPrnamt>
+      <sshPrnamtType>SH</sshPrnamtType>
+    </shrsOrPrnAmt>
+    <investmentDiscretion>DFND</investmentDiscretion>
+    <otherManager>1</otherManager>
+    <votingAuthority>
+      <Sole>20000</Sole>
+      <Shared>0</Shared>
+      <None>0</None>
+    </votingAuthority>
+  </infoTable>
+  <infoTable>
+    <nameOfIssuer>MICROSOFT CORP</nameOfIssuer>
+    <titleOfClass>COM</titleOfClass>
+    <cusip>594918104</cusip>
+    <value>2880000</value>
+    <shrsOrPrnAmt>
+      <sshPrnamt>10000</sshPrnamt>
+      <sshPrnamtType>SH</sshPrnamtType>
+    </shrsOrPrnAmt>
+    <investmentDiscretion>DFND</investmentDiscretion>
+    <otherManager>2</otherManager>
+    <votingAuthority>
+      <Sole>0</Sole>
+      <Shared>10000</Shared>
+      <None>0</None>
+    </votingAuthority>
+  </infoTable>
+  <infoTable>
+    <nameOfIssuer>NVIDIA CORPORATION</nameOfIssuer>
+    <titleOfClass>COM</titleOfClass>
+    <cusip>67066G104</cusip>
+    <value>5560000</value>
+    <shrsOrPrnAmt>
+      <sshPrnamt>20000</sshPrnamt>
+      <sshPrnamtType>SH</sshPrnamtType>
+    </shrsOrPrnAmt>
+    <putCall>Call</putCall>
+    <investmentDiscretion>SOLE</investmentDiscretion>
+    <votingAuthority>
+      <Sole>0</Sole>
+      <Shared>0</Shared>
+      <None>20000</None>
+    </votingAuthority>
+  </infoTable>
+  <infoTable>
+    <nameOfIssuer>SPDR S&amp;P 500 ETF TR</nameOfIssuer>
+    <titleOfClass>TR UNIT</titleOfClass>
+    <cusip>78462F103</cusip>
+    <value>4090000</value>
+    <shrsOrPrnAmt>
+      <sshPrnamt>10000</sshPrnamt>
+      <sshPrnamtType>SH</sshPrnamtType>
+    </shrsOrPrnAmt>
+    <putCall>Put</putCall>
+    <investmentDiscretion>SOLE</investmentDiscretion>
+    <votingAuthority>
+      <Sole>0</Sole>
+      <Shared>0</Shared>
+      <None>10000</None>
+    </votingAuthority>
+  </infoTable>
+  <infoTable>
+    <nameOfIssuer>BLOOM ENERGY CORP</nameOfIssuer>
+    <titleOfClass>NOTE 2.500% 8/1</titleOfClass>
+    <cusip>093712AH0</cusip>
+    <value>1200000</value>
+    <shrsOrPrnAmt>
+      <sshPrnamt>1000000</sshPrnamt>
+      <sshPrnamtType>PRN</sshPrnamtType>
+    </shrsOrPrnAmt>
+    <investmentDiscretion>SOLE</investmentDiscretion>
+    <votingAuthority>
+      <Sole>0</Sole>
+      <Shared>0</Shared>
+      <None>0</None>
+    </votingAuthority>
+  </infoTable>
+  <infoTable>
+    <nameOfIssuer>BITDEER TECHNOLOGIES GROUP</nameOfIssuer>
+    <titleOfClass>CL A ORD SHS</titleOfClass>
+    <cusip>G11448100</cusip>
+    <value>2400000</value>
+    <shrsOrPrnAmt>
+      <sshPrnamt>200000</sshPrnamt>
+      <sshPrnamtType>SH</sshPrnamtType>
+    </shrsOrPrnAmt>
+    <investmentDiscretion>SOLE</investmentDiscretion>
+    <votingAuthority>
+      <Sole>200000</Sole>
+      <Shared>0</Shared>
+      <None>0</None>
+    </votingAuthority>
+  </infoTable>
+  <infoTable>
+    <nameOfIssuer>NORTHWIND TRADERS INC</nameOfIssuer>
+    <titleOfClass>COM</titleOfClass>
+    <cusip>66600A101</cusip>
+    <value>1600000</value>
+    <shrsOrPrnAmt>
+      <sshPrnamt>40000</sshPrnamt>
+      <sshPrnamtType>SH</sshPrnamtType>
+    </shrsOrPrnAmt>
+    <investmentDiscretion>SOLE</investmentDiscretion>
+    <votingAuthority>
+      <Sole>40000</Sole>
+      <Shared>0</Shared>
+      <None>0</None>
+    </votingAuthority>
+  </infoTable>
+  <infoTable>
+    <nameOfIssuer>ZZQX PRIVATE HOLDCO</nameOfIssuer>
+    <titleOfClass>COM</titleOfClass>
+    <cusip>99999Z109</cusip>
+    <value>800000</value>
+    <shrsOrPrnAmt>
+      <sshPrnamt>80000</sshPrnamt>
+      <sshPrnamtType>SH</sshPrnamtType>
+    </shrsOrPrnAmt>
+    <investmentDiscretion>SOLE</investmentDiscretion>
+    <votingAuthority>
+      <Sole>80000</Sole>
+      <Shared>0</Shared>
+      <None>0</None>
+    </votingAuthority>
+  </infoTable>
+</informationTable>

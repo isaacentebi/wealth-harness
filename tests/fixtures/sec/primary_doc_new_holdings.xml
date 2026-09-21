@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<edgarSubmission xmlns="http://www.sec.gov/edgar/thirteenffiler" xmlns:ns1="http://www.sec.gov/edgar/common">
+  <headerData>
+    <submissionType>13F-HR/A</submissionType>
+    <filerInfo>
+      <periodOfReport>03-31-2023</periodOfReport>
+    </filerInfo>
+  </headerData>
+  <formData>
+    <coverPage>
+      <reportCalendarOrQuarter>03-31-2023</reportCalendarOrQuarter>
+      <isAmendment>true</isAmendment>
+      <amendmentNo>2</amendmentNo>
+      <amendmentInfo>
+        <amendmentType>NEW HOLDINGS</amendmentType>
+        <confDeniedExpired>true</confDeniedExpired>
+        <dateDeniedExpired>08-14-2023</dateDeniedExpired>
+        <dateReported>05-15-2023</dateReported>
+        <reasonForNonConfidentiality>Confidential Treatment Expired</reasonForNonConfidentiality>
+      </amendmentInfo>
+      <filingManager>
+        <name>Fixture Capital LP</name>
+      </filingManager>
+      <reportType>13F HOLDINGS REPORT</reportType>
+    </coverPage>
+    <summaryPage>
+      <tableEntryTotal>1</tableEntryTotal>
+      <tableValueTotal>6200000</tableValueTotal>
+    </summaryPage>
+  </formData>
+</edgarSubmission>

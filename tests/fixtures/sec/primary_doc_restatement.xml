@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<edgarSubmission xmlns="http://www.sec.gov/edgar/thirteenffiler">
+  <headerData>
+    <submissionType>13F-HR/A</submissionType>
+    <filerInfo>
+      <periodOfReport>03-31-2023</periodOfReport>
+    </filerInfo>
+  </headerData>
+  <formData>
+    <coverPage>
+      <reportCalendarOrQuarter>03-31-2023</reportCalendarOrQuarter>
+      <isAmendment>true</isAmendment>
+      <amendmentNo>1</amendmentNo>
+      <amendmentInfo>
+        <amendmentType>RESTATEMENT</amendmentType>
+      </amendmentInfo>
+      <filingManager>
+        <name>Fixture Capital LP</name>
+      </filingManager>
+      <reportType>13F HOLDINGS REPORT</reportType>
+    </coverPage>
+    <summaryPage>
+      <tableEntryTotal>2</tableEntryTotal>
+      <tableValueTotal>27840000</tableValueTotal>
+    </summaryPage>
+  </formData>
+</edgarSubmission>

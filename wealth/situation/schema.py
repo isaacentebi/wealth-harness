@@ -104,6 +104,13 @@ SCHEMA: dict[str, dict[str, str]] = {
         "buckets?": "list", "return_requirement?": "{value, goal_id}", "residence?": "object",
         "missing?": "list", "evidence?": "{fact key: fact id}",
     },
+    "follow.<cik>": {
+        "note": "a 13F manager the person follows; <cik> is the 10-digit SEC CIK (find it with manager_search)",
+        "cik": "the same 10-digit CIK", "name": "the manager as EDGAR names it",
+        "since?": "YYYY-MM-DD", "notify?": "false to stop new-13F items (default true)",
+        "mirror?": "{sleeve_amount, currency, top_n?} when the person mirrors it in a sleeve",
+        "note_text?": "their words on why they follow it",
+    },
 }
 """Human-readable contract, returned in ``fact_contract`` and by ``wealth_context``."""
 
@@ -485,6 +492,30 @@ def _policy_ips(value: dict, key: str) -> None:
             _fail(f"{key}.{name}", "must be an object")
 
 
+_CIK = re.compile(r"^\d{10}$")
+
+
+def _follow(value: dict, key: str) -> None:
+    _object(value, key, {"cik", "name", "since", "notify", "mirror", "note_text"})
+    cik = key.split(".", 1)[1]
+    if not _CIK.match(cik):
+        _fail(key, "must be follow.<10-digit CIK>, e.g. follow.0002045724")
+    if value.get("cik") != cik:
+        _fail(f"{key}.cik", f"must be {cik!r}, the CIK in the key")
+    _text(value.get("name"), f"{key}.name", required=True, limit=120)
+    _iso_date(value.get("since"), f"{key}.since")
+    _bool(value.get("notify"), f"{key}.notify")
+    _text(value.get("note_text"), f"{key}.note_text", limit=400)
+    mirror = value.get("mirror")
+    if mirror is not None:
+        _object(mirror, f"{key}.mirror", {"sleeve_amount", "currency", "top_n"})
+        _number(mirror.get("sleeve_amount"), f"{key}.mirror.sleeve_amount")
+        _currency(mirror.get("currency"), f"{key}.mirror.currency")
+        top_n = mirror.get("top_n")
+        if top_n is not None and (isinstance(top_n, bool) or not isinstance(top_n, int) or top_n < 1):
+            _fail(f"{key}.mirror.top_n", "must be a whole number from 1")
+
+
 def _validator(key: str) -> Callable[[Any, str], None] | None:
     if key == "policy.ips":
         return _policy_ips
@@ -505,7 +536,8 @@ def _validator(key: str) -> Callable[[Any, str], None] | None:
         return None
     if head == "income" and key not in LEGACY_KEYS:
         return _income
-    return {"cash": _cash, "liability": _liability, "investment": _investment, "thread": _thread}.get(head)
+    return {"cash": _cash, "liability": _liability, "investment": _investment, "thread": _thread,
+            "follow": _follow}.get(head)
 
 
 def validate(key: str, value: Any) -> list[str]:

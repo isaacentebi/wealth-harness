@@ -134,6 +134,9 @@ TASK_LABELS = {
     "debt_payoff": L("Debt payoff", "Pago de deudas"), "tax": L("Tax", "Impuestos"),
     "rebalance": L("Rebalance", "Rebalanceo"), "asset_location": L("Asset location", "Ubicación de activos"),
     "situation": L("Your picture", "Tu panorama"),
+    "manager_holdings": L("13F holdings", "Posiciones 13F"), "manager_profile": L("Manager profile", "Perfil del administrador"),
+    "manager_compare": L("Manager comparison", "Comparación de administradores"),
+    "manager_mirror": L("Mirror a manager", "Replicar a un administrador"),
 }
 
 
@@ -700,10 +703,113 @@ def _situation(sit: Mapping, envelope: Mapping, task: str) -> list[dict]:
     return out
 
 
+def _holding_label(item: Mapping) -> str:
+    return _name(item.get("ticker") or _title_name(str(item.get("issuer") or "").lower()))
+
+
+def _manager_holdings(result: Mapping, envelope: Mapping, task: str) -> list[dict]:
+    """Top long-equity holdings (the filing's own weights) and the biggest weight changes vs the prior quarter."""
+    out: list[dict] = []
+    positions = [p for p in result.get("positions") or [] if isinstance(p, Mapping)]
+    rows = [{"label": _holding_label(p), "value": money(p.get("value"), result.get("currency") or "USD"),
+             "share": _raw(p.get("weight"))} for p in positions[:MAX_ROWS] if _dec(p.get("weight")) is not None]
+    if rows:
+        name = _name((result.get("manager") or {}).get("name"))
+        out.append(_spec(task, "allocation", L(f"Top reported holdings: {name}", f"Principales posiciones reportadas: {name}"),
+                         {"rows": rows, "total": money(result.get("long_equity_value"), result.get("currency") or "USD")},
+                         envelope, result,
+                         caption=L("Long US-listed stocks at the quarter end, as filed; options, shorts and cash are not shown",
+                                   "Acciones largas listadas en EE.UU. al cierre del trimestre, como se reportaron; "
+                                   "sin opciones, cortos ni efectivo")))
+    changes = result.get("changes")
+    if isinstance(changes, Mapping) and result.get("previous_period") and result.get("period"):
+        moved = [r for kind in ("new", "exited", "increased", "decreased") for r in changes.get(kind) or []
+                 if isinstance(r, Mapping) and _dec(r.get("weight_change")) is not None]
+        moved.sort(key=lambda r: -abs(_dec(r["weight_change"]) or 0))
+        metrics = [{"label": _holding_label(r), "values": [ratio(r.get("previous_weight")), ratio(r.get("weight"))]}
+                   for r in moved[:MAX_METRICS]]
+        if metrics:
+            out.append(_spec(task, "comparison", L("Biggest changes since the prior quarter",
+                                                   "Mayores cambios desde el trimestre anterior"),
+                             {"options": [{"label": {"date": result["previous_period"]}},
+                                          {"label": {"date": result["period"]}}], "metrics": metrics},
+                             envelope, result))
+    return out
+
+
+def _manager_profile(result: Mapping, envelope: Mapping, task: str) -> list[dict]:
+    series = [s for s in (result.get("concentration") or {}).get("by_quarter") or [] if isinstance(s, Mapping)]
+    out: list[dict] = []
+    turnover = result.get("turnover") or {}
+    holding = result.get("holding_period") or {}
+    conviction = result.get("conviction") or {}
+    rows = [{"label": L("Turnover a year (estimate)", "Rotación al año (estimada)"), "value": ratio(turnover.get("annualised"))},
+            {"label": L("Quarters a position is held (median)", "Trimestres que se mantiene una posición (mediana)"),
+             "value": count(holding.get("median_quarters"))},
+            {"label": L("Typical first position size", "Tamaño inicial típico"),
+             "value": ratio(conviction.get("typical_initial_weight"))}]
+    out.append(_spec(task, "ticket", L("How this manager invests", "Cómo invierte este administrador"),
+                     {"rows": rows, "total": None}, envelope, result))
+    if len(series) >= 2:
+        first, last = series[0], series[-1]
+        metrics = [
+            {"label": L("Holdings", "Posiciones"), "values": [count(first.get("positions")), count(last.get("positions"))]},
+            {"label": L("Top 10 share", "Peso de las 10 mayores"), "values": [ratio(first.get("top10")), ratio(last.get("top10"))]},
+            {"label": L("Top 5 share", "Peso de las 5 mayores"), "values": [ratio(first.get("top5")), ratio(last.get("top5"))]},
+            {"label": L("Effective number of positions", "Número efectivo de posiciones"),
+             "values": [count(first.get("effective_positions")), count(last.get("effective_positions"))]},
+            {"label": L("Largest position", "Posición más grande"), "values": [ratio(first.get("largest")), ratio(last.get("largest"))]},
+        ]
+        out.append(_spec(task, "comparison", L("Concentration then and now", "Concentración antes y ahora"),
+                         {"options": [{"label": {"date": first["period"]}}, {"label": {"date": last["period"]}}],
+                          "metrics": metrics}, envelope, result))
+    return out
+
+
+def _manager_compare(result: Mapping, envelope: Mapping, task: str) -> list[dict]:
+    managers = [m for m in result.get("managers") or [] if isinstance(m, Mapping)][:MAX_OPTIONS]
+    if len(managers) < 2:
+        return []
+    options = [{"label": _name(m.get("name") or m.get("cik"))} for m in managers]
+    metrics = [
+        {"label": L("Turnover a year (estimate)", "Rotación al año (estimada)"),
+         "values": [ratio(m.get("annual_turnover")) for m in managers]},
+        {"label": L("Quarters held (median)", "Trimestres mantenida (mediana)"),
+         "values": [count(m.get("median_quarters_held")) for m in managers]},
+        {"label": L("Holdings", "Posiciones"), "values": [count(m.get("positions")) for m in managers]},
+        {"label": L("Top 10 share", "Peso de las 10 mayores"), "values": [ratio(m.get("top10")) for m in managers]},
+        {"label": L("Effective number of positions", "Número efectivo de posiciones"),
+         "values": [count(m.get("effective_positions")) for m in managers]},
+        {"label": L("Options share of reported value", "Peso de opciones en el valor reportado"),
+         "values": [ratio(m.get("options_share")) for m in managers]},
+    ]
+    return [_spec(task, "comparison", L("Managers side by side", "Administradores lado a lado"),
+                  {"options": options, "metrics": metrics}, envelope, result)]
+
+
+def _manager_mirror(result: Mapping, envelope: Mapping, task: str) -> list[dict]:
+    targets = [t for t in result.get("targets") or [] if isinstance(t, Mapping)]
+    rows = [{"label": _name(t.get("ticker")), "value": money(t.get("amount"), t.get("currency") or result.get("currency")),
+             "share": _raw(t.get("weight"))} for t in targets[:MAX_ROWS] if _dec(t.get("weight")) is not None]
+    out: list[dict] = []
+    if rows:
+        out.append(_spec(task, "allocation", L("Your mirror sleeve", "Tu bolsa espejo"),
+                         {"rows": rows, "total": money(result.get("sleeve_amount"), result.get("currency"))},
+                         envelope, result,
+                         caption=L("Targets only, never orders; the 13F is lagged and incomplete",
+                                   "Sólo objetivos, nunca órdenes; el 13F llega con retraso y es incompleto")))
+    plan = result.get("plan")
+    if isinstance(plan, Mapping) and plan.get("status") in _OK and isinstance(plan.get("result"), Mapping):
+        out += [s for s in _rebalance(plan["result"], envelope, task) if s["kind"] == "ticket"][:1]
+    return out
+
+
 BUILDERS: dict[str, Callable[[Mapping, Mapping, str], list[dict]]] = {
     "spending": _spending, "dca": _dca, "performance": _performance, "project": _project, "income": _income,
     "stress": _stress, "debt_payoff": _debt_payoff, "tax": _tax, "rebalance": _rebalance,
     "asset_location": _asset_location,
+    "manager_holdings": _manager_holdings, "manager_profile": _manager_profile, "manager_compare": _manager_compare,
+    "manager_mirror": _manager_mirror,
 }
 
 

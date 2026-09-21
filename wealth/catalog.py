@@ -145,6 +145,18 @@ _REBAL_MX_HOUSEHOLD: dict[str, Any] = {
 }
 
 
+_MANAGER_SNAPSHOT = ('snapshot: "example" (the fictional offline managers CIK 0000000001 and 0000000002) or '
+                     "recorded pages {url: body}; omit for live EDGAR")
+_MANAGER_NETWORK = ("Live EDGAR needs WEALTH_SEC_USER_AGENT ('Name email@domain', SEC fair access) and is cached on "
+                    "disk; OpenFIGI maps CUSIPs (WEALTH_OPENFIGI_API_KEY optional), SEC names are the fallback.")
+_MANAGER_IPS: dict[str, Any] = {
+    "currency": "USD",
+    "allocation": {"model": "growth", "sleeves": [
+        {"id": "equity", "name": "Equity", "asset": "equity", "target": 0.8, "min": 0.75, "max": 0.85},
+        {"id": "fixed_income", "name": "Fixed income", "asset": "fixed_income", "target": 0.2, "min": 0.15, "max": 0.25}]},
+    "constraints": {"concentration": {"limit": 0.1}, "leverage": {"allowed": False}},
+}
+
 CATALOG: dict[str, dict[str, Any]] = {
     "import": {
         "purpose": "Validate and reconcile a household from canonical JSON, CSV, or XLSX without inventing accounts, lots, or values.",
@@ -589,10 +601,85 @@ CATALOG: dict[str, dict[str, Any]] = {
                                    {"name": "cetes", "kind": "mx_fixed_income", "holdings": [{"account_id": "gbm", "value": 200000}]}]},
         },
     },
+    "manager_search": {
+        "purpose": "Find a fund manager's SEC filer (CIK) by firm or person name, with its latest 13F filing. "
+                   "Says so when a match does not file 13F or its latest 13F is a notice pointing to another filer.",
+        "required": ["name (firm or person, e.g. 'Situational Awareness', 'Gavin Baker')"],
+        "optional": ["limit (1-20, default 8)", _MANAGER_SNAPSHOT],
+        "notes": _MANAGER_NETWORK,
+        "example": {"name": "example", "snapshot": "example"},
+    },
+    "manager_holdings": {
+        "purpose": "A manager's 13F holdings for the latest (or a chosen) quarter: issuer, class, CUSIP, ticker with "
+                   "mapping confidence, shares, value, weight; options and principal-amount rows apart; amendments "
+                   "applied; changes vs the prior quarter; the reporting lag and what a 13F leaves out.",
+        "required": ["cik (from manager_search)"],
+        "optional": ["period (YYYY-MM-DD quarter end or 2026Q2)", "include_options (add weights that count options at "
+                     "underlying value)", "tickers {cusip: ticker} overrides", "as_of (for the lag)", _MANAGER_SNAPSHOT],
+        "notes": "Result: positions, options, other, changes {new, exited, increased, decreased}, lag, excludes, "
+                 "what_is_13f {en, es}, amendments. " + _MANAGER_NETWORK,
+        "example": {"cik": "0000000001", "snapshot": "example", "as_of": "2026-09-21"},
+        "variants": {"earlier_quarter_with_options": {"cik": "0000000001", "period": "2026Q1", "include_options": True,
+                                                      "snapshot": "example", "as_of": "2026-09-21"}},
+    },
+    "manager_profile": {
+        "purpose": "How a manager invests, read from consecutive 13F filings: turnover (quarterly and annualised "
+                   "estimate), holding period, concentration and its trend, conviction and position sizing, sector "
+                   "drift, options usage, and a plain-language character in English and Spanish.",
+        "required": ["cik"],
+        "optional": ["quarters (2-40, default 8)", "sectors (default true; issuer SIC codes from EDGAR)",
+                     "tickers {cusip: ticker}", _MANAGER_SNAPSHOT],
+        "notes": "Turnover = min(buys, sells) / average portfolio value from quarter-end share changes; an estimate, "
+                 "since trades inside a quarter are invisible. " + _MANAGER_NETWORK,
+        "example": {"cik": "0000000001", "quarters": 4, "snapshot": "example", "as_of": "2026-09-21"},
+    },
+    "manager_compare": {
+        "purpose": "Two to six managers' 13F profiles side by side (turnover, holding period, concentration, "
+                   "initial position size, options share, sector drift, character).",
+        "required": ["ciks: [cik, ...] (2-6)"],
+        "optional": ["quarters (default 8)", "sectors", "tickers", _MANAGER_SNAPSHOT],
+        "example": {"ciks": ["0000000001", "0000000002"], "quarters": 4, "snapshot": "example", "as_of": "2026-09-21"},
+    },
+    "manager_mirror": {
+        "purpose": "Mirror a manager's long-equity 13F weights in a sleeve of the person's money: drop unmapped "
+                   "tickers, optional top-N and minimum weight, cap single names at the policy's concentration limit "
+                   "and redistribute, check each buy against the IPS, flag Mexico SIC availability, US estate situs "
+                   "and whole-share cost, and hand off to rebalance for a trade list. Never places orders.",
+        "required": ["holdings (a manager_holdings result) or cik", "sleeve_amount", "currency"],
+        "optional": ["period", "ips (else the accepted policy.ips)", "residence: MX|US (else client.profile)",
+                     "constraints {top_n, min_weight, max_weight, min_confidence (0.8), portfolio_value, prices "
+                     "{TICKER: USD}, usdmxn, sic_listed {TICKER: bool}, funding, portfolio (policy_check shape), "
+                     "household + jurisdiction_context (+ cash_flows, tax_inputs, rebalance_constraints) for trades}",
+                     "backtest {quarters?, prices|price_csv+price_source|years, benchmark?}: historical, lagged copy "
+                     "of each 13F from its filing date", "tickers", _MANAGER_SNAPSHOT],
+        "notes": "Result: targets [{ticker, weight, amount, capped, mexico?}], cap, dropped, expected_trades, "
+                 "policy_check, speculation (satellite-sleeve assessment), plan (rebalance envelope or null), "
+                 "tracking_caveats (always), backtest?. execution_ready is always false.",
+        "example": {"cik": "0000000001", "snapshot": "example", "as_of": "2026-09-21",
+                    "sleeve_amount": 50000, "currency": "USD", "ips": _MANAGER_IPS,
+                    "constraints": {"top_n": 5, "portfolio_value": 500000}},
+        "variants": {
+            "mexico_resident": {"cik": "0000000001", "snapshot": "example", "as_of": "2026-09-21",
+                                "sleeve_amount": 200000, "currency": "MXN", "residence": "MX", "ips": _MANAGER_IPS,
+                                "constraints": {"usdmxn": 18.5, "sic_listed": {"NVDA": True, "TSM": True, "META": True}}},
+            "with_backtest": {"cik": "0000000002", "snapshot": "example", "as_of": "2026-09-21",
+                              "sleeve_amount": 20000, "currency": "USD", "ips": _MANAGER_IPS,
+                              "constraints": {"portfolio_value": 200000},
+                              "backtest": {"quarters": 4, "benchmark": "SPY", "prices": {
+                                  "currency": "USD", "source": "example closes (fictional)", "rows": [
+                                      {"date": "2026-02-12", "MSFT": 470, "V": 335, "JPM": 298, "KO": 70, "AMZN": 228, "SPY": 690},
+                                      {"date": "2026-05-13", "MSFT": 455, "V": 332, "JPM": 292, "KO": 72, "AMZN": 210, "SPY": 675},
+                                      {"date": "2026-08-12", "MSFT": 472, "V": 344, "JPM": 306, "KO": 71, "AMZN": 226, "SPY": 705},
+                                      {"date": "2026-09-18", "MSFT": 480, "V": 350, "JPM": 310, "KO": 72, "AMZN": 231, "SPY": 712}]}}},
+        },
+    },
     "monitor": {
         "purpose": "Evaluate opt-in review, expiry, drift, goal, threshold, or thesis rules and return only state changes to the caller.",
         "required": ["client_id on wealth_run", "rules or stored monitor.rules"],
-        "optional": ["rules[].enabled", "acknowledge: [rule ids] (accept a thesis change as the new baseline)",
+        "optional": ["rules[].enabled", "acknowledge: [rule ids] (accept a thesis change or a seen 13F as the new baseline)",
+                     "rules[].kind manager_filing: a new 13F from a manager saved as follow.<cik> (or rules[].ciks) "
+                     "is a proactive item; manager_filings {cik: {accession, form, filing_date, period}} supplies "
+                     "the latest filings instead of reading EDGAR",
                      "timezone (IANA; default client.profile.timezone, else local)"],
         "example": {"rules": [{"id": "goal-freshness", "kind": "expiry", "keys": ["goals", "plan.resources"]}],
                     "timezone": "America/Mexico_City"},

@@ -6,6 +6,11 @@ else ``client.profile.timezone``, else the machine's local timezone.
 Thesis rules compare the watched value with an acknowledged baseline.  A change
 stays active until the caller acknowledges it with ``inputs.acknowledge``
 (a list of rule ids); the baseline never moves on its own.
+
+``manager_filing`` rules watch managers saved as ``follow.<cik>``: the first
+check records what is already filed; a later 13F is a proactive item (with the
+next step, ``manager_holdings``) until acknowledged.  The latest filings come
+from ``inputs.manager_filings`` or EDGAR (needs ``WEALTH_SEC_USER_AGENT``).
 """
 from __future__ import annotations
 
@@ -207,8 +212,14 @@ def evaluate(snapshot: dict, previous: dict, inputs: dict) -> dict:
                     active = {"gt": left > right, "lt": left < right, "gte": left >= right, "lte": left <= right}[op]
                     status = "active" if active else "clear"
                     detail = {"fact_key": key, "observed": left, "threshold": right, "op": op}
+        elif kind == "manager_filing":
+            # A new 13F from a followed manager (follow.<cik>) is a proactive item until acknowledged.
+            from .managers import filing_check
+            status, detail, identity, extra = filing_check(rule, eligible, old, rid in acknowledged,
+                                                           inputs.get("manager_filings"))
+            baseline = extra
         else:
-            raise ValueError("monitor kind must be review, expiry, drift, goal_due, threshold, or thesis")
+            raise ValueError("monitor kind must be review, expiry, drift, goal_due, threshold, thesis, or manager_filing")
         if kind == "thesis" and rid in acknowledged and status == "unknown":
             warnings.append(f"Acknowledgement for {rid} was not applied because the watched value is unavailable.")
         fingerprint = hashlib.sha256(json.dumps([rule, status, identity], sort_keys=True).encode()).hexdigest()
@@ -218,13 +229,15 @@ def evaluate(snapshot: dict, previous: dict, inputs: dict) -> dict:
             if status in {"active", "unknown"}:
                 events.append({**item, "event": "review_needed"})
         elif old.get("status") != status:
-            resolved = "acknowledged" if kind == "thesis" and rid in acknowledged else "resolved"
+            resolved = "acknowledged" if kind in {"thesis", "manager_filing"} and rid in acknowledged else "resolved"
             events.append({**item, "event": resolved if status == "clear" else "review_needed"})
         elif status in {"active", "unknown"} and old.get("fingerprint") != fingerprint:
             events.append({**item, "event": "review_needed"})
         state[rid] = {"fingerprint": fingerprint, "status": status}
         if kind == "thesis" and baseline is not None:
             state[rid]["value_hash"] = baseline
+        if kind == "manager_filing" and baseline:
+            state[rid].update(baseline)
     return {"status": "ready", "result": {"checks": results, "events": events,
             "checked_on": today.isoformat(), "date_basis": timezone_basis, "configured_rules": len(rules),
             "delivery": "returned to caller only; no external messages or trades"},

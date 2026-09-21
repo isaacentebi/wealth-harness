@@ -36,6 +36,8 @@ TASK_MODULES = {
     "mx_calendar": "mexico", "estate": "estate",
     "ledger": "ledger", "performance": "ledger", "spending": "cashflow", "dca": "dca",
     "rebalance": "rebalance", "asset_location": "rebalance",
+    "manager_search": "managers", "manager_holdings": "managers", "manager_mirror": "managers",
+    "manager_profile": "managers", "manager_compare": "managers",
 }
 # Tasks answered by the service itself rather than one module.
 SERVICE_TASKS = ("plan", "calendar", "monitor", "debt_payoff", "policy_draft", "policy_check")
@@ -109,7 +111,8 @@ def fact_contract() -> dict:
                  "investment.<id>", "goals", "reserve", "thread.<id>", "preference.*", "constraint.*", "onboarding",
                  "policy.ips (written by accepting an IPS decision)",
                  "thesis.*", "research.<SYMBOL>", "planning.project", "planning.income", "planning.ladder",
-                 "planning.dca", "tax.profile", "monitor.rules", "account.<id> (statements, via wealth_ingest)"],
+                 "planning.dca", "tax.profile", "monitor.rules", "account.<id> (statements, via wealth_ingest)",
+                 "follow.<cik> (a 13F manager the person follows; manager_filing monitor rules watch it)"],
         "schema": SCHEMA,
         "legacy_keys": "plan.resources and income.schedule still work as explicit plan/calendar inputs; for the "
                        "person's picture save the canonical keys above (plan and calendar derive their inputs "
@@ -265,6 +268,8 @@ class WealthService:
             "policy_draft": "goals reserve preference constraint client.profile policy",
             "policy_check": "policy constraint goals reserve",
             "rebalance": "household account tax goals reserve constraint", "asset_location": "household account tax",
+            "manager_search": "follow", "manager_holdings": "follow", "manager_profile": "follow",
+            "manager_compare": "follow", "manager_mirror": "follow policy constraint household client.profile",
         }
         from .recall import recall
         with WealthStore(self.db_path) as store:
