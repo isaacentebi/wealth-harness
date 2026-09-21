@@ -9,6 +9,8 @@ import sys
 import time
 from pathlib import Path
 
+from .cli_text import COMMANDS as TEXT_COMMANDS
+from .cli_text import main as text_main
 from .service import OPERATIONS, WealthService, dispatch
 
 
@@ -16,12 +18,58 @@ def _reject_constant(value: str):
     raise ValueError(f"non-finite JSON value: {value}")
 
 
+def _destructive(operation: str, payload: object) -> bool:
+    return operation == "forget" or (
+        operation == "client" and isinstance(payload, dict) and payload.get("action") == "forget")
+
+
+def _confirm_forget(payload: dict) -> None:
+    """Require a person at a terminal to type the client id and DELETE.
+
+    Refuses whenever stdin is not an interactive terminal, so an agent or a
+    script with shell access cannot delete a profile non-interactively.
+    """
+
+    if not sys.stdin.isatty():
+        raise PermissionError("forget requires an interactive terminal; it cannot be run from a script or agent")
+    client_id = payload.get("client_id")
+    if not isinstance(client_id, str) or not client_id:
+        raise ValueError("forget requires client_id")
+    expected = f"{client_id} DELETE"
+    print(f"This permanently deletes client {client_id!r} and all of its memory.\n"
+          f"Type '{expected}' to confirm: ", end="", file=sys.stderr, flush=True)
+    try:
+        answer = input()
+    except EOFError:
+        answer = ""
+    if answer.strip() != expected:
+        raise PermissionError("forget was not confirmed; nothing was deleted")
+
+
+def _command(argv: list[str]) -> str | None:
+    """The first positional argument, skipping the value of a leading --db."""
+    skip = False
+    for arg in argv:
+        if skip:
+            skip = False
+        elif arg == "--db":
+            skip = True
+        elif not arg.startswith("-"):
+            return arg
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Client memory and evidence-backed wealth workflows")
-    parser.add_argument("operation", choices=(*OPERATIONS, "watch"))
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if _command(argv) in TEXT_COMMANDS:  # text-channel helpers, see docs/openclaw.md
+        return text_main(argv)
+    parser = argparse.ArgumentParser(description="Wealth JSON CLI: one JSON object in (stdin or --input), JSON out")
+    parser.add_argument("operation", choices=(*OPERATIONS, "watch"),
+                        help=" | ".join((*OPERATIONS, "watch")) + " "
+                             "(text channels: onboarding | today | view, see docs/openclaw.md)")
     parser.add_argument("--db", help="SQLite path (default WEALTH_DB or user data directory)")
     parser.add_argument("--input", default="-", help="JSON argument file; '-' reads stdin")
-    parser.add_argument("--client", help="explicit client identifier for wealth watch")
+    parser.add_argument("--client", help="explicit client identifier for wealth watch or forget")
     parser.add_argument("--interval", type=float, default=300,
                         help="foreground watch interval in seconds (default: 300)")
     parser.add_argument("--once", action="store_true",
@@ -45,12 +93,19 @@ def main(argv: list[str] | None = None) -> int:
             except KeyboardInterrupt:
                 pass
             return 0
-        if args.input == "-" and (args.operation == "capabilities" or
-                                   (args.operation == "context" and sys.stdin.isatty())):
+        if args.operation == "forget" and not sys.stdin.isatty():
+            _confirm_forget({})  # refuses before reading any piped payload
+        if args.operation == "forget" and args.input == "-":
+            if not args.client:
+                raise ValueError("forget requires --client (or --input FILE)")
+            payload = {"client_id": args.client, "confirm_client_id": args.client}
+        elif args.input == "-" and args.operation == "context" and sys.stdin.isatty():
             payload = {}
         else:
             raw = sys.stdin.read() if args.input == "-" else Path(args.input).read_text(encoding="utf-8")
             payload = {} if args.operation == "context" and not raw.strip() else json.loads(raw, parse_constant=_reject_constant)
+        if _destructive(args.operation, payload):
+            _confirm_forget(payload if args.operation == "forget" else {"client_id": payload.get("client_id")})
         result = dispatch(args.operation, payload, args.db)
         print(json.dumps(result, ensure_ascii=False, allow_nan=False, indent=2))
         return 0

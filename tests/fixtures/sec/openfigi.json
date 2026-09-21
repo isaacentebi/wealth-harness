@@ -1,0 +1,22 @@
+{
+  "_comment": "OpenFIGI /v3/mapping data rows by CUSIP, trimmed to the fields the mapper reads. BTDR, NWND and ZZQX are absent on purpose (name fallback and unmapped).",
+  "037833100": [{"figi": "BBG000B9XRY4", "ticker": "AAPL", "exchCode": "US", "marketSector": "Equity", "securityType": "Common Stock", "name": "APPLE INC", "compositeFIGI": "BBG000B9XRY4"},
+                {"figi": "BBG000B9Y5X2", "ticker": "AAPL", "exchCode": "UW", "marketSector": "Equity", "securityType": "Common Stock", "name": "APPLE INC", "compositeFIGI": "BBG000B9XRY4"}],
+  "594918104": [{"ticker": "MSFT", "exchCode": "US", "marketSector": "Equity", "securityType": "Common Stock", "name": "MICROSOFT CORP"}],
+  "67066G104": [{"ticker": "NVDA", "exchCode": "US", "marketSector": "Equity", "securityType": "Common Stock", "name": "NVIDIA CORP"}],
+  "78462F103": [{"ticker": "SPY", "exchCode": "US", "marketSector": "Equity", "securityType": "ETP", "name": "SPDR S&P 500 ETF TRUST"}],
+  "191216100": [{"ticker": "KO", "exchCode": "US", "marketSector": "Equity", "securityType": "Common Stock", "name": "COCA-COLA CO/THE"}],
+  "093712AH0": [{"ticker": "BE 2.5 08/01/28", "exchCode": null, "marketSector": "Corp", "securityType": "CONVERTIBLE", "name": "BLOOM ENERGY CORP"}],
+  "92826C839": [{"ticker": "V", "exchCode": "US", "marketSector": "Equity", "securityType": "Common Stock", "name": "VISA INC-CLASS A SHARES"}],
+  "57636Q104": [{"ticker": "MA", "exchCode": "US", "marketSector": "Equity", "securityType": "Common Stock", "name": "MASTERCARD INC - A"}],
+  "46625H100": [{"ticker": "JPM", "exchCode": "US", "marketSector": "Equity", "securityType": "Common Stock", "name": "JPMORGAN CHASE & CO"}],
+  "91324P102": [{"ticker": "UNH", "exchCode": "US", "marketSector": "Equity", "securityType": "Common Stock", "name": "UNITEDHEALTH GROUP INC"}],
+  "22160K105": [{"ticker": "COST", "exchCode": "US", "marketSector": "Equity", "securityType": "Common Stock", "name": "COSTCO WHOLESALE CORP"}],
+  "023135106": [{"ticker": "AMZN", "exchCode": "US", "marketSector": "Equity", "securityType": "Common Stock", "name": "AMAZON.COM INC"}],
+  "02079K305": [{"ticker": "GOOGL", "exchCode": "US", "marketSector": "Equity", "securityType": "Common Stock", "name": "ALPHABET INC-CL A"}],
+  "007903107": [{"ticker": "AMD", "exchCode": "US", "marketSector": "Equity", "securityType": "Common Stock", "name": "ADVANCED MICRO DEVICES"}],
+  "88160R101": [{"ticker": "TSLA", "exchCode": "US", "marketSector": "Equity", "securityType": "Common Stock", "name": "TESLA INC"}],
+  "69608A108": [{"ticker": "PLTR", "exchCode": "US", "marketSector": "Equity", "securityType": "Common Stock", "name": "PALANTIR TECHNOLOGIES INC-A"}],
+  "19260Q107": [{"ticker": "COIN", "exchCode": "US", "marketSector": "Equity", "securityType": "Common Stock", "name": "COINBASE GLOBAL INC -CLASS A"}],
+  "594972408": [{"ticker": "MSTR", "exchCode": "US", "marketSector": "Equity", "securityType": "Common Stock", "name": "STRATEGY INC"}]
+}

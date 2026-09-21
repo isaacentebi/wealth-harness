@@ -1,0 +1,339 @@
+"""Browser chat server: streaming turns, cancellation, errors, uploads, headers."""
+from __future__ import annotations
+
+import http.client
+import json
+import sqlite3
+import threading
+import time
+from contextlib import contextmanager
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+
+import pytest
+
+from wealth import agent, web
+from wealth.agent import AgentError, TurnEvent
+from wealth.store import StoreError
+
+
+@contextmanager
+def serving(chat):
+    server = web.create_server(chat, 0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", server
+    finally:
+        turn = chat.turn
+        if turn is not None and not turn.finished:
+            turn.control.cancel()
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def _post(base, path, token, body=b"{}", content_type="application/json", headers=None):
+    request = Request(base + path, data=body, method="POST",
+                      headers={"Content-Type": content_type, "X-Wealth-Token": token, **(headers or {})})
+    return urlopen(request, timeout=10)
+
+
+def _events(base, turn_id, token):
+    request = Request(f"{base}/api/turns/{turn_id}/events", headers={"X-Wealth-Token": token})
+    with urlopen(request, timeout=10) as response:
+        assert response.headers.get_content_type() == "text/event-stream"
+        events = []
+        for block in response.read().decode().split("\n\n"):
+            data = [line[6:] for line in block.splitlines() if line.startswith("data: ")]
+            if data:
+                events.append(json.loads(data[0]))
+        return events
+
+
+def _streaming(monkeypatch, fn):
+    """Route Chat through a fake event stream instead of Codex."""
+
+    monkeypatch.setattr(web, "run_turn", agent.run_turn)
+    monkeypatch.setattr(web, "stream_turn", fn)
+
+
+def test_sse_stream_carries_progress_memory_and_answer(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_stream(message, **kwargs):
+        seen.update(kwargs)
+        yield TurnEvent("thread", data={"thread_id": "0199a1b2-c3d4-7e5f-8a9b"})
+        yield TurnEvent("progress", "Checking your saved profile")
+        yield TurnEvent("progress", "Checking your saved profile")
+        yield TurnEvent("memory", data={"keys": ["goals", "preference.style"]})
+        yield TurnEvent("answer", "Here is the answer.", {"thread_id": "0199a1b2-c3d4-7e5f-8a9b"})
+
+    _streaming(monkeypatch, fake_stream)
+    chat = web.Chat(tmp_path / "w.sqlite3", "personal")
+    with serving(chat) as (base, _):
+        state = json.load(urlopen(base + "/api/state", timeout=5))
+        assert state["display_name"] == "Personal"
+        # A brand-new profile gets the first setup card instead of a welcome and starters.
+        assert state["starters"] == [] and state["onboarding"]["card"]["step"] == "identity"
+        assert "welcome" not in state
+        body = json.dumps({"message": "hi", "reasoning": "medium", "timezone": "America/Mexico_City"}).encode()
+        turn = json.load(_post(base, "/api/turns", state["csrf_token"], body))["turn"]
+        events = _events(base, turn["id"], state["csrf_token"])
+        types = [e["type"] for e in events]
+        assert types == ["progress", "memory", "answer", "done"]
+        assert [i["key"] for i in events[1]["items"]] == ["goals", "preference.style"]
+        assert [i["key"] for i in events[2]["message"]["memory"]] == ["goals", "preference.style"]
+        # Replaying from an offset resumes after a reload.
+        assert [e["type"] for e in _events(base, turn["id"], state["csrf_token"] )][-1] == "done"
+        after = json.load(urlopen(base + "/api/state", timeout=5))
+        assert [m["role"] for m in after["messages"]] == ["user", "assistant"]
+        assert after["turn"] is None and after["starters"] == []
+    assert seen["timezone_name"] == "America/Mexico_City"
+    assert seen["reasoning"] == "medium"
+    assert seen["profile"] == {"fresh": [], "stale": [], "inferred": []}
+    assert chat.thread_id == "0199a1b2-c3d4-7e5f-8a9b"
+
+
+def test_events_endpoint_requires_token_and_local_host(tmp_path, monkeypatch):
+    _streaming(monkeypatch, lambda message, **kw: iter([TurnEvent("answer", "ok")]))
+    chat = web.Chat(tmp_path / "w.sqlite3", "personal")
+    with serving(chat) as (base, server):
+        token = chat.token
+        turn = json.load(_post(base, "/api/turns", token, b'{"message":"hi"}'))["turn"]
+        with pytest.raises(HTTPError) as denied:
+            urlopen(Request(f"{base}/api/turns/{turn['id']}/events"), timeout=5)
+        assert denied.value.code == 403
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+        connection.request("GET", "/api/state", headers={"Host": f"[::1]:{server.server_port}"})
+        assert connection.getresponse().status == 403  # not bound to ::1
+        connection.close()
+
+
+def test_stop_cancels_running_turn_and_keeps_chat_usable(tmp_path, monkeypatch):
+    started = threading.Event()
+
+    def slow_stream(message, *, control, **kwargs):
+        yield TurnEvent("progress", "Thinking it through")
+        started.set()
+        for _ in range(200):
+            if control.cancelled:
+                raise AgentError(None, "cancelled")
+            time.sleep(0.02)
+        yield TurnEvent("answer", "late")
+
+    _streaming(monkeypatch, slow_stream)
+    chat = web.Chat(tmp_path / "w.sqlite3", "personal")
+    with serving(chat) as (base, _):
+        turn = json.load(_post(base, "/api/turns", chat.token, b'{"message":"hi"}'))["turn"]
+        assert started.wait(5)
+        pending = json.load(urlopen(base + "/api/state", timeout=5))["turn"]
+        assert pending["status"] == "running" and pending["message"] == "hi"
+        assert pending["progress"] == "Thinking it through"
+        with pytest.raises(HTTPError) as busy:
+            _post(base, "/api/turns", chat.token, b'{"message":"again"}')
+        assert busy.value.code == 409
+        assert _post(base, f"/api/turns/{turn['id']}/cancel", chat.token).status == 202
+        events = _events(base, turn["id"], chat.token)
+        assert events[-2]["type"] == "error" and events[-2]["kind"] == "cancelled"
+        assert events[-1] == {"seq": events[-1]["seq"], "type": "done", "status": "cancelled"}
+        state = json.load(urlopen(base + "/api/state", timeout=5))
+        assert state["messages"] == [] and state["turn"]["status"] == "cancelled"
+        assert not chat.lock.locked()
+
+
+@pytest.mark.parametrize("raised, status, kind", [
+    (AgentError(None, "not_logged_in", "Not logged in"), 502, "not_logged_in"),
+    (AgentError("slow", "timeout"), 502, "timeout"),
+    (StoreError("broken"), 503, "storage"),
+    (sqlite3.OperationalError("database is locked"), 503, "storage"),
+    (KeyError("boom"), 500, "other"),
+])
+def test_blocking_endpoint_maps_every_failure_to_json(tmp_path, monkeypatch, raised, status, kind):
+    def failing(message, **kwargs):
+        raise raised
+
+    monkeypatch.setattr(web, "run_turn", failing)
+    chat = web.Chat(tmp_path / "w.sqlite3", "personal")
+    with serving(chat) as (base, _):
+        with pytest.raises(HTTPError) as failure:
+            _post(base, "/api/chat", chat.token, b'{"message":"hi"}')
+        assert failure.value.code == status
+        payload = json.load(failure.value)
+        assert payload["kind"] == kind and payload["error"]
+        assert "boom" not in payload["error"]
+        assert not chat.lock.locked()
+
+
+def test_reset_clears_conversation_but_not_memory(tmp_path, monkeypatch):
+    monkeypatch.setattr(web, "run_turn", lambda message, **kw: "Answer")
+    chat = web.Chat(tmp_path / "w.sqlite3", "personal")
+    chat.ask("hello")
+    chat.thread_id = "0199a1b2-c3d4-7e5f"
+    web.WealthService(chat.db).remember("personal", [{
+        "key": "preference.style", "value": "calm",
+        "source": {"kind": "user", "ref": "conversation", "observed_on": "2026-09-21"},
+        "confidence": "confirmed"}], 0)
+    with serving(chat) as (base, _):
+        state = json.load(_post(base, "/api/reset", chat.token))
+    assert state["messages"] == [] and chat.thread_id is None
+    # Setup is still open, so the page offers it instead of starters; memory survives the reset.
+    assert state["onboarding"]["active"] and state["starters"] == []
+    assert web.WealthService(chat.db).inspect("personal")["facts"]
+
+
+def test_uploads_are_typed_bounded_and_reach_the_turn(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(web, "run_turn", lambda message, **kw: calls.append((message, kw)) or "Seen")
+    chat = web.Chat(tmp_path / "w.sqlite3", "personal")
+    with serving(chat) as (base, server):
+        pdf = b"%PDF-1.7\n" + b"x" * 100
+        upload = json.load(_post(base, "/api/upload", chat.token, pdf, "application/pdf",
+                                 {"X-Filename": "..%2F..%2Fetc%2Fpasswd%20statement.pdf"}))["upload"]
+        assert upload["name"] == "passwd statement.pdf"
+        stored = chat.uploads.get(upload["id"])
+        assert stored["path"].startswith(str(tmp_path / "uploads" / "personal"))
+        for body, kind in ((b"MZ\x90\x00", "application/x-msdownload"), (b"not a pdf", "application/pdf")):
+            with pytest.raises(HTTPError) as rejected:
+                _post(base, "/api/upload", chat.token, body, kind, {"X-Filename": "x"})
+            assert rejected.value.code == 400
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+        connection.putrequest("POST", "/api/upload")
+        for name, value in (("Content-Type", "application/pdf"), ("X-Wealth-Token", chat.token),
+                            ("Content-Length", str(web.MAX_UPLOAD_BYTES + 1))):
+            connection.putheader(name, value)
+        connection.endheaders()
+        assert connection.getresponse().status == 413
+        connection.close()
+        body = json.dumps({"message": "", "attachments": [upload["id"]]}).encode()
+        assert json.load(_post(base, "/api/chat", chat.token, body))["answer"] == "Seen"
+        with pytest.raises(HTTPError) as missing:
+            _post(base, "/api/chat", chat.token, json.dumps({"message": "x", "attachments": ["../../x"]}).encode())
+        assert missing.value.code == 400
+    message, kwargs = calls[0]
+    assert message == "I’ve attached a file."
+    assert kwargs["attachments"][0]["path"] == stored["path"]
+    assert chat.messages[0]["attachments"][0]["name"] == "passwd statement.pdf"
+    assert "path" not in chat.messages[0]["attachments"][0]
+
+
+def test_security_headers_and_socket_timeout(tmp_path):
+    chat = web.Chat(tmp_path / "w.sqlite3", "personal")
+    with serving(chat) as (base, server):
+        response = urlopen(base + "/", timeout=5)
+        assert response.headers["Referrer-Policy"] == "no-referrer"
+        csp = response.headers["Content-Security-Policy"]
+        assert "frame-ancestors 'none'" in csp
+        assert "font-src https://fonts.gstatic.com" in csp and "https://fonts.googleapis.com" in csp
+        assert server.RequestHandlerClass.timeout == 30
+    with pytest.raises(ValueError):
+        web.create_server(chat, 0, "0.0.0.0")
+
+
+def test_page_never_injects_html_from_model_text():
+    from pathlib import Path
+    page = Path(web.__file__).with_name("chat.html").read_text(encoding="utf-8")
+    for sink in ("innerHTML =", "innerHTML=", "outerHTML", "insertAdjacentHTML", "document.write"):
+        assert sink not in page
+    assert "event.isComposing" in page and "(pointer: coarse)" in page
+    # Dot design language: light only, Inter + Roboto Mono, no warning glyphs or checkmarks.
+    assert "prefers-color-scheme: dark" not in page
+    assert '<meta name="color-scheme" content="light">' in page
+    assert "fonts.googleapis.com" in page and "Roboto+Mono" in page
+
+
+def test_friendly_names():
+    assert web.friendly_name("my-profile") == "My profile"
+    assert web.friendly_name("fictional-demo", "Fictional Wealth Demo") == "Fictional Wealth Demo"
+
+
+def _page() -> str:
+    from pathlib import Path
+    return Path(web.__file__).with_name("chat.html").read_text(encoding="utf-8")
+
+
+def test_page_citations_presence_and_send_markup():
+    import re
+    page = _page()
+    # Citations open their sources in a new tab without an opener or referrer, and only for http(s).
+    assert page.count("a.rel = 'noopener noreferrer'") >= 2
+    assert "url.protocol === 'http:' || url.protocol === 'https:'" in page
+    assert "el('ol', 'sources')" in page
+    assert "'role', 'button'" in page and "aria-expanded" in page and "aria-controls" in page
+    # The 44px hit area of a citation mark comes from padding, given back by negative margins.
+    assert re.search(r"\.answer a\.cite \{[^}]*padding: 15px 16px", page)
+    # Presence is drawn on a whole-pixel 24 grid; only the cobalt element moves, and reduced motion stops it.
+    assert "viewBox', '0 0 24 24'" in page and "viewBox', '0 0 40 40'" not in page
+    assert "@keyframes feed" in page and "prefers-reduced-motion: reduce" in page
+    # Disabled send: no blush fill, a hairline drawn with box-shadow so nothing shifts.
+    disabled = re.search(r"\.send:disabled \{([^}]*)\}", page).group(1)
+    assert "blush" not in disabled and "box-shadow: inset 0 0 0 1px var(--hairline)" in disabled
+    assert "Guardado" in page and "'Recordado'" not in page
+
+
+def _run_page_js(snippet: str):
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    page = _page()
+    strings = page[page.index("    const STRINGS = {"):page.index("    function localizeChrome()")]
+    memory = page[page.index("    const LABEL_KEYS = ["):page.index("    // ------------------------------------------------------------------ citations")]
+    script = ("globalThis.navigator = { language: 'en-US' };\n" + strings + memory
+              + f"\nprocess.stdout.write(JSON.stringify({snippet}));")
+    out = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=20, check=True)
+    return json.loads(out.stdout)
+
+
+def test_memory_line_reads_naturally_and_localises():
+    keys = json.dumps(["account.gbm-4321", "account.gbm-8890", "liability.car_loan", "thread.continuity", "goals"])
+    data = json.dumps({"event": {"institutions": {"gbm-4321": "GBM", "gbm-8890": "GBM"}}})
+    en, es, bare, labels, only_thread, named = _run_page_js(
+        f"[memoryPhrase({keys}, 'en', {data}), memoryPhrase({keys}, 'es', {data}), memoryPhrase({keys}, 'en'),"
+        " memoryPhrase(['Account gbm 4321', 'Liability car loan', 'Income schedule', 'Thread continuity', 'Goals'], 'es'),"
+        " memoryPhrase(['thread.continuity'], 'en'),"
+        " memoryPhrase([{key: 'account.x1', institution: 'Banorte'}, {key: 'goals', label: 'Casa en 2028'}], 'en')]")
+    assert en == "Remembered: GBM accounts, debts, and goals"
+    assert es == "Guardado: cuentas de GBM, deudas y metas"
+    assert bare == "Remembered: statement accounts, debts, and goals"
+    assert labels == "Guardado: cuenta del estado de cuenta, deudas, ingresos y metas"
+    assert only_thread == ""
+    assert named == "Remembered: Banorte account and Casa en 2028"
+
+
+def test_turn_language_follows_the_conversation():
+    result = _run_page_js(
+        "[languageOf('¿Cuánto me cuesta mi cuenta de GBM?'), languageOf('Revisa mi asignación'),"
+        " languageOf('How much does my GBM account cost?'), languageOf('ok'), languageOf('GBM 4321')]")
+    assert result == ["es", "es", "en", "en", "en"]
+
+
+def test_answer_arrives_before_the_deferred_memory_step(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_stream(message, **kwargs):
+        assert kwargs["defer_memory"] is True
+        calls.append(("turn", message))
+        yield TurnEvent("answer", f"Answer to {message}")
+
+    def fake_remember(message, answer, **kwargs):
+        time.sleep(0.3)
+        calls.append(("remember", message))
+        return ["income.salary"]
+
+    monkeypatch.setattr(agent, "stream_turn", fake_stream)
+    monkeypatch.setattr(web, "stream_turn", fake_stream)
+    monkeypatch.setattr(web, "remember_exchange", fake_remember)
+    chat = web.Chat(tmp_path / "w.sqlite3", "personal")
+    with serving(chat) as (base, _):
+        first = json.loads(_post(base, "/api/turns", chat.token, json.dumps({"message": "gano 85 mil"}).encode()).read())
+        events = _events(base, first["turn"]["id"], chat.token)
+        types = [e["type"] for e in events]
+        assert types.index("answer") < types.index("memory") < types.index("done")
+        memory = next(e for e in events if e["type"] == "memory")
+        assert memory["items"] == [{"key": "income.salary"}] and memory["message_id"]
+        second = json.loads(_post(base, "/api/turns", chat.token, json.dumps({"message": "y ahora?"}).encode()).read())
+        _events(base, second["turn"]["id"], chat.token)
+    assert calls == [("turn", "gano 85 mil"), ("remember", "gano 85 mil"), ("turn", "y ahora?"), ("remember", "y ahora?")]
+    assert chat.messages[1]["memory"] == [{"key": "income.salary"}]

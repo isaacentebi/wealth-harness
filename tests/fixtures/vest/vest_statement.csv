@@ -1,0 +1,15 @@
+Vest account statement - Northbound Securities LLC
+Statement period 08/01/2026 - 08/31/2026
+Account ****7788
+
+Symbol,Description,Quantity,Price,Market Value,Cost Basis
+VOO,Vanguard S&P 500 ETF,2.5,500.00,1250.00,1150.00
+MSFT,Microsoft Corp,1.25,400.00,500.00,450.00
+Cash,Cash balance,,,120.50,
+Total,,,,1870.50,
+
+Date,Type,Description,Symbol,Quantity,Price,Amount,Fees
+08/05/2026,Deposit,Deposit from bank,,,,300.00,
+08/06/2026,Buy,Buy VOO,VOO,0.5,498.00,-249.00,0
+08/20/2026,Dividend,VOO dividend,VOO,,,3.10,
+08/20/2026,Withholding,Dividend withholding tax,VOO,,,-0.31,

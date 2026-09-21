@@ -1,0 +1,57 @@
+{
+  "_comment": "Two fictional managers over consecutive quarters (real securities, fictional holdings). Each quarter: {period, filing_date, holdings {TICKER: [shares, price]}, options {TICKER: [put|call, shares, price]}}. tests/test_managers.py renders these into real-format 13F documents with managers.build_snapshot. Patient Compounders is low-turnover and concentrated (COST shows a fictional 4-for-1 split in 2026-03-31); Fastlane Momentum rotates most of its book every quarter and uses calls.",
+  "securities": {
+    "AAPL": ["APPLE INC", "COM", "037833100", 320193, "3571"],
+    "MSFT": ["MICROSOFT CORP", "COM", "594918104", 789019, "7372"],
+    "V": ["VISA INC", "COM CL A", "92826C839", 1403161, "7389"],
+    "MA": ["MASTERCARD INCORPORATED", "CL A", "57636Q104", 1141391, "7389"],
+    "KO": ["COCA COLA CO", "COM", "191216100", 21344, "2080"],
+    "JPM": ["JPMORGAN CHASE & CO", "COM", "46625H100", 19617, "6021"],
+    "UNH": ["UNITEDHEALTH GROUP INC", "COM", "91324P102", 731766, "6324"],
+    "COST": ["COSTCO WHSL CORP NEW", "COM", "22160K105", 909832, "5331"],
+    "AMZN": ["AMAZON COM INC", "COM", "023135106", 1018724, "5961"],
+    "GOOGL": ["ALPHABET INC", "CAP STK CL A", "02079K305", 1652044, "7370"],
+    "NVDA": ["NVIDIA CORPORATION", "COM", "67066G104", 1045810, "3674"],
+    "AMD": ["ADVANCED MICRO DEVICES INC", "COM", "007903107", 2488, "3674"],
+    "TSLA": ["TESLA INC", "COM", "88160R101", 1318605, "3711"],
+    "PLTR": ["PALANTIR TECHNOLOGIES INC", "CL A", "69608A108", 1321655, "7372"],
+    "COIN": ["COINBASE GLOBAL INC", "COM CL A", "19260Q107", 1679788, "6199"],
+    "MSTR": ["STRATEGY INC", "CL A NEW", "594972408", 1050446, "7372"]
+  },
+  "managers": {
+    "0009990002": {
+      "name": "Patient Compounders LLC",
+      "quarters": [
+        {"period": "2025-06-30", "filing_date": "2025-08-12",
+         "holdings": {"AAPL": [50000, 200], "MSFT": [20000, 490], "V": [30000, 350], "MA": [15000, 560], "KO": [80000, 70],
+                      "JPM": [25000, 290], "UNH": [10000, 310], "COST": [4000, 990], "AMZN": [30000, 220], "GOOGL": [40000, 175]}},
+        {"period": "2025-09-30", "filing_date": "2025-11-13",
+         "holdings": {"AAPL": [50000, 250], "MSFT": [20000, 510], "V": [30000, 340], "MA": [15000, 570], "KO": [80000, 66],
+                      "JPM": [25000, 315], "UNH": [11000, 345], "COST": [4000, 915], "AMZN": [30000, 219], "GOOGL": [40000, 243]}},
+        {"period": "2025-12-31", "filing_date": "2026-02-12",
+         "holdings": {"AAPL": [48000, 270], "MSFT": [20000, 480], "V": [30000, 350], "MA": [15000, 570], "KO": [80000, 70],
+                      "JPM": [25000, 320], "UNH": [11000, 330], "COST": [4000, 860], "AMZN": [32000, 230], "GOOGL": [40000, 310]}},
+        {"period": "2026-03-31", "filing_date": "2026-05-14",
+         "holdings": {"AAPL": [48000, 250], "MSFT": [20000, 450], "V": [30000, 330], "MA": [15000, 540], "KO": [80000, 72],
+                      "JPM": [25000, 290], "UNH": [11000, 300], "COST": [16000, 230], "AMZN": [32000, 205], "GOOGL": [40000, 300]}},
+        {"period": "2026-06-30", "filing_date": "2026-08-13",
+         "holdings": {"AAPL": [48000, 260], "MSFT": [20000, 470], "V": [30000, 345], "MA": [15000, 560], "KO": [78000, 71],
+                      "JPM": [25000, 305], "UNH": [11000, 320], "COST": [16000, 240], "AMZN": [32000, 225], "GOOGL": [40000, 320]}}
+      ]
+    },
+    "0009990003": {
+      "name": "Fastlane Momentum LP",
+      "quarters": [
+        {"period": "2025-12-31", "filing_date": "2026-02-13",
+         "holdings": {"NVDA": [100000, 180], "TSLA": [30000, 420], "PLTR": [80000, 170], "COIN": [20000, 250]},
+         "options": {"NVDA": ["call", 50000, 180]}},
+        {"period": "2026-03-31", "filing_date": "2026-05-15",
+         "holdings": {"AMD": [90000, 200], "MSTR": [40000, 330], "PLTR": [20000, 150], "AAPL": [40000, 250]},
+         "options": {"AMD": ["call", 60000, 200]}},
+        {"period": "2026-06-30", "filing_date": "2026-08-14",
+         "holdings": {"NVDA": [80000, 190], "COIN": [50000, 300], "TSLA": [25000, 400], "AMZN": [40000, 225]},
+         "options": {"TSLA": ["put", 20000, 400]}}
+      ]
+    }
+  }
+}

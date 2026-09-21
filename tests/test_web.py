@@ -26,7 +26,8 @@ def test_local_http_chat_memory_context_and_request_boundary(tmp_path, monkeypat
         return urlopen(Request(base + "/api/chat", data=b'{"message":"hello"}', headers=headers), timeout=5)
     try:
         state = json.load(urlopen(base + "/api/state", timeout=5))
-        assert state["welcome"] and state["capabilities"]["web_search"]
+        assert state["onboarding"]["active"] and state["onboarding"]["mode"] == "flow"
+        assert state["onboarding"]["card"]["step"] == "identity" and state["capabilities"]["web_search"]
         with pytest.raises(HTTPError) as denied:
             send("wrong")
         assert denied.value.code == 403
@@ -37,7 +38,7 @@ def test_local_http_chat_memory_context_and_request_boundary(tmp_path, monkeypat
         assert json.load(send(state["csrf_token"]))["answer"] == "A real response boundary."
         assert calls[0][1]["profile_empty"] is True
         assert calls[0][1]["web_search"] is True
-        assert calls[0][1]["history"][0][0] == "assistant"
+        assert calls[0][1]["history"] == []  # no canned welcome: setup cards replace it
         assert len(json.load(urlopen(base + "/api/state", timeout=5))["messages"]) == 2
         chat.lock.acquire()
         try:
@@ -55,8 +56,8 @@ def test_local_http_chat_memory_context_and_request_boundary(tmp_path, monkeypat
 def test_live_search_defaults_on_and_prompt_agrees(tmp_path):
     assert 'web_search="live"' in build_command("sol", tmp_path / "db")
     assert 'web_search="live"' in build_command("sol", tmp_path / "db", web_search=True)
-    assert "Live web search is available" in build_prompt("question", "client", web_search=True)
-    assert "General web search is disabled" in build_prompt("question", "client", web_search=False)
+    assert "Web search: on" in build_prompt("question", "client", web_search=True)
+    assert "Web search: off" in build_prompt("question", "client", web_search=False)
 
 
 def test_reasoning_selection_reaches_model_and_rejects_unknown(tmp_path, monkeypatch):

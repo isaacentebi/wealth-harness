@@ -1,0 +1,27 @@
+Statement,Header,Field Name,Field Value
+Statement,Data,BrokerName,Interactive Brokers LLC
+Statement,Data,Period,"August 1, 2026 - August 31, 2026"
+Account Information,Header,Field Name,Field Value
+Account Information,Data,Name,Jane Example
+Account Information,Data,Account,U1234567
+Account Information,Data,Account Type,Individual
+Account Information,Data,Base Currency,USD
+Net Asset Value,Header,Asset Class,Prior Total,Current Long,Current Short,Current Total,Change
+Net Asset Value,Data,Cash ,1000,1200,0,1200,200
+Net Asset Value,Data,Stock,6500,7100,0,7100,600
+Net Asset Value,Data,Total,7500,8300,0,8300,800
+Open Positions,Header,DataDiscriminator,Asset Category,Currency,Symbol,Quantity,Mult,Cost Price,Cost Basis,Close Price,Value,Unrealized P/L,Code
+Open Positions,Data,Summary,Stocks,USD,AAPL,20,1,150,3000,200,4000,1000,
+Open Positions,Data,Summary,Stocks,MXN,WALMEX,1000,1,55,55000,62,62000,7000,
+Open Positions,Total,,Stocks,USD,,,,,,,7100,,
+Base Currency Exchange Rate,Header,Currency,Rate
+Base Currency Exchange Rate,Data,MXN,0.05
+Trades,Header,DataDiscriminator,Asset Category,Currency,Symbol,Date/Time,Quantity,T. Price,C. Price,Proceeds,Comm/Fee,Basis,Realized P/L,MTM P/L,Code
+Trades,Data,Order,Stocks,USD,AAPL,"2026-08-10, 10:30:00",5,190,200,-950,-1,951,0,50,O
+Dividends,Header,Currency,Date,Description,Amount
+Dividends,Data,USD,2026-08-15,AAPL(US0378331005) Cash Dividend USD 0.25 per Share (Ordinary Dividend),5
+Dividends,Data,Total,,,5
+Withholding Tax,Header,Currency,Date,Description,Amount,Code
+Withholding Tax,Data,USD,2026-08-15,AAPL(US0378331005) Cash Dividend USD 0.25 per Share - US Tax,-0.75,
+Deposits & Withdrawals,Header,Currency,Settle Date,Description,Amount
+Deposits & Withdrawals,Data,USD,2026-08-03,Electronic Fund Transfer,1000

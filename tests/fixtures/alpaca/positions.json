@@ -1,0 +1,14 @@
+[
+  {"asset_id": "5b0b9e1c-2f5f-4a55-9a6e-1f2e3d4c5b6a", "symbol": "VOO", "exchange": "ARCA", "asset_class": "us_equity",
+   "asset_marginable": true, "avg_entry_price": "480", "qty": "10.5", "qty_available": "10.5", "side": "long",
+   "market_value": "5775", "cost_basis": "5040", "unrealized_pl": "735", "unrealized_plpc": "0.1458",
+   "current_price": "550", "lastday_price": "546.5", "change_today": "0.0064"},
+  {"asset_id": "b0b6dd9d-8b9b-48a9-ba46-b9d54906e415", "symbol": "AAPL", "exchange": "NASDAQ", "asset_class": "us_equity",
+   "asset_marginable": true, "avg_entry_price": "200", "qty": "3.25", "qty_available": "3.25", "side": "long",
+   "market_value": "747.5", "cost_basis": "650", "unrealized_pl": "97.5", "unrealized_plpc": "0.15",
+   "current_price": "230", "lastday_price": "228", "change_today": "0.0088"},
+  {"asset_id": "3c9a1d2e-7f4b-4e8a-b1c2-d3e4f5a6b7c8", "symbol": "ASML", "exchange": "NASDAQ", "asset_class": "us_equity",
+   "asset_marginable": true, "avg_entry_price": "700", "qty": "2", "qty_available": "2", "side": "long",
+   "market_value": "1500", "cost_basis": "1400", "unrealized_pl": "100", "unrealized_plpc": "0.0714",
+   "current_price": "750", "lastday_price": "741", "change_today": "0.0121"}
+]

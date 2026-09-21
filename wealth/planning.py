@@ -7,48 +7,39 @@ securities.  Results are conditional simulations, not forecasts or advice.
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date
 import math
 import random
-import re
 from typing import Any
 
+from ._common import currency as iso_currency
+from ._common import envelope, iso_date, money
+from ._common import number as common_number
 
-_CURRENCY = re.compile(r"[A-Z]{3}")
+
 _DAY = 365.2425
+_TIMINGS = {"start", "end"}
+_BASES = {"nominal", "real"}
+
+
+_date = iso_date
+_money = money
+
+
+def _currency(value: Any, field: str) -> str:
+    return iso_currency(value, field)
 
 
 def _number(value: Any, field: str, *, minimum: float | None = None) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, str):
         raise ValueError(f"{field} must be a finite number")
-    number = float(value)
-    if not math.isfinite(number) or (minimum is not None and number < minimum):
-        suffix = f" greater than or equal to {minimum}" if minimum is not None else ""
-        raise ValueError(f"{field} must be a finite number{suffix}")
-    return number
+    return common_number(value, field, minimum=minimum)
 
 
 def _integer(value: Any, field: str, *, minimum: int = 0) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         raise ValueError(f"{field} must be an integer greater than or equal to {minimum}")
-    return value
-
-
-def _date(value: Any, field: str) -> date:
-    if not isinstance(value, str):
-        raise ValueError(f"{field} must be an ISO date")
-    try:
-        parsed = date.fromisoformat(value)
-    except ValueError as exc:
-        raise ValueError(f"{field} must be an ISO date") from exc
-    if parsed.isoformat() != value:
-        raise ValueError(f"{field} must be an ISO date")
-    return parsed
-
-
-def _currency(value: Any, field: str) -> str:
-    if not isinstance(value, str) or _CURRENCY.fullmatch(value) is None:
-        raise ValueError(f"{field} must be three uppercase letters")
     return value
 
 
@@ -59,10 +50,6 @@ def _rate(value: Any, field: str, *, allow_negative: bool = False) -> float:
     if not allow_negative and rate > 1:
         raise ValueError(f"{field} must be between 0 and 1")
     return rate
-
-
-def _money(value: float, currency: str) -> dict[str, Any]:
-    return {"currency": currency, "amount": round(value, 2)}
 
 
 def _pct(value: float) -> float:
@@ -81,66 +68,137 @@ def _percentile(values: list[float], percentile: float) -> float:
     return ordered[low] + (ordered[high] - ordered[low]) * (position - low)
 
 
+def _percentiles(values: list[float], currency: str, scale: float = 1.0) -> dict[str, Any]:
+    return {label: _money(_percentile(values, q) * scale, currency)
+            for label, q in (("p10", .10), ("p50", .50), ("p90", .90))}
+
+
 def _envelope(status: str, *, result: dict[str, Any] | None = None,
               missing: list[str] | None = None, warnings: list[str] | None = None,
               assumptions: list[str] | None = None) -> dict[str, Any]:
-    return {
-        "status": status,
-        "result": result or {},
-        "missing": missing or [],
-        "warnings": warnings or [],
-        "sources": [],
-        "assumptions": assumptions or [],
-    }
+    return envelope(status, result, missing=missing or (), warnings=warnings or (),
+                    assumptions=assumptions or ())
 
 
 def _required(data: dict[str, Any], fields: list[str]) -> list[str]:
     return [field for field in fields if field not in data]
 
 
-def _return_model(raw: Any, field: str) -> tuple[str, list[float] | tuple[float, float]]:
+@dataclass(frozen=True)
+class _ReturnModel:
+    """A seeded annual-return generator in a stated basis (nominal or real)."""
+
+    kind: str
+    basis: str
+    history: tuple[float, ...] = ()
+    block_length: int = 1
+    mean: float = 0.0
+    volatility: float = 0.0
+    degrees_of_freedom: float = 0.0
+
+    def describe(self) -> str:
+        if self.kind == "bootstrap":
+            return f"iid bootstrap of {len(self.history)} {self.basis} annual returns"
+        if self.kind == "block_bootstrap":
+            return (f"circular block bootstrap (block length {self.block_length}) of "
+                    f"{len(self.history)} {self.basis} annual returns; preserves serial dependence within blocks")
+        if self.kind == "student_t":
+            return (f"Student-t {self.basis} annual returns, mean {self.mean}, volatility {self.volatility}, "
+                    f"{self.degrees_of_freedom} degrees of freedom (variance-matched), floored at -99%")
+        return (f"lognormal {self.basis} annual returns with arithmetic mean {self.mean} and "
+                f"volatility {self.volatility}")
+
+
+def _return_model(raw: Any, field: str, warnings: list[str]) -> _ReturnModel:
     if not isinstance(raw, dict):
         raise ValueError(f"{field} must be an object")
     kind = raw.get("type")
-    if kind == "bootstrap":
+    basis = raw.get("basis")
+    if basis is None:
+        basis = "nominal"
+        warnings.append(f"{field}.basis was not stated; returns are treated as NOMINAL. State "
+                        "'nominal' or 'real' so inflation is neither ignored nor double counted.")
+    if basis not in _BASES:
+        raise ValueError(f"{field}.basis must be 'nominal' or 'real'")
+    if kind in {"bootstrap", "block_bootstrap"}:
         values = raw.get("historical_annual_returns")
         if not isinstance(values, list) or not values:
             raise ValueError(f"{field}.historical_annual_returns must be a nonempty list")
-        returns = [_rate(value, f"{field}.historical_annual_returns[{index}]", allow_negative=True)
-                   for index, value in enumerate(values)]
-        return kind, returns
-    if kind == "parametric":
+        history = tuple(_rate(value, f"{field}.historical_annual_returns[{index}]", allow_negative=True)
+                        for index, value in enumerate(values))
+        if kind == "bootstrap":
+            return _ReturnModel(kind, basis, history)
+        block = _integer(raw.get("block_length"), f"{field}.block_length", minimum=1)
+        if block > len(history):
+            raise ValueError(f"{field}.block_length cannot exceed the history length")
+        return _ReturnModel(kind, basis, history, block_length=block)
+    if kind in {"parametric", "student_t"}:
         mean = _rate(raw.get("annual_return"), f"{field}.annual_return", allow_negative=True)
         volatility = _number(raw.get("annual_volatility"), f"{field}.annual_volatility", minimum=0)
-        return kind, (mean, volatility)
-    raise ValueError(f"{field}.type must be 'bootstrap' or 'parametric'")
+        if kind == "parametric":
+            return _ReturnModel(kind, basis, mean=mean, volatility=volatility)
+        df = _number(raw.get("degrees_of_freedom"), f"{field}.degrees_of_freedom")
+        if df <= 2:
+            raise ValueError(f"{field}.degrees_of_freedom must be greater than 2 (finite variance)")
+        return _ReturnModel(kind, basis, mean=mean, volatility=volatility, degrees_of_freedom=df)
+    raise ValueError(f"{field}.type must be 'bootstrap', 'block_bootstrap', 'parametric' or 'student_t'")
 
 
-def _draw_returns(model: tuple[str, list[float] | tuple[float, float]], years: int,
-                  rng: random.Random) -> list[float]:
-    kind, parameters = model
-    if kind == "bootstrap":
-        history = parameters
-        assert isinstance(history, list)
-        return [rng.choice(history) for _ in range(years)]
-    mean, volatility = parameters
-    assert isinstance(mean, float) and isinstance(volatility, float)
-    if volatility == 0:
-        return [mean] * years
+def _draw_returns(model: _ReturnModel, years: int, rng: random.Random) -> tuple[list[float], int]:
+    """Annual returns in the model's basis, plus the count of floored draws."""
+    if model.kind == "bootstrap":
+        return [rng.choice(model.history) for _ in range(years)], 0
+    if model.kind == "block_bootstrap":
+        out: list[float] = []
+        size = len(model.history)
+        while len(out) < years:
+            start = rng.randrange(size)
+            out.extend(model.history[(start + i) % size] for i in range(model.block_length))
+        return out[:years], 0
+    if model.volatility == 0:
+        return [model.mean] * years, 0
+    if model.kind == "student_t":
+        df = model.degrees_of_freedom
+        scale = model.volatility * math.sqrt((df - 2) / df)
+        draws, floored = [], 0
+        for _ in range(years):
+            chi2 = rng.gammavariate(df / 2, 2)
+            value = model.mean + scale * rng.normalvariate(0.0, 1.0) / math.sqrt(chi2 / df)
+            if value < -0.99:
+                value, floored = -0.99, floored + 1
+            draws.append(value)
+        return draws, floored
     # Convert arithmetic mean/volatility to lognormal parameters.  This keeps
     # every gross return nonnegative without an arbitrary clipping rule.
-    variance = volatility * volatility
-    sigma2 = math.log1p(variance / ((1 + mean) ** 2))
-    mu = math.log1p(mean) - sigma2 / 2
+    variance = model.volatility * model.volatility
+    sigma2 = math.log1p(variance / ((1 + model.mean) ** 2))
+    mu = math.log1p(model.mean) - sigma2 / 2
     sigma = math.sqrt(sigma2)
-    return [math.exp(rng.normalvariate(mu, sigma)) - 1 for _ in range(years)]
+    return [math.exp(rng.normalvariate(mu, sigma)) - 1 for _ in range(years)], 0
+
+
+def _nominal(returns: list[float], basis: str, inflation: float) -> list[float]:
+    """Express draws in nominal terms; real draws are compounded with inflation once."""
+    if basis == "nominal":
+        return returns
+    return [(1 + r) * (1 + inflation) - 1 for r in returns]
 
 
 def _growth(wealth: float, annual_return: float, years: float, fee: float, tax_drag: float) -> float:
+    """Grow for ``years`` (possibly fractional): return, then the AUM fee, then tax drag.
+
+    Tax drag is a return drag in percentage points per year charged only on a
+    positive net gain and never larger than that gain: loss periods are not
+    taxed, and the drag cannot turn a small gain into a loss.
+    """
     if wealth <= 0 or years <= 0:
         return max(wealth, 0.0)
     try:
-        result = wealth * ((1 + annual_return) ** years) * ((1 - fee) ** years) * ((1 - tax_drag) ** years)
+        factor = ((1 + annual_return) ** years) * ((1 - fee) ** years)
+        gain = factor - 1.0
+        if gain > 0:
+            factor -= min(tax_drag * years, gain)
+        result = wealth * factor
     except OverflowError as exc:
         raise ValueError("supplied assumptions produce nonfinite wealth") from exc
     if not math.isfinite(result):
@@ -153,6 +211,17 @@ def _add_years(day: date, years: int) -> date:
         return day.replace(year=day.year + years)
     except ValueError:  # February 29
         return day.replace(year=day.year + years, day=28)
+
+
+def _years_between(start: date, when: date) -> float:
+    """Projection years from ``start``: whole anniversaries plus the elapsed share
+    of the current anniversary year. Returns, inflation indexing and deflation
+    all use this one clock, so a real return and indexed flows stay consistent."""
+    whole = when.year - start.year
+    if _add_years(start, whole) > when:
+        whole -= 1
+    anchor, following = _add_years(start, whole), _add_years(start, whole + 1)
+    return whole + (when - anchor).days / (following - anchor).days
 
 
 def _accrue(wealth: float, projection_start: date, interval_start: date, interval_end: date,
@@ -193,7 +262,7 @@ def _expand_flows(data: dict[str, Any], start: date, end: date, inflation: float
         if not isinstance(indexed, bool):
             raise ValueError(f"cashflows[{index}].inflation_indexed must be a boolean")
         if indexed:
-            amount *= (1 + inflation) ** ((when - start).days / _DAY)
+            amount *= (1 + inflation) ** _years_between(start, when)
         hard = raw.get("hard_goal")
         if not isinstance(hard, bool):
             raise ValueError(f"cashflows[{index}].hard_goal must be a boolean")
@@ -248,6 +317,7 @@ def _simulate_project(data: dict[str, Any]) -> dict[str, Any]:
                                 "cashflows", "recurring_cashflows"])
     if required:
         return _envelope("needs_input", missing=required)
+    warnings: list[str] = []
     currency = _currency(data["currency"], "currency")
     start = _date(data["as_of"], "as_of")
     end = _date(data["end_date"], "end_date")
@@ -256,21 +326,25 @@ def _simulate_project(data: dict[str, Any]) -> dict[str, Any]:
     initial = _number(data["initial_wealth"], "initial_wealth", minimum=0)
     simulations = _integer(data["simulations"], "simulations", minimum=1)
     seed = _integer(data["seed"], "seed", minimum=0)
-    model = _return_model(data["return_model"], "return_model")
+    model = _return_model(data["return_model"], "return_model", warnings)
     inflation = _rate(data["annual_inflation"], "annual_inflation")
     fee = _rate(data["annual_fee"], "annual_fee")
     tax_drag = _rate(data["annual_tax_drag"], "annual_tax_drag")
     flows = _expand_flows(data, start, end, inflation)
     horizon_years = max(1, math.ceil((end - start).days / _DAY))
+    deflator = (1 + inflation) ** _years_between(start, end)
     rng = random.Random(seed)
     terminals: list[float] = []
+    floored = 0
     all_withdrawals_fulfilled = 0
     positive_terminal_wealth = 0
     goal_success: defaultdict[str, int] = defaultdict(int)
     hard_goal_ids = sorted({flow["goal_id"] for flow in flows
                             if flow["type"] == "withdrawal" and flow["hard"]})
     for _ in range(simulations):
-        returns = _draw_returns(model, horizon_years, rng)
+        drawn, clipped = _draw_returns(model, horizon_years, rng)
+        floored += clipped
+        returns = _nominal(drawn, model.basis, inflation)
         wealth = initial
         previous = start
         all_path_withdrawals_funded = True
@@ -294,68 +368,130 @@ def _simulate_project(data: dict[str, Any]) -> dict[str, Any]:
         positive_terminal_wealth += int(wealth > 1e-9)
         for goal_id, funded in path_goals.items():
             goal_success[goal_id] += int(funded)
+    if floored:
+        warnings.append(f"{floored} Student-t annual draws fell below -99% and were floored there.")
     result = {
         "currency": currency,
         "horizon": {"as_of": start.isoformat(), "end_date": end.isoformat()},
         "simulations": simulations,
+        "return_model": {"description": model.describe(), "basis": model.basis},
         "all_withdrawals_fulfilled_probability_percent": _pct(
             all_withdrawals_fulfilled / simulations
         ),
         "positive_terminal_wealth_probability_percent": _pct(
             positive_terminal_wealth / simulations
         ),
-        "terminal_wealth_percentiles": {
-            "p10": _money(_percentile(terminals, .10), currency),
-            "p50": _money(_percentile(terminals, .50), currency),
-            "p90": _money(_percentile(terminals, .90), currency),
-        },
+        "terminal_wealth_percentiles": _percentiles(terminals, currency),
+        "real_terminal_wealth_percentiles": _percentiles(terminals, currency, 1 / deflator),
+        "real_value_basis": f"{start.isoformat()} money, deflated at {inflation} annual inflation",
         "hard_goal_funded_probability_percent": {
             goal_id: _pct(goal_success[goal_id] / simulations) for goal_id in hard_goal_ids
         },
     }
     assumptions = [
         "Results are conditional on the supplied return model, cash flows, inflation, fees, tax drag, and horizon.",
-        "Cash flows occur on their stated dates; contributions are applied before withdrawals that share a date.",
+        f"Return model: {model.describe()}.",
+        ("Real returns are converted to nominal once with (1 + real) x (1 + inflation) - 1; inflation-indexed "
+         "cash flows are grown at the same inflation, so inflation is counted exactly once."
+         if model.basis == "real" else
+         "Returns are nominal; inflation-indexed cash flows grow at the stated inflation and real outcomes "
+         "are nominal outcomes deflated by the same inflation."),
+        "terminal_wealth_percentiles are nominal; real_terminal_wealth_percentiles are in as_of money.",
+        "Cash flows occur on their stated dates, so there is no separate start- or end-of-year timing choice; contributions are applied before withdrawals that share a date.",
+        "The AUM fee is charged every period; tax drag is percentage points of return charged only on positive net gains and capped at the gain, so loss periods are untaxed.",
         "All-withdrawals-fulfilled and positive-terminal-wealth probabilities are separate; a plan may spend exactly to zero after meeting every withdrawal.",
         "A missed hard goal remains failed even if later contributions restore positive wealth.",
     ]
-    return _envelope("ready", result=result, assumptions=assumptions)
+    return _envelope("ready", result=result, warnings=warnings, assumptions=assumptions)
+
+
+def _taxes(raw: Any, tax_drag: float) -> dict[str, float] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("taxes must be an object")
+    if tax_drag:
+        raise ValueError("annual_tax_drag must be 0 when explicit taxes are modeled; both would double count tax")
+    return {
+        "dividend": _rate(raw.get("dividend_tax_rate"), "taxes.dividend_tax_rate"),
+        "gains": _rate(raw.get("capital_gains_tax_rate"), "taxes.capital_gains_tax_rate"),
+        "basis": _number(raw.get("initial_cost_basis"), "taxes.initial_cost_basis", minimum=0),
+        "total_return_yield": _rate(raw.get("total_return_dividend_yield"),
+                                    "taxes.total_return_dividend_yield"),
+    }
 
 
 def _income_path(initial: float, returns: list[float], need: float, need_growth: float,
-                 dividend_yield: float, fee: float, tax_drag: float, strategy: str) -> dict[str, float | bool]:
-    wealth = initial
-    total_deficit = 0.0
-    sales = 0.0
-    dividends_used = 0.0
+                 dividend_yield: float, fee: float, tax_drag: float, timing: str,
+                 taxes: dict[str, float] | None) -> dict[str, float | bool]:
+    """One withdrawal path.
+
+    Without ``taxes`` the source of cash is economically irrelevant, so the path
+    is a single total-return account with tax drag on positive returns. With
+    ``taxes`` dividends are taxed when paid (spent or reinvested), share sales
+    realize gains against an average cost basis, and sales are grossed up so
+    the net cash covers the need.
+    """
+    shares, cash = initial, 0.0
+    basis = taxes["basis"] if taxes else initial
+    total_deficit = sales = dividends_used = taxes_paid = 0.0
     depleted = False
+
+    def spend(amount: float) -> float:
+        nonlocal shares, cash, basis, sales, dividends_used, taxes_paid
+        from_cash = min(cash, amount)
+        cash -= from_cash
+        dividends_used += from_cash
+        remaining = amount - from_cash
+        if remaining <= 0 or shares <= 0:
+            return max(remaining, 0.0)
+        gain_fraction = max(0.0, 1.0 - basis / shares) if taxes else 0.0
+        rate = taxes["gains"] * gain_fraction if taxes else 0.0
+        if rate >= 1.0:
+            return remaining
+        gross = min(shares, remaining / (1.0 - rate))
+        net = gross * (1.0 - rate)
+        taxes_paid += gross - net
+        basis *= 1.0 - gross / shares
+        shares -= gross
+        sales += gross
+        return max(0.0, remaining - net)
+
+    def reinvest() -> None:
+        nonlocal shares, cash, basis
+        shares += cash
+        basis += cash
+        cash = 0.0
+
     for year, total_return in enumerate(returns):
         annual_need = need * ((1 + need_growth) ** year)
-        opening = wealth
-        if strategy == "dividend_cash":
-            total_value = opening * (1 + total_return) * (1 - fee) * (1 - tax_drag)
-            # The dividend is cash carved out of total portfolio value, not a
-            # second return source.  Cap it at total value for pathological
-            # caller-supplied combinations of yield and negative total return.
-            dividend = min(opening * dividend_yield * (1 - fee) * (1 - tax_drag), total_value)
-            used = min(dividend, annual_need)
-            dividends_used += used
-            cash_need = annual_need - used
-            # Unused distributions are reinvested, so value after spending the
-            # used dividend equals total value less that spending.
-            wealth = total_value - used
+        deficit = 0.0
+        if timing == "start":
+            deficit = spend(annual_need)
+            reinvest()
+        opening = shares
+        grown = opening * (1 + total_return) * (1 - fee)
+        if taxes is None:
+            gain = grown - opening
+            shares = grown - (min(tax_drag * opening, gain) if gain > 0 else 0.0)
         else:
-            wealth = opening * (1 + total_return) * (1 - fee) * (1 - tax_drag)
-            cash_need = annual_need
-        sold = min(wealth, cash_need)
-        sales += sold
-        wealth -= sold
-        deficit = cash_need - sold
+            # The dividend is carved out of total value, not a second return source.
+            dividend = min(opening * dividend_yield * (1 - fee), max(grown, 0.0))
+            shares = grown - dividend
+            tax = taxes["dividend"] * dividend
+            taxes_paid += tax
+            cash += dividend - tax
+        shares = max(0.0, shares)
+        if timing == "end":
+            deficit = spend(annual_need)
+            reinvest()
         total_deficit += deficit
         depleted = depleted or deficit > 1e-9
-        wealth = max(0.0, wealth)
-    return {"terminal": wealth, "deficit": total_deficit, "sales": sales,
-            "dividends_used": dividends_used, "depleted": depleted}
+    terminal = shares + cash
+    deferred = taxes["gains"] * max(0.0, shares - basis) if taxes else 0.0
+    return {"terminal": terminal, "after_liquidation": terminal - deferred,
+            "deficit": total_deficit, "sales": sales, "dividends_used": dividends_used,
+            "taxes_paid": taxes_paid, "depleted": depleted}
 
 
 def _simulate_income(data: dict[str, Any]) -> dict[str, Any]:
@@ -364,6 +500,7 @@ def _simulate_income(data: dict[str, Any]) -> dict[str, Any]:
                                 "annual_tax_drag", "simulations", "seed", "return_model"])
     if required:
         return _envelope("needs_input", missing=required)
+    warnings: list[str] = []
     currency = _currency(data["currency"], "currency")
     initial = _number(data["initial_wealth"], "initial_wealth", minimum=0)
     years = _integer(data["years"], "years", minimum=1)
@@ -374,49 +511,95 @@ def _simulate_income(data: dict[str, Any]) -> dict[str, Any]:
     tax_drag = _rate(data["annual_tax_drag"], "annual_tax_drag")
     simulations = _integer(data["simulations"], "simulations", minimum=1)
     seed = _integer(data["seed"], "seed", minimum=0)
-    model = _return_model(data["return_model"], "return_model")
+    model = _return_model(data["return_model"], "return_model", warnings)
+    timing = data.get("spending_timing", "start")
+    if timing not in _TIMINGS:
+        raise ValueError("spending_timing must be 'start' or 'end'")
+    inflation = None
+    if data.get("annual_inflation") is not None:
+        inflation = _rate(data["annual_inflation"], "annual_inflation")
+    if model.basis == "real" and inflation is None:
+        return _envelope("needs_input", missing=["annual_inflation (required to use real-basis returns)"],
+                         warnings=warnings)
+    taxes = _taxes(data.get("taxes"), tax_drag)
+    strategies = {"total_return_sales": taxes["total_return_yield"] if taxes else 0.0}
+    if taxes:
+        strategies = {"dividend_cash": dividend_yield, **strategies}
     rng = random.Random(seed)
-    paths: dict[str, list[dict[str, float | bool]]] = {"dividend_cash": [], "total_return_sales": []}
+    paths: dict[str, list[dict[str, float | bool]]] = {name: [] for name in strategies}
     early_bad: list[float] = []
     late_bad: list[float] = []
+    floored = 0
     for _ in range(simulations):
-        returns = _draw_returns(model, years, rng)
-        for strategy in paths:
-            paths[strategy].append(_income_path(initial, returns, need, growth, dividend_yield,
-                                                fee, tax_drag, strategy))
-        early_bad.append(float(_income_path(initial, sorted(returns), need, growth, dividend_yield,
-                                            fee, tax_drag, "total_return_sales")["terminal"]))
+        drawn, clipped = _draw_returns(model, years, rng)
+        floored += clipped
+        returns = _nominal(drawn, model.basis, inflation or 0.0)
+        for name, strategy_yield in strategies.items():
+            paths[name].append(_income_path(initial, returns, need, growth, strategy_yield,
+                                            fee, tax_drag, timing, taxes))
+        sequence_yield = strategies["total_return_sales"]
+        early_bad.append(float(_income_path(initial, sorted(returns), need, growth, sequence_yield,
+                                            fee, tax_drag, timing, taxes)["terminal"]))
         late_bad.append(float(_income_path(initial, sorted(returns, reverse=True), need, growth,
-                                           dividend_yield, fee, tax_drag, "total_return_sales")["terminal"]))
+                                           sequence_yield, fee, tax_drag, timing, taxes)["terminal"]))
+    if floored:
+        warnings.append(f"{floored} Student-t annual draws fell below -99% and were floored there.")
+    deflator = (1 + inflation) ** years if inflation is not None else None
     comparison: dict[str, Any] = {}
     for strategy, records in paths.items():
         terminals = [float(record["terminal"]) for record in records]
         comparison[strategy] = {
+            "portfolio_dividend_yield": strategies[strategy],
             "probability_of_any_income_deficit_percent": _pct(sum(bool(r["depleted"]) for r in records) / simulations),
             "mean_cumulative_deficit": _money(sum(float(r["deficit"]) for r in records) / simulations, currency),
             "mean_sales": _money(sum(float(r["sales"]) for r in records) / simulations, currency),
             "mean_dividends_used": _money(sum(float(r["dividends_used"]) for r in records) / simulations, currency),
-            "terminal_wealth_percentiles": {
-                "p10": _money(_percentile(terminals, .1), currency),
-                "p50": _money(_percentile(terminals, .5), currency),
-                "p90": _money(_percentile(terminals, .9), currency),
-            },
+            "mean_taxes_paid": _money(sum(float(r["taxes_paid"]) for r in records) / simulations, currency),
+            "terminal_wealth_percentiles": _percentiles(terminals, currency),
+            "terminal_wealth_after_liquidation_tax_percentiles": _percentiles(
+                [float(r["after_liquidation"]) for r in records], currency),
+            "real_terminal_wealth_percentiles": (_percentiles(terminals, currency, 1 / deflator)
+                                                 if deflator is not None else None),
         }
     result = {
         "currency": currency,
+        "spending_timing": timing,
+        "return_model": {"description": model.describe(), "basis": model.basis},
         "strategies": comparison,
         "sequence_risk": {
             "median_terminal_wealth_with_low_returns_first": _money(_percentile(early_bad, .5), currency),
             "median_terminal_wealth_with_high_returns_first": _money(_percentile(late_bad, .5), currency),
-            "method": "The same simulated annual returns are reordered low-first and high-first while withdrawals continue.",
+            "method": "The same simulated annual returns are reordered low-first and high-first while withdrawals continue (total-return strategy).",
         },
     }
+    if taxes is None:
+        result["strategy_comparison"] = None
+        warnings.append("Dividend-cash and total-return withdrawals are identical without taxes: the same total "
+                        "return is spent either way. Supply taxes (dividend and capital-gains rates, cost basis, "
+                        "and the total-return portfolio's yield) to compare them.")
+    else:
+        result["strategy_comparison"] = (
+            "Both portfolios earn the same pre-tax total return and differ only in dividend yield: dividends are "
+            "taxed when paid; share sales realize gains against average cost basis and are grossed up for tax.")
     assumptions = [
+        f"Return model: {model.describe()}.",
+        f"Spending occurs at the {timing} of each year"
+        + (" (conservative default: spent money misses that year's return)." if timing == "start" else "."),
+        "Income need grows at annual_need_growth in nominal terms."
+        + (f" Real outcomes deflate nominal terminal wealth at {inflation} annual inflation." if inflation is not None
+           else " No annual_inflation was supplied, so real outcomes are not reported."),
         "Dividend yield is included within total return; it is not added as a second return source.",
-        "Unused dividends are reinvested and income deficits persist even if a later year recovers.",
-        "Results are conditional on the supplied return, yield, income-growth, fee, tax-drag, and horizon inputs.",
+        "Income deficits persist even if a later year recovers.",
     ]
-    return _envelope("ready", result=result, assumptions=assumptions)
+    if model.basis == "real":
+        assumptions.append("Real returns are converted to nominal once with (1 + real) x (1 + inflation) - 1.")
+    if taxes is None:
+        assumptions.append("annual_tax_drag is percentage points of return charged only in positive-return years and capped at the gain.")
+    else:
+        assumptions.append("Taxes: dividends at dividend_tax_rate when paid; realized gains at capital_gains_tax_rate on "
+                           "average cost basis; realized losses earn no tax credit (conservative); terminal wealth is "
+                           "shown before and after the deferred tax on unrealized gains.")
+    return _envelope("ready", result=result, warnings=warnings, assumptions=assumptions)
 
 
 def _fx_converter(data: dict[str, Any], reporting: str):

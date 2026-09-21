@@ -4,19 +4,32 @@ The module deliberately has no database or provider integration.  It turns an
 explicit source into the canonical household document, or calculates exposure
 from a supplied/current household.  Amounts are emitted as decimal strings so
 that the result remains JSON safe and reproducible.
+
+Conventions that other modules share live here because this module owns the
+canonical household: the account-type vocabulary (:data:`ACCOUNT_TYPES`),
+ownership attribution (:func:`ownership_shares`), symbol normalisation
+(:func:`normalize_symbol`), FX conversion (:func:`fx_converter`) and fund
+look-through (:func:`lookthrough`).
+
+FX convention: an ``fx`` record ``{"from": "USD", "to": "MXN", "rate": 18}``
+means one unit of ``from`` buys ``rate`` units of ``to`` (1 USD = 18 MXN).  The
+market quote ``USDMXN 18`` is therefore ``from=USD, to=MXN``.  Implausible or
+apparently inverted quotes are excluded with a warning unless the record sets
+``direction_verified: true``; reciprocal quotes that disagree are rejected.
 """
 
 from __future__ import annotations
 
 import csv
 from copy import deepcopy
+from dataclasses import dataclass, field as dataclass_field
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 import io
 import json
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Callable
 
 
 _CURRENCY = re.compile(r"[A-Z]{3}")
@@ -24,6 +37,99 @@ _ENTITIES = (
     "people", "accounts", "positions", "lots", "liabilities",
     "external_assets", "income_exposures", "fx", "fund_holdings",
 )
+
+# --------------------------------------------------------------------------
+# Canonical account vocabulary (shared with wealth.tax).
+# --------------------------------------------------------------------------
+
+#: Canonical account types.  ``tax_treatment`` drives which accounts the tax
+#: module will model; ``liquid_by_default`` is used only when neither the
+#: position nor the account states liquidity and the asset is not inherently
+#: illiquid.
+ACCOUNT_TYPES: dict[str, dict[str, Any]] = {
+    "taxable": {"tax_treatment": "taxable", "liquid_by_default": True, "description": "individual or joint taxable brokerage/custody account"},
+    "bank": {"tax_treatment": "taxable", "liquid_by_default": True, "description": "checking, savings, deposit or money-market account"},
+    "traditional_ira": {"tax_treatment": "tax_deferred", "liquid_by_default": False, "description": "traditional, rollover, SEP or SIMPLE IRA"},
+    "roth_ira": {"tax_treatment": "tax_exempt", "liquid_by_default": False, "description": "Roth IRA"},
+    "employer_plan": {"tax_treatment": "tax_deferred", "liquid_by_default": False, "description": "401(k), 403(b), 457(b), TSP or similar pre-tax plan"},
+    "roth_employer_plan": {"tax_treatment": "tax_exempt", "liquid_by_default": False, "description": "Roth 401(k)/403(b)/457(b)"},
+    "hsa": {"tax_treatment": "tax_exempt", "liquid_by_default": False, "description": "health savings account"},
+    "education_529": {"tax_treatment": "tax_exempt", "liquid_by_default": False, "description": "529 education savings plan"},
+    "annuity": {"tax_treatment": "tax_deferred", "liquid_by_default": False, "description": "deferred annuity contract"},
+    "mx_afore": {"tax_treatment": "tax_deferred", "liquid_by_default": False, "description": "Mexican AFORE retirement account"},
+    "mx_ppr": {"tax_treatment": "tax_deferred", "liquid_by_default": False, "description": "Mexican Plan Personal de Retiro"},
+    "trust": {"tax_treatment": "separate_entity", "liquid_by_default": False, "description": "trust account; tax depends on trust type"},
+    "entity": {"tax_treatment": "separate_entity", "liquid_by_default": False, "description": "corporate, partnership or holding-company account"},
+    "private_investment": {"tax_treatment": "taxable", "liquid_by_default": False, "description": "subscription/capital account for private funds or direct deals"},
+}
+ACCOUNT_TYPE_ALIASES: dict[str, str] = {
+    "brokerage": "taxable", "taxable_brokerage": "taxable", "individual": "taxable",
+    "joint": "taxable", "custody": "taxable", "cuenta_de_inversion": "taxable",
+    "cash": "bank", "checking": "bank", "savings": "bank", "deposit": "bank", "money_market": "bank",
+    "ira": "traditional_ira", "rollover_ira": "traditional_ira", "sep_ira": "traditional_ira", "simple_ira": "traditional_ira",
+    "401k": "employer_plan", "403b": "employer_plan", "457b": "employer_plan", "tsp": "employer_plan",
+    "roth_401k": "roth_employer_plan", "roth_403b": "roth_employer_plan", "roth_457b": "roth_employer_plan",
+    "529": "education_529", "afore": "mx_afore", "ppr": "mx_ppr",
+    "corporate": "entity", "llc": "entity", "partnership": "entity", "holding_company": "entity",
+}
+
+
+def _vocabulary_key(value: Any) -> str:
+    text = str(value).strip().lower().replace("(", "").replace(")", "")
+    return re.sub(r"[\s\-/]+", "_", text)
+
+
+def canonical_account_type(value: Any) -> str | None:
+    """Return the canonical account type for ``value`` or ``None`` when unknown."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    key = _vocabulary_key(value)
+    key = ACCOUNT_TYPE_ALIASES.get(key, key)
+    return key if key in ACCOUNT_TYPES else None
+
+
+def account_tax_treatment(value: Any) -> str:
+    """``taxable``, ``tax_deferred``, ``tax_exempt``, ``separate_entity`` or ``unknown``."""
+    canonical = canonical_account_type(value)
+    return ACCOUNT_TYPES[canonical]["tax_treatment"] if canonical else "unknown"
+
+
+# Asset classes that are illiquid by default regardless of the account that
+# holds them.  A position-level ``liquid: true`` may override (for example a
+# listed REIT recorded as real_estate); an account-level flag may not.
+ILLIQUID_ASSET_CLASSES = frozenset({
+    "private_equity", "private_credit", "private_debt", "venture_capital", "venture",
+    "hedge_fund", "real_estate", "private_real_estate", "direct_real_estate", "restricted_stock",
+    "unlisted", "private", "private_company", "private_fund", "collectible", "collectibles",
+    "art", "farmland", "timberland", "private_infrastructure",
+})
+_FUND_ASSET_CLASSES = frozenset({"fund", "etf", "mutual_fund"})
+_REDEMPTION_PERIOD_DAYS = {"daily": 1, "weekly": 7, "monthly": 30, "quarterly": 91, "semiannual": 182, "annual": 365}
+
+# Ownership forms.  For forms in ``_EQUAL_PRESUMPTION_FORMS`` equal economic
+# shares are presumed when shares are omitted (disclosed as an assumption).
+OWNERSHIP_FORMS = frozenset({
+    "sole", "joint_tenancy", "tenancy_by_entirety", "tenancy_in_common",
+    "community_property", "sociedad_conyugal", "trust", "entity",
+})
+_EQUAL_PRESUMPTION_FORMS = frozenset({"joint_tenancy", "tenancy_by_entirety", "community_property", "sociedad_conyugal"})
+_SPOUSAL_FORMS = frozenset({"tenancy_by_entirety", "community_property", "sociedad_conyugal"})
+UNATTRIBUTED = "unattributed"
+
+# Broad multi-decade plausibility bands, expressed as USD per one unit of the
+# currency.  They catch inverted or mis-scaled quotes; they are not prices.
+_USD_PER_UNIT_BANDS: dict[str, tuple[Decimal, Decimal]] = {
+    "USD": (Decimal(1), Decimal(1)),
+    "EUR": (Decimal("0.8"), Decimal("1.7")), "GBP": (Decimal("1.0"), Decimal("2.2")),
+    "CHF": (Decimal("0.6"), Decimal("1.5")), "JPY": (Decimal("0.005"), Decimal("0.014")),
+    "CAD": (Decimal("0.6"), Decimal("1.1")), "AUD": (Decimal("0.45"), Decimal("1.1")),
+    "MXN": (Decimal("0.03"), Decimal("0.12")), "BRL": (Decimal("0.1"), Decimal("0.7")),
+    "CNY": (Decimal("0.11"), Decimal("0.17")), "HKD": (Decimal("0.125"), Decimal("0.132")),
+    "INR": (Decimal("0.009"), Decimal("0.025")), "KRW": (Decimal("0.0005"), Decimal("0.0011")),
+}
+FX_RECIPROCAL_TOLERANCE = Decimal("0.01")
+
+
 def _text(value: Any, field: str, *, optional: bool = False) -> str | None:
     if value is None and optional:
         return None
@@ -71,6 +177,11 @@ def _out(value: Decimal) -> str:
     return rendered.rstrip("0").rstrip(".") if "." in rendered else rendered
 
 
+def latest_plausible_today() -> date:
+    """The later of the local and UTC calendar dates (never rejects a local 'today')."""
+    return max(date.today(), datetime.now(timezone.utc).date())
+
+
 def _unique(items: list[dict[str, Any]], entity: str) -> set[str]:
     seen: set[str] = set()
     for index, item in enumerate(items):
@@ -83,18 +194,150 @@ def _unique(items: list[dict[str, Any]], entity: str) -> set[str]:
     return seen
 
 
+# --------------------------------------------------------------------------
+# Symbols
+# --------------------------------------------------------------------------
+
+_EXCHANGE_SUFFIXES = frozenset({
+    "MX", "TO", "NE", "CN", "L", "AX", "HK", "DE", "PA", "AS", "SW", "SA", "NS", "BO",
+    "KS", "KQ", "SS", "SZ", "MI", "MC", "ST", "OL", "CO", "HE", "BR", "LS", "VI", "IR",
+})
+_BLOOMBERG_EXCHANGES = frozenset({"US", "UN", "UW", "UQ", "UA", "UR", "MM", "LN", "CN", "CT", "GY", "FP", "NA", "SW", "JP", "JT", "HK", "AU", "BZ"})
+
+
+def normalize_symbol(value: Any) -> str | None:
+    """Normalise a ticker for matching across vendor conventions.
+
+    ``BRK.B``, ``BRK/B``, ``BRK B`` and ``BRK-B`` become ``BRK-B``; BMV series
+    markers and venue suffixes are removed (``WALMEX*``, ``WALMEX.MX`` and
+    ``WALMEX* MM`` become ``WALMEX``).  Venue stripping can merge same-ticker
+    listings on different exchanges, so callers should disclose that matches
+    are symbol-based.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip().upper()
+    text = re.sub(r"\s+EQUITY$", "", text)
+    if ":" in text:  # "BMV:WALMEX", "NYSE:BRK.B"
+        text = text.split(":", 1)[1].strip()
+    parts = text.split()
+    if len(parts) == 2 and parts[1] in _BLOOMBERG_EXCHANGES:
+        text = parts[0]
+    if "." in text:
+        base, suffix = text.rsplit(".", 1)
+        if base and suffix in _EXCHANGE_SUFFIXES:
+            text = base
+    text = text.rstrip("*").strip()
+    text = re.sub(r"[.\s/]+", "-", text)
+    return text or None
+
+
+# --------------------------------------------------------------------------
+# Ownership
+# --------------------------------------------------------------------------
+
+def _validate_ownership(item: dict[str, Any], field: str, people: set[str]) -> None:
+    ownership = item.get("ownership")
+    if ownership is None:
+        return
+    if not isinstance(ownership, dict):
+        raise ValueError(f"{field}.ownership must be an object with form and owners")
+    form = _text(ownership.get("form"), f"{field}.ownership.form")
+    if form not in OWNERSHIP_FORMS:
+        raise ValueError(f"{field}.ownership.form must be one of {', '.join(sorted(OWNERSHIP_FORMS))}")
+    owners = ownership.get("owners")
+    if not isinstance(owners, list):
+        raise ValueError(f"{field}.ownership.owners must be a list")
+    if not owners and form not in {"trust", "entity"}:
+        raise ValueError(f"{field}.ownership.owners must name at least one person")
+    seen: set[str] = set()
+    shares: list[Decimal | None] = []
+    for index, owner in enumerate(owners):
+        if not isinstance(owner, dict):
+            raise ValueError(f"{field}.ownership.owners[{index}] must be an object")
+        if "pct" in owner or "percent" in owner:
+            raise ValueError(f"{field}.ownership.owners[{index}] uses 'share' (a decimal fraction), not pct/percent")
+        person = _text(owner.get("person_id"), f"{field}.ownership.owners[{index}].person_id")
+        if person not in people:
+            raise ValueError(f"{field}.ownership.owners[{index}].person_id does not reference a person")
+        if person in seen:
+            raise ValueError(f"{field}.ownership lists {person} more than once")
+        seen.add(person)
+        if owner.get("share") is None:
+            shares.append(None)
+        else:
+            share = _number(owner["share"], f"{field}.ownership.owners[{index}].share", nonnegative=True)
+            if share == 0 or share > 1:
+                raise ValueError(f"{field}.ownership.owners[{index}].share must be in (0, 1]")
+            shares.append(share)
+    if form == "sole" and len(owners) != 1:
+        raise ValueError(f"{field}.ownership form sole requires exactly one owner")
+    if form in _SPOUSAL_FORMS and len(owners) != 2:
+        raise ValueError(f"{field}.ownership form {form} requires exactly two spouses")
+    supplied = [share for share in shares if share is not None]
+    if supplied and len(supplied) != len(shares):
+        raise ValueError(f"{field}.ownership must give a share for every owner or for none")
+    if not supplied and owners and form not in _EQUAL_PRESUMPTION_FORMS | {"sole"}:
+        raise ValueError(f"{field}.ownership form {form} requires explicit shares")
+    if supplied and abs(sum(supplied, Decimal(0)) - 1) > Decimal("0.000001"):
+        raise ValueError(f"{field}.ownership shares must sum to 1")
+
+
+def ownership_shares(item: dict[str, Any], *, fallback_owner: str | None = None) -> tuple[list[tuple[str, Decimal]], str | None]:
+    """Return ``[(person_id, share)]`` summing to 1, plus an assumption note.
+
+    Records without ``ownership`` are attributed wholly to ``owner_id`` (or
+    ``fallback_owner``); records with neither are ``unattributed``.  Household
+    totals never double count because shares always sum to one.
+    """
+    ownership = item.get("ownership")
+    if isinstance(ownership, dict):
+        owners = ownership.get("owners") or []
+        form = ownership.get("form")
+        if not owners:
+            return [(UNATTRIBUTED, Decimal(1))], f"{form} ownership lists no beneficial owners; value is unattributed."
+        if all(owner.get("share") is None for owner in owners):
+            share = Decimal(1) / len(owners)
+            note = None if len(owners) == 1 else f"Equal economic shares presumed for {form} ownership without stated shares."
+            return [(owner["person_id"], share) for owner in owners], note
+        return [(owner["person_id"], Decimal(str(owner["share"]))) for owner in owners], None
+    owner = item.get("owner_id") or fallback_owner
+    if isinstance(owner, str) and owner.strip():
+        return [(owner.strip(), Decimal(1))], None
+    return [(UNATTRIBUTED, Decimal(1))], None
+
+
+# --------------------------------------------------------------------------
+# FX
+# --------------------------------------------------------------------------
+
+def fx_plausibility(source: str, target: str, rate: Decimal) -> str | None:
+    """Return ``None`` when plausible, ``"inverted"`` or ``"out_of_range"`` otherwise."""
+    if source not in _USD_PER_UNIT_BANDS or target not in _USD_PER_UNIT_BANDS or rate <= 0:
+        return None
+    source_low, source_high = _USD_PER_UNIT_BANDS[source]
+    target_low, target_high = _USD_PER_UNIT_BANDS[target]
+    low, high = source_low / target_high, source_high / target_low
+    if low <= rate <= high:
+        return None
+    if low <= Decimal(1) / rate <= high:
+        return "inverted"
+    return "out_of_range"
+
+
 def validate_household(household: Any) -> dict[str, Any]:
     """Validate and copy a canonical household, returning data plus scope warnings.
 
     Unknown external values and liabilities are allowed because unknown is not
     zero.  They are reported by the exposure calculator as excluded coverage.
+    See the module docstring for the FX and ownership conventions.
     """
     if not isinstance(household, dict):
         raise ValueError("household must be an object")
     data = deepcopy(household)
     _currency(data.get("currency"), "household.currency")
     household_as_of = _date(data.get("as_of"), "household.as_of")
-    if household_as_of > datetime.now(timezone.utc).date():
+    if household_as_of > latest_plausible_today():
         raise ValueError("household.as_of cannot be in the future")
     if not isinstance(data.get("complete"), bool):
         raise ValueError("household.complete must be a boolean")
@@ -137,7 +380,12 @@ def validate_household(household: Any) -> dict[str, Any]:
         owner = _text(account.get("owner_id"), f"accounts[{index}].owner_id")
         if owner not in people:
             raise ValueError(f"accounts[{index}].owner_id does not reference a person")
-        _text(account.get("type"), f"accounts[{index}].type")
+        account_type = _text(account.get("type"), f"accounts[{index}].type")
+        if canonical_account_type(account_type) is None:
+            warnings.append(
+                f"Account {account['id']} type '{account_type}' is outside the canonical vocabulary; "
+                "it is not liquid by default and is not modelled as a taxable account."
+            )
         _currency(account.get("currency"), f"accounts[{index}].currency")
         for field in ("liquid", "restricted"):
             if field in account and not isinstance(account[field], bool):
@@ -149,6 +397,7 @@ def validate_household(household: Any) -> dict[str, Any]:
             raise ValueError(f"accounts[{index}].restrictions must be a list of strings")
         if "tax_unit" in account:
             _text(account["tax_unit"], f"accounts[{index}].tax_unit")
+        _validate_ownership(account, f"accounts[{index}]", people)
 
     _unique(data["positions"], "positions")
     position_keys: set[tuple[str, str]] = set()
@@ -165,7 +414,7 @@ def validate_household(household: Any) -> dict[str, Any]:
         _number(position.get("quantity"), f"positions[{index}].quantity", nonnegative=True)
         _number(position.get("value"), f"positions[{index}].value", nonnegative=True)
         _currency(position.get("currency"), f"positions[{index}].currency")
-        for field in ("liquid", "restricted"):
+        for field in ("liquid", "restricted", "listed"):
             if field in position and not isinstance(position[field], bool):
                 raise ValueError(f"positions[{index}].{field} must be a boolean")
         if "restrictions" in position and not (
@@ -176,6 +425,19 @@ def validate_household(household: Any) -> dict[str, Any]:
         for field in ("asset_class", "issuer", "sector", "country", "economic_currency"):
             if field in position:
                 (_currency if field == "economic_currency" else _text)(position[field], f"positions[{index}].{field}")
+        if "lockup_until" in position:
+            _date(position["lockup_until"], f"positions[{index}].lockup_until")
+        if "redemption" in position:
+            redemption = position["redemption"]
+            if not isinstance(redemption, dict) or redemption.get("frequency") not in _REDEMPTION_PERIOD_DAYS:
+                raise ValueError(f"positions[{index}].redemption.frequency must be one of {', '.join(_REDEMPTION_PERIOD_DAYS)}")
+            notice = redemption.get("notice_days", 0)
+            if not isinstance(notice, int) or isinstance(notice, bool) or notice < 0:
+                raise ValueError(f"positions[{index}].redemption.notice_days must be a nonnegative integer")
+            if "gate" in redemption:
+                gate = _number(redemption["gate"], f"positions[{index}].redemption.gate", nonnegative=True)
+                if gate > 1:
+                    raise ValueError(f"positions[{index}].redemption.gate must be a fraction no greater than 1")
 
     _unique(data["lots"], "lots")
     lot_quantities: dict[tuple[str, str], Decimal] = {}
@@ -212,6 +474,9 @@ def validate_household(household: Any) -> dict[str, Any]:
         _currency(item.get("currency"), f"liabilities[{index}].currency")
         if "monthly_payment" in item:
             _number(item["monthly_payment"], f"liabilities[{index}].monthly_payment", nonnegative=True)
+        if "owner_id" in item and _text(item["owner_id"], f"liabilities[{index}].owner_id") not in people:
+            raise ValueError(f"liabilities[{index}].owner_id does not reference a person")
+        _validate_ownership(item, f"liabilities[{index}]", people)
     for index, item in enumerate(data["external_assets"]):
         _text(item.get("name"), f"external_assets[{index}].name")
         if item.get("value") not in (None, ""):
@@ -224,6 +489,9 @@ def validate_household(household: Any) -> dict[str, Any]:
         for field in ("asset_class", "sector", "country"):
             if field in item:
                 _text(item[field], f"external_assets[{index}].{field}")
+        if "owner_id" in item and _text(item["owner_id"], f"external_assets[{index}].owner_id") not in people:
+            raise ValueError(f"external_assets[{index}].owner_id does not reference a person")
+        _validate_ownership(item, f"external_assets[{index}]", people)
     for index, item in enumerate(data["income_exposures"]):
         _text(item.get("description"), f"income_exposures[{index}].description")
         _currency(item.get("currency"), f"income_exposures[{index}].currency")
@@ -233,20 +501,39 @@ def validate_household(household: Any) -> dict[str, Any]:
         if "annual_amount" in item:
             _number(item["annual_amount"], f"income_exposures[{index}].annual_amount", nonnegative=True)
 
-    fx_keys: set[tuple[str, str]] = set()
+    fx_rates: dict[tuple[str, str], Decimal] = {}
     for index, item in enumerate(data["fx"]):
         if not isinstance(item, dict):
             raise ValueError(f"fx[{index}] must be an object")
         source, target = _currency(item.get("from"), f"fx[{index}].from"), _currency(item.get("to"), f"fx[{index}].to")
-        if source == target or (source, target) in fx_keys:
+        if source == target or (source, target) in fx_rates:
             raise ValueError(f"duplicate or identity FX pair: {source}/{target}")
-        fx_keys.add((source, target))
-        if _number(item.get("rate"), f"fx[{index}].rate") <= 0:
+        rate = _number(item.get("rate"), f"fx[{index}].rate")
+        if rate <= 0:
             raise ValueError(f"fx[{index}].rate must be positive")
+        fx_rates[(source, target)] = rate
         fx_as_of = _date(item.get("as_of"), f"fx[{index}].as_of")
         if fx_as_of > household_as_of:
             raise ValueError(f"fx[{index}].as_of cannot be after household.as_of")
         _text(item.get("source"), f"fx[{index}].source")
+        if "direction_verified" in item and not isinstance(item["direction_verified"], bool):
+            raise ValueError(f"fx[{index}].direction_verified must be a boolean")
+        verdict = fx_plausibility(source, target, rate)
+        if verdict and item.get("direction_verified") is not True:
+            if verdict == "inverted":
+                warnings.append(
+                    f"FX {source}->{target} rate {_out(rate)} looks inverted (1 {source} = {_out(rate)} {target} is implausible; "
+                    f"the inverse {_out(Decimal(1) / rate)} is plausible). It is excluded until corrected or marked direction_verified."
+                )
+            else:
+                warnings.append(f"FX {source}->{target} rate {_out(rate)} is outside the broad plausibility band; check the quote.")
+    for (source, target), rate in fx_rates.items():
+        reverse = fx_rates.get((target, source))
+        if reverse is not None and source < target and abs(rate * reverse - 1) > FX_RECIPROCAL_TOLERANCE:
+            raise ValueError(
+                f"inconsistent reciprocal FX quotes {source}->{target} {_out(rate)} and {target}->{source} {_out(reverse)}; "
+                f"their product must be within {_out(FX_RECIPROCAL_TOLERANCE * 100)}% of 1"
+            )
 
     fund_ids: set[str] = set()
     for index, fund in enumerate(data["fund_holdings"]):
@@ -408,9 +695,76 @@ def _import_household(inputs: dict[str, Any]) -> tuple[dict[str, Any], list[str]
     return checked["household"], checked["warnings"], [source]
 
 
-def _fx_converter(household: dict[str, Any], as_of: date, max_age: int, warnings: list[str]):
-    rates: dict[tuple[str, str], Decimal] = {}
+# --------------------------------------------------------------------------
+# Evaluation date, FX and look-through (shared with wealth.research)
+# --------------------------------------------------------------------------
+
+def evaluation_date(inputs: dict[str, Any], household_as_of: date) -> tuple[date, str | None]:
+    """Return the date against which data freshness is judged.
+
+    Freshness is measured at evaluation time, not at ``household.as_of``: a
+    household snapshot does not stay current because its FX is as old as it is.
+    """
+    if inputs.get("evaluation_date") is not None:
+        value = _date(inputs["evaluation_date"], "evaluation_date")
+        if value < household_as_of:
+            raise ValueError("evaluation_date cannot precede household.as_of")
+        if value > latest_plausible_today():
+            raise ValueError("evaluation_date cannot be in the future")
+        return value, None
+    today = max(date.today(), household_as_of)
+    return today, f"evaluation_date defaulted to the local calendar date {today.isoformat()}."
+
+
+@dataclass
+class FxConverter:
+    """Order-independent FX conversion over the fresh, plausible household quotes."""
+
+    quotes: dict[tuple[str, str], tuple[Decimal, dict[str, Any]]]
+    stale: set[tuple[str, str]]
+    rejected: set[tuple[str, str]]
+    warnings: list[str]
+    used: dict[tuple[str, str], dict[str, Any]] = dataclass_field(default_factory=dict)
+
+    def rate(self, source: str, target: str) -> Decimal | None:
+        if source == target:
+            return Decimal(1)
+        if (source, target) in self.quotes:
+            return self.quotes[(source, target)][0]
+        if (target, source) in self.quotes:
+            return Decimal(1) / self.quotes[(target, source)][0]
+        return None
+
+    def convert(self, value: Decimal, source: str, target: str, label: str) -> Decimal | None:
+        rate = self.rate(source, target)
+        if rate is None:
+            pair = {(source, target), (target, source)}
+            if pair & self.rejected:
+                reason = "implausible (possibly inverted)"
+            elif pair & self.stale:
+                reason = "stale"
+            else:
+                reason = "missing"
+            self.warnings.append(f"Excluded {label}: {reason} FX for {source}/{target}.")
+            return None
+        if source != target:
+            quoted = (source, target) if (source, target) in self.quotes else (target, source)
+            record = self.quotes[quoted][1]
+            self.used[(source, target)] = {
+                "from": source, "to": target, "rate": _out(rate),
+                "meaning": f"1 {source} = {_out(rate)} {target}",
+                "quoted_as": f"{quoted[0]}->{quoted[1]}", "as_of": record["as_of"], "source": record["source"],
+            }
+        return value * rate
+
+    def used_rows(self) -> list[dict[str, Any]]:
+        return [self.used[key] for key in sorted(self.used)]
+
+
+def fx_converter(household: dict[str, Any], as_of: date, max_age: int, warnings: list[str]) -> FxConverter:
+    quotes: dict[tuple[str, str], tuple[Decimal, dict[str, Any]]] = {}
     stale: set[tuple[str, str]] = set()
+    rejected: set[tuple[str, str]] = set()
     for item in household["fx"]:
         key = (item["from"], item["to"])
         if (as_of - _date(item["as_of"], "fx.as_of")).days > max_age:
@@ -418,50 +772,81 @@ def _fx_converter(household: dict[str, Any], as_of: date, max_age: int, warnings
             warnings.append(f"Excluded stale FX {key[0]}/{key[1]} dated {item['as_of']}.")
             continue
         rate = _number(item["rate"], "fx.rate")
-        rates[key] = rate
-        rates[(key[1], key[0])] = Decimal(1) / rate
-
-    def convert(value: Decimal, source: str, target: str, label: str) -> Decimal | None:
-        if source == target:
-            return value
-        rate = rates.get((source, target))
-        if rate is None:
-            reason = "stale" if (source, target) in stale or (target, source) in stale else "missing"
-            warnings.append(f"Excluded {label}: {reason} FX for {source}/{target}.")
-            return None
-        return value * rate
-
-    return convert
+        if fx_plausibility(key[0], key[1], rate) == "inverted" and item.get("direction_verified") is not True:
+            rejected.add(key)
+            continue
+        quotes[key] = (rate, item)
+    return FxConverter(quotes, stale, rejected, warnings)
 
 
-def _lookthrough(
-    instrument: str,
+def is_fund(metadata: dict[str, Any]) -> bool:
+    return _vocabulary_key(metadata.get("asset_class", "")) in _FUND_ASSET_CLASSES
+
+
+@dataclass(frozen=True)
+class Leaf:
+    """One look-through leaf.  ``kind`` is ``instrument``, ``match``,
+    ``opaque_fund`` (fund without current holdings), ``residual`` (unreported
+    fund weight) or ``cycle``.  The last three are explicit unknown exposure."""
+
+    weight: Decimal
+    instrument_id: str
+    metadata: dict[str, Any]
+    path: tuple[str, ...]
+    kind: str
+
+    @property
+    def unknown(self) -> bool:
+        return self.kind in {"opaque_fund", "residual", "cycle"}
+
+
+def lookthrough(
+    instrument_id: str,
     metadata: dict[str, Any],
     funds: dict[str, dict[str, Any]],
     *,
-    path: tuple[str, ...] = (),
-) -> tuple[list[tuple[Decimal, str, dict[str, Any]]], bool]:
-    """Return leaf weights and whether coverage was incomplete."""
-    if instrument in path:
-        return [(Decimal(1), f"unknown:cycle:{instrument}", {"asset_class": "unknown"})], True
-    fund = funds.get(instrument)
+    opaque: set[str] | frozenset[str] = frozenset(),
+    stop: Callable[[str, dict[str, Any]], bool] | None = None,
+    _path: tuple[str, ...] = (),
+) -> list[Leaf]:
+    """Expand ``instrument_id`` through current fund holdings.
+
+    Unreported fund weight becomes an explicit ``residual`` leaf; funds with no
+    current holdings (stale, missing, or listed in ``opaque``) remain an
+    ``opaque_fund`` leaf.  ``stop`` ends expansion at a matching node.
+    """
+    path = _path + (instrument_id,)
+    if stop is not None and stop(instrument_id, metadata):
+        return [Leaf(Decimal(1), instrument_id, metadata, path, "match")]
+    if instrument_id in _path:
+        return [Leaf(Decimal(1), f"unknown:cycle:{instrument_id}", {"asset_class": "unknown"}, path, "cycle")]
+    fund = funds.get(instrument_id)
     if fund is None:
-        return [(Decimal(1), instrument, metadata)], False
-    leaves: list[tuple[Decimal, str, dict[str, Any]]] = []
+        kind = "opaque_fund" if instrument_id in opaque or is_fund(metadata) else "instrument"
+        return [Leaf(Decimal(1), instrument_id, metadata, path, kind)]
+    leaves: list[Leaf] = []
     total = Decimal(0)
-    partial = False
     for holding in fund["holdings"]:
         weight = _number(holding["weight"], "holding.weight")
         total += weight
-        children, child_partial = _lookthrough(
-            holding["instrument_id"], holding, funds, path=path + (instrument,)
-        )
-        leaves.extend((weight * child_weight, child_id, child_meta) for child_weight, child_id, child_meta in children)
-        partial = partial or child_partial
+        for child in lookthrough(holding["instrument_id"], holding, funds, opaque=opaque, stop=stop, _path=path):
+            leaves.append(Leaf(weight * child.weight, child.instrument_id, child.metadata, child.path, child.kind))
     if total < 1:
-        leaves.append((Decimal(1) - total, f"unknown:residual:{instrument}", {"asset_class": "unknown"}))
-        partial = True
-    return leaves, partial
+        leaves.append(Leaf(Decimal(1) - total, f"unknown:residual:{instrument_id}", {"asset_class": "unknown"}, path, "residual"))
+    return leaves
+
+
+def current_funds(household: dict[str, Any], as_of: date, max_age: int, warnings: list[str]) -> tuple[dict[str, dict[str, Any]], set[str]]:
+    fresh: dict[str, dict[str, Any]] = {}
+    stale: set[str] = set()
+    for fund in household["fund_holdings"]:
+        age = (as_of - _date(fund["as_of"], "fund_holdings.as_of")).days
+        if age > max_age:
+            warnings.append(f"Fund holdings for {fund['instrument_id']} are stale ({fund['as_of']}); look-through excluded.")
+            stale.add(fund["instrument_id"])
+        else:
+            fresh[fund["instrument_id"]] = fund
+    return fresh, stale
 
 
 def _targets(inputs: dict[str, Any]) -> list[dict[str, Any]]:
@@ -490,86 +875,125 @@ def _targets(inputs: dict[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
+def _whole_days(inputs: dict[str, Any], key: str, default: int) -> int:
+    value = _number(inputs.get(key, default), key, nonnegative=True)
+    if value != value.to_integral_value():
+        raise ValueError(f"{key} must be a whole number of days")
+    return int(value)
+
+
+def _position_liquidity(position: dict[str, Any], account: dict[str, Any], as_of: date, horizon: int) -> tuple[Decimal, str]:
+    """Return the liquid fraction of a position within ``horizon`` days and why."""
+    def unrestricted(item: dict[str, Any]) -> bool:
+        return not item.get("restricted", False) and not item.get("restrictions", [])
+
+    if not unrestricted(position) or not unrestricted(account):
+        return Decimal(0), "restricted"
+    if position.get("lockup_until") and _date(position["lockup_until"], "position.lockup_until") > as_of:
+        return Decimal(0), "lockup"
+    if position.get("liquid") is False or account.get("liquid") is False:
+        return Decimal(0), "declared_illiquid"
+    redemption = position.get("redemption")
+    if isinstance(redemption, dict):
+        days = int(redemption.get("notice_days", 0)) + _REDEMPTION_PERIOD_DAYS[redemption["frequency"]]
+        if days > horizon:
+            return Decimal(0), "redemption_terms_exceed_horizon"
+        gate = _number(redemption.get("gate", 1), "redemption.gate")
+        return gate, "redeemable_within_horizon" if gate == 1 else "redemption_gated"
+    inherently_illiquid = _vocabulary_key(position.get("asset_class", "")) in ILLIQUID_ASSET_CLASSES or position.get("listed") is False
+    if inherently_illiquid:
+        if position.get("liquid") is True:
+            return Decimal(1), "declared_liquid"
+        return Decimal(0), "unlisted" if position.get("listed") is False else "illiquid_asset_class"
+    if position.get("liquid") is True:
+        return Decimal(1), "declared_liquid"
+    if account.get("liquid") is True:
+        return Decimal(1), "account_declared_liquid"
+    canonical = canonical_account_type(account["type"])
+    if canonical is not None and ACCOUNT_TYPES[canonical]["liquid_by_default"]:
+        return Decimal(1), f"account_type_default:{canonical}"
+    return Decimal(0), "account_type_not_liquid" if canonical else "unknown_account_type"
+
+
 def _exposure(household: dict[str, Any], inputs: dict[str, Any], base_warnings: list[str]) -> dict[str, Any]:
     warnings = list(base_warnings)
+    assumptions: list[str] = []
     reporting = household["currency"]
-    as_of = _date(household["as_of"], "household.as_of")
-    max_fx_age = int(_number(inputs.get("max_fx_age_days", 7), "max_fx_age_days", nonnegative=True))
-    max_fund_age = int(_number(inputs.get("max_fund_age_days", 90), "max_fund_age_days", nonnegative=True))
-    convert = _fx_converter(household, as_of, max_fx_age, warnings)
-
-    fresh_funds: dict[str, dict[str, Any]] = {}
-    stale_funds: set[str] = set()
-    for fund in household["fund_holdings"]:
-        age = (as_of - _date(fund["as_of"], "fund_holdings.as_of")).days
-        if age > max_fund_age:
-            warnings.append(f"Fund holdings for {fund['instrument_id']} are stale ({fund['as_of']}); look-through excluded.")
-            stale_funds.add(fund["instrument_id"])
-        else:
-            fresh_funds[fund["instrument_id"]] = fund
+    household_as_of = _date(household["as_of"], "household.as_of")
+    as_of, date_note = evaluation_date(inputs, household_as_of)
+    if date_note:
+        assumptions.append(date_note)
+    max_fx_age = _whole_days(inputs, "max_fx_age_days", 7)
+    max_fund_age = _whole_days(inputs, "max_fund_age_days", 90)
+    max_household_age = _whole_days(inputs, "max_household_age_days", 31)
+    horizon = _whole_days(inputs, "liquidity_horizon_days", 30)
+    household_age = (as_of - household_as_of).days
+    household_stale = household_age > max_household_age
+    if household_stale:
+        warnings.append(
+            f"Household snapshot is stale: as_of {household['as_of']} is {household_age} days before evaluation date "
+            f"{as_of.isoformat()} (limit {max_household_age} days)."
+        )
+    fx = fx_converter(household, as_of, max_fx_age, warnings)
+    fresh_funds, stale_funds = current_funds(household, as_of, max_fund_age, warnings)
 
     accounts = {account["id"]: account for account in household["accounts"]}
-    owners = {identifier: account["owner_id"] for identifier, account in accounts.items()}
     exposure: dict[str, dict[str, Decimal]] = {
         dimension: {} for dimension in ("asset_class", "issuer", "sector", "country", "economic_currency", "account", "person", "instrument")
     }
+    person_assets: dict[str, Decimal] = {person["id"]: Decimal(0) for person in household["people"]}
+    person_liabilities: dict[str, Decimal] = {person["id"]: Decimal(0) for person in household["people"]}
     total_positions = Decimal(0)
     liquid_positions = Decimal(0)
+    liquidity_by_reason: dict[str, Decimal] = {}
     nonliquid_position_records = 0
-    liquidity_type_defaults_used: set[str] = set()
     leaves_by_position: dict[str, dict[str, Decimal]] = {}
     incomplete_lookthrough = False
     excluded_value_records = 0
+    unattributed_value_records = 0
 
     def add(dimension: str, name: Any, value: Decimal) -> None:
         label = str(name) if name not in (None, "") else "unknown"
         exposure[dimension][label] = exposure[dimension].get(label, Decimal(0)) + value
 
-    def unrestricted(item: dict[str, Any]) -> bool:
-        return not item.get("restricted", False) and not item.get("restrictions", [])
-
-    liquid_account_types = {"taxable", "brokerage", "bank", "cash", "checking", "savings"}
-
-    def position_is_liquid(position: dict[str, Any]) -> bool:
-        account = accounts[position["account_id"]]
-        if not unrestricted(position) or not unrestricted(account):
-            return False
-        if position.get("liquid") is False or account.get("liquid") is False:
-            return False
-        if position.get("liquid") is True or account.get("liquid") is True:
-            return True
-        account_type = str(account["type"]).strip().lower().replace("_", " ").replace("-", " ")
-        if account_type in liquid_account_types:
-            liquidity_type_defaults_used.add(account_type)
-            return True
-        return False
+    def attribute(item: dict[str, Any], value: Decimal, target: dict[str, Decimal], label: str, *, fallback: str | None = None) -> None:
+        nonlocal unattributed_value_records
+        shares, note = ownership_shares(item, fallback_owner=fallback)
+        if note:
+            assumptions.append(note)
+        for person, share in shares:
+            if person == UNATTRIBUTED:
+                unattributed_value_records += 1
+                warnings.append(f"{label} has no stated owner; its value is unattributed rather than assigned to a person.")
+            target[person] = target.get(person, Decimal(0)) + value * share
+            if target is person_assets:
+                add("person", person, value * share)
 
     for position in household["positions"]:
-        value = convert(_number(position["value"], "position.value"), position["currency"], reporting, f"position {position['id']}")
+        value = fx.convert(_number(position["value"], "position.value"), position["currency"], reporting, f"position {position['id']}")
         if value is None:
             excluded_value_records += 1
             continue
+        account = accounts[position["account_id"]]
         total_positions += value
-        if position_is_liquid(position):
-            liquid_positions += value
-        else:
+        fraction, reason = _position_liquidity(position, account, as_of, horizon)
+        liquid_positions += value * fraction
+        liquidity_by_reason[reason] = liquidity_by_reason.get(reason, Decimal(0)) + value
+        if fraction < 1:
             nonliquid_position_records += 1
         add("account", position["account_id"], value)
-        add("person", owners[position["account_id"]], value)
-        looks_like_fund = str(position.get("asset_class", "")).lower() in {"fund", "etf", "mutual fund"}
-        if position["instrument_id"] in stale_funds or (looks_like_fund and position["instrument_id"] not in fresh_funds):
-            incomplete_lookthrough = True
-            if position["instrument_id"] not in stale_funds:
-                warnings.append(f"No current fund holdings supplied for {position['instrument_id']}; kept as a direct fund exposure.")
-        leaves, partial = _lookthrough(position["instrument_id"], position, fresh_funds)
-        incomplete_lookthrough = incomplete_lookthrough or partial
+        attribute(account, value, person_assets, f"Account {account['id']}")
         leaf_map: dict[str, Decimal] = {}
-        for weight, instrument, metadata in leaves:
-            leaf_value = value * weight
-            leaf_map[instrument] = leaf_map.get(instrument, Decimal(0)) + weight
-            add("instrument", instrument, leaf_value)
+        for leaf in lookthrough(position["instrument_id"], position, fresh_funds, opaque=stale_funds):
+            if leaf.unknown:
+                incomplete_lookthrough = True
+                if leaf.kind == "opaque_fund" and leaf.instrument_id not in stale_funds:
+                    warnings.append(f"No current fund holdings supplied for {leaf.instrument_id}; kept as a direct fund exposure.")
+            leaf_value = value * leaf.weight
+            leaf_map[leaf.instrument_id] = leaf_map.get(leaf.instrument_id, Decimal(0)) + leaf.weight
+            add("instrument", leaf.instrument_id, leaf_value)
             for dimension in ("asset_class", "issuer", "sector", "country", "economic_currency"):
-                add(dimension, metadata.get(dimension), leaf_value)
+                add(dimension, leaf.metadata.get(dimension), leaf_value)
         leaves_by_position[position["id"]] = leaf_map
 
     external_total = Decimal(0)
@@ -578,15 +1002,18 @@ def _exposure(household: dict[str, Any], inputs: dict[str, Any], base_warnings: 
         if item.get("value") in (None, ""):
             excluded_value_records += 1
             continue
-        value = convert(_number(item["value"], "external_asset.value"), item["currency"], reporting, f"external asset {item['id']}")
+        value = fx.convert(_number(item["value"], "external_asset.value"), item["currency"], reporting, f"external asset {item['id']}")
         if value is None:
             excluded_value_records += 1
             continue
         external_total += value
         if item["liquid"]:
             liquid_external += value
+        liquidity_by_reason["external_declared_liquid" if item["liquid"] else "external_declared_illiquid"] = (
+            liquidity_by_reason.get("external_declared_liquid" if item["liquid"] else "external_declared_illiquid", Decimal(0)) + value
+        )
         add("account", "external", value)
-        add("person", "unknown", value)
+        attribute(item, value, person_assets, f"External asset {item['id']}")
         add("instrument", f"external:{item['id']}", value)
         for dimension in ("asset_class", "issuer", "sector", "country", "economic_currency"):
             add(dimension, item.get(dimension), value)
@@ -597,11 +1024,12 @@ def _exposure(household: dict[str, Any], inputs: dict[str, Any], base_warnings: 
         if item.get("value") in (None, ""):
             unknown_liabilities += 1
             continue
-        value = convert(_number(item["value"], "liability.value"), item["currency"], reporting, f"liability {item['id']}")
+        value = fx.convert(_number(item["value"], "liability.value"), item["currency"], reporting, f"liability {item['id']}")
         if value is None:
             unknown_liabilities += 1
         else:
             known_liabilities += value
+            attribute(item, value, person_liabilities, f"Liability {item['id']}")
 
     known_assets = total_positions + external_total
     known_nav = known_assets - known_liabilities
@@ -617,6 +1045,15 @@ def _exposure(household: dict[str, Any], inputs: dict[str, Any], base_warnings: 
             }
             for name, value in sorted(values.items(), key=lambda item: (-item[1], item[0]))
         ]
+    people_rows = [
+        {
+            "person_id": person,
+            "attributed_assets": _out(person_assets.get(person, Decimal(0))),
+            "attributed_liabilities": _out(person_liabilities.get(person, Decimal(0))),
+            "attributed_nav": _out(person_assets.get(person, Decimal(0)) - person_liabilities.get(person, Decimal(0))),
+        }
+        for person in sorted(set(person_assets) | set(person_liabilities), key=lambda key: (key == UNATTRIBUTED, key))
+    ]
 
     income_rows = []
     economic_links = []
@@ -715,9 +1152,7 @@ def _exposure(household: dict[str, Any], inputs: dict[str, Any], base_warnings: 
             status = "indeterminate"
         target_rows.append({
             "dimension": target["dimension"], "name": target["name"],
-            "actual_weight": _out(measured) if measured is not None and not indeterminate else None,
             "measured_weight": _out(measured) if measured is not None else None,
-            "measured_known_assets_weight": _out(measured) if measured is not None else None,
             "measured_weight_basis": "known_assets",
             "unknown_weight": _out(unknown_weight) if unknown_weight is not None else None,
             "possible_weight": {
@@ -732,21 +1167,35 @@ def _exposure(household: dict[str, Any], inputs: dict[str, Any], base_warnings: 
             "status": status, "uncertainty": uncertainty,
         })
 
-    partial = bool(warnings or incomplete_lookthrough or excluded_value_records or unknown_liabilities or income_gap_count)
+    rejected_fx = sorted(f"{a}->{b}" for a, b in fx.rejected)
+    partial = bool(warnings or incomplete_lookthrough or excluded_value_records or unknown_liabilities or income_gap_count or household_stale)
     return {
         "status": "partial" if partial else "ready",
         "result": {
-            "as_of": household["as_of"], "currency": reporting,
+            "as_of": household["as_of"], "evaluation_date": as_of.isoformat(), "currency": reporting,
             "known_assets": _out(known_assets), "known_liabilities": _out(known_liabilities),
             "known_nav": _out(known_nav), "liquid_capital": _out(liquid_capital),
+            "liquidity": {
+                "horizon_days": horizon,
+                "liquid_capital": _out(liquid_capital),
+                "not_liquid_within_horizon": _out(known_assets - liquid_capital),
+                "value_by_reason": {reason: _out(value) for reason, value in sorted(liquidity_by_reason.items())},
+            },
+            "people": people_rows,
+            "fx_used": fx.used_rows(),
+            "fx_convention": "rate = units of `to` per one unit of `from` (from=USD, to=MXN, rate=18 means 1 USD = 18 MXN)",
             "coverage": {
                 "household_complete": household["complete"],
+                "household_age_days": household_age,
+                "household_stale": household_stale,
                 "excluded_value_records": excluded_value_records,
                 "unknown_liabilities": unknown_liabilities,
                 "unknown_sections": household["unknown_sections"],
                 "nonliquid_position_records": nonliquid_position_records,
+                "unattributed_value_records": unattributed_value_records,
                 "income_exposure_gaps": income_gap_count,
                 "lookthrough_complete": not incomplete_lookthrough,
+                "rejected_fx_quotes": rejected_fx,
                 "weight_denominator": "known_assets",
             },
             "exposures": dimensions, "income_exposures": income_rows,
@@ -754,13 +1203,13 @@ def _exposure(household: dict[str, Any], inputs: dict[str, Any], base_warnings: 
         },
         "missing": [], "warnings": list(dict.fromkeys(warnings)),
         "sources": ["household", *sorted({fund["source"] for fund in fresh_funds.values()})],
-        "assumptions": [
-            f"FX older than {max_fx_age} days is excluded.",
-            f"Fund holdings older than {max_fund_age} days are excluded.",
-            "Positions without explicit liquidity are liquid only in taxable, brokerage, bank, cash, checking, or savings accounts; restricted positions and accounts are excluded from liquid capital.",
+        "assumptions": list(dict.fromkeys([
+            *assumptions,
+            f"Freshness is measured at evaluation date {as_of.isoformat()}: FX older than {max_fx_age} days, fund holdings older than {max_fund_age} days are excluded; a household older than {max_household_age} days is flagged stale.",
+            f"Liquid capital is value convertible to cash within {horizon} days: restricted, locked-up, declared-illiquid, unlisted and inherently illiquid asset classes (private equity/credit, real estate, hedge funds, restricted stock, collectibles) are excluded regardless of account; redemption terms and gates are applied; otherwise the canonical account-type default is used.",
+            "Person attribution uses stated ownership shares (owner_id alone means 100%); household totals count each asset once.",
             "Income amounts are not capitalized into assets or NAV; economic links are shared labels and do not estimate correlation or causation.",
-            *([f"Used account-type liquidity defaults for: {', '.join(sorted(liquidity_type_defaults_used))}."] if liquidity_type_defaults_used else []),
-        ],
+        ])),
     }
 
 

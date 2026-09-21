@@ -1,0 +1,14 @@
+"Positions for All-Accounts as of 04:14 PM ET, 08/31/2026"
+
+"Individual ...5678"
+"Symbol","Description","Qty (Quantity)","Price","Price Chng % (Price Change %)","Mkt Val (Market Value)","Cost Basis","Gain % (Gain/Loss %)","Security Type"
+"VTI","VANGUARD TOTAL STOCK MARKET ETF","100","$250.00","0.5%","$25,000.00","$20,000.00","25%","ETFs & Closed End Funds"
+"AAPL","APPLE INC","10.5","$200.10","0.2%","$2,101.05","$1,500.00","40.07%","Equity"
+"Cash & Cash Investments","--","--","--","--","$1,500.00","--","--","Cash and Money Market"
+"Account Total","--","--","--","--","$28,601.05","$21,500.00","--","--"
+
+"Roth IRA ...4321"
+"Symbol","Description","Qty (Quantity)","Price","Price Chng % (Price Change %)","Mkt Val (Market Value)","Cost Basis","Gain % (Gain/Loss %)","Security Type"
+"VXUS","VANGUARD TOTAL INTL STOCK ETF","200","$60.00","0.1%","$12,000.00","$11,000.00","9.09%","ETFs & Closed End Funds"
+"Cash & Cash Investments","--","--","--","--","$250.00","--","--","Cash and Money Market"
+"Account Total","--","--","--","--","$12,250.00","$11,000.00","--","--"

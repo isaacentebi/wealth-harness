@@ -1,61 +1,66 @@
 """Integrated historical market analytics and portfolio construction.
 
 This module is a pure adapter around :mod:`wealth.legacy`: it reads only caller
-supplied data (or the legacy yfinance adapter when explicitly requested), never
-writes client state, and returns the shared domain-module envelope.
+supplied data (or the legacy yfinance/Ken French adapters when explicitly or
+documentedly requested), never writes client state, and returns the shared
+domain-module envelope.
+
+Documented defaults (each is also stated in the result's ``assumptions``):
+
+* Benchmark: an explicit ``benchmark`` wins; otherwise USD uses VTI (a broad US
+  equity market proxy). Other currencies have no default and omit beta/alpha.
+* Risk-free: an explicit ``risk_free`` wins; otherwise live USD prices use the
+  Ken French daily RF (one-month T-bill). Caller-supplied prices never trigger
+  a hidden fetch, and other currencies have no built-in series: both omit
+  Sharpe/alpha with a stated reason and cash earns 0% unless ``risk_free`` is
+  ``"ken_french"`` (USD) or ``{"annual_rate", "source"}``.
+* Weights must sum to one; ``weights_residual`` = ``cash`` or ``normalize``
+  is the only way a partial allocation is completed.
+* Covariance: the common (all assets observed) window with Ledoit-Wolf
+  shrinkage; ``covariance="pairwise"`` opts into an inception-aware estimate.
 """
 from __future__ import annotations
 
 import csv
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import date
+import math
 from pathlib import Path
-import re
-from typing import Any
+import threading
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
 
 from . import legacy
+from ._common import currency as _iso_currency
+from ._common import envelope as _envelope
+from ._common import historical_cvar
+from ._common import iso_date as _iso_date
+from ._common import number as _number
+from ._common import text as _text
 
 
-_TASKS = {"analyze", "stress", "compare", "construct", "factors"}
+_TASKS = {"analyze", "stress", "compare", "construct", "factors", "sic_premium"}
 _METHODS = {"equal", "invvol", "minvar", "riskparity", "hrp", "cvar", "black_litterman"}
 _CASH_PREFIX = "CASH::"
-
-
-def _envelope(status: str, result: dict | None = None, *, missing=(), warnings=(),
-              sources=(), assumptions=()) -> dict:
-    return {"status": status, "result": result or {}, "missing": list(missing),
-            "warnings": list(warnings), "sources": list(sources),
-            "assumptions": list(assumptions)}
-
-
-def _text(value: Any, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{field} must be a nonempty string")
-    return value.strip()
+_WEIGHT_TOLERANCE = 1e-6
+_DEFAULT_BENCHMARKS = {
+    "USD": ("VTI", "Vanguard Total Stock Market ETF, a broad US equity market proxy"),
+}
+_MIN_PAIR_OVERLAP = 60
 
 
 def _currency(value: Any, field: str = "currency") -> str:
-    value = _text(value, field)
-    if not re.fullmatch(r"[A-Z]{3}", value):
-        raise ValueError(f"{field} must be three uppercase letters")
-    return value
+    return _iso_currency(_text(value, field), field)
 
 
-def _number(value: Any, field: str, *, minimum: float | None = None) -> float:
-    if isinstance(value, bool):
-        raise ValueError(f"{field} must be a finite number")
-    try:
-        out = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{field} must be a finite number") from exc
-    if not np.isfinite(out) or (minimum is not None and out < minimum):
-        raise ValueError(f"{field} must be a finite number >= {minimum}")
-    return out
-
-
+# --------------------------------------------------------------------------
+# weights and portfolio scope
+# --------------------------------------------------------------------------
 def _weights(raw: Any, field: str) -> dict[str, float]:
+    """Validated positive raw weights, *not* rescaled."""
     if not isinstance(raw, dict) or not raw:
         raise ValueError(f"{field} must be a nonempty object")
     out: dict[str, float] = {}
@@ -64,10 +69,39 @@ def _weights(raw: Any, field: str) -> dict[str, float]:
         if name in out:
             raise ValueError(f"{field} contains duplicate symbol {name}")
         out[name] = _number(value, f"{field}.{symbol}", minimum=0.0)
-    total = sum(out.values())
-    if total <= 0:
+    if sum(out.values()) <= 0:
         raise ValueError(f"{field} must have a positive sum")
-    return {symbol: value / total for symbol, value in out.items() if value > 0}
+    return {symbol: value for symbol, value in out.items() if value > 0}
+
+
+def _complete_weights(raw: Any, field: str, currency: str, policy: Any,
+                      warnings: list[str]) -> tuple[dict[str, float] | None, list[str]]:
+    """Weights that sum to one, or a ``missing`` entry explaining why not.
+
+    A partial allocation is never rescaled silently: the caller must say whether
+    the remainder is cash (``weights_residual='cash'``) or whether proportional
+    rescaling is intended (``weights_residual='normalize'``).
+    """
+    weights = _weights(raw, field)
+    if policy is not None and policy not in {"cash", "normalize"}:
+        raise ValueError("weights_residual must be 'cash' or 'normalize'")
+    total = sum(weights.values())
+    if abs(total - 1.0) <= _WEIGHT_TOLERANCE:
+        return {k: v / total for k, v in weights.items()}, []
+    if policy == "normalize":
+        warnings.append(f"{field} summed to {total:.6g}; rescaled proportionally to 1 at the caller's "
+                        "explicit request (weights_residual='normalize').")
+        return {k: v / total for k, v in weights.items()}, []
+    if policy == "cash":
+        if total > 1.0:
+            raise ValueError(f"{field} sum to {total:.6g}; a residual above 100% cannot be completed with cash")
+        cash = f"{_CASH_PREFIX}{currency}"
+        completed = dict(weights)
+        completed[cash] = completed.get(cash, 0.0) + 1.0 - total
+        warnings.append(f"{field} summed to {total:.6g}; the unallocated {1.0 - total:.4%} is labelled "
+                        f"{cash} at the caller's explicit request (weights_residual='cash').")
+        return completed, []
+    return None, [f"{field} summing to 1 (received {total:.6g}), or weights_residual='cash'|'normalize'"]
 
 
 def _validate_cash_symbols(weights: dict[str, float], currency: str, field: str) -> None:
@@ -134,25 +168,58 @@ def _stored_portfolio(inputs: dict, context: dict) -> tuple[dict | None, str | N
         "weights": {symbol: value / total for symbol, value in values.items() if value > 0},
         "currency": currency, "scope": scope, "total_value": total,
         "complete": supplied.get("complete") is True,
-        "source": source_name,
+        "source": source_name, "warnings": [],
     }
     return portfolio, source_name, supplied.get("complete") is True, missing
 
 
 def _portfolio(inputs: dict, context: dict, key: str = "weights") -> tuple[dict | None, dict | None, list[str]]:
+    weights, info, missing = _raw_portfolio(inputs, context, key)
+    if weights and info is not None:
+        info = dict(info)
+        info["warnings"] = list(info.get("warnings", []))
+        info["assumptions"] = list(info.get("assumptions", []))
+        weights = _combine_sic(weights, inputs, info.get("source") or key,
+                               info["assumptions"], info["warnings"])
+        if info.get("weights") is not None:
+            info["weights"] = weights
+    return weights, info, missing
+
+
+def _raw_portfolio(inputs: dict, context: dict, key: str = "weights") -> tuple[dict | None, dict | None, list[str]]:
     if key in inputs:
         currency = _currency(inputs.get("currency"))
-        requested = _weights(inputs[key], key)
+        warnings: list[str] = []
+        requested, missing = _complete_weights(inputs[key], key, currency,
+                                               inputs.get("weights_residual"), warnings)
+        if requested is None:
+            return None, None, missing
         _validate_cash_symbols(requested, currency, key)
         return requested, {
             "currency": currency, "scope": str(inputs.get("scope") or "request weights"),
             "complete": True, "source": f"inputs.{key}", "total_value": None,
+            "warnings": warnings,
         }, []
     stored, _, _, missing = _stored_portfolio(inputs, context)
     return (stored or {}).get("weights"), stored, missing
 
 
-def _inline_prices(spec: dict, tickers: list[str], currency: str) -> pd.DataFrame:
+# --------------------------------------------------------------------------
+# prices, risk-free, benchmark
+# --------------------------------------------------------------------------
+@dataclass
+class _Prices:
+    px: pd.DataFrame | None
+    warnings: list = field(default_factory=list)
+    sources: list = field(default_factory=list)
+    missing: list = field(default_factory=list)
+    assumptions: list = field(default_factory=list)
+    rf: pd.Series | None = None          # daily decimal on px.index[1:]
+    rf_label: str | None = None
+    dropped_optional: list = field(default_factory=list)
+
+
+def _inline_prices(spec: dict, tickers: list[str], optional: set[str]) -> pd.DataFrame:
     rows = spec.get("rows")
     if not isinstance(rows, list) or len(rows) < 3:
         raise ValueError("prices.rows must contain at least three observations")
@@ -160,31 +227,100 @@ def _inline_prices(spec: dict, tickers: list[str], currency: str) -> pd.DataFram
     if "date" not in frame:
         raise ValueError("prices.rows require a date field")
     frame.index = pd.to_datetime(frame.pop("date"), errors="raise")
-    missing = sorted(set(tickers) - set(frame.columns))
+    missing = sorted(set(tickers) - set(frame.columns) - optional)
     if missing:
         raise ValueError("prices.rows missing requested assets: " + ", ".join(missing))
-    return frame[tickers].astype(float)
+    return frame[[t for t in tickers if t in frame.columns]].astype(float)
 
 
-def _csv_prices(path: str, tickers: list[str]) -> pd.DataFrame:
+def _csv_prices(path: str, tickers: list[str], optional: set[str]) -> pd.DataFrame:
     price_path = Path(path).expanduser()
     with price_path.open(newline="", encoding="utf-8-sig") as handle:
         header = next(csv.reader(handle), [])
     if len(header) < 2 or len(set(header[1:])) != len(header[1:]):
         raise ValueError("price_csv has duplicate or missing asset columns")
     frame = pd.read_csv(price_path, index_col=0, parse_dates=True)
-    missing = sorted(set(tickers) - set(frame.columns))
+    missing = sorted(set(tickers) - set(frame.columns) - optional)
     if missing:
         raise ValueError("price_csv missing requested assets: " + ", ".join(missing))
-    return frame[tickers]
+    return frame[[t for t in tickers if t in frame.columns]]
 
 
-def _price_frame(inputs: dict, tickers: list[str], currency: str) -> tuple[pd.DataFrame | None, list, list, list]:
+def _risk_free(inputs: dict, return_index: pd.DatetimeIndex, currency: str,
+               warnings: list[str], live: bool) -> tuple[pd.Series | None, str | None, dict | None]:
+    """Daily decimal risk-free series on ``return_index``, its label and source.
+
+    ``risk_free`` may be ``"none"``, ``"ken_french"`` (USD one-month T-bill,
+    fetched), or ``{"annual_rate", "source"}``. Unstated, live USD prices use
+    Ken French; caller-supplied prices stay offline and omit it with a warning.
+    """
+    spec = inputs.get("risk_free")
+    if spec == "none":
+        warnings.append("risk_free='none': Sharpe and alpha are omitted and cash earns 0%.")
+        return None, None, None
+    if isinstance(spec, dict):
+        annual = _number(spec.get("annual_rate"), "risk_free.annual_rate")
+        if annual <= -1:
+            raise ValueError("risk_free.annual_rate must be greater than -1")
+        source = _text(spec.get("source"), "risk_free.source")
+        if "currency" in spec and _currency(spec["currency"], "risk_free.currency") != currency:
+            raise ValueError("risk_free.currency must match the portfolio currency")
+        daily = (1.0 + annual) ** (1.0 / legacy.TRADING_DAYS) - 1.0
+        label = (f"constant {annual:.4%} annual {currency} risk-free assumption compounded daily "
+                 f"({source})")
+        return (pd.Series(daily, index=return_index), label,
+                {"kind": "risk_free_assumption", "ref": source, "currency": currency,
+                 "annual_rate": annual})
+    if spec not in (None, "ken_french"):
+        raise ValueError("risk_free must be 'none', 'ken_french', or an object with annual_rate and source")
+    if spec == "ken_french" and currency != "USD":
+        raise ValueError("risk_free='ken_french' is the US one-month T-bill and applies only to USD portfolios")
+    if spec is None and currency == "USD" and not live:
+        warnings.append("Supplied prices keep this run offline, so no risk-free series was fetched: Sharpe and "
+                        "alpha are omitted and cash earns 0%. Pass risk_free='ken_french' (USD T-bill, fetched) "
+                        "or risk_free.annual_rate with a source.")
+        return None, None, None
+    if currency != "USD":
+        warnings.append(f"No built-in {currency} risk-free series: Sharpe and alpha are omitted and cash earns 0%. "
+                        f"Supply risk_free.annual_rate with a source to compute them.")
+        return None, None, None
+    rf = legacy._rf_daily(return_index, warnings, "USD")
+    if rf is None:
+        return None, None, None
+    label = "Ken French daily USD RF (one-month T-bill)"
+    return rf, label, {"kind": "risk_free", "ref": "Ken French US daily RF (one-month T-bill)",
+                       "currency": "USD"}
+
+
+def _common_window(px: pd.DataFrame, requested_years: int | None, warnings: list[str]) -> dict:
+    """Describe (and warn about) how asset histories truncate the common sample."""
+    coverage = px.attrs.get("coverage") or {}
+    first = {symbol: (coverage.get(symbol) or {}).get("first") for symbol in px.columns}
+    start = px.index.min()
+    limited = sorted(s for s, d in first.items() if d and pd.Timestamp(d) >= start)
+    detail = {"start": str(start.date()), "end": str(px.index.max().date()), "n_prices": int(len(px)),
+              "asset_first_available": {k: v for k, v in first.items() if v}}
+    if requested_years:
+        requested_start = px.index.max() - pd.Timedelta(days=int(round(365.25 * requested_years)))
+        short_days = (start - requested_start).days
+        detail["requested_years"] = requested_years
+        if short_days > 30:
+            detail["truncated_by"] = limited
+            warnings.insert(0, f"TRUNCATED SAMPLE: the common window starts {start.date()}, about "
+                               f"{short_days / 365.25:.1f} years short of the requested {requested_years}y, "
+                               f"because {', '.join(limited) or 'some assets'} lack earlier history; every "
+                               "statistic uses this shorter window.")
+    return detail
+
+
+def _price_frame(inputs: dict, tickers: list[str], currency: str, *, need_rf: bool = False,
+                 optional: set[str] | None = None, align: bool = True) -> _Prices:
+    optional = set(optional or ())
     cash = [ticker for ticker in tickers if ticker.startswith(_CASH_PREFIX)]
     market = [ticker for ticker in tickers if ticker not in cash]
-    warnings: list[str] = []
-    assumptions: list[str] = []
+    out = _Prices(None)
     source: dict
+    requested_years = None
     if "prices" in inputs:
         spec = inputs["prices"]
         if not isinstance(spec, dict):
@@ -194,52 +330,437 @@ def _price_frame(inputs: dict, tickers: list[str], currency: str) -> tuple[pd.Da
             raise ValueError("prices.currency must match portfolio currency; no implicit FX")
         source_ref = spec.get("source")
         if not source_ref:
-            return None, [], [], ["prices.source"]
-        px = _inline_prices(spec, market, currency) if market else pd.DataFrame(index=pd.to_datetime([r["date"] for r in spec["rows"]]))
+            out.missing = ["prices.source"]
+            return out
+        px = (_inline_prices(spec, market, optional) if market
+              else pd.DataFrame(index=pd.to_datetime([r["date"] for r in spec["rows"]])))
         source = {"kind": "supplied_rows", "ref": str(source_ref)}
+        if declared != SIC_CURRENCY:
+            sic_cols = [t for t in market if is_sic_symbol(t)]
+            if sic_cols:
+                out.warnings.append(f"{', '.join(sic_cols)} quote in {SIC_CURRENCY} on BMV/SIC; the supplied rows are "
+                                    f"taken as already converted into {declared} (no implicit FX is applied).")
     elif "price_csv" in inputs:
         source_ref = inputs.get("price_source")
         if not source_ref:
-            return None, [], [], ["price_source"]
-        px = _csv_prices(_text(inputs["price_csv"], "price_csv"), market) if market else pd.DataFrame()
+            out.missing = ["price_source"]
+            return out
+        px = _csv_prices(_text(inputs["price_csv"], "price_csv"), market, optional) if market else pd.DataFrame()
         source = {"kind": "supplied_csv", "ref": str(source_ref),
                   "path": str(Path(inputs["price_csv"]).expanduser())}
     else:
         if not market:
-            return None, [], [], ["prices or at least one non-cash asset"]
+            out.missing = ["prices or at least one non-cash asset"]
+            return out
         years = inputs.get("years", 5)
         if isinstance(years, bool) or not isinstance(years, int) or years <= 0:
             raise ValueError("years must be a positive integer")
-        px, warnings = legacy._load_prices(market, years=years, currency=currency)
+        requested_years = years
+        sic_notes: list[str] = []
+        if any(is_sic_symbol(t) for t in market):
+            with _sic_quote_currencies(sic_notes):
+                px, out.warnings = legacy._load_prices(market, years=years, currency=currency, align=align)
+        else:
+            px, out.warnings = legacy._load_prices(market, years=years, currency=currency, align=align)
+        out.warnings.extend(sic_notes)
         source = {"kind": "live", "ref": "Yahoo Finance via yfinance adjusted daily closes",
                   "retrieved": px.attrs.get("retrieved")}
         absent = sorted(set(market) - set(px.columns))
-        if absent:
-            return None, warnings, [source], [f"prices for {symbol}" for symbol in absent]
-    if len(px.index) < 3:
-        raise ValueError("prices require at least three observations")
+        required_absent = [s for s in absent if s not in optional]
+        if required_absent:
+            out.sources = [source]
+            out.missing = [f"prices for {symbol}" for symbol in required_absent]
+            return out
+    out.dropped_optional = sorted(set(market) & optional - set(px.columns))
+    market = [t for t in market if t in px.columns]
     px.index = pd.DatetimeIndex(px.index).tz_localize(None)
     px = px.sort_index()
+    if align and market and px[market].isna().any().any():
+        before = len(px)
+        attrs = dict(px.attrs)
+        px = px.dropna(subset=market, how="any")
+        px.attrs.update(attrs)
+        out.warnings.insert(0, f"TRUNCATED SAMPLE: {before - len(px)} supplied price rows with a missing "
+                               "asset were dropped so every statistic uses one common window "
+                               f"({px.index.min().date()} to {px.index.max().date()}).")
+    if len(px.index) < 3:
+        raise ValueError("prices require at least three observations")
+    px = px[market].copy() if market else pd.DataFrame(index=px.index)
+    if align:
+        if market:
+            legacy.daily_returns(px)
+    else:
+        empty = [symbol for symbol in market if px[symbol].notna().sum() < 2]
+        if empty:
+            raise ValueError("prices have fewer than two observations for: " + ", ".join(empty))
+        values = px.to_numpy(float)
+        if (values[np.isfinite(values)] <= 0).any() or np.isinf(values).any():
+            raise ValueError("prices must be positive and finite where observed")
+    return_index = px.index[1:]
+    rf, rf_label, rf_source = (None, None, None)
+    if need_rf or cash:
+        rf, rf_label, rf_source = _risk_free(inputs, return_index, currency, out.warnings,
+                                             live=source["kind"] == "live")
     for symbol in cash:
-        px[symbol] = 1.0
-    px = px[tickers]
-    legacy.daily_returns(px)
+        if rf is not None:
+            px[symbol] = np.r_[1.0, np.cumprod(1.0 + rf.to_numpy(float))]
+        else:
+            px[symbol] = 1.0
+    px = px[[t for t in tickers if t in px.columns]]
     source["currency"] = currency
     source["window"] = {"start": str(px.index.min().date()), "end": str(px.index.max().date()),
                         "n_prices": int(len(px))}
+    if source["kind"] == "live" and align:
+        source["common_window"] = _common_window(px, requested_years, out.warnings)
     px.attrs.update(currency=currency, source=source["ref"], data_kind=source["kind"],
-                    retrieved=source.get("retrieved"), risk_free_policy="omit",
-                    first_dates={symbol: str(px.index.min().date()) for symbol in px.columns})
-    assumptions.append("Supplied prices are adjusted closes already expressed in the declared currency." if source["kind"].startswith("supplied") else "Live prices use the legacy yfinance adjusted-close adapter and its common-date window.")
+                    retrieved=source.get("retrieved"),
+                    risk_free_policy="supplied" if rf is not None else "omit",
+                    first_dates=px.attrs.get("first_dates") or
+                    {symbol: str(px[symbol].first_valid_index().date()) for symbol in px.columns})
+    out.assumptions.append("Supplied prices are adjusted closes already expressed in the declared currency."
+                           if source["kind"].startswith("supplied") else
+                           "Live prices use the legacy yfinance adjusted-close adapter.")
+    sic_live = [t for t in market if is_sic_symbol(t)] if source["kind"] == "live" else []
+    if sic_live:
+        source["quote_currencies"] = {t: SIC_CURRENCY for t in sic_live}
+        out.assumptions.append(f"{', '.join(sic_live)} are {SIC_SUFFIX} (BMV/SIC) listings quoted in {SIC_CURRENCY}" +
+                               ("." if currency == SIC_CURRENCY else
+                                f", converted to {currency} at the prior available {SIC_CURRENCY}->{currency} "
+                                "daily close (maximum four calendar days)."))
     if cash:
-        assumptions.append("Stored cash is preserved as a constant-price, zero-return allocation.")
-    return px, warnings, [source], []
+        out.assumptions.append(f"Stored cash compounds at the {rf_label}." if rf is not None else
+                               "Stored cash is a constant-price, zero-return allocation because no "
+                               f"{currency} risk-free series is available.")
+    out.px, out.rf, out.rf_label = px, rf, rf_label
+    out.sources = [source] + ([rf_source] if rf_source else [])
+    return out
 
 
-def _metadata(px: pd.DataFrame, currency: str) -> dict:
-    return {symbol: {"currency": currency} for symbol in px.columns}
+def _benchmark(inputs: dict, currency: str, warnings: list[str],
+               assumptions: list[str]) -> tuple[str | None, str]:
+    explicit = inputs.get("benchmark")
+    if explicit:
+        return _text(explicit, "benchmark").upper(), "explicit"
+    default = _DEFAULT_BENCHMARKS.get(currency)
+    if default is None:
+        warnings.append(f"No benchmark supplied and no documented {currency} default; beta and alpha are "
+                        "omitted. Pass benchmark explicitly.")
+        return None, "none"
+    assumptions.append(f"Benchmark defaulted to {default[0]} ({default[1]}), the documented {currency} "
+                       "default; pass benchmark to override.")
+    return default[0], "currency_default"
 
 
+def _metadata(px: pd.DataFrame, currency: str, inputs: dict, warnings: list[str]) -> dict:
+    meta: dict[str, dict] = {symbol: {"currency": currency} for symbol in px.columns}
+    quoted = px.attrs.get("quote_currencies") or {}
+    for symbol in meta:
+        native = quote_currency(symbol, quoted.get(symbol))
+        if native:
+            meta[symbol]["quote_currency"] = native
+    raw = inputs.get("expense_ratios")
+    if raw is None:
+        return meta
+    if not isinstance(raw, dict):
+        raise ValueError("expense_ratios must be an object of decimal annual ratios")
+    source = _text(inputs.get("expense_ratio_source"), "expense_ratio_source")
+    for symbol, value in raw.items():
+        name = _text(symbol, "expense_ratios symbol").upper()
+        ratio = _number(value, f"expense_ratios.{symbol}", minimum=0.0)
+        if ratio >= 1:
+            raise ValueError(f"expense_ratios.{symbol} must be a decimal below one (0.0003 = 0.03%)")
+        if ratio > 0.03:
+            warnings.append(f"expense_ratios.{name} = {ratio} is above 3%; confirm it is a decimal "
+                            "(0.0003 = 0.03%), not a percentage.")
+        if name in meta:
+            meta[name].update(expense_ratio=ratio, source=source, fee_status="caller-verified")
+    for symbol in meta:
+        if symbol.startswith(_CASH_PREFIX):
+            meta[symbol].update(expense_ratio=0.0, fee_status="cash")
+    return meta
+
+
+# --------------------------------------------------------------------------
+# SIC (Sistema Internacional de Cotizaciones, Mexico) listings
+# --------------------------------------------------------------------------
+SIC_SUFFIX = ".MX"
+SIC_CURRENCY = "MXN"
+_META_LOCK = threading.RLock()
+
+
+def is_sic_symbol(symbol: Any) -> bool:
+    """True for Yahoo-style BMV/SIC symbols (``AAPL.MX``), which quote in MXN."""
+    return isinstance(symbol, str) and symbol.strip().upper().endswith(SIC_SUFFIX) \
+        and len(symbol.strip()) > len(SIC_SUFFIX)
+
+
+def quote_currency(symbol: str, provider_currency: str | None = None) -> str | None:
+    """A symbol's native quote currency.
+
+    The ``.MX`` exchange suffix (BMV/SIC) is MXN by construction and wins over
+    provider metadata; every other symbol keeps the provider's currency (or
+    ``None`` when unknown -- unknown is never assumed).
+    """
+    if is_sic_symbol(symbol):
+        return SIC_CURRENCY
+    return str(provider_currency).upper() if provider_currency else None
+
+
+def _sic_underlyings(raw: Any) -> dict[str, str]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("sic_underlyings must be an object mapping SIC symbols to home listings")
+    out: dict[str, str] = {}
+    for key, value in raw.items():
+        name = _text(key, "sic_underlyings symbol").upper()
+        if not is_sic_symbol(name):
+            raise ValueError(f"sic_underlyings key {name} must be a {SIC_SUFFIX} symbol")
+        target = _text(value, f"sic_underlyings.{key}").upper()
+        if is_sic_symbol(target):
+            raise ValueError(f"sic_underlyings.{key} must be a home-market listing, not a SIC symbol")
+        out[name] = target
+    return out
+
+
+def sic_underlying(symbol: str, mapping: dict[str, str] | None = None) -> str:
+    """Home-market underlying of a SIC symbol: explicit mapping, else the suffix stripped."""
+    name = _text(symbol, "symbol").upper()
+    if not is_sic_symbol(name):
+        return name
+    explicit = _sic_underlyings(mapping)
+    return explicit.get(name) or name[: -len(SIC_SUFFIX)]
+
+
+def _combine_sic(weights: dict[str, float] | None, inputs: dict, field: str,
+                 assumptions: list[str], warnings: list[str]) -> dict[str, float] | None:
+    """Merge ``XXX.MX`` weights into their home underlying when explicitly asked.
+
+    Off by default: without ``combine_sic_listings=true`` weights are returned
+    unchanged and only a note flags SIC/home pairs held side by side.
+    """
+    if not weights:
+        return weights
+    flag = inputs.get("combine_sic_listings", False)
+    if not isinstance(flag, bool):
+        raise ValueError("combine_sic_listings must be true or false")
+    mapping = _sic_underlyings(inputs.get("sic_underlyings"))
+    sic = [s for s in weights if is_sic_symbol(s)]
+    if not sic:
+        return weights
+    if not flag:
+        pairs = sorted(f"{s}/{sic_underlying(s, mapping)}" for s in sic
+                       if sic_underlying(s, mapping) in weights)
+        if pairs:
+            note = (f"{field} holds SIC and home listings of the same underlying ({', '.join(pairs)}); they are "
+                    "analysed as separate assets. Pass combine_sic_listings=true to treat each pair as one exposure.")
+            if note not in warnings:
+                warnings.append(note)
+        return weights
+    merged: dict[str, float] = {}
+    moved: list[str] = []
+    for symbol, weight in weights.items():
+        target = sic_underlying(symbol, mapping) if is_sic_symbol(symbol) else symbol
+        if target != symbol:
+            moved.append(f"{symbol}->{target}")
+        merged[target] = merged.get(target, 0.0) + weight
+    line = (f"combine_sic_listings=true: SIC listings in {field} are treated as their home-market underlying "
+            f"and merged into one exposure ({', '.join(moved)}); the home listing's price history stands in for "
+            "the SIC line, so the SIC premium/discount and MXN trading frictions are ignored.")
+    if line not in assumptions:
+        assumptions.append(line)
+    return merged
+
+
+def _combined_shocks(shocks: dict, inputs: dict, name: str) -> dict:
+    """Re-key explicit stress shocks onto merged underlyings when combining SIC listings."""
+    if inputs.get("combine_sic_listings") is not True:
+        return shocks
+    mapping = _sic_underlyings(inputs.get("sic_underlyings"))
+    out: dict = {}
+    for symbol, value in shocks.items():
+        key = str(symbol).upper()
+        target = sic_underlying(key, mapping) if is_sic_symbol(key) else symbol
+        if target in out and _number(out[target], f"{name}.{target}") != _number(value, f"{name}.{symbol}"):
+            raise ValueError(f"{name}: conflicting shocks for {symbol} and its underlying {target}")
+        out[target] = value
+    return out
+
+
+@contextmanager
+def _sic_quote_currencies(notes: list[str]):
+    """Make the legacy price adapter treat ``.MX`` symbols as MXN-quoted.
+
+    ``legacy.to_currency`` reads native currencies from provider metadata; for
+    ``.MX`` symbols the exchange suffix fixes the currency at MXN, so a missing or
+    contradictory provider field is replaced (and a contradiction is disclosed).
+    """
+    with _META_LOCK:
+        original = legacy._ticker_meta
+
+        def patched(tickers) -> dict:
+            meta = dict(original(tickers) or {})
+            for symbol in tickers:
+                if not is_sic_symbol(symbol):
+                    continue
+                entry = dict(meta.get(symbol) or {})
+                provider = str(entry.get("currency") or "").upper() or None
+                if provider and provider != SIC_CURRENCY:
+                    notes.append(f"{symbol}: provider reported quote currency {provider}; the {SIC_SUFFIX} "
+                                 f"(BMV/SIC) listing is treated as {SIC_CURRENCY}.")
+                entry["currency"] = SIC_CURRENCY
+                meta[symbol] = entry
+            return meta
+
+        legacy._ticker_meta = patched
+        try:
+            yield
+        finally:
+            legacy._ticker_meta = original
+
+
+def _dated_input(value: Any, as_of: Any, field: str, as_of_field: str) -> tuple[float | None, str | None]:
+    if value is None:
+        return None, None
+    amount = _number(value, field)
+    if amount <= 0:
+        raise ValueError(f"{field} must be positive")
+    if as_of is None:
+        return amount, None
+    if isinstance(as_of, (date, pd.Timestamp)):
+        return amount, pd.Timestamp(as_of).date().isoformat()
+    return amount, _iso_date(as_of, as_of_field).isoformat()
+
+
+def _fetch_quote(symbol: str, expected_ccy: str, field: str,
+                 warnings: list[str]) -> tuple[float | None, str | None, dict | None]:
+    quote = legacy._latest_quote(symbol, warnings)
+    if quote is None:
+        return None, None, None
+    price, qccy, pdate = quote
+    qccy = quote_currency(symbol, qccy)
+    if qccy != expected_ccy:
+        warnings.append(f"{symbol}: quote currency {qccy} is not {expected_ccy}; {field} left unknown.")
+        return None, None, None
+    return float(price), pdate, {"kind": "live", "ref": "Yahoo Finance via yfinance adjusted daily closes",
+                                 "symbol": symbol, "field": field, "currency": qccy, "as_of": pdate,
+                                 "retrieved": date.today().isoformat()}
+
+
+def _fetch_usdmxn(warnings: list[str]) -> tuple[float | None, str | None, dict | None]:
+    try:
+        series = legacy._fx_series("USD", SIC_CURRENCY)
+    except Exception as exc:  # noqa: BLE001 -- provider failure means unknown, not zero
+        warnings.append(f"USDMXN: no usable FX history ({exc})")
+        return None, None, None
+    if series is None or not len(series):
+        warnings.append("USDMXN: no usable FX history")
+        return None, None, None
+    series = series.dropna().sort_index()
+    rate, rdate = float(series.iloc[-1]), str(pd.Timestamp(series.index[-1]).date())
+    return rate, rdate, {"kind": "live", "ref": "Yahoo Finance via yfinance USDMXN=X daily close",
+                         "field": "usdmxn", "as_of": rdate, "retrieved": date.today().isoformat()}
+
+
+def sic_premium(sic_symbol: str, home_symbol: str | None = None, *,
+                sic_price_mxn: float | None = None, sic_price_as_of: str | None = None,
+                home_price: float | None = None, home_price_as_of: str | None = None,
+                usdmxn: float | None = None, usdmxn_as_of: str | None = None,
+                source: str | None = None, fetch_missing: bool = False,
+                sic_underlyings: dict[str, str] | None = None) -> dict:
+    """Premium (+) or discount (-) of a SIC MXN price over the home USD price x USDMXN.
+
+    ``premium = sic_price_mxn / (home_price * usdmxn) - 1``. Every input may be
+    supplied (with its ``*_as_of`` date) or, only when ``fetch_missing`` is true,
+    taken from the existing Yahoo adapter. A missing input is never zero: the
+    result is ``needs_input`` naming the missing field(s). Inputs dated on
+    different days are computed but warned about.
+    """
+    sic = _text(sic_symbol, "sic_symbol").upper()
+    if not is_sic_symbol(sic):
+        raise ValueError(f"sic_symbol must be a {SIC_SUFFIX} (BMV/SIC) symbol, e.g. AAPL.MX")
+    home = (_text(home_symbol, "home_symbol").upper() if home_symbol is not None
+            else sic_underlying(sic, sic_underlyings))
+    if is_sic_symbol(home):
+        raise ValueError("home_symbol must be the home-market (USD) listing, not a SIC symbol")
+    if not isinstance(fetch_missing, bool):
+        raise ValueError("fetch_missing must be true or false")
+    warnings: list[str] = []
+    sources: list[dict] = []
+    values = {
+        "sic_price_mxn": _dated_input(sic_price_mxn, sic_price_as_of, "sic_price_mxn", "sic_price_as_of"),
+        "home_price": _dated_input(home_price, home_price_as_of, "home_price", "home_price_as_of"),
+        "usdmxn": _dated_input(usdmxn, usdmxn_as_of, "usdmxn", "usdmxn_as_of"),
+    }
+    supplied = [name for name, (value, _) in values.items() if value is not None]
+    if supplied:
+        if not source:
+            return _envelope("needs_input", {"sic_symbol": sic, "home_symbol": home},
+                             missing=["price_source (who supplied " + ", ".join(supplied) + ")"])
+        sources.append({"kind": "supplied", "ref": _text(source, "price_source"), "fields": supplied,
+                        "as_of": {name: values[name][1] for name in supplied}})
+    if fetch_missing:
+        fetchers = {"sic_price_mxn": lambda: _fetch_quote(sic, SIC_CURRENCY, "sic_price_mxn", warnings),
+                    "home_price": lambda: _fetch_quote(home, "USD", "home_price", warnings),
+                    "usdmxn": lambda: _fetch_usdmxn(warnings)}
+        for name, (value, _) in list(values.items()):
+            if value is None:
+                fetched, fdate, fsource = fetchers[name]()
+                if fetched is not None:
+                    values[name] = (fetched, fdate)
+                    sources.append(fsource)
+    inputs_used = {name: {"value": value, "as_of": as_of} for name, (value, as_of) in values.items()}
+    base = {"sic_symbol": sic, "home_symbol": home, "home_currency": "USD",
+            "sic_currency": SIC_CURRENCY, "inputs": inputs_used}
+    missing = [name for name, (value, _) in values.items() if value is None]
+    assumptions = [f"{home} is quoted in USD and {sic} in MXN; one {sic} share represents one {home} share "
+                   "(no ADR/share-class ratio).",
+                   "premium = sic_price_mxn / (home_price x usdmxn) - 1; positive is a SIC premium, "
+                   "negative a discount. No bid/ask, commissions, or taxes."]
+    if missing:
+        if not fetch_missing:
+            warnings.append("Missing inputs were not fetched; pass them explicitly or set fetch_missing=true.")
+        return _envelope("needs_input", base, missing=missing, warnings=warnings,
+                         sources=sources, assumptions=assumptions)
+    sic_px, home_px, fx = (values[k][0] for k in ("sic_price_mxn", "home_price", "usdmxn"))
+    implied = home_px * fx
+    premium = sic_px / implied - 1.0
+    dates = {name: as_of for name, (_, as_of) in values.items()}
+    undated = [name for name, as_of in dates.items() if as_of is None]
+    if undated:
+        warnings.append("Undated input(s): " + ", ".join(undated) + "; the comparison cannot be confirmed "
+                        "as same-day.")
+    distinct = sorted({d for d in dates.values() if d})
+    if len(distinct) > 1:
+        warnings.append("DATE MISMATCH: inputs are from different dates (" +
+                        ", ".join(f"{k} {v}" for k, v in dates.items() if v) +
+                        "); part of the premium may be price or FX movement between those dates.")
+    result = {**base,
+              "implied_sic_price_mxn": implied,
+              "sic_price_usd": sic_px / fx,
+              "premium": premium,
+              "premium_bps": premium * 1e4,
+              "direction": "premium" if premium > 0 else ("discount" if premium < 0 else "parity"),
+              "as_of": dates,
+              "same_day": len(distinct) == 1 and not undated}
+    return _envelope("ready", result, warnings=warnings, sources=sources, assumptions=assumptions)
+
+
+def _sic_premium_task(inputs: dict, context: dict) -> dict:
+    if "sic_symbol" not in inputs:
+        return _envelope("needs_input", missing=["sic_symbol"])
+    return sic_premium(
+        inputs["sic_symbol"], inputs.get("home_symbol"),
+        sic_price_mxn=inputs.get("sic_price_mxn"), sic_price_as_of=inputs.get("sic_price_as_of"),
+        home_price=inputs.get("home_price"), home_price_as_of=inputs.get("home_price_as_of"),
+        usdmxn=inputs.get("usdmxn"), usdmxn_as_of=inputs.get("usdmxn_as_of"),
+        source=inputs.get("price_source"), fetch_missing=inputs.get("fetch_missing", False),
+        sic_underlyings=inputs.get("sic_underlyings"))
+
+
+# --------------------------------------------------------------------------
+# descriptive tasks
+# --------------------------------------------------------------------------
 def _analysis(inputs: dict, context: dict) -> dict:
     weights, info, missing = _portfolio(inputs, context)
     if missing:
@@ -247,22 +768,34 @@ def _analysis(inputs: dict, context: dict) -> dict:
     if weights is None:
         return _envelope("needs_input", missing=["weights or household/portfolio.snapshot"])
     currency = info["currency"]
-    benchmark = str(inputs.get("benchmark") or next((x for x in weights if not x.startswith(_CASH_PREFIX)), "")).upper()
+    warnings = list(info.get("warnings", []))
+    assumptions = ["Historical statistics are descriptive and are not forecasts.", *info.get("assumptions", [])]
+    benchmark, basis = _benchmark(inputs, currency, warnings, assumptions)
     tickers = list(weights)
     if benchmark and benchmark not in tickers:
         tickers.append(benchmark)
-    px, warnings, sources, price_missing = _price_frame(inputs, tickers, currency)
-    if price_missing:
-        return _envelope("needs_input", missing=price_missing, warnings=warnings, sources=sources)
-    result = legacy.analyze_frame(px, benchmark, weights, warnings, _metadata(px, currency),
-                                  str(inputs.get("rebalance", "annual")))
+    optional = {benchmark} if basis == "currency_default" and benchmark not in weights else set()
+    prices = _price_frame(inputs, tickers, currency, need_rf=True, optional=optional)
+    warnings.extend(prices.warnings)
+    if prices.missing:
+        return _envelope("needs_input", missing=prices.missing, warnings=warnings, sources=prices.sources)
+    if benchmark in prices.dropped_optional:
+        warnings.append(f"Default benchmark {benchmark} is not in the supplied prices; beta and alpha are omitted.")
+        benchmark, basis = None, "none"
+    result = legacy.analyze_frame(prices.px, benchmark or "", weights, warnings,
+                                  _metadata(prices.px, currency, inputs, warnings),
+                                  str(inputs.get("rebalance", "annual")),
+                                  risk_free=prices.rf, risk_free_label=prices.rf_label)
+    warnings = result["warnings"]
+    result["benchmark"] = {"symbol": benchmark, "basis": basis}
     result["scope"] = info["scope"]
     result["portfolio_total_value"] = info["total_value"]
     result["input_complete"] = info["complete"]
     status = "ready" if info["complete"] else "partial"
-    completeness = [] if info["complete"] else ["Stored portfolio is not marked complete; statistics cover only supplied positions."]
-    return _envelope(status, result, warnings=[*warnings, *completeness], sources=sources,
-                     assumptions=["Historical statistics are descriptive and are not forecasts."])
+    if not info["complete"]:
+        warnings.append("Stored portfolio is not marked complete; statistics cover only supplied positions.")
+    return _envelope(status, result, warnings=warnings, sources=prices.sources,
+                     assumptions=[*assumptions, *prices.assumptions])
 
 
 def _stress(inputs: dict, context: dict) -> dict:
@@ -276,13 +809,19 @@ def _stress(inputs: dict, context: dict) -> dict:
         return _envelope("needs_input", missing=["scenarios"])
     needs_history = any(isinstance(s, dict) and ("start" in s or "end" in s) for s in scenarios)
     sources: list = []
-    warnings: list[str] = []
-    assumptions = ["Scenario returns are deterministic arithmetic on the supplied portfolio weights; no rebalancing, taxes, or trading costs."]
+    warnings: list[str] = list(info.get("warnings", []))
+    assumptions = ["Scenario returns are deterministic arithmetic on the supplied portfolio weights; no rebalancing, taxes, or trading costs.",
+                   "Historical windows run close-to-close from the first observed close on or after start to the last close on or before end (the same convention as the regime table).",
+                   *info.get("assumptions", [])]
     px = None
     if needs_history:
-        px, warnings, sources, price_missing = _price_frame(inputs, list(weights), info["currency"])
-        if price_missing:
-            return _envelope("needs_input", missing=price_missing, warnings=warnings, sources=sources)
+        prices = _price_frame(inputs, list(weights), info["currency"])
+        warnings.extend(prices.warnings)
+        sources = prices.sources
+        if prices.missing:
+            return _envelope("needs_input", missing=prices.missing, warnings=warnings, sources=sources)
+        px = prices.px
+        assumptions.extend(prices.assumptions)
     rows = []
     for index, scenario in enumerate(scenarios):
         if not isinstance(scenario, dict):
@@ -292,6 +831,7 @@ def _stress(inputs: dict, context: dict) -> dict:
             shocks = scenario["shocks"]
             if not isinstance(shocks, dict):
                 raise ValueError(f"scenarios[{index}].shocks must be an object")
+            shocks = _combined_shocks(shocks, inputs, name)
             missing_assets = sorted(set(weights) - set(shocks))
             if missing_assets:
                 raise ValueError(f"{name}: shocks missing portfolio assets: {', '.join(missing_assets)}")
@@ -329,22 +869,38 @@ def _compare(inputs: dict, context: dict) -> dict:
         return _envelope("needs_input", missing=["current_weights or household/portfolio.snapshot"])
     if "proposed_weights" not in inputs:
         return _envelope("needs_input", missing=["proposed_weights"])
-    proposed = _weights(inputs["proposed_weights"], "proposed_weights")
+    warnings = list(info.get("warnings", []))
+    proposed, proposed_missing = _complete_weights(inputs["proposed_weights"], "proposed_weights",
+                                                   info["currency"], inputs.get("weights_residual"), warnings)
+    if proposed is None:
+        return _envelope("needs_input", missing=proposed_missing, warnings=warnings)
     _validate_cash_symbols(proposed, info["currency"], "proposed_weights")
+    assumptions = ["Both portfolios use the identical historical sample, currency, and rebalance convention.",
+                   *info.get("assumptions", [])]
+    proposed = _combine_sic(proposed, inputs, "proposed_weights", assumptions, warnings)
+    benchmark, basis = _benchmark(inputs, info["currency"], warnings, assumptions)
     all_names = list(dict.fromkeys([*current, *proposed]))
-    benchmark = str(inputs.get("benchmark") or next((x for x in all_names if not x.startswith(_CASH_PREFIX)), "")).upper()
     if benchmark and benchmark not in all_names:
         all_names.append(benchmark)
-    px, warnings, sources, price_missing = _price_frame(inputs, all_names, info["currency"])
-    if price_missing:
-        return _envelope("needs_input", missing=price_missing, warnings=warnings, sources=sources)
-    result = legacy.compare_portfolios(px, current, proposed, benchmark,
+    optional = {benchmark} if basis == "currency_default" and benchmark not in {*current, *proposed} else set()
+    prices = _price_frame(inputs, all_names, info["currency"], need_rf=True, optional=optional)
+    warnings.extend(prices.warnings)
+    if prices.missing:
+        return _envelope("needs_input", missing=prices.missing, warnings=warnings, sources=prices.sources)
+    if benchmark in prices.dropped_optional:
+        warnings.append(f"Default benchmark {benchmark} is not in the supplied prices; beta and alpha are omitted.")
+        benchmark, basis = None, "none"
+    result = legacy.compare_portfolios(prices.px, current, proposed, benchmark or "",
                                        str(inputs.get("rebalance", "annual")),
-                                       _metadata(px, info["currency"]))
-    result.update(currency=info["currency"], scope=info["scope"], input_complete=info["complete"])
+                                       _metadata(prices.px, info["currency"], inputs, warnings),
+                                       risk_free=prices.rf, risk_free_label=prices.rf_label)
+    result.update(currency=info["currency"], scope=info["scope"], input_complete=info["complete"],
+                  benchmark={"symbol": benchmark, "basis": basis})
+    for leg in ("current", "proposed"):
+        warnings.extend(w for w in result[leg].get("warnings", []) if w not in warnings)
     status = "ready" if info["complete"] else "partial"
-    return _envelope(status, result, warnings=warnings, sources=sources,
-                     assumptions=["Both portfolios use the identical historical sample, currency, and rebalance convention."])
+    return _envelope(status, result, warnings=warnings, sources=prices.sources,
+                     assumptions=[*assumptions, *prices.assumptions])
 
 
 def _factors(inputs: dict, context: dict) -> dict:
@@ -369,14 +925,16 @@ def _factors(inputs: dict, context: dict) -> dict:
     names = [name for name in names if not name.startswith(_CASH_PREFIX)]
     if not names:
         return _envelope("needs_input", missing=["at least one non-cash asset for factor analysis"])
-    px, warnings, sources, price_missing = _price_frame(inputs, names, "USD")
-    if price_missing:
-        return _envelope("needs_input", missing=price_missing, warnings=warnings, sources=sources)
+    prices = _price_frame(inputs, names, "USD")
+    warnings, sources = list(info.get("warnings", [])) + prices.warnings, prices.sources
+    if prices.missing:
+        return _envelope("needs_input", missing=prices.missing, warnings=warnings, sources=sources)
     model = inputs.get("model", 3)
     if isinstance(model, bool) or model not in (3, 5):
         raise ValueError("model must be 3 or 5")
-    result = legacy.factor_regression(px, model, warnings)
+    result = legacy.factor_regression(prices.px, model, warnings)
     result.update(currency="USD", scope=info["scope"], input_complete=info["complete"])
+    factor_assumptions = list(info.get("assumptions", []))
     factor_source = {"kind": "factor_data", "ref": f"Ken French US daily {model}-factor library",
                      "currency": "USD", "window": result["window"]}
     sources.append(factor_source)
@@ -391,19 +949,70 @@ def _factors(inputs: dict, context: dict) -> dict:
         result["excluded_cash"] = cash
     status = "ready" if info["complete"] else "partial"
     return _envelope(status, result, warnings=warnings, sources=sources,
-                     assumptions=["Factor loadings are in-sample regressions on US daily factors, not forecasts or causal exposures."])
+                     assumptions=["Factor loadings are in-sample regressions on US daily factors, not forecasts or causal exposures.",
+                                  *factor_assumptions])
 
 
-def _hrp(rets: pd.DataFrame, max_weight: float) -> pd.Series:
+# --------------------------------------------------------------------------
+# covariance estimators
+# --------------------------------------------------------------------------
+def _shrunk_cov(rets: pd.DataFrame) -> np.ndarray:
+    return legacy.shrink_covariance(rets)[0] * legacy.TRADING_DAYS
+
+
+def _pairwise_cov(rets: pd.DataFrame) -> tuple[np.ndarray, dict]:
+    """Pairwise-complete annualized covariance with eigenvalue-clipped PSD repair.
+
+    Each variance uses the asset's full observed history in the window and each
+    covariance uses the dates both assets were observed. The resulting matrix
+    need not be positive semidefinite; its correlation matrix is repaired by
+    clipping eigenvalues at a small floor and restoring the unit diagonal, which
+    leaves each asset's own variance unchanged. No shrinkage is applied.
+    """
+    observed = rets.notna().astype(int)
+    overlap = observed.T @ observed
+    min_overlap = int(overlap.to_numpy().min())
+    if min_overlap < _MIN_PAIR_OVERLAP:
+        raise ValueError(f"pairwise covariance needs at least {_MIN_PAIR_OVERLAP} overlapping returns for every "
+                         f"pair; the thinnest pair has {min_overlap}")
+    raw = rets.cov(min_periods=_MIN_PAIR_OVERLAP).to_numpy(float) * legacy.TRADING_DAYS
+    vol = np.sqrt(np.clip(np.diag(raw), 1e-18, None))
+    corr = raw / np.outer(vol, vol)
+    corr = (corr + corr.T) / 2.0
+    values, vectors = np.linalg.eigh(corr)
+    floor = 1e-8
+    repaired = values.min() < floor
+    clipped = vectors @ np.diag(np.clip(values, floor, None)) @ vectors.T
+    scale = np.sqrt(np.diag(clipped))
+    clipped = clipped / np.outer(scale, scale)
+    cov = clipped * np.outer(vol, vol)
+    first = {c: str(rets[c].first_valid_index().date()) for c in rets.columns}
+    return cov, {"estimator": "pairwise-complete sample covariance (no shrinkage)",
+                 "psd_repair": "eigenvalue clipping of the correlation matrix at 1e-8, unit diagonal restored",
+                 "psd_repair_applied": bool(repaired),
+                 "min_eigenvalue_before_repair": float(values.min()),
+                 "minimum_pair_overlap_returns": min_overlap,
+                 "asset_first_return": first,
+                 "label": "INCEPTION-AWARE: assets contribute different sample lengths; statistics are not from one common window"}
+
+
+# --------------------------------------------------------------------------
+# construction methods
+# --------------------------------------------------------------------------
+def _hrp(rets: pd.DataFrame, max_weight: float, cov: np.ndarray | None = None) -> pd.Series:
     from scipy.cluster.hierarchy import leaves_list, linkage
     from scipy.spatial.distance import squareform
 
     if rets.shape[1] == 1:
         legacy._cap(np.ones(1), max_weight)
         return pd.Series([1.0], index=rets.columns)
-    cov = pd.DataFrame(legacy.shrink_covariance(rets)[0], index=rets.columns, columns=rets.columns)
-    corr = rets.corr().clip(-1.0, 1.0)
+    cov_matrix = _shrunk_cov(rets) if cov is None else np.asarray(cov, float)
+    cov = pd.DataFrame(cov_matrix, index=rets.columns, columns=rets.columns)
+    vol = np.sqrt(np.clip(np.diag(cov_matrix), 1e-18, None))
+    corr = pd.DataFrame(np.clip(cov_matrix / np.outer(vol, vol), -1.0, 1.0),
+                        index=rets.columns, columns=rets.columns)
     distance = np.sqrt(np.maximum((1.0 - corr.to_numpy()) / 2.0, 0.0))
+    np.fill_diagonal(distance, 0.0)
     order = leaves_list(linkage(squareform(distance, checks=False), method="single")).tolist()
     ordered = [rets.columns[i] for i in order]
     allocation = pd.Series(1.0, index=ordered)
@@ -433,48 +1042,145 @@ def _hrp(rets: pd.DataFrame, max_weight: float) -> pd.Series:
     return pd.Series(capped, index=rets.columns)
 
 
-def _cvar(rets: pd.DataFrame, max_weight: float, confidence: float,
-          min_return: float | None) -> pd.Series:
+def _cvar_lp(returns: np.ndarray, max_weight: float, confidence: float,
+             mean_floor_daily: float | None) -> np.ndarray:
     from scipy.optimize import linprog
 
-    if not 0.5 <= confidence < 1.0:
-        raise ValueError("confidence must be at least 0.5 and below 1")
-    n_obs, n_assets = rets.shape
-    legacy._cap(np.ones(n_assets), max_weight)
+    n_obs, n_assets = returns.shape
     # Variables: weights, VaR threshold alpha (free), nonnegative tail excesses.
     objective = np.r_[np.zeros(n_assets), 1.0,
                       np.full(n_obs, 1.0 / ((1.0 - confidence) * n_obs))]
-    losses = -rets.to_numpy(float)
-    aub = np.c_[losses, -np.ones(n_obs), -np.eye(n_obs)]
+    aub = np.c_[-returns, -np.ones(n_obs), -np.eye(n_obs)]
     bub = np.zeros(n_obs)
-    if min_return is not None:
-        target_daily = (1.0 + min_return) ** (1.0 / legacy.TRADING_DAYS) - 1.0
-        aub = np.vstack([aub, np.r_[-rets.mean().to_numpy(), 0.0, np.zeros(n_obs)]])
-        bub = np.r_[bub, -target_daily]
+    if mean_floor_daily is not None:
+        aub = np.vstack([aub, np.r_[-returns.mean(axis=0), 0.0, np.zeros(n_obs)]])
+        bub = np.r_[bub, -mean_floor_daily]
     result = linprog(objective, A_ub=aub, b_ub=bub,
                      A_eq=np.r_[np.ones(n_assets), 0.0, np.zeros(n_obs)][None, :],
                      b_eq=[1.0], bounds=[(0.0, max_weight)] * n_assets + [(None, None)] + [(0.0, None)] * n_obs,
                      method="highs")
     if not result.success:
         raise ValueError(f"CVaR optimizer did not produce feasible weights: {result.message}")
-    weights = result.x[:n_assets]
-    return pd.Series(weights / weights.sum(), index=rets.columns)
+    weights = np.clip(result.x[:n_assets], 0.0, None)
+    return weights / weights.sum()
 
 
-def _black_litterman(rets: pd.DataFrame, max_weight: float, inputs: dict) -> tuple[pd.Series, dict]:
+def _cvar(rets: pd.DataFrame, max_weight: float, confidence: float,
+          min_cagr: float | None = None, min_arithmetic: float | None = None) -> tuple[pd.Series, dict]:
+    """Minimum historical CVaR with an optional, explicitly typed return floor.
+
+    ``min_cagr`` is an in-sample geometric floor on the daily-rebalanced
+    constant-mix portfolio: CAGR = exp(252 * mean(log(1 + r_p))) - 1. It is not
+    linear in the weights, so the linear arithmetic-mean floor is bisected for
+    the lowest level whose minimum-CVaR solution meets the CAGR target. ``min_arithmetic`` is the linear floor on
+    252 x the mean daily return.
+    """
+    if not 0.5 <= confidence < 1.0:
+        raise ValueError("confidence must be at least 0.5 and below 1")
+    if min_cagr is not None and min_arithmetic is not None:
+        raise ValueError("use either min_annual_return (CAGR) or min_annual_arithmetic_return, not both")
+    n_assets = rets.shape[1]
+    legacy._cap(np.ones(n_assets), max_weight)
+    returns = rets.to_numpy(float)
+    detail: dict = {"objective": f"minimize historical daily CVaR at confidence {confidence:.3f}",
+                    "return_floor": None}
+    if min_cagr is None and min_arithmetic is None:
+        return pd.Series(_cvar_lp(returns, max_weight, confidence, None), index=rets.columns), detail
+    if min_arithmetic is not None:
+        floor = min_arithmetic / legacy.TRADING_DAYS
+        weights = _cvar_lp(returns, max_weight, confidence, floor)
+        iterations = 1
+        kind, target = "arithmetic_annual_mean", min_arithmetic
+    else:
+        from scipy.optimize import linprog
+
+        target_log = math.log1p(min_cagr) / legacy.TRADING_DAYS
+
+        def log_growth(w: np.ndarray) -> float:
+            path = returns @ w
+            return float(np.mean(np.log1p(path))) if (path > -1).all() else -np.inf
+
+        unreachable = (f"min_annual_return {min_cagr:.4%} (in-sample CAGR) is not attainable by the "
+                       "long-only capped minimum-CVaR portfolios on this sample")
+        # Bracket the arithmetic floor: the log target is a lower bound (arithmetic
+        # mean >= geometric mean); the highest attainable mean is the upper bound.
+        top = linprog(-returns.mean(axis=0), A_eq=np.ones((1, n_assets)), b_eq=[1.0],
+                      bounds=[(0.0, max_weight)] * n_assets, method="highs")
+        high = float(-top.fun) - 1e-12
+        weights = _cvar_lp(returns, max_weight, confidence, max(target_log, -1.0))
+        iterations = 1
+        floor = target_log
+        if log_growth(weights) < target_log - 1e-12:
+            if high < target_log:
+                raise ValueError(unreachable)
+            best = _cvar_lp(returns, max_weight, confidence, high)
+            if log_growth(best) < target_log - 1e-12:
+                raise ValueError(unreachable)
+            low = target_log
+            # Bisect for the lowest arithmetic floor whose minimum-CVaR solution meets the CAGR target.
+            for iterations in range(2, 42):
+                middle = (low + high) / 2.0
+                candidate = _cvar_lp(returns, max_weight, confidence, middle)
+                if log_growth(candidate) >= target_log - 1e-12:
+                    high, best = middle, candidate
+                else:
+                    low = middle
+                if high - low < 1e-10:
+                    break
+            weights, floor = best, high
+        kind, target = "in_sample_cagr", min_cagr
+    portfolio = returns @ weights
+    detail["return_floor"] = {
+        "kind": kind, "target": target,
+        "binding_arithmetic_daily_floor": floor, "iterations": iterations,
+        "realized_in_sample_cagr": float(math.expm1(np.mean(np.log1p(portfolio)) * legacy.TRADING_DAYS)),
+        "realized_arithmetic_annual_mean": float(portfolio.mean() * legacy.TRADING_DAYS),
+        "portfolio_convention": "daily-rebalanced constant mix on the training sample",
+    }
+    return pd.Series(weights, index=rets.columns), detail
+
+
+def _market_prior(names: list[str], inputs: dict, cov: np.ndarray,
+                  risk_aversion: float) -> tuple[np.ndarray, dict]:
+    raw = inputs.get("market_weights")
+    if not isinstance(raw, dict) or {str(k).upper() for k in raw} != set(names):
+        raise ValueError("market_weights must identify exactly every construction symbol")
+    source = _text(inputs.get("market_weights_source"), "market_weights_source")
+    values = {str(k).upper(): _number(v, f"market_weights.{k}", minimum=0.0) for k, v in raw.items()}
+    total = sum(values.values())
+    if total <= 0:
+        raise ValueError("market_weights must have a positive sum")
+    w_mkt = np.array([values[name] / total for name in names])
+    prior = risk_aversion * cov @ w_mkt
+    return prior, {"prior": "market_equilibrium",
+                   "market_weights": {name: float(w_mkt[i]) for i, name in enumerate(names)},
+                   "market_weights_source": source,
+                   "prior_method": "reverse optimization: pi = risk_aversion x Sigma x w_market "
+                                   "(market weights normalized over this universe only)"}
+
+
+def _black_litterman(rets: pd.DataFrame, max_weight: float, inputs: dict,
+                     cov: np.ndarray | None = None) -> tuple[pd.Series, dict]:
     names = list(rets.columns)
-    prior_raw = inputs.get("prior_returns")
-    if not isinstance(prior_raw, dict) or set(prior_raw) != set(names):
-        raise ValueError("prior_returns must identify exactly every construction symbol")
-    prior = np.array([_number(prior_raw[name], f"prior_returns.{name}") for name in names])
-    views = inputs.get("views")
-    if not isinstance(views, list) or not views:
-        raise ValueError("views must be a nonempty list")
     tau = _number(inputs.get("tau"), "tau", minimum=0.0)
     risk_aversion = _number(inputs.get("risk_aversion"), "risk_aversion", minimum=0.0)
     if tau <= 0 or risk_aversion <= 0:
         raise ValueError("tau and risk_aversion must be greater than zero")
-    annual_cov = legacy.shrink_covariance(rets)[0] * legacy.TRADING_DAYS
+    annual_cov = _shrunk_cov(rets) if cov is None else np.asarray(cov, float)
+    has_explicit, has_market = "prior_returns" in inputs, "market_weights" in inputs
+    if has_explicit == has_market:
+        raise ValueError("Black-Litterman needs exactly one prior: prior_returns or market_weights")
+    if has_explicit:
+        prior_raw = inputs.get("prior_returns")
+        if not isinstance(prior_raw, dict) or set(prior_raw) != set(names):
+            raise ValueError("prior_returns must identify exactly every construction symbol")
+        prior = np.array([_number(prior_raw[name], f"prior_returns.{name}") for name in names])
+        prior_detail: dict = {"prior": "explicit"}
+    else:
+        prior, prior_detail = _market_prior(names, inputs, annual_cov, risk_aversion)
+    views = inputs.get("views", [])
+    if not isinstance(views, list) or (has_explicit and not views):
+        raise ValueError("views must be a nonempty list (it may be empty only with a market_weights prior)")
     tau_cov = tau * annual_cov
     loadings, expected, omega, view_records = [], [], [], []
     for index, view in enumerate(views):
@@ -502,46 +1208,61 @@ def _black_litterman(rets: pd.DataFrame, max_weight: float, inputs: dict) -> tup
                              "expected_return": q, "confidence": confidence,
                              "prior_view_return": float(row @ prior),
                              "uncertainty_variance": uncertainty})
-    p = np.vstack(loadings)
-    q = np.asarray(expected)
-    system = p @ tau_cov @ p.T + np.diag(omega)
-    try:
-        adjustment = tau_cov @ p.T @ np.linalg.solve(system, q - p @ prior)
-    except np.linalg.LinAlgError as exc:
-        raise ValueError("Black-Litterman view system is singular") from exc
-    posterior = prior + adjustment
+    if loadings:
+        p = np.vstack(loadings)
+        q = np.asarray(expected)
+        system = p @ tau_cov @ p.T + np.diag(omega)
+        try:
+            gain = tau_cov @ p.T @ np.linalg.inv(system)
+        except np.linalg.LinAlgError as exc:
+            raise ValueError("Black-Litterman view system is singular") from exc
+        posterior = prior + gain @ (q - p @ prior)
+        # Posterior uncertainty of the mean: M = tau*Sigma - tau*Sigma P' (P tau*Sigma P' + Omega)^-1 P tau*Sigma
+        uncertainty_m = tau_cov - gain @ p @ tau_cov
+    else:
+        posterior = prior.copy()
+        uncertainty_m = tau_cov.copy()
+    uncertainty_m = (uncertainty_m + uncertainty_m.T) / 2.0
+    posterior_cov = annual_cov + uncertainty_m
     weights = legacy._optimize(
-        lambda w: float(-(posterior @ w) + 0.5 * risk_aversion * (w @ annual_cov @ w)),
+        lambda w: float(-(posterior @ w) + 0.5 * risk_aversion * (w @ posterior_cov @ w)),
         len(names), max_weight,
     )
     return pd.Series(weights, index=names), {
+        **prior_detail,
         "prior_returns": {name: float(prior[i]) for i, name in enumerate(names)},
         "posterior_returns": {name: float(posterior[i]) for i, name in enumerate(names)},
+        "posterior_volatility": {name: float(np.sqrt(posterior_cov[i, i])) for i, name in enumerate(names)},
+        "optimizer_covariance": "Sigma + M: return covariance plus posterior uncertainty of the mean",
         "views": view_records, "tau": tau, "risk_aversion": risk_aversion,
     }
 
 
 def _fit_method(rets: pd.DataFrame, method: str, max_weight: float,
-                inputs: dict) -> tuple[pd.Series, dict | None]:
+                inputs: dict, cov: np.ndarray | None = None) -> tuple[pd.Series, dict | None]:
     if method == "hrp":
-        return _hrp(rets, max_weight), None
+        return _hrp(rets, max_weight, cov), None
     if method == "cvar":
+        if cov is not None:
+            raise ValueError("cvar optimizes over joint historical scenarios and requires the common window; "
+                             "covariance='pairwise' is not applicable")
         confidence = _number(inputs.get("confidence", 0.95), "confidence")
-        target = inputs.get("min_annual_return")
-        min_return = None if target is None else _number(target, "min_annual_return")
-        if min_return is not None and min_return <= -1:
-            raise ValueError("min_annual_return must be greater than -1")
-        return _cvar(rets, max_weight, confidence, min_return), None
+        floors = {}
+        for key in ("min_annual_return", "min_annual_arithmetic_return"):
+            if inputs.get(key) is not None:
+                floors[key] = _number(inputs[key], key)
+                if floors[key] <= -1:
+                    raise ValueError(f"{key} must be greater than -1")
+        return _cvar(rets, max_weight, confidence, floors.get("min_annual_return"),
+                     floors.get("min_annual_arithmetic_return"))
     if method == "black_litterman":
-        return _black_litterman(rets, max_weight, inputs)
-    return legacy.solve_weights(rets, method, max_weight), None
+        return _black_litterman(rets, max_weight, inputs, cov)
+    return legacy.solve_weights(rets, method, max_weight, cov=cov), None
 
 
 def _tail_loss(rets: pd.DataFrame, weights: pd.Series, confidence: float = 0.95) -> float:
-    losses = -(rets[weights.index].to_numpy() @ weights.to_numpy())
-    threshold = np.quantile(losses, confidence)
-    tail = losses[losses >= threshold]
-    return float(tail.mean())
+    sample = rets[weights.index].dropna()
+    return historical_cvar(-(sample.to_numpy() @ weights.to_numpy()), confidence)
 
 
 def _drift_weights(target: pd.Series, block: pd.DataFrame) -> pd.Series:
@@ -553,19 +1274,19 @@ def _drift_weights(target: pd.Series, block: pd.DataFrame) -> pd.Series:
 def _validation_metrics(returns: pd.Series, confidence: float) -> dict:
     if returns.empty:
         raise ValueError("validation produced no returns")
-    loss = -returns.to_numpy(float)
-    threshold = np.quantile(loss, confidence)
-    tail = loss[loss >= threshold]
     return {
         "total_return": float((1.0 + returns).prod() - 1.0),
         "annualized_return": float(legacy.ann_return(returns)),
         "annualized_volatility": float(legacy.ann_vol(returns)),
         "max_drawdown": float(legacy.max_drawdown(returns)),
-        "historical_daily_cvar_loss": float(tail.mean()),
+        "historical_daily_cvar_loss": historical_cvar(-returns.to_numpy(float), confidence),
         "n_days": int(len(returns)),
     }
 
 
+# --------------------------------------------------------------------------
+# walk-forward validation
+# --------------------------------------------------------------------------
 def _dated_beliefs(spec: dict, first_cutoff: date) -> tuple[list[tuple[date, dict]], list[str]]:
     schedule = spec.get("belief_schedule")
     if not isinstance(schedule, list) or not schedule:
@@ -586,8 +1307,10 @@ def _dated_beliefs(spec: dict, first_cutoff: date) -> tuple[list[tuple[date, dic
             raise ValueError(f"validation.belief_schedule[{index}].effective_on must be an ISO date")
         if effective in seen:
             raise ValueError("validation.belief_schedule effective_on dates must be unique")
-        if not isinstance(entry.get("prior_returns"), dict) or not isinstance(entry.get("views"), list) or not entry["views"]:
-            raise ValueError(f"validation.belief_schedule[{index}] requires complete prior_returns and views")
+        has_prior = isinstance(entry.get("prior_returns"), dict) or isinstance(entry.get("market_weights"), dict)
+        if not has_prior or not isinstance(entry.get("views"), list):
+            raise ValueError(f"validation.belief_schedule[{index}] requires a prior (prior_returns or "
+                             "market_weights) and a views list")
         seen.add(effective)
         dated.append((effective, entry))
     dated.sort(key=lambda item: item[0])
@@ -597,7 +1320,8 @@ def _dated_beliefs(spec: dict, first_cutoff: date) -> tuple[list[tuple[date, dic
 
 
 def _walk_forward(rets: pd.DataFrame, method: str, inner_cap: float, inputs: dict,
-                  initial_risky: pd.Series, cash_weights: dict[str, float]) -> tuple[dict | None, list[str]]:
+                  initial_full: pd.Series, cash_weights: dict[str, float],
+                  cash_returns: pd.Series | None, currency: str) -> tuple[dict | None, list[str]]:
     spec = inputs.get("validation")
     if spec is None:
         return None, []
@@ -622,25 +1346,45 @@ def _walk_forward(rets: pd.DataFrame, method: str, inner_cap: float, inputs: dic
     confidence = _number(inputs.get("confidence", 0.95), "confidence")
     if not 0.5 <= confidence < 1:
         raise ValueError("confidence must be at least 0.5 and below 1")
-    cash_weight = sum(cash_weights.values())
-    risky_share = 1.0 - cash_weight
+    risky_share = 1.0 - sum(cash_weights.values())
+    universe = [*rets.columns, *cash_weights]
 
     def full_weights(risky_weights: pd.Series) -> pd.Series:
         out = risky_weights * risky_share
         for cash_name, weight in cash_weights.items():
             out.loc[cash_name] = weight
-        return out
+        return out.reindex(universe).fillna(0.0)
+
+    static = None
+    if spec.get("static_baseline_weights") is not None:
+        static_warnings: list[str] = []
+        static_raw, static_missing = _complete_weights(spec["static_baseline_weights"],
+                                                       "validation.static_baseline_weights",
+                                                       currency, None, static_warnings)
+        if static_raw is None:
+            return None, static_missing
+        unknown = sorted(set(static_raw) - set(universe))
+        if unknown:
+            raise ValueError("validation.static_baseline_weights uses symbols outside the construction universe: "
+                             + ", ".join(unknown))
+        static = pd.Series(static_raw).reindex(universe).fillna(0.0)
 
     full_rets = rets.copy()
     for cash_name in cash_weights:
-        full_rets[cash_name] = 0.0
-    prior_risky = initial_risky.reindex(rets.columns).fillna(0.0)
-    prior_risky = prior_risky / prior_risky.sum()
-    prior_method = full_weights(prior_risky)
-    prior_equal = prior_method.copy()
-    method_returns, equal_returns, blocks = [], [], []
+        full_rets[cash_name] = cash_returns.reindex(rets.index).to_numpy() if cash_returns is not None else 0.0
+
+    fitters: dict[str, Callable[[pd.DataFrame, dict], pd.Series]] = {
+        "method": lambda train, fit_inputs: full_weights(_fit_method(train, method, inner_cap, fit_inputs)[0]),
+        "equal_weight": lambda train, _: full_weights(legacy.solve_weights(train, "equal", inner_cap)),
+        "inverse_volatility": lambda train, _: full_weights(legacy.solve_weights(train, "invvol", inner_cap)),
+    }
+    if static is not None:
+        fitters["static_baseline"] = lambda train, _: static.copy()
+    prior = {name: initial_full.reindex(universe).fillna(0.0) for name in fitters}
+    series: dict[str, list[pd.Series]] = {name: [] for name in fitters}
+    blocks = []
     cursor = train_days
-    while cursor + test_days <= len(rets):
+    while cursor < len(rets):
         train = rets.iloc[cursor - train_days:cursor]
         test = rets.iloc[cursor:cursor + test_days]
         fit_inputs = inputs
@@ -649,56 +1393,67 @@ def _walk_forward(rets: pd.DataFrame, method: str, inner_cap: float, inputs: dic
             effective, beliefs = max(
                 (item for item in belief_schedule if item[0] <= train.index[-1].date()),
                 key=lambda item: item[0])
-            fit_inputs = dict(inputs)
-            fit_inputs.update(prior_returns=beliefs["prior_returns"], views=beliefs["views"])
+            fit_inputs = {k: v for k, v in inputs.items() if k not in {"prior_returns", "market_weights"}}
+            fit_inputs.update({k: beliefs[k] for k in ("prior_returns", "market_weights",
+                                                        "market_weights_source", "views") if k in beliefs})
             belief_effective_on = effective.isoformat()
-        method_risky, _ = _fit_method(train, method, inner_cap, fit_inputs)
-        equal_risky = legacy.solve_weights(train, "equal", inner_cap)
-        method_target, equal_target = full_weights(method_risky), full_weights(equal_risky)
-        method_turnover = 0.5 * float((method_target - prior_method).abs().sum())
-        equal_turnover = 0.5 * float((equal_target - prior_equal).abs().sum())
         full_test = full_rets.loc[test.index]
-        method_gross = legacy.portfolio_returns(full_test, method_target, "none")
-        equal_gross = legacy.portfolio_returns(full_test, equal_target, "none")
-        method_net, equal_net = method_gross.copy(), equal_gross.copy()
-        method_cost = method_turnover * cost_bps / 10_000.0
-        equal_cost = equal_turnover * cost_bps / 10_000.0
-        method_net.iloc[0] -= method_cost
-        equal_net.iloc[0] -= equal_cost
-        method_returns.append(method_net)
-        equal_returns.append(equal_net)
-        blocks.append({
+        block_strategies = {}
+        for name, fit in fitters.items():
+            target = fit(train, fit_inputs)
+            turnover = 0.5 * float((target - prior[name]).abs().sum())
+            cost = turnover * cost_bps / 10_000.0
+            net = legacy.portfolio_returns(full_test, target, "none").copy()
+            net.iloc[0] -= cost
+            series[name].append(net)
+            block_strategies[name] = {"weights": {k: float(v) for k, v in target.items()},
+                                      "turnover": turnover, "cost_return": cost}
+            prior[name] = _drift_weights(target[target > 0], full_test).reindex(universe).fillna(0.0)
+        block = {
             "train_window": {"start": str(train.index[0].date()), "end": str(train.index[-1].date()),
                              "n_days": len(train)},
             "test_window": {"start": str(test.index[0].date()), "end": str(test.index[-1].date()),
                             "n_days": len(test)},
-            "method_weights": {k: float(v) for k, v in method_target.items()},
-            "equal_weights": {k: float(v) for k, v in equal_target.items()},
-            "method_turnover": method_turnover, "equal_turnover": equal_turnover,
-            "method_cost_return": method_cost, "equal_cost_return": equal_cost,
-        })
+            "partial": len(test) < test_days,
+            "strategies": block_strategies,
+        }
         if belief_effective_on is not None:
-            blocks[-1]["belief_effective_on"] = belief_effective_on
-        prior_method = _drift_weights(method_target, full_test)
-        prior_equal = _drift_weights(equal_target, full_test)
+            block["belief_effective_on"] = belief_effective_on
+        blocks.append(block)
         cursor += test_days
-    method_series, equal_series = pd.concat(method_returns), pd.concat(equal_returns)
+    results = {name: _validation_metrics(pd.concat(parts), confidence) for name, parts in series.items()}
     return {
-        "design": "rolling fixed-length training window followed by the next non-overlapping test block",
+        "design": "rolling fixed-length training window followed by the next non-overlapping test block; "
+                  "a final shorter block covers the remaining observations",
         "train_days": train_days, "test_days": test_days,
         "transaction_cost_bps": cost_bps,
         "turnover_convention": "one-way turnover is half the absolute weight change from prior block-end drifted weights; cost is deducted on the next block's first return",
-        "method": _validation_metrics(method_series, confidence),
-        "equal_weight_baseline": _validation_metrics(equal_series, confidence),
+        "strategies": results,
+        "baselines": {
+            "equal_weight": "equal weights over the risky sleeve, refit each block under the same cap",
+            "inverse_volatility": "inverse sample volatility over each training window, same cap",
+            **({"static_baseline": "caller-specified fixed weights (e.g. a 60/40 mix), reset each block"}
+               if static is not None else {}),
+        },
+        "partial_final_block": bool(blocks and blocks[-1]["partial"]),
         "blocks": blocks,
         "interpretation": "historical out-of-sample walk-forward evidence; it does not prove future advantage",
     }, []
 
 
+# --------------------------------------------------------------------------
+# construction
+# --------------------------------------------------------------------------
 def _construction(inputs: dict, context: dict) -> dict:
     method = str(inputs.get("method", "equal")).lower()
     if method not in _METHODS:
         raise ValueError("method must be one of " + ", ".join(sorted(_METHODS)))
+    covariance_mode = inputs.get("covariance", "common_window")
+    if covariance_mode not in {"common_window", "pairwise"}:
+        raise ValueError("covariance must be 'common_window' or 'pairwise'")
+    pairwise = covariance_mode == "pairwise"
+    if pairwise and inputs.get("validation") is not None:
+        raise ValueError("walk-forward validation requires the common window; remove covariance='pairwise'")
     current, info, missing = _portfolio(inputs, context)
     if missing:
         return _envelope("needs_input", missing=missing)
@@ -712,68 +1467,114 @@ def _construction(inputs: dict, context: dict) -> dict:
         currency = _currency(inputs.get("currency"))
         current = {name: 1.0 / len(names) for name in names}
         info = {"currency": currency, "scope": str(inputs.get("scope") or "requested universe"),
-                "complete": True, "source": "inputs.tickers", "total_value": None}
+                "complete": True, "source": "inputs.tickers", "total_value": None, "warnings": [],
+                "assumptions": []}
+        current = _combine_sic(current, inputs, "tickers", info["assumptions"], info["warnings"])
     _validate_cash_symbols(current, info["currency"], "construction universe")
-    cash_weight = sum(weight for symbol, weight in current.items() if symbol.startswith(_CASH_PREFIX))
+    cash_weights = {k: v for k, v in current.items() if k.startswith(_CASH_PREFIX) and v > 0}
+    cash_weight = sum(cash_weights.values())
     risky = [symbol for symbol in current if not symbol.startswith(_CASH_PREFIX)]
     if not risky:
         return _envelope("needs_input", missing=["at least one non-cash construction asset"])
     max_weight = _number(inputs.get("max_weight", 1.0), "max_weight", minimum=0.0)
     if max_weight <= 0 or max_weight > 1:
         raise ValueError("max_weight must be greater than zero and at most one")
-    px, warnings, sources, price_missing = _price_frame(inputs, risky, info["currency"])
-    if price_missing:
-        return _envelope("needs_input", missing=price_missing, warnings=warnings, sources=sources)
-    rets = legacy.daily_returns(px[risky])
+    needs_cash_returns = bool(cash_weights) and inputs.get("validation") is not None
+    prices = _price_frame(inputs, [*risky, *cash_weights] if needs_cash_returns else risky,
+                          info["currency"], align=not pairwise)
+    warnings = list(info.get("warnings", [])) + prices.warnings
+    sources = prices.sources
+    if prices.missing:
+        return _envelope("needs_input", missing=prices.missing, warnings=warnings, sources=sources)
+    px = prices.px
+    cov_detail = None
+    if pairwise:
+        rets = px[risky].pct_change(fill_method=None).iloc[1:]
+        rets = rets.dropna(how="all")
+        cov, cov_detail = _pairwise_cov(rets)
+        warnings.insert(0, "INCEPTION-AWARE COVARIANCE: " + cov_detail["label"] + ".")
+    else:
+        rets = legacy.daily_returns(px[risky])
+        cov = None
     risky_share = 1.0 - cash_weight
     if risky_share <= 0:
         return _envelope("needs_input", missing=["positive non-cash portfolio share"])
     inner_cap = min(1.0, max_weight / risky_share)
-    inner, method_detail = _fit_method(rets, method, inner_cap, inputs)
+    inner, method_detail = _fit_method(rets, method, inner_cap, inputs, cov)
     proposed = {symbol: float(weight * risky_share) for symbol, weight in inner.items()}
-    for symbol, weight in current.items():
-        if symbol.startswith(_CASH_PREFIX) and weight > 0:
-            proposed[symbol] = weight
+    proposed.update(cash_weights)
     if max(proposed.values()) > max_weight + 1e-7:
         raise ValueError(f"infeasible maximum weight {max_weight} with preserved cash allocation")
-    equal_inner = legacy.solve_weights(rets, "equal", inner_cap)
+    equal_inner = legacy.solve_weights(rets, "equal", inner_cap, cov=cov)
     equal = {symbol: float(weight * risky_share) for symbol, weight in equal_inner.items()}
-    equal.update({symbol: weight for symbol, weight in current.items() if symbol.startswith(_CASH_PREFIX)})
+    equal.update(cash_weights)
     confidence = _number(inputs.get("confidence", 0.95), "confidence")
-    metrics = lambda w: {
-        "annualized_volatility": float((rets[list(w)].cov().to_numpy() * legacy.TRADING_DAYS * np.outer(list(w.values()), list(w.values()))).sum() ** 0.5),
-        "historical_daily_cvar_loss": _tail_loss(rets, pd.Series(w), confidence),
-    }
+    sigma = cov if cov is not None else rets.cov().to_numpy() * legacy.TRADING_DAYS
+
+    def metrics(w: dict[str, float]) -> dict:
+        vector = np.array([w.get(name, 0.0) for name in rets.columns])
+        return {"annualized_volatility": float(vector @ sigma @ vector) ** 0.5,
+                "historical_daily_cvar_loss": _tail_loss(rets, pd.Series(w), confidence)}
+
     risky_proposed = {k: v / risky_share for k, v in proposed.items() if not k.startswith(_CASH_PREFIX)}
     risky_equal = {k: v / risky_share for k, v in equal.items() if not k.startswith(_CASH_PREFIX)}
-    current_risky = {k: v / risky_share for k, v in current.items() if not k.startswith(_CASH_PREFIX)}
+    cash_returns = None
+    if needs_cash_returns:
+        first_cash = next(iter(cash_weights))
+        cash_returns = px[first_cash].pct_change().iloc[1:]
     validation, validation_missing = _walk_forward(
-        rets, method, inner_cap, inputs, pd.Series(current_risky),
-        {k: v for k, v in current.items() if k.startswith(_CASH_PREFIX)})
+        rets, method, inner_cap, inputs, pd.Series(current), cash_weights, cash_returns, info["currency"])
     if validation_missing:
         return _envelope("needs_input", missing=validation_missing, warnings=warnings, sources=sources)
+    window = legacy._window(rets.index)
     result = {"method": method, "currency": info["currency"], "scope": info["scope"],
               "weights": proposed, "cash_weight_preserved": cash_weight,
               "constraints": {"long_only": True, "sum": 1.0, "max_weight": max_weight},
+              "covariance": cov_detail or {
+                  "estimator": {"equal": "not used by the method",
+                                "invvol": "sample volatility (unshrunk)",
+                                "cvar": "not used: joint historical scenarios"}.get(
+                                    method, "Ledoit-Wolf scaled-identity shrinkage"),
+                  "sample": "common window: every asset observed on every date"},
               "historical_metrics_on_risky_sleeve": metrics(risky_proposed),
               "equal_weight_baseline": {"weights": equal,
-                                          "historical_metrics_on_risky_sleeve": metrics(risky_equal)},
-              "window": legacy._window(rets.index), "input_complete": info["complete"]}
+                                        "historical_metrics_on_risky_sleeve": metrics(risky_equal)},
+              "window": window, "input_complete": info["complete"]}
+    if pairwise:
+        result["historical_metrics_convention"] = ("volatility from the repaired pairwise covariance; CVaR from "
+                                                   "dates on which every asset was observed")
     if method_detail is not None:
         result["model"] = method_detail
     if validation is not None:
         result["validation"] = validation
     assumptions = ["Construction is long-only and uses historical daily returns; it is not an expected-return forecast.",
-                   "The equal-weight baseline uses the same universe, cap, cash allocation, and price window."]
+                   "The equal-weight baseline uses the same universe, cap, cash allocation, and price window.",
+                   *info.get("assumptions", []),
+                   *prices.assumptions]
+    if pairwise:
+        assumptions.append("covariance='pairwise': each variance and covariance uses every date its assets were "
+                           "observed, then the matrix is repaired to be positive semidefinite; it mixes sample "
+                           "lengths and is not a common-window estimate.")
+    else:
+        assumptions.append("Covariance uses only the common window on which every asset has prices; "
+                           "pass covariance='pairwise' for an inception-aware estimate.")
     if cash_weight:
         assumptions.append("Stored cash weight is preserved exactly and excluded from covariance optimization.")
     if method == "hrp":
-        assumptions.append("HRP uses single-linkage clustering, shrinkage covariance, recursive bisection, then the stated hard cap.")
+        assumptions.append("HRP uses single-linkage clustering, the stated covariance estimate, recursive bisection, then the stated hard cap.")
     if method == "cvar":
         assumptions.append(f"CVaR minimizes empirical daily tail loss at confidence {confidence:.3f} via a constrained linear program.")
+        if inputs.get("min_annual_return") is not None:
+            assumptions.append("min_annual_return is an in-sample CAGR floor on the daily-rebalanced mix, enforced by "
+                               "bisecting the linear arithmetic-mean floor until realized CAGR meets it.")
+        if inputs.get("min_annual_arithmetic_return") is not None:
+            assumptions.append("min_annual_arithmetic_return floors 252 x the mean daily return; realized CAGR is "
+                               "lower by the variance drag and is reported beside it.")
     if method == "black_litterman":
-        assumptions.append("Black-Litterman combines only the explicit annual prior and relative or absolute views; confidence maps to posterior view uncertainty, not a guaranteed probability of correctness.")
-        assumptions.append("Long-only capped weights maximize posterior mean-variance utility using the stated positive risk_aversion.")
+        assumptions.append("Black-Litterman combines the stated prior (explicit returns or market-cap reverse optimization) "
+                           "with relative or absolute views; confidence maps to view uncertainty, not a probability of being right.")
+        assumptions.append("Long-only capped weights maximize posterior mean-variance utility with covariance Sigma + M "
+                           "(posterior uncertainty of the mean) at the stated positive risk_aversion.")
     if validation is not None:
         assumptions.append("Walk-forward weights use only each preceding training window; block-end drift determines next-block turnover and the explicit cost deduction.")
     status = "ready" if info["complete"] else "partial"
@@ -787,4 +1588,5 @@ def run(task: str, inputs: dict, context: dict) -> dict:
     if not isinstance(inputs, dict) or not isinstance(context, dict):
         raise ValueError("inputs and context must be objects")
     return {"analyze": _analysis, "stress": _stress, "compare": _compare,
-            "construct": _construction, "factors": _factors}[task](inputs, context)
+            "construct": _construction, "factors": _factors,
+            "sic_premium": _sic_premium_task}[task](inputs, context)
