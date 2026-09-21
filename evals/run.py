@@ -186,7 +186,9 @@ def write_report(out: Path, transcripts: list[dict], results: list[dict], meta: 
     folder = out / "transcripts"
     folder.mkdir(exist_ok=True)
     for transcript, result in zip(transcripts, results):
-        (folder / f"{transcript['scenario_id']}.json").write_text(
+        sample = transcript.get("sample")
+        name = transcript["scenario_id"] + (f"~{sample}" if sample else "")
+        (folder / f"{name}.json").write_text(
             json.dumps({"transcript": transcript, "result": result}, ensure_ascii=False, indent=2),
             encoding="utf-8")
     (out / "results.json").write_text(
@@ -235,7 +237,19 @@ def summary(transcripts: list[dict], results: list[dict], meta: dict, worst: int
         lines += ["", "Judge means by dimension"]
         for name in DIMENSIONS:
             lines.append(f"  {name:16} {sum(s[name] for s in judged) / len(judged):.2f}")
-        lines.append(f"  {'overall':16} {sum(sum(s.values()) / len(s) for s in judged) / len(judged):.2f}")
+        overall = [sum(s.values()) / len(s) for s in judged]
+        mean = sum(overall) / len(overall)
+        spread = (sum((x - mean) ** 2 for x in overall) / (len(overall) - 1)) ** 0.5 if len(overall) > 1 else 0.0
+        lines.append(f"  {'overall':16} {mean:.2f}  (n={len(overall)}, standard error {spread / len(overall) ** 0.5:.2f})")
+        by_scenario: dict[str, list[float]] = {}
+        for result in results:
+            value = _judge_mean(result)
+            if value is not None:
+                by_scenario.setdefault(str(result["scenario_id"]), []).append(value)
+        if any(len(v) > 1 for v in by_scenario.values()):
+            lines += ["", "By scenario (mean of samples)"]
+            for sid, values in sorted(by_scenario.items(), key=lambda kv: sum(kv[1]) / len(kv[1])):
+                lines.append(f"  {sid[:34]:34} {sum(values) / len(values):.2f}  {' '.join(f'{v:.1f}' for v in values)}")
     errors = [r for r in results if (r.get("judge") or {}).get("error")]
     if errors:
         lines.append(f"\nJudge errors: {len(errors)}")
@@ -285,18 +299,22 @@ def mode_run(options, data) -> Path:
     print(f"Running {len(chosen)} scenario(s) with {agent.resolve_model(options.model)} "
           f"({options.reasoning}); judge {getattr(judge, 'label', 'none')}", file=sys.stderr)
 
-    def one(scenario):
+    def one(item):
+        scenario, sample = item
         transcript = run_scenario(data, scenario, options)
+        if options.samples > 1:
+            transcript["sample"] = sample
         result = score(transcript, judge)
-        print(f"  {scenario['id']}: {result['verdict']}", file=sys.stderr)
+        print(f"  {scenario['id']}{f' #{sample}' if options.samples > 1 else ''}: {result['verdict']}", file=sys.stderr)
         return transcript, result
 
-    pairs = _parallel(one, chosen, options.jobs)
+    work = [(scenario, sample) for scenario in chosen for sample in range(1, options.samples + 1)]
+    pairs = _parallel(one, work, options.jobs)
     transcripts, results = [p[0] for p in pairs], [p[1] for p in pairs]
     meta = {"mode": "run", "model": agent.resolve_model(options.model), "reasoning": options.reasoning,
             "judge": getattr(judge, "label", "none"), "instructions": str(instructions),
             "instructions_sha256": hashlib.sha256(instructions.read_bytes()).hexdigest()[:12],
-            "scenarios": options.scenarios, "web_search": options.web_search}
+            "scenarios": options.scenarios, "web_search": options.web_search, "samples": options.samples}
     out = _out_dir(options)
     write_report(out, transcripts, results, meta)
     return out
@@ -380,6 +398,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--label", default="", help="suffix for the report directory")
     p.add_argument("--out", help="explicit report directory")
     p.add_argument("--worst", type=int, default=5)
+    p.add_argument("--samples", type=int, default=1, help="runs per scenario; the summary averages them")
     return p
 
 
