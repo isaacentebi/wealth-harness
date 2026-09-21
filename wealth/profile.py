@@ -17,7 +17,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Iterable
 
-from .situation import build as build_situation, sentences
+from .situation import build as build_situation, sentences, summaries
 from .situation.model import goal_name
 
 FORM_FIELDS = ("income", "spending", "savings", "investments", "debts", "dependents",
@@ -987,6 +987,175 @@ def upcoming(snapshot: dict, today: date, horizon_days: int = 60, labels: dict[s
     return sorted(items, key=lambda i: (order[i["type"]], i["date"] or "9999"))
 
 
+# ---------------------------------------------------------------- memory: what Wealth knows, as sentences
+#
+# The page reads like notes about the person: one sentence per fact, grouped by
+# life area, each with a quiet origin cue.  Every sentence carries exactly the
+# action it supports (edit its amount, forget it, confirm it), resolved here so
+# the page never guesses at fact shapes.
+
+MEMORY_TOPICS = ("money_in", "money_out", "own", "owe", "goals", "invest", "about")
+_REVIEW_MAX = 3
+# Legacy list facts: list name -> (synthetic id prefix the model uses, amount field).
+_LEGACY_LISTS = {"plan.resources": {"cash": ("cash", "amount"), "debts": ("debt", "balance"),
+                                    "investments": ("investment", "amount")},
+                 "income.schedule": {"items": ("item", "amount")}}
+_WHOLE_KEY_FORGET_BLOCKED = {"client.profile", "plan.resources", "income.schedule", "goals", "household"}
+_COUNT_FIELDS = {"dependents", "birth_year", "target_months", "reserve_months"}
+
+
+def _legacy_item(key: str, current: Any, ref: str | None) -> tuple[str, int, str]:
+    """(list name, index, amount field) for a ``cash:cash0``-style ref into a legacy list fact."""
+    name, sep, item_id = (ref or "").partition(":")
+    spec = _LEGACY_LISTS.get(key, {}).get(name)
+    items = current.get(name) if isinstance(current, dict) else None
+    if not sep or not spec or not isinstance(items, list):
+        raise LookupError("no such item on this fact")
+    for index, item in enumerate(items):
+        if isinstance(item, dict) and str(item.get("id") or f"{spec[0]}{index}") == item_id:
+            field = next((f for f in (spec[1], "amount", "balance") if f in item), spec[1])
+            return name, index, field
+    raise LookupError("no such item on this fact")
+
+
+def _find_goal(goals: Any, ref: str | None) -> dict | None:
+    if not isinstance(goals, list) or ref is None:
+        return None
+    return next((g for i, g in enumerate(goals) if isinstance(g, dict) and str(g.get("id", i)) == ref), None)
+
+
+def _edit_spec(fact: dict, ref: str | None) -> dict | None:
+    """What an inline edit changes: an amount (with currency) or a count, and where it lives."""
+    key, value = fact["key"], fact.get("value")
+    if key.startswith(("account.", "analysis.", "research.")) or key in _MARKET_VALUED:
+        return None  # statement and market values change with a new statement, not by hand
+    if key in _LEGACY_LISTS and ref and ":" in ref:
+        try:
+            name, index, field = _legacy_item(key, value, ref)
+        except LookupError:
+            return None
+        item = value[name][index]
+        return {"field": ref, "kind": "amount", "amount": _num(item.get(field)),
+                "currency": item.get("currency") or value.get("currency")}
+    if key == "goals":
+        goal = _find_goal(value, ref)
+        if goal is None:
+            return None
+        if goal.get("monthly_contribution") is not None or (goal.get("amount") is not None and goal.get("frequency") == "monthly"):
+            wrap, amount = "monthly_contribution", goal.get("monthly_contribution", goal.get("amount"))
+        elif goal.get("target_amount") is not None:
+            wrap, amount = "target_amount", goal["target_amount"]
+        else:
+            return None
+        return {"field": ref, "kind": "amount", "wrap": wrap, "amount": _num(amount), "currency": goal.get("currency")}
+    if ref and isinstance(value, dict) and ref in value:
+        item = value[ref]
+        if isinstance(item, dict) and "amount" in item:
+            return {"field": ref, "kind": "amount", "amount": _num(item["amount"]), "currency": item.get("currency")}
+        if isinstance(item, (int, float)) and not isinstance(item, bool):
+            if ref in _COUNT_FIELDS:
+                return {"field": ref, "kind": "number", "amount": item, "unit": "months" if "months" in ref else None}
+            currency = value.get("currency")
+            if isinstance(currency, str) and _CURRENCY.match(currency):
+                return {"field": ref, "kind": "amount", "amount": item, "currency": currency}
+        return None
+    field = _canonical_amount_field(key, value) if ref is None else None
+    if field:
+        return {"field": None, "kind": "amount", "amount": _num(value.get(field)), "currency": value.get("currency")}
+    return None
+
+
+def _forget_spec(fact: dict, ref: str | None, sentence: dict) -> dict | None:
+    key, value = fact["key"], fact.get("value")
+    if sentence.get("readonly") or len(sentence.get("keys") or []) > 1:
+        return None
+    if key == "spending.monthly" and isinstance(value, dict):
+        other = "essential" if ref == "total" else "total"
+        return {"field": ref if value.get(other) is not None else None}
+    if ref is not None:
+        return {"field": ref}
+    return None if key in _WHOLE_KEY_FORGET_BLOCKED else {"field": None}
+
+
+def _origin(sentence: dict, institutions: dict[str, str], observed: dict[str, Any]) -> dict:
+    key = sentence.get("key")
+    if sentence.get("origin") == "transactions" or key is None:
+        return {"kind": "transactions"}
+    if sentence.get("unconfirmed"):
+        return {"kind": "guess"}
+    kind = {"user": "said", "document": "statement"}.get(sentence.get("source"), "calculated")
+    if sentence.get("origin") == "statement":
+        kind = "statement"
+    origin = {"kind": kind}
+    institution = sentence.get("institution") or institutions.get(key)
+    if institution and kind == "statement":
+        origin["institution"] = institution
+    as_of = sentence.get("as_of") or (observed.get(key) if kind == "statement" else None)
+    if as_of and kind == "statement":
+        origin["as_of"] = str(as_of)[:10]
+    return origin
+
+
+def memory_view(sit: dict, snapshot: dict, language: str, missing: Iterable[str] = ()) -> dict:
+    """Sentences grouped by life area, the stated-vs-statement cards and at most three check-ins."""
+    facts = {f["key"]: f for f in snapshot.get("facts") or [] if f.get("value") is not None}
+    meta = sit.get("meta") or {}
+    institutions = {a["key"]: a.get("institution") for a in sit["accounts"] if a.get("key") and a.get("institution")}
+    observed = {k: m.get("observed_on") for k, m in meta.items()}
+    heads = summaries(sit, language)
+    items, conflicts = [], []
+    for index, s in enumerate(sentences(sit, language)):
+        fact = facts.get(s["key"] or "")
+        ref = s.get("ref")
+        editable = not s.get("readonly")
+        item = {
+            "id": f"{s['topic']}-{index}", "topic": s["topic"], "text": s["text"], "emphasis": s["emphasis"],
+            "key": s["key"] if fact else None, "origin": _origin(s, institutions, observed),
+            "since": s.get("since"), "age_days": s.get("age_days"),
+            "unconfirmed": s["unconfirmed"], "stale": s["stale"],
+            "edit": _edit_spec(fact, ref) if fact and editable else None,
+            "forget": _forget_spec(fact, ref, s) if fact else None,
+            "confirm": bool(fact and editable and (s["stale"] or s["unconfirmed"])
+                            and not s["key"].startswith("account.") and s["key"] not in _MARKET_VALUED),
+        }
+        if s.get("kind") == "difference":
+            conflict = _conflict(item, s, sit, meta)
+            if conflict:
+                conflicts.append(conflict)
+            continue
+        items.append(item)
+    review = [i for i in items if i["stale"] and (i["confirm"] or i["edit"])][:_REVIEW_MAX]
+    in_review = {i["id"] for i in review}
+    groups = []
+    for topic in MEMORY_TOPICS:
+        rows = [i for i in items if i["topic"] == topic and i["id"] not in in_review]
+        if rows:  # a group appears only once it has a fact
+            groups.append({"id": topic, "summary": heads.get(topic), "facts": rows})
+    return {"groups": groups, "conflicts": conflicts, "review": review, "missing": list(missing)}
+
+
+def _conflict(item: dict, sentence: dict, sit: dict, meta: dict) -> dict | None:
+    """A stated figure a newer statement disagrees with; gone once the person has answered it."""
+    diff = next((d for d in sit["differences"] if d.get("statement") and d["key"] == item["key"]
+                 and d.get("institution") == sentence.get("institution")), None)
+    if diff is None or item["key"] is None:
+        return None
+    statement_keys = [a["key"] for a in sit["accounts"] if a.get("key") and a["source"] == "statement"
+                      and (a.get("institution") or "").lower() == (diff.get("institution") or "").lower()]
+    statement_rev = max((meta.get(k, {}).get("revision") or 0 for k in statement_keys), default=0)
+    stated_rev = meta.get(item["key"], {}).get("revision") or 0
+    if stated_rev > statement_rev:
+        return None  # answered after the statement arrived: kept, replaced or changed
+    edit = item["edit"]
+    use = None
+    if edit and diff.get("statement_value") is not None and diff.get("currency"):
+        use = {"field": edit["field"], "amount": round(float(diff["statement_value"])), "currency": diff["currency"],
+               "wrap": edit.get("wrap")}
+    return {"id": item["id"], "text": item["text"], "emphasis": item["emphasis"], "key": item["key"],
+            "institution": diff.get("institution"), "as_of": diff.get("as_of"),
+            "use_statement": use, "edit": edit}
+
+
 # ---------------------------------------------------------------- entry point
 
 def _situation(service: Any, client_id: str, snapshot: dict, today: date) -> dict:
@@ -998,8 +1167,16 @@ def _situation(service: Any, client_id: str, snapshot: dict, today: date) -> dic
     return build_situation(snapshot, None, today)
 
 
-def profile_view(service: Any, client_id: str, today: Any = None) -> dict:
-    """Assemble the JSON-able dashboard model: only what the page renders."""
+def _memory_lang(language: str | None) -> str:
+    return "es" if str(language or "").lower().startswith("es") else "en"
+
+
+def profile_view(service: Any, client_id: str, today: Any = None, language: str | None = None) -> dict:
+    """Assemble the JSON-able dashboard model: only what the page renders.
+
+    ``language`` ("es"/"en", e.g. from ``?lang=``) builds the memory in that
+    language only; without it both are included so the page can switch offline.
+    """
     today = _today(today)
     snapshot = _snapshot(service, client_id)
     facts = _facts_by_key(snapshot)
@@ -1018,7 +1195,11 @@ def profile_view(service: Any, client_id: str, today: Any = None) -> dict:
                                   _dict_value(facts.get("plan.resources")).get("currency"), sit.get("currency"))
                       if isinstance(c, str) and _CURRENCY.match(c)), None)
     locale = next((profile.get(k) for k in ("locale", "language") if isinstance(profile.get(k), str)), None)
-    language = sit["profile"].get("language") or ("es" if str(locale or "").lower().startswith("es") else "en")
+    saved = sit["profile"].get("language") or ("es" if str(locale or "").lower().startswith("es") else "en")
+    langs = [_memory_lang(language)] if language else ["en", "es"]
+    memory: dict[str, Any] = {"language": _memory_lang(language) if language else saved}
+    for lang in langs:
+        memory[lang] = memory_view(sit, snapshot, lang, known["missing"])
     return {
         "version": 2, "today": today.isoformat(),
         "client": {"display_name": snapshot["client"].get("display_name"),
@@ -1027,8 +1208,8 @@ def profile_view(service: Any, client_id: str, today: Any = None) -> dict:
         "overview": ov,
         "performance": performance(snapshot, _history(service, client_id, "household"), today),
         "groups": groups,
-        # What Wealth knows as sentences (see wealth.situation.sentences); the page picks a language.
-        "memory": {"language": language, "en": sentences(sit, "en"), "es": sentences(sit, "es")},
+        # What Wealth knows, as sentences grouped by life area (see memory_view).
+        "memory": memory,
         "completeness": known,
         "upcoming": upcoming(snapshot, today, labels=fact_labels(sit)),
     }
@@ -1104,6 +1285,17 @@ def _goal_patch(goal: dict, value: Any) -> dict:
             if number is None or number < 0:
                 raise ValueError("enter a non-negative target")
             updated["target_amount"] = int(number) if number.is_integer() else number
+    if "monthly_contribution" in value:
+        number = _num(value["monthly_contribution"])
+        if number is None or number < 0:
+            raise ValueError("enter a non-negative monthly amount")
+        number = int(number) if number.is_integer() else number
+        # Older goals kept the monthly figure as amount + frequency; keep their shape.
+        if "monthly_contribution" not in goal and goal.get("amount") is not None and goal.get("frequency") == "monthly":
+            updated["amount"] = number
+        else:
+            updated["monthly_contribution"] = number
+        updated.pop("approximate", None)
     if value.get("currency"):
         currency = str(value["currency"]).upper()
         if not _CURRENCY.match(currency):
@@ -1150,11 +1342,25 @@ def fact_action(snapshot: dict, key: str, action: str, *, field: str | None = No
         amount_field = _canonical_amount_field(key, current)
         if amount_field:
             amount = _amount(value)
-            return [_user_fact(key, {amount_field: amount["amount"], "currency": amount["currency"]},
-                               "profile page edit", today, merge=True)]
+            patch = {amount_field: amount["amount"], "currency": amount["currency"]}
+            if current.get("approximate"):
+                patch["approximate"] = False  # the person just gave the exact figure
+            return [_user_fact(key, patch, "profile page edit", today, merge=True)]
         if key == "goals" or key in _MARKET_VALUED:
             raise ValueError("this value is structured; update it in the chat")
         return [_user_fact(key, _coerce(_editor(current), value), "profile page edit", today)]
+    if key in _LEGACY_LISTS and ":" in field:
+        # One item of a legacy list (plan.resources cash/debts/investments, income.schedule items):
+        # lists without ids cannot be merge-patched, so the whole object is rewritten.
+        name, index, amount_field = _legacy_item(key, current, field)
+        items = list(current[name])
+        if action == "delete":
+            items.pop(index)
+            return [_user_fact(key, {**current, name: items}, "profile page: item removed", today)]
+        amount = _amount(value)
+        item = {k: v for k, v in items[index].items() if k != "approximate"}  # the person just stated it
+        items[index] = {**item, amount_field: amount["amount"], "currency": amount["currency"]}
+        return [_user_fact(key, {**current, name: items}, "profile page edit", today)]
     if key == "goals":
         if not isinstance(current, list):
             raise ValueError("goals has an unexpected shape")
@@ -1172,6 +1378,15 @@ def fact_action(snapshot: dict, key: str, action: str, *, field: str | None = No
         raise LookupError("no such field on this fact")
     if action == "delete":
         return [_user_fact(key, {field: None}, "profile page: field removed", today, merge=True)]
+    if isinstance(value, dict) and "amount" in value and _editor(current[field]) == "number":
+        # A plain number beside the fact's currency (spending.monthly total, plan.resources essentials).
+        amount = _amount(value)
+        patch: dict[str, Any] = {field: amount["amount"]}
+        if isinstance(current.get("currency"), str):
+            patch["currency"] = amount["currency"]
+        if current.get("approximate"):
+            patch["approximate"] = False
+        return [_user_fact(key, patch, "profile page edit", today, merge=True)]
     new_value = _coerce(_editor(current[field]), value)
     if isinstance(new_value, list):  # the store merges only id-keyed lists; replace the object
         return [_user_fact(key, {**current, field: new_value}, "profile page edit", today)]

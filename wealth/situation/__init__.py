@@ -14,7 +14,7 @@ from .insights import picture_delta, statement_insights
 from .model import build, missing_for_onboarding
 from .plans import calendar_inputs, debt_payoff, plan_inputs
 from .schema import SCHEMA, SchemaError, validate
-from .text import brief, sentences
+from .text import brief, sentences, summaries
 
 __all__ = ["SCHEMA", "SchemaError", "brief", "build", "calendar_inputs", "debt_payoff", "missing_for_onboarding",
-           "picture_delta", "plan_inputs", "sentences", "statement_insights", "validate"]
+           "picture_delta", "plan_inputs", "sentences", "statement_insights", "summaries", "validate"]
