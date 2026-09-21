@@ -518,3 +518,19 @@ def test_policy_draft_runs_without_a_client_from_inline_facts(tmp_path):
     report = service.run("policy_draft", {"as_of": AS_OF, "facts": [{"key": k, "value": v} for k, v in US.items()]})
     assert report["status"] == "ready" and report["result"]["ips"]["risk"]["profile"] == "growth"
     assert report["evidence_ids"] == []
+
+
+def test_constraint_concentration_reads_shares_and_flags_percent_and_one():
+    warnings: list = []
+    c = policy._constraints({"constraint.concentration": {"value": 0.05, "id": "f"}}, "MX", False, {}, warnings)
+    assert c["concentration"]["limit"] == 0.05 and warnings == []
+    warnings = []
+    c = policy._constraints({"constraint.concentration": {"value": 5, "id": "f"}}, "MX", False, {}, warnings)
+    assert c["concentration"]["limit"] == 0.05 and any("read as 5%" in w for w in warnings)
+    warnings = []
+    c = policy._constraints({"constraint.concentration": {"value": 1, "id": "f"}}, "MX", False, {}, warnings)
+    assert c["concentration"]["limit"] == 1.0 and any("if you meant 1%, save 0.01" in w for w in warnings)
+    warnings = []
+    c = policy._constraints({"constraint.concentration": {"value": 150, "id": "f"}}, "MX", False, {}, warnings)
+    assert c["concentration"]["limit"] == policy.DEFAULT_CONCENTRATION and c["concentration"]["basis"] == "default"
+    assert any("not a readable limit" in w for w in warnings)

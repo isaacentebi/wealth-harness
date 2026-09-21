@@ -351,3 +351,130 @@ def test_mx_location_reports_missing_platform_listing_and_domicile():
     assert any("platform" in m for m in report["missing"])
     assert any("issuer_domicile" in m for m in report["missing"])
     assert any("sic_listed" in m for m in report["missing"])
+
+
+# ---------------------------------------------------------------- audit fixes
+
+
+def _naftrac_household(fx=True):
+    household = deepcopy(_REBAL_US_HOUSEHOLD)
+    if fx:
+        household["fx"] = [{"from": "MXN", "to": "USD", "rate": 0.054, "as_of": "2026-09-18", "source": "test"}]
+    household["positions"].append({"id": "brk-naf", "account_id": "brk", "instrument_id": "NAFTRAC", "symbol": "NAFTRAC",
+                                   "quantity": 1000, "value": 100000, "currency": "MXN", "asset_class": "equity"})
+    household["lots"].append({"id": "lot-naf", "account_id": "brk", "instrument_id": "NAFTRAC", "quantity": 1000,
+                              "cost_basis": 50000, "acquired_on": "2021-01-04", "currency": "MXN"})
+    return household
+
+
+NAFTRAC_TARGETS = {"by": "instrument", "sleeves": [{"name": "NAFTRAC", "weight": 0.05, "buy": ["NAFTRAC"]},
+                                                   {"name": "VTI", "weight": 0.55, "buy": ["VTI"]},
+                                                   {"name": "BND", "weight": 0.40, "buy": ["BND"]}]}
+
+
+def test_us_gain_on_a_non_usd_lot_is_computed_in_usd_and_counted_in_the_total():
+    report = us(household=_naftrac_household(), targets=deepcopy(NAFTRAC_TARGETS))
+    sale = find(report, "brk", "NAFTRAC", "sell")
+    assert sale["quantity"] == "551" and sale["price_currency"] == "MXN"
+    # 551 shares x (100 - 50) MXN x 0.054 USD/MXN
+    assert sale["realized_gain_or_loss"] == {"currency": "USD", "amount": "1487.70"}
+    assert sale["lots"][0]["gain_or_loss"] == "1487.70" and sale["lots"][0]["currency"] == "USD"
+    engine = report["result"]["tax_engine_check"]
+    assert engine["realized"] == {"short_term": "-2000.00", "long_term": "1487.70"}
+    rows = sum(Decimal(t["estimated_tax"]["amount"]) for t in trades(report, "sell"))
+    assert rows == Decimal(report["result"]["summary"]["total_estimated_tax"]) == Decimal("-163.94")
+    assert any("trade-date FX" in a for a in report["assumptions"])
+
+
+def test_us_non_usd_lot_alone_is_taxed_at_the_long_term_rate_in_usd():
+    household = _naftrac_household()
+    household["positions"] = [p for p in household["positions"] if (p["account_id"], p["instrument_id"]) != ("brk", "VTI")]
+    household["lots"] = [lot for lot in household["lots"] if (lot["account_id"], lot["instrument_id"]) != ("brk", "VTI")]
+    report = us(household=household, targets=deepcopy(NAFTRAC_TARGETS))
+    sale = find(report, "brk", "NAFTRAC", "sell")
+    gain = Decimal(sale["realized_gain_or_loss"]["amount"])
+    assert gain > 0
+    assert Decimal(sale["estimated_tax"]["amount"]) == (gain * Decimal("0.15")).quantize(Decimal("0.01"))
+    assert report["result"]["summary"]["total_estimated_tax"] == sale["estimated_tax"]["amount"]
+
+
+def test_us_cost_basis_usd_on_the_lot_is_used_when_supplied():
+    household = _naftrac_household()
+    household["lots"][-1]["cost_basis_usd"] = 2000  # basis at the acquisition-date rate
+    report = us(household=household, targets=deepcopy(NAFTRAC_TARGETS))
+    sale = find(report, "brk", "NAFTRAC", "sell")
+    # 551 x 100 x 0.054 - 2000 x 551/1000
+    assert sale["realized_gain_or_loss"]["amount"] == "1873.40"
+
+
+def test_currency_override_without_fx_is_missing_not_a_crash():
+    jc = deepcopy(US_JC)
+    jc["instruments"] = {"VTI": {"currency": "EUR"}}
+    report = us(jurisdiction_context=jc)
+    assert any(m.startswith("fx.EUR/USD") for m in report["missing"])
+    assert "VTI" in {o["instrument_id"] for o in report["result"]["outside_plan"]}
+
+
+def test_band_and_weights_written_as_percent_are_rejected():
+    targets = deepcopy(US_TARGETS)
+    targets["band"] = 5
+    with pytest.raises(ValueError, match=r"targets.band .*usa 0.05 para 5%"):
+        us(targets=targets)
+    targets = deepcopy(US_TARGETS)
+    targets["sleeves"][0]["band"] = 10
+    with pytest.raises(ValueError, match=r"sleeves\[0\].band"):
+        us(targets=targets)
+    targets = deepcopy(US_TARGETS)
+    targets["sleeves"][0]["weight"], targets["sleeves"][1]["weight"] = 60, 40
+    with pytest.raises(ValueError, match="not a percent"):
+        us(targets=targets)
+
+
+def test_account_minimum_is_compared_in_the_account_currency():
+    # ibkr is a USD account in an MXN-reporting household; its minimum is in USD, not MXN.
+    from wealth.household import validate_household
+    jc = deepcopy(MX_JC)
+    jc["accounts"]["ibkr"]["min_trade_amount"] = 500  # USD
+    household = validate_household(deepcopy(_REBAL_MX_HOUSEHOLD))["household"]
+    ctx = rebalance._Context(household, deepcopy(MX_TARGETS), jc, None, {"marginal_rate": 0.30}, None, [], [], [])
+    sim = rebalance._Sim(ctx)
+    usd_in_mxn = ctx.rate("USD", "MXN")
+    one_aapl = Decimal(230) * usd_in_mxn  # thousands of MXN, but only 230 USD
+    assert one_aapl > 500
+    assert "230.00 USD is below the account minimum trade 500.00 USD" in sim._below_minimum(ctx.accounts["ibkr"], one_aapl)
+    assert sim._below_minimum(ctx.accounts["ibkr"], Decimal(600) * usd_in_mxn) is None
+    # constraints.min_trade_amount stays in the reporting currency
+    ctx.min_trade = Decimal(20000)
+    assert "MXN is below constraints.min_trade_amount 20000.00 MXN" in sim._below_minimum(ctx.accounts["gbm"], Decimal(10000))
+
+
+def test_whole_share_sale_is_rounded_down_not_up():
+    # AAPL at ibkr needs about 0.79 of a share; rounding up would realise a gain and strand the proceeds.
+    report = mx()
+    assert not any(t["instrument_id"] == "AAPL" for t in trades(report, "sell"))
+    assert "ibkr" not in report["result"]["summary"]["cash_left_by_account"]
+
+
+def test_service_defaults_the_jurisdiction_from_the_profile(tmp_path):
+    from wealth.catalog import CATALOG
+    service = WealthService(tmp_path / "db.sqlite3")
+    service.create("ana", "Ana")
+    source = {"kind": "user", "ref": "chat", "observed_on": "2026-09-01"}
+    service.remember("ana", [{"key": "client.profile", "value": {"residence": {"country": "US"}}, "source": source}])
+    inputs = deepcopy(CATALOG["rebalance"]["variants"]["from_ledger"])
+    inputs["jurisdiction_context"].pop("jurisdiction")
+    assert service.run("rebalance", inputs=deepcopy(inputs))["status"] == "needs_input"  # no client, no profile
+    report = service.run("rebalance", inputs=deepcopy(inputs), client_id="ana")
+    assert report["status"] == "ready", report["missing"]
+    assert report["result"]["jurisdiction"] == "US"
+    assert any("from the saved profile" in a for a in report["assumptions"])
+
+
+def test_profile_jurisdiction_rules():
+    pj = rebalance._profile_jurisdiction
+    assert pj({"residence": {"country": "MX"}})[0] == "MX"
+    assert pj({"residence": "US", "tax_residence": ["MX"]})[0] == "MX"  # stated tax residence wins
+    assert pj({"tax_residence": ["US", "MX"]})[0] is None
+    assert pj({"residence": {"country": "MX"}, "us_person": True})[0] is None
+    assert pj({"residence": {"country": "ES"}})[0] is None
+    assert pj(None) == (None, None)
