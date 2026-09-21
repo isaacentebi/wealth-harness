@@ -278,6 +278,11 @@
       <div class="identity" aria-label="Session details">
         <strong id="client">Connecting…</strong>
         <span id="model"></span>
+        <label style="font-size:12px">Reasoning
+          <select id="reasoning" aria-label="Reasoning level" style="font:inherit;padding:5px 8px;border:1px solid #ccd6ce;border-radius:8px;background:transparent;color:inherit">
+            <option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option>
+          </select>
+        </label>
       </div>
     </header>
 
@@ -315,6 +320,7 @@
       const status = document.getElementById('status');
       const client = document.getElementById('client');
       const model = document.getElementById('model');
+      const reasoning = document.getElementById('reasoning');
       const capabilities = document.getElementById('capabilities');
       const webSearchStatus = document.getElementById('web-search-status');
 
@@ -398,6 +404,7 @@
       function setBusy(value) {
         busy = value;
         input.disabled = value;
+        reasoning.disabled = value;
         send.disabled = value || !input.value.trim();
 
         clearInterval(timer);
@@ -438,7 +445,7 @@
               'Content-Type': 'application/json',
               'X-Wealth-Token': token
             },
-            body: JSON.stringify({ message })
+            body: JSON.stringify({ message, reasoning: reasoning.value })
           });
           const data = await response.json().catch(() => ({}));
           if (!response.ok || typeof data.answer !== 'string') {
@@ -481,6 +488,7 @@
           token = String(state.csrf_token || '');
           client.textContent = state.client_id ? `Client ${state.client_id}` : 'Private session';
           model.textContent = state.model ? `Model · ${state.model}` : '';
+          reasoning.value = state.reasoning || 'low';
           const webSearchEnabled = state.capabilities && state.capabilities.web_search === true;
           capabilities.textContent = `Python analytics · Persistent memory · Live market data${webSearchEnabled ? ' · Web search' : ''}`;
           webSearchStatus.textContent = webSearchEnabled ? 'Web search is enabled.' : 'Web search is currently disabled.';

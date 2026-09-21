@@ -8,7 +8,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from .agent import AgentError, run_turn, seed_demo, resolve_model
+from .agent import AgentError, run_turn, seed_demo, resolve_model, REASONING_LEVELS
 from .behavior import ONBOARDING_WELCOME
 from .service import WealthService, database_path
 from .store import ClientNotFoundError, ClientExistsError, StoreError
@@ -18,6 +18,7 @@ class Chat:
     def __init__(self, db, client_id, model="sol", web_search=True):
         self.db, self.client_id, self.model = db, client_id, model
         self.web_search = web_search
+        self.reasoning = "low"
         self.token = secrets.token_urlsafe(32)
         self.lock = threading.Lock()
         self.messages = []
@@ -33,19 +34,24 @@ class Chat:
 
     def state(self):
         return {"client_id": self.client_id, "model": resolve_model(self.model),
+                "reasoning": self.reasoning, "reasoning_levels": list(REASONING_LEVELS),
                 "csrf_token": self.token, "messages": list(self.messages), "welcome": self.welcome,
                 "capabilities": {"python_analytics": True, "persistent_memory": True,
                                  "live_market_data": True, "web_search": self.web_search}}
 
-    def ask(self, message):
+    def ask(self, message, reasoning=None):
+        reasoning = self.reasoning if reasoning is None else reasoning
+        if reasoning not in REASONING_LEVELS:
+            raise ValueError("reasoning must be low, medium, or high")
         if not self.lock.acquire(blocking=False):
             raise BlockingIOError("A response is already in progress. Please wait.")
         try:
+            self.reasoning = reasoning
             history = [(m["role"], m["content"]) for m in self.messages]
             if self.welcome:
                 history.insert(0, ("assistant", self.welcome))
             answer = run_turn(message, client_id=self.client_id, db_path=self.db,
-                              model=self.model, history=history, web_search=self.web_search,
+                              model=self.model, history=history, web_search=self.web_search, reasoning=reasoning,
                               profile_empty=not WealthService(self.db).inspect(self.client_id)["facts"])
             self.messages.extend([{"role": "user", "content": message},
                                   {"role": "assistant", "content": answer}])
@@ -101,7 +107,7 @@ def create_server(chat, port=8765):
                 message = body.get("message") if isinstance(body, dict) else None
                 if not isinstance(message, str) or not message.strip() or len(message) > 12000:
                     return self.respond(400, {"error": "Enter a message of 1–12,000 characters."})
-                answer = chat.ask(message.strip())
+                answer = chat.ask(message.strip(), body.get("reasoning"))
             except BlockingIOError as exc:
                 return self.respond(409, {"error": str(exc)})
             except (ValueError, UnicodeError):

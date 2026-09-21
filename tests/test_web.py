@@ -57,3 +57,18 @@ def test_live_search_defaults_on_and_prompt_agrees(tmp_path):
     assert 'web_search="live"' in build_command("sol", tmp_path / "db", web_search=True)
     assert "Live web search is available" in build_prompt("question", "client", web_search=True)
     assert "General web search is disabled" in build_prompt("question", "client", web_search=False)
+
+
+def test_reasoning_selection_reaches_model_and_rejects_unknown(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(web, "run_turn", lambda text, **kwargs: calls.append(kwargs) or "Answer")
+    chat = web.Chat(tmp_path / "reasoning.sqlite3", "client")
+    assert chat.state()["reasoning"] == "low"
+    chat.ask("hello", "high")
+    assert calls[-1]["reasoning"] == "high"
+    assert chat.state()["reasoning"] == "high"
+    assert 'model_reasoning_effort="low"' in build_command("sol", tmp_path / "db")
+    assert 'model_reasoning_effort="high"' in build_command("sol", tmp_path / "db", reasoning="high")
+    with pytest.raises(ValueError):
+        chat.ask("hello", "invalid")
+    assert len(calls) == 1

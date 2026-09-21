@@ -13,7 +13,8 @@ uv run wealth-chat --client isaac --model sol
 Open [Wealth chat](http://127.0.0.1:8765). This uses the same client database as
 `wealth-agent`. Live web search is enabled by default in both launchers, using
 [Codex web search](https://learn.chatgpt.com/docs/web-search?surface=cli).
-The page shows working status, source links, and retryable errors. Client facts
+The page shows working status, source links, retryable errors, and a Low/Medium/High
+reasoning selector. Low is the default; the chosen level applies to the next message. Client facts
 persist across restarts; the visible transcript lasts for the server session.
 The server binds only to localhost and validates request origins and a session
 token. It is a local personal interface, not a hosted multi-user application.

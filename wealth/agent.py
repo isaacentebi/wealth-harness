@@ -30,6 +30,7 @@ DEMO_CLIENT_ID = "fictional-demo"
 MAX_HISTORY_MESSAGES = 6
 MAX_HISTORY_CHARS = 12_000
 DEFAULT_TIMEOUT_SECONDS = 300.0
+REASONING_LEVELS = ("low", "medium", "high")
 
 
 class AgentError(RuntimeError):
@@ -54,9 +55,11 @@ def resolve_model(value: str) -> str:
     return MODEL_ALIASES.get(value.lower(), value)
 
 
-def build_command(model: str, db_path: str | Path, *, web_search: bool = True) -> list[str]:
+def build_command(model: str, db_path: str | Path, *, web_search: bool = True, reasoning: str = "low") -> list[str]:
     """Build an isolated Codex invocation exposing only the Wealth MCP server."""
 
+    if reasoning not in REASONING_LEVELS:
+        raise ValueError("reasoning must be low, medium, or high")
     project_root = Path(__file__).resolve().parent.parent
     database = Path(db_path).expanduser().resolve()
     return [
@@ -70,6 +73,8 @@ def build_command(model: str, db_path: str | Path, *, web_search: bool = True) -
         "--model",
         resolve_model(model),
         "--json",
+        "-c",
+        f"model_reasoning_effort={_toml(reasoning)}",
         "-C",
         str(project_root),
         "-c",
@@ -256,8 +261,9 @@ def run_turn(
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     profile_empty: bool | None = None,
     web_search: bool = True,
+    reasoning: str = "low",
 ) -> str:
-    command = build_command(model, db_path, web_search=web_search)
+    command = build_command(model, db_path, web_search=web_search, reasoning=reasoning)
     return_code, stdout = _run_process(
         command, build_prompt(user_prompt, client_id, history, profile_empty=profile_empty, web_search=web_search), timeout
     )
