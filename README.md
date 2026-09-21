@@ -17,7 +17,8 @@ uv run wealth-chat --client my-profile --model sol
 
 Open **http://127.0.0.1:8765/**. Onboarding starts with income, spending, savings,
 investments and debt. Relevant facts are remembered automatically. Web search is
-on; reasoning defaults to Low and can be changed in the chat.
+on; response depth defaults to Fast and can be changed to Balanced or Deep in the
+chat. Progress streams while the assistant works, and a response can be stopped.
 
 For a fictional terminal demo, run `uv run wealth-agent --demo --model sol`.
 Use `--model luna` for Luna. [Setup, memory and fresh test sessions](docs/agent.md).

@@ -14,14 +14,22 @@ def _event(event: dict) -> str:
     return json.dumps(event)
 
 
+def _proc(stdout: str, code: int = 0, stderr: str = ""):
+    """A fake ``_stream_process`` generator for a finished Codex run."""
+
+    for line in stdout.splitlines():
+        yield ("line", line)
+    yield ("exit", code, stderr)
+
+
 def test_run_turn_builds_isolated_codex_command_without_extracting_auth(
     monkeypatch, tmp_path, capsys
 ):
     captured = {}
 
-    def fake_run(command, prompt, timeout):
+    def fake_run(command, prompt, timeout, control=None, cwd=None):
         captured.update(command=list(command), prompt=prompt, timeout=timeout)
-        return 0, "\n".join(
+        return _proc("\n".join(
             [
                 _event(
                     {
@@ -43,9 +51,9 @@ def test_run_turn_builds_isolated_codex_command_without_extracting_auth(
                 ),
                 _event({"type": "turn.completed", "usage": {"input_tokens": 42}}),
             ]
-        )
+        ))
 
-    monkeypatch.setattr(agent, "_run_process", fake_run)
+    monkeypatch.setattr(agent, "_stream_process", fake_run)
     answer = agent.run_turn(
         "How am I doing?",
         client_id="stable-client",
@@ -59,9 +67,12 @@ def test_run_turn_builds_isolated_codex_command_without_extracting_auth(
     assert answer == "A concise answer."
     assert command[:2] == ["codex", "exec"]
     assert "--ignore-user-config" in command
-    assert "--ephemeral" in command
+    assert "--ephemeral" not in command  # sessions persist so later turns can resume
     assert command[command.index("--sandbox") + 1] == "read-only"
     assert command[command.index("--model") + 1] == "gpt-5.6-sol"
+    for feature in ("shell_tool", "unified_exec", "browser_use", "computer_use", "view_image",
+                    "image_generation", "memories", "tool_suggest", "skill_search"):
+        assert f"features.{feature}=false" in command
     assert "features.shell_tool=false" in command
     assert "features.apps=false" in command
     assert "features.plugins=false" in command
@@ -81,22 +92,22 @@ def test_run_turn_builds_isolated_codex_command_without_extracting_auth(
 def test_turn_failure_event_is_not_silent(monkeypatch, tmp_path):
     monkeypatch.setattr(
         agent,
-        "_run_process",
-        lambda command, prompt, timeout: (
-            0,
+        "_stream_process",
+        lambda *args: _proc(
             _event(
                 {"type": "turn.failed", "error": {"message": "authentication unavailable"}}
             ),
         ),
     )
-    with pytest.raises(agent.AgentError, match="authentication unavailable"):
+    with pytest.raises(agent.AgentError, match="authentication unavailable") as failure:
         agent.run_turn(
             "question", client_id="client", db_path=tmp_path / "wealth.sqlite3"
         )
+    assert failure.value.kind == "not_logged_in"
 
 
 def test_partial_response_without_completed_turn_is_not_success(monkeypatch, tmp_path):
-    monkeypatch.setattr(agent, "_run_process", lambda *args: (0, _event({
+    monkeypatch.setattr(agent, "_stream_process", lambda *args: _proc(_event({
         "type": "item.completed", "item": {"type": "agent_message", "text": "Working..."}
     })))
     with pytest.raises(agent.AgentError, match="before completing"):
@@ -270,5 +281,5 @@ def test_launcher_supplies_behavior_once_and_preserves_standalone_mcp_contract(t
     assert 'model_verbosity="low"' in command
     assert ASSISTANT_CONTRACT not in build_server(include_behavior=False).instructions
     assert ASSISTANT_CONTRACT in build_server().instructions
-    assert "This instance serves one person" in prompt
+    assert "client_id: 'profile'" in prompt
     assert "WITHOUT client_id" in ASSISTANT_CONTRACT
