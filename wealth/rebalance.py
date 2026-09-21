@@ -32,7 +32,7 @@ trade.  Nothing here places orders.
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dc_replace
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_FLOOR
 from typing import Any
@@ -92,6 +92,15 @@ def _dec(value: Any, path: str, *, nonnegative: bool = True) -> Decimal:
 
 def _opt_dec(value: Any, path: str) -> Decimal | None:
     return None if value is None else _dec(value, path)
+
+
+def _share(value: Any, path: str) -> Decimal:
+    """A share of the portfolio written as a fraction (0.05 = 5%); a percent such as 5 is rejected."""
+    result = _dec(value, path)
+    if result > ONE:
+        raise ValueError(f"{path} must be a fraction between 0 and 1, not a percent (got {value}); "
+                         f"use {format(result / 100, 'f')} for {value}% (usa {format(result / 100, 'f')} para {value}%)")
+    return result
 
 
 def _date(value: Any, path: str) -> date:
@@ -351,7 +360,7 @@ class _Context:
         raw = targets.get("sleeves")
         if not isinstance(raw, list) or not raw:
             raise ValueError("targets.sleeves must be a nonempty list of {name, weight, min?, max?, buy?}")
-        default_band = _dec(targets.get("band", "0.05"), "targets.band")
+        default_band = _share(targets.get("band", "0.05"), "targets.band")
         sleeves: list[_Sleeve] = []
         for index, item in enumerate(raw):
             path = f"targets.sleeves[{index}]"
@@ -360,10 +369,10 @@ class _Context:
             name = tax_engine._text(item.get("name"), f"{path}.name")
             if any(s.name == name for s in sleeves):
                 raise ValueError(f"duplicate sleeve {name}")
-            weight = _dec(item.get("weight"), f"{path}.weight")
-            band = _dec(item.get("band", default_band), f"{path}.band")
-            low = _dec(item["min"], f"{path}.min") if item.get("min") is not None else max(weight - band, ZERO)
-            high = _dec(item["max"], f"{path}.max") if item.get("max") is not None else min(weight + band, ONE)
+            weight = _share(item.get("weight"), f"{path}.weight")
+            band = _share(item.get("band", default_band), f"{path}.band")
+            low = _share(item["min"], f"{path}.min") if item.get("min") is not None else max(weight - band, ZERO)
+            high = _share(item["max"], f"{path}.max") if item.get("max") is not None else min(weight + band, ONE)
             if not low <= weight <= high <= 1:
                 raise ValueError(f"{path} needs min <= weight <= max <= 1")
             buy = item.get("buy") or []
@@ -442,6 +451,10 @@ class _Context:
                 self.missing.append(f"prices.{position['instrument_id']}")
                 self.outside.append({**label, "reason": "no price"})
                 continue
+            if self.price_rep(position["instrument_id"]) is None:
+                self.missing.append(f"fx.{instrument.currency}/{self.currency} (price of {position['instrument_id']})")
+                self.outside.append({**label, "reason": f"no usable FX rate for its {instrument.currency} price"})
+                continue
             self.holdings[(account.id, position["instrument_id"])] = _Holding(
                 account.id, position["instrument_id"], Decimal(str(position["quantity"])), sleeve,
                 sorted(lots_by.get((account.id, position["instrument_id"]), []), key=lambda l: (l["acquired_on"], l["id"])))
@@ -504,6 +517,36 @@ class _Context:
             return None
         rate = self.rate(meta.currency, self.currency)
         return None if rate is None else meta.price * rate
+
+    def usd_price(self, instrument: _Instrument) -> Decimal | None:
+        """Sale price per share in USD, the currency of a US gain (trade-date FX)."""
+        if instrument.price is None or instrument.currency is None:
+            return None
+        rate = self.rate(instrument.currency, "USD")
+        if rate is None:
+            return None
+        if instrument.currency != "USD":
+            self._note_usd_conversion()
+        return instrument.price * rate
+
+    def usd_basis(self, lot: dict[str, Any]) -> Decimal | None:
+        """Lot basis in USD: ``cost_basis_usd`` when supplied, else the basis at trade-date FX."""
+        if lot.get("cost_basis_usd") is not None:
+            return _dec(lot["cost_basis_usd"], f"lots[{lot['id']}].cost_basis_usd")
+        rate = self.rate(str(lot["currency"]).upper(), "USD")
+        if rate is None:
+            return None
+        if str(lot["currency"]).upper() != "USD":
+            self._note_usd_conversion()
+        return Decimal(str(lot["cost_basis"])) * rate
+
+    def _note_usd_conversion(self) -> None:
+        note = ("A US gain on a non-USD holding is computed in USD: proceeds at the trade-date FX rate and basis at "
+                "lots[].cost_basis_usd when supplied, otherwise at the same trade-date rate. US tax uses the rate on "
+                "the acquisition date for basis, so without cost_basis_usd the currency part of the gain is left out; "
+                "treat the gain and tax as approximate.")
+        if note not in self.assumptions:
+            self.assumptions.append(note)
 
     def whole_shares(self, account: _Account, instrument: _Instrument) -> bool:
         if instrument.fractional is False:
@@ -625,14 +668,19 @@ def _units(ctx: _Context, holding: _Holding, planned_buys: list[tuple[str, str]]
             blocked.append({"account_id": account.id, "instrument_id": holding.instrument, "reason": "missing lots"})
             return []
         units = []
+        price_usd = ctx.usd_price(instrument)
         for lot in holding.lots:
             quantity = Decimal(str(lot["quantity"]))
             if quantity <= 0:
                 continue
-            if lot["currency"] != instrument.currency:
-                ctx.missing.append(f"lot {lot['id']} basis in {instrument.currency} (no FX is inferred for basis)")
+            basis_usd = ctx.usd_basis(lot)
+            if price_usd is None or basis_usd is None:
+                pair = instrument.currency if price_usd is None else lot["currency"]
+                ctx.missing.append(f"fx.{pair}/USD (US gain on lot {lot['id']} is computed in USD)")
+                blocked.append({"account_id": account.id, "instrument_id": holding.instrument, "lot_id": lot["id"],
+                                "reason": "gain in USD cannot be computed without FX"})
                 continue
-            per_share = price - Decimal(str(lot["cost_basis"])) / quantity
+            per_share = price_usd - basis_usd / quantity
             start = _date(lot.get("holding_period_start") or lot["acquired_on"], "lot.acquired_on")
             character = tax_engine._holding_character(start, ctx.trade_date)
             if per_share < 0:
@@ -645,7 +693,7 @@ def _units(ctx: _Context, holding: _Holding, planned_buys: list[tuple[str, str]]
             else:
                 tier = 3 if character == "long_term" else 4
             rate = None if rates is None else rates[f"{character}_{'loss' if per_share < 0 else 'gain'}"]
-            rank = (per_share / price) * (rate if rate is not None else ONE) + cost_rate
+            rank = (per_share / price_usd) * (rate if rate is not None else ONE) + cost_rate
             units.append(_Unit(account.id, holding.instrument, quantity, tier, rank, per_share, rate, "us_capital_gain",
                                lot=lot, character=character))
         return units
@@ -759,13 +807,32 @@ class _Sim:
             return None
         return amount * account.cost_rate
 
-    def _round(self, raw: Decimal, whole: bool, *, sell: bool) -> Decimal:
+    def _round(self, raw: Decimal, whole: bool) -> Decimal:
+        """Round a quantity down: buys never exceed the budget, and sells never exceed the excess (rounding a
+        sale up to a whole share could realise tax and strand proceeds the account cannot reinvest)."""
         if whole:
-            floor = raw.to_integral_value(rounding=ROUND_FLOOR)
-            if sell and floor == 0 and raw >= Decimal("0.5"):
-                return ONE
-            return floor
+            return raw.to_integral_value(rounding=ROUND_FLOOR)
         return raw.quantize(_FRACTION_STEP, rounding=ROUND_FLOOR)
+
+    def _below_minimum(self, account: _Account, amount: Decimal) -> str | None:
+        """Why a trade of ``amount`` (reporting currency) is below a minimum, or None.
+
+        ``constraints.min_trade_amount`` is in the reporting currency; an account's
+        ``min_trade_amount`` is in that account's currency and is compared there.
+        """
+        ctx = self.ctx
+        if amount < ctx.min_trade:
+            return (f"{_money(amount)} {ctx.currency} is below constraints.min_trade_amount "
+                    f"{_money(ctx.min_trade)} {ctx.currency}")
+        if account.min_trade > 0:
+            local = ctx.fx.convert(amount, ctx.currency, account.currency, f"minimum trade check for {account.id}")
+            if local is None:
+                ctx.missing.append(f"fx.{ctx.currency}/{account.currency} (account {account.id} minimum trade)")
+                return f"no FX rate to compare with the account minimum in {account.currency}"
+            if local < account.min_trade:
+                return (f"{_money(local)} {account.currency} is below the account minimum trade "
+                        f"{_money(account.min_trade)} {account.currency}")
+        return None
 
     def buy(self, deficits: dict[str, Decimal], phase: str) -> None:
         ctx = self.ctx
@@ -786,8 +853,11 @@ class _Sim:
                 options = []
                 for position, instrument_id in enumerate(sleeve.buy):
                     instrument = ctx.instruments.get(instrument_id)
-                    if instrument is None or instrument.price is None or ctx.price_rep(instrument_id) is None:
+                    if instrument is None or instrument.price is None:
                         ctx.missing.append(f"jurisdiction_context.instruments.{instrument_id}.price (buy candidate for {sleeve.name})")
+                        continue
+                    if ctx.price_rep(instrument_id) is None:
+                        ctx.missing.append(f"fx.{instrument.currency}/{ctx.currency} (buy candidate {instrument_id} for {sleeve.name})")
                         continue
                     if not ctx.can_hold(account, instrument):
                         continue
@@ -809,16 +879,15 @@ class _Sim:
             budget = min(need, cash / (ONE + cost_rate))
             if spendable is not None:
                 budget = min(budget, spendable)
-            quantity = self._round(budget / price, ctx.whole_shares(account, instrument), sell=False)
+            quantity = self._round(budget / price, ctx.whole_shares(account, instrument))
             amount = quantity * price
             if quantity <= 0:
                 self.skipped.append({"account_id": account_id, "instrument_id": instrument.id, "side": "buy",
                                      "reason": f"budget {_money(budget)} {ctx.currency} is below one share ({_money(price)})"})
                 continue
-            minimum = max(ctx.min_trade, account.min_trade)
-            if amount < minimum:
-                self.skipped.append({"account_id": account_id, "instrument_id": instrument.id, "side": "buy",
-                                     "reason": f"{_money(amount)} is below the minimum trade {_money(minimum)}"})
+            below = self._below_minimum(account, amount)
+            if below:
+                self.skipped.append({"account_id": account_id, "instrument_id": instrument.id, "side": "buy", "reason": below})
                 continue
             cost = self._cost(account, amount)
             self.cash[account_id] = cash - amount - (cost or ZERO)
@@ -890,14 +959,13 @@ class _Sim:
                 price = ctx.price_rep(unit.instrument)
                 key = (unit.account, unit.instrument)
                 available = min(unit.quantity, self.qty[key])
-                quantity = min(self._round(excess / price, ctx.whole_shares(account, instrument), sell=True), available)
+                quantity = min(self._round(excess / price, ctx.whole_shares(account, instrument)), available)
                 if quantity <= 0:
                     continue
                 amount = quantity * price
-                minimum = max(ctx.min_trade, account.min_trade)
-                if key not in grouped and amount < minimum:
-                    self.skipped.append({"account_id": unit.account, "instrument_id": unit.instrument, "side": "sell",
-                                         "reason": f"{_money(amount)} is below the minimum trade {_money(minimum)}"})
+                below = None if key in grouped else self._below_minimum(account, amount)
+                if below:
+                    self.skipped.append({"account_id": unit.account, "instrument_id": unit.instrument, "side": "sell", "reason": below})
                     continue
                 excess -= amount
                 self.qty[key] -= quantity
@@ -944,8 +1012,9 @@ class _Sim:
         left = self.lot_left[lot["id"]]
         factor = left / Decimal(str(lot["quantity"]))
         live = dict(lot, quantity=str(left), cost_basis=str(Decimal(str(lot["cost_basis"])) * factor))
-        if lot.get("cost_basis_mxn") is not None:
-            live["cost_basis_mxn"] = str(Decimal(str(lot["cost_basis_mxn"])) * factor)
+        for key in ("cost_basis_mxn", "cost_basis_usd"):
+            if lot.get(key) is not None:
+                live[key] = str(Decimal(str(lot[key])) * factor)
         return live
 
     def _sell_reason(self, sleeve: _Sleeve, account: _Account, instrument: _Instrument, entry: dict[str, Any]) -> str:
@@ -1032,13 +1101,21 @@ def _us_engine(ctx: _Context, sim: _Sim, model: Any) -> tuple[dict[str, Any] | N
         return None, ZERO
     accounts = {a["id"]: a for a in ctx.household["accounts"]}
     lots = tax_engine._build_lots(ctx.household, accounts)
+    # The engine works in USD: non-USD taxable lots are restated in USD the same way the plan priced them
+    # (see Context.usd_basis / usd_price), so they are netted with the rest instead of dropped.
+    raw_lots = {lot["id"]: lot for lot in ctx.household["lots"]}
+    for lot_id, lot in list(lots.items()):
+        if lot.tax_treatment == "taxable" and lot.currency != "USD":
+            basis = ctx.usd_basis(raw_lots[lot_id])
+            if basis is not None:
+                lots[lot_id] = dc_replace(lot, cost_basis=basis, currency="USD")
     lots_plan = {k: v for k, v in lots_plan.items() if lots[k].us_taxable}
     if not lots_plan:
         return None, ZERO
     prices = {}
     for lot_id in lots_plan:
         instrument = ctx.instruments[lots[lot_id].instrument_id]
-        prices[instrument.id] = {"price": instrument.price, "currency": instrument.currency, "as_of": ctx.trade_date,
+        prices[instrument.id] = {"price": ctx.usd_price(instrument), "currency": "USD", "as_of": ctx.trade_date,
                                  "source": instrument.price_source or "plan price"}
     purchases, _ = tax_engine._wash_purchases({"purchases": ctx.tax_inputs.get("purchases") or []}, accounts, lots)
     for account_id, instrument_id in sim.planned_buys:
@@ -1077,8 +1154,6 @@ def _netting_model(ctx: _Context, model: Any) -> Any:
         return model
     if model.method != "marginal_rates":
         return None
-    from dataclasses import replace as dc_replace
-
     limit = tax_engine.us_params.capital_loss_limit(model.filing_status or "single")
     facts = {key: ZERO for key in tax_engine._FACT_KEYS}
     facts["ordinary_income_loss_deduction_available"] = limit
@@ -1107,7 +1182,7 @@ def _attribute_us_tax(ctx: _Context, sim: _Sim, netting: Any, book: Any, lots_pl
         if not added:
             continue
         outcome = tax_engine._realize(book, dict(cumulative), set())
-        running = netting.incremental(outcome.short_term, outcome.long_term)
+        running = netting.incremental(outcome.short_term, outcome.long_term).quantize(_CENT)  # rows add up to the total
         marginal = running - previous
         previous = running
         converted = ctx.fx.convert(marginal, "USD", ctx.currency, "estimated tax")
@@ -1162,6 +1237,12 @@ def plan(holdings: Any, targets: dict[str, Any] | None, *, jurisdiction_context:
     ``jurisdiction_context``: ``{jurisdiction: US|MX, trade_date?, currency?,
     accounts: {id: {platform?, commission_rate?, vat_rate?, fractional?, min_trade_amount?, purpose?}},
     instruments: {id: {price, currency, sleeve?, venue?, sic_listed?, security_type?, issuer_domicile?}}}``.
+    Weights, ``band``, ``min`` and ``max`` are shares of the portfolio in [0, 1] (0.05 = 5%).
+    ``constraints.min_trade_amount`` is in the reporting currency; an account's
+    ``min_trade_amount`` is in that account's currency.  A US lot in another currency may carry
+    ``cost_basis_usd`` (basis at the acquisition-date rate); otherwise its gain is restated in USD
+    at the trade-date FX rate (an approximation, stated in the assumptions).
+    ``run`` defaults ``jurisdiction_context.jurisdiction`` from ``client.profile`` when it is omitted.
     """
     missing: list[str] = []
     warnings: list[str] = []
@@ -1560,8 +1641,57 @@ def run(task: str, inputs: dict[str, Any], context: dict[str, Any] | None = None
     unknown = set(inputs) - _PLAN_KEYS
     if unknown:
         raise ValueError(f"rebalance inputs: unknown {sorted(unknown)}; expected {sorted(_PLAN_KEYS)}")
-    if "jurisdiction_context" not in inputs:
-        return envelope("needs_input", {}, missing=["jurisdiction_context {jurisdiction: US|MX, ...}"])
+    jc = inputs.get("jurisdiction_context")
+    if jc is not None and not isinstance(jc, dict):
+        raise ValueError("jurisdiction_context must be an object")
+    jc = dict(jc or {})
+    defaulted: list[str] = []
+    if not jc.get("jurisdiction"):
+        jurisdiction, why = _profile_jurisdiction(context.get("client.profile"))
+        if jurisdiction is None:
+            return envelope("needs_input", {}, missing=["jurisdiction_context {jurisdiction: US|MX, ...}" + (f" ({why})" if why else "")])
+        jc["jurisdiction"] = jurisdiction
+        defaulted.append(f"Jurisdiction {jurisdiction} taken from the saved profile ({why}); pass "
+                         "jurisdiction_context.jurisdiction to override.")
+    inputs = {**inputs, "jurisdiction_context": jc}
+    report = _run_plan(inputs, context)
+    if defaulted:
+        report.setdefault("assumptions", [])
+        report["assumptions"] = defaulted + list(report["assumptions"])
+    return report
+
+
+def _profile_jurisdiction(profile: Any) -> tuple[str | None, str | None]:
+    """US or MX from ``client.profile`` (stated tax residence first, then residence), with the reason.
+
+    Returns ``(None, why)`` when the profile does not settle it: no residence, a residence outside
+    US/MX, tax residence in both, or a US person resident in Mexico (both regimes apply).
+    """
+    if not isinstance(profile, dict):
+        return None, None
+    from .situation.schema import country_code
+
+    tax_residence = profile.get("tax_residence")
+    if isinstance(tax_residence, str):
+        tax_residence = [tax_residence]
+    stated = [c for c in (country_code(x) for x in tax_residence or []) if c]
+    residence = profile.get("residence")
+    country = country_code(residence.get("country") if isinstance(residence, dict) else residence)
+    if stated:
+        known = sorted(set(stated) & {"US", "MX"})
+        if len(known) != 1:
+            return None, f"client.profile.tax_residence {stated} does not name exactly one of US or MX"
+        jurisdiction, why = known[0], f"client.profile.tax_residence {stated}"
+    elif country in {"US", "MX"}:
+        jurisdiction, why = country, f"client.profile.residence {country}"
+    else:
+        return None, (f"client.profile.residence {country} is not US or MX" if country else None)
+    if jurisdiction == "MX" and profile.get("us_person") is True:
+        return None, "a US person resident in Mexico is taxed by both; choose the regime for this plan"
+    return jurisdiction, why
+
+
+def _run_plan(inputs: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
     holdings = inputs.get("household")
     if holdings is None:
         ledger = inputs.get("ledger", context.get("ledger"))

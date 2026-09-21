@@ -9,6 +9,11 @@ Every recommendation is then checked against it.
   (:func:`wealth.situation.build`) and the person's ``preference.*`` and
   ``constraint.*`` facts.  Every number carries the rule that produced it
   (``rationale``); unknown inputs become ``missing`` entries, never guesses.
+  ``constraint.concentration`` is the largest share of the investment
+  portfolio one security may hold, written as a share with 0 < x <= 1
+  (0.05 = 5%; 1 = no limit, flagged with a warning).  A value above 1 and up
+  to 100 is read as a percent (5 -> 0.05) with a warning; anything else is
+  unreadable and the 10% default applies.
 * :func:`propose` records a draft as a decision citing the evidence fact ids
   and holds the draft under the decision id.  When the person accepts that
   decision (the ordinary decision lifecycle), :func:`on_accepted` stores it as
@@ -499,7 +504,14 @@ def _constraints(preferences: Mapping[str, Any] | None, country: str | None, us_
                 (value.get(f) for f in ("max_single_holding", "limit", "max") if value.get(f) is not None), None)
             limit = _num(raw)
             if limit is not None and 1 < limit <= 100:
+                # Written as a percent (e.g. 5): read as 5% and say so; the contract is a share in (0, 1].
+                warnings.append(f"{key} is {raw}, read as {raw}% ({limit / 100:g}); save it as a share such as "
+                                f"{limit / 100:g} to avoid the ambiguity.")
                 limit = limit / 100
+            elif limit == 1:
+                # A share of 1 is 100%: no single-holding limit.  Flag it, since 1 may have meant 1%.
+                warnings.append(f"{key} is 1, read as 100% of the portfolio (no single-holding limit); "
+                                "if you meant 1%, save 0.01.")
             if limit is None or not 0 < limit <= 1:
                 warnings.append(f"{key} is not a readable limit (a share such as 0.05); the 10% default applies.")
                 used = False
