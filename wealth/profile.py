@@ -1259,6 +1259,10 @@ def profile_view(service: Any, client_id: str, today: Any = None, language: str 
         ov = situation_overview(sit)
     if ov.get("status") != "empty":
         ov["differences"] = differences(sit)
+        if sit.get("prices"):
+            # Ledger accounts valued at provider prices: each source with its date, and what is too old.
+            ov["price_sources"] = (sit.get("net_worth") or {}).get("price_sources") or []
+            ov["stale_prices"] = sit.get("stale_prices") or []
     goals = goals_view(snapshot, today)
     known = completeness(snapshot, sit)
     groups = memory_groups(snapshot, today, ov, goals, known["missing"], sit)
@@ -1992,8 +1996,9 @@ def review_view(service: Any, client_id: str, period: str | None = None, today: 
     chosen_key = ("ips_benchmark" if bench.get("period_return") is not None else
                   "global_60_40" if ref.get("period_return") is not None or not bench else "ips_benchmark")
     chosen = bench if chosen_key == "ips_benchmark" else ref
+    market = result.get("market_data") or {}
     bench_label, bench_parts = _benchmark(chosen_key, (sec["allocation"]["data"] or {}).get("sleeves") or [],
-                                          (inputs or {}).get("benchmarks"))
+                                          (inputs or {}).get("benchmarks") or market.get("benchmarks"))
     performance_view = {
         "portfolio": V.ratio(total.get("twr_period")), "xirr": V.ratio(total.get("xirr_annual")),
         "benchmark": {"label": bench_label, "parts": bench_parts, "value": V.ratio(chosen.get("period_return"))},
@@ -2079,7 +2084,14 @@ def review_view(service: Any, client_id: str, period: str | None = None, today: 
             "letter": {"narrative": None, "summary": _review_summary(result.get("narrative_inputs") or {}, label)},
             "sections": {"net_worth": net_worth, "performance": performance_view, "allocation": allocation,
                          "cash_flow": cash_flow, "goals": goals, "decisions": decisions, "dca": dca, "taxes": taxes,
-                         "fees": fees, "next_quarter": next_quarter}}
+                         "fees": fees, "next_quarter": next_quarter},
+            # Market data the provider supplied (none when the host passed its own prices): every source with
+            # its date, the benchmark proxies (named as proxies), and prices too old to be current.
+            "market_data": {"sources": [{"source": p.get("source"), "date": p.get("last") or p.get("date"),
+                                         "symbol": p.get("instrument_id")} for p in market.get("prices") or []],
+                            "proxies": market.get("proxies") or [], "offline": market.get("offline")}
+            if market else None,
+            "stale_prices": market.get("stale_prices") or []}
 
 
 # ---- connections

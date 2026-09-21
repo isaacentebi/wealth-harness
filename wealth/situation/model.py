@@ -789,6 +789,75 @@ def _statement_accounts(facts: _Facts, ledger: Mapping[str, Any] | None) -> list
     return accounts
 
 
+_LEDGER_LIABILITY_TYPES = {"credit_card", "loan", "mortgage", "line_of_credit"}
+PRICE_STALE_DAYS = 5
+
+
+def _value_ledger_accounts(accounts: list[dict], ledger: Mapping[str, Any], market: Mapping[str, Any],
+                           today: date) -> list[dict]:
+    """Value ledger-only accounts from supplied quotes (``market``): pure, nothing is fetched here.
+
+    An account is valued only when every holding has a quote and its cash is anchored by an
+    opening balance or a statement balance (a cash sum of flows alone is not a balance).
+    Returns the quotes used, each with its source and date.
+    """
+    from ..ledger.derive import replay
+
+    targets = [a for a in accounts if a["source"] == "ledger"
+               and str(a.get("type") or "").lower() not in _LEDGER_LIABILITY_TYPES]
+    if not targets:
+        return []
+    state, _ = replay(ledger, today.isoformat())
+    quotes = market.get("prices") or {}
+    instruments = {i.get("id"): i for i in ledger.get("instruments") or []}
+    anchored = {e.get("account_id") for e in ledger.get("entries") or [] if e.get("kind") == "opening_balance"}
+    anchored |= {a.get("account_id") for a in ledger.get("assertions") or []}
+    used: dict[str, dict] = {}
+    for account in targets:
+        native: dict[str, Decimal] = {}
+        positions: list[dict] = []
+        unpriced: list[str] = []
+        cash = {ccy: amount for (acc, ccy), amount in state.cash.items() if acc == account["id"] and amount}
+        for ccy, amount in sorted(cash.items()):
+            native[ccy] = native.get(ccy, Decimal(0)) + amount
+            positions.append({"instrument_id": f"CASH:{ccy}", "symbol": f"CASH:{ccy}", "value": str(amount),
+                              "currency": ccy, "asset_class": "cash"})
+        for (acc, instrument_id), lots in sorted(state.lots.items()):
+            quantity = sum((lot.quantity for lot in lots), Decimal(0))
+            if acc != account["id"] or not quantity:
+                continue
+            meta = instruments.get(instrument_id) or {}
+            quote = quotes.get(instrument_id)
+            price = D((quote or {}).get("price"))
+            if quote is None or price is None or not quote.get("currency") or not quote.get("date"):
+                unpriced.append(meta.get("symbol") or instrument_id)
+                continue
+            value = quantity * price
+            native[quote["currency"]] = native.get(quote["currency"], Decimal(0)) + value
+            positions.append({"instrument_id": instrument_id, "symbol": meta.get("symbol") or instrument_id,
+                              "quantity": str(quantity), "value": str(value), "currency": quote["currency"],
+                              "asset_class": meta.get("asset_class"), "venue": meta.get("venue"),
+                              "issuer_domicile": meta.get("issuer_domicile"),
+                              "underlying_symbol": meta.get("underlying_symbol"), "price": str(price),
+                              "price_date": quote["date"], "price_source": quote.get("source")})
+            used[instrument_id] = quote
+        account["priced_positions"] = positions
+        account["unpriced"] = unpriced
+        if cash and account["id"] not in anchored:
+            account["unvalued_reason"] = "cash_unanchored"
+            continue
+        if unpriced:
+            account["unvalued_reason"] = "prices"
+            continue
+        dates = [p["price_date"] for p in positions if p.get("price_date")]
+        account.update(native=native, positions=positions, as_of=min(dates) if dates else today.isoformat(),
+                       valued_by="prices")
+    return [{"instrument_id": k, "symbol": (instruments.get(k) or {}).get("symbol") or k, "price": q.get("price"),
+             "currency": q.get("currency"), "date": q.get("date"), "source": q.get("source"),
+             "origin": q.get("origin"), "stale": (today - _as_date(q["date"])).days > PRICE_STALE_DAYS}
+            for k, q in sorted(used.items())]
+
+
 def _stated_investments(facts: _Facts) -> list[dict]:
     items = []
     for key in facts.keys("investment."):
@@ -832,7 +901,7 @@ def underlying_of(symbol: Any) -> str | None:
 def _holdings(accounts: list[dict], fx: _FX, currency: str | None) -> dict:
     rows = []
     for account in accounts:
-        if not account["eligible"] or account["source"] == "ledger":
+        if not account["eligible"] or (account["source"] == "ledger" and account.get("valued_by") != "prices"):
             continue
         for position in account["positions"]:
             value = fx.convert(D(position.get("value")), position.get("currency"), currency)
@@ -982,8 +1051,14 @@ def _kept(snapshot: Mapping[str, Any], facts: _Facts) -> dict[str, list[dict]]:
 
 
 def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, today: date | str | None = None,
-          *, since_revision: int | None = None, fx_max_age_days: int | None = SITUATION_FX_MAX_AGE_DAYS) -> dict:
-    """The person's current picture: deterministic, JSON-safe, unknown kept as ``None``."""
+          *, since_revision: int | None = None, fx_max_age_days: int | None = SITUATION_FX_MAX_AGE_DAYS,
+          market: Mapping[str, Any] | None = None) -> dict:
+    """The person's current picture: deterministic, JSON-safe, unknown kept as ``None``.
+
+    ``market`` (from :func:`wealth.prices.ledger_market`) values ledger-only accounts:
+    ``{prices: {instrument_id: {price, currency, date, source}}, fx: [{base, quote, rate, date, source}]}``.
+    It is passed in; nothing is fetched here.  Without it ledger-only accounts stay unvalued.
+    """
     today = _as_date(today) or datetime.now(timezone.utc).date()
     facts = _Facts(snapshot, today)
     fx = _FX(today, fx_max_age_days)
@@ -995,7 +1070,10 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
             if isinstance(row, dict):
                 fx.add(row.get("from"), row.get("to"), row.get("rate"), row.get("as_of") or household_fact.get("as_of"),
                        f"household {household_fact.get('as_of')}")
+    for row in (market or {}).get("fx") or []:
+        fx.add(row.get("base"), row.get("quote"), row.get("rate"), row.get("date"), row.get("source") or "market")
     statement_accounts = _statement_accounts(facts, ledger)
+    price_rows = _value_ledger_accounts(statement_accounts, ledger, market, today) if market and ledger else []
     for account in statement_accounts:
         for row in account["fx"]:
             if isinstance(row, dict):
@@ -1068,6 +1146,15 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
                "value": None, "liquid": account["liquid"] if isinstance(account.get("liquid"), bool)
                else (account.get("type") or "").lower() not in _ILLIQUID_TYPES,
                "stale": not account["eligible"], "positions": len(account["positions"])}
+        if account["source"] == "ledger" and "priced_positions" in account:
+            row["valued_by"] = account.get("valued_by")
+            row["unpriced"] = account.get("unpriced") or []
+            if account.get("unvalued_reason"):
+                row["unvalued_reason"] = account["unvalued_reason"]
+            row["priced_positions"] = account["priced_positions"]
+            row["price_sources"] = sorted({(p["price_source"], p["price_date"]) for p in account["priced_positions"]
+                                           if p.get("price_source")})
+            row["price_sources"] = [{"source": s, "date": d} for s, d in row["price_sources"]]
         if account["key"] in superseded:
             # Kept out of the totals: the person kept their stated figure over this statement.
             row["superseded_by"] = superseded[account["key"]]
@@ -1145,7 +1232,7 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
     liquid = sum((D(r["value"]) for r in counted if r.get("liquid", True)), Decimal(0))
     illiquid = sum((D(r["value"]) for r in counted if not r.get("liquid", True)), Decimal(0))
     owed = sum((D(r["value"]) or Decimal(0) for r in liabilities if r["value"] is not None), Decimal(0))
-    unvalued_accounts = [a["label"] for a in accounts if a["source"] == "ledger"]
+    unvalued_accounts = [a["label"] for a in accounts if a["source"] == "ledger" and a.get("valued_by") != "prices"]
     any_assets = bool(counted)
     net_worth = {
         "currency": currency, "currency_basis": currency_basis,
@@ -1156,6 +1243,9 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
         "unconverted": unconverted, "unvalued_accounts": unvalued_accounts,
         "complete": not unconverted and not unvalued_accounts and bool(any_assets),
     }
+    if market is not None:
+        net_worth["price_sources"] = sorted({(r["source"], r["date"]) for r in price_rows if r["source"]})
+        net_worth["price_sources"] = [{"source": s, "date": d} for s, d in net_worth["price_sources"]]
 
     # -- monthly flow
     paying = [r for r in liabilities if r["monthly_payment"] is not None and not r["in_spending"]]
@@ -1283,6 +1373,11 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
                          | {i["key"] for i in stated_investments if i.get("legacy")}
                          | ({"goals"} if any(g["legacy"] for g in goals) else set())),
         "fx": fx.listing(), "evidence": {k: v for k, v in sorted(facts.used.items()) if v},
+        "prices": price_rows,
+        "stale_prices": [{"symbol": r["symbol"], "date": r["date"], "source": r["source"]} for r in price_rows if r["stale"]]
+        + [{"symbol": f["pair"], "date": f["date"], "source": f["source"]} for f in fx.listing()
+           if market is not None and f["date"] and (today - _as_date(f["date"])).days > PRICE_STALE_DAYS
+           and f["source"] and f["source"].startswith("Yahoo")],
         "meta": {k: facts.meta(k) for k in sorted(facts.all)},
         "changes": changes, "changes_since": since_revision,
     }
