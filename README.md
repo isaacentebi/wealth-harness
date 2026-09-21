@@ -41,6 +41,19 @@ returns the live task catalog, examples, and boundaries. Set `intent` to a task
 name to retrieve only that task’s contract. The host does not need
 the implementation manual in its prompt.
 
+## Talk to a real agent
+
+If Codex CLI is installed and you are signed in with ChatGPT:
+
+```sh
+uv run wealth-agent --demo --model sol
+```
+
+Use `--model luna` to switch models. Ask “How much can I invest while protecting
+my home goal?”, then change the goal and ask it to remember. The fictional
+client's Wealth memory persists across sessions and models. No extra API key is
+needed for this local path. [Agent setup and details](docs/agent.md).
+
 ## Model provider
 
 Wealth needs no LLM API key. Your host assistant can use OpenRouter or another

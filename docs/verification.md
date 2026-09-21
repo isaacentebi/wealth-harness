@@ -70,6 +70,33 @@ listed shares. Inputs, eligibility, rates, and account coverage remain explicit.
 
 Semantic retrieval accepts host-supplied embeddings; the package does not
 create them. SQLite is local plaintext. MCP was tested with the official SDK,
-not every third-party harness. No human usability study or model-driven
-conversation evaluation has been performed. The host still owns conversational
-judgment and explanations.
+not every third-party harness. No human usability study or comprehensive
+conversation-quality evaluation has been performed. The host still owns
+conversational judgment and explanations.
+
+
+## Real agents — 2026-09-21 UTC
+
+Codex CLI 0.153.4 reported an active ChatGPT login. No API key or OAuth token
+was copied into Wealth. Bounded live runs used the actual Wealth MCP server:
+
+- **GPT-5.6 Sol:** retrieved a fictional client's context, ran `plan`, and
+  correctly returned $226,000 total uncommitted capital after a $24,000 reserve
+  and $50,000 home goal from a $300,000 pool.
+- **GPT-5.6 Luna:** retrieved the same client, saved the requested goal correction
+  to $100,000, and reran `plan`, returning $176,000. A direct database read and
+  deterministic recalculation verified the persisted correction. Luna corrected
+  its initial local-date provenance to the UTC date; the launcher now explicitly
+  supplies the current UTC date.
+- **Actual `wealth-agent` entrypoint with Sol:** discovered and called Wealth
+  tools and distinguished the $226,000 total investment budget from $26,000
+  additional cash when $200,000 was already invested.
+
+These are small live integration checks, not a quality guarantee for every
+financial question. Raw event logs and test databases remain local under ignored
+`private/`. The terminal launcher uses bounded conversation history and persistent
+Wealth memory, supports Sol/Luna, and leaves the user's Codex configuration intact.
+
+Launcher regressions cover command isolation, surfaced failures, rejection of an
+incomplete event stream, and demo persistence. The integrated local suite passed
+with 345 tests; the final canonical demo also passed its focused exposure check.

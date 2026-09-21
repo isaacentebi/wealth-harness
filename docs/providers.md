@@ -23,5 +23,7 @@ See the [official OpenRouter quickstart](https://openrouter.ai/docs/quickstart)
 for authentication and the API endpoint. The host sends selected conversation
 and tool results to its model provider; keep the client context deliberate.
 
-A standalone chat application would require an additional model/tool loop.
-This repository currently supplies the financial capability, not that chat UI.
+For a ready local terminal agent using your existing ChatGPT login, use
+[`wealth-agent`](agent.md). It invokes Codex with Sol or Luna and connects the
+Wealth tools. It does not use an OpenRouter key. A hosted OpenRouter chat UI
+would be a separate integration.
