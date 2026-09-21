@@ -365,10 +365,20 @@ class Chat:
                 reveal = None  # a turn is running; the person can still ask for the synthesis
         return {**result, "reveal": reveal}
 
+    def saved_language(self) -> str | None:
+        """The language the person set up Wealth in, so the page matches the conversation after a reload."""
+        try:
+            facts = WealthService(self.db).inspect(self.client_id, keys=["client.profile"]).get("facts") or []
+        except (StoreError, sqlite3.Error):
+            return None
+        language = ((facts[0].get("value") or {}) if facts else {}).get("language")
+        return language if language in ("es", "en") else None
+
     def state(self, language: str | None = None):
         turn = self.turn
         onboarding = self.onboarding_state(language if language in ("es", "en") else None)
         return {"client_id": self.client_id, "display_name": self.display_name,
+                "language": self.saved_language(),
                 "model": resolve_model(self.model),
                 "reasoning": self.reasoning, "reasoning_levels": list(REASONING_LEVELS),
                 "csrf_token": self.token, "messages": list(self.messages),

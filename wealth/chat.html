@@ -3643,6 +3643,13 @@
       try {
         state = await refreshToken();
         if (!token) throw new Error(state.error || 'Could not load your session.');
+        if (!askedLang && (state.language === 'es' || state.language === 'en') && state.language !== LANG) {
+          // Match the language they set Wealth up in, not only the browser's.
+          const url = new URL(location.href);
+          url.searchParams.set('lang', state.language);
+          location.replace(url.toString());
+          return;
+        }
       } catch (err) {
         const box = el('div', 'fatal');
         box.setAttribute('role', 'alert');
