@@ -23,7 +23,7 @@ from .store import StaleRevisionError, StoreError, ValidationError
 
 class Source(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    kind: Literal["user", "document", "web", "tool", "inference"]
+    kind: Literal["user", "document", "web", "tool", "inference", "pattern"]
     ref: str
     observed_on: str
 
@@ -36,6 +36,7 @@ class Fact(BaseModel):
     confidence: Literal["confirmed", "reported", "inferred"] = "reported"
     expires_on: str | None = None
     merge: bool = False
+    valid_from: str | None = None
 
 
 READ = ToolAnnotations(
@@ -115,10 +116,13 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = True) -
         expected_revision: StrictInt | None = None,
         request_id: str | None = None,
     ) -> dict[str, Any]:
-        """Atomically record sourced facts; returns a receipt (keys, new revision, warnings).
+        """Atomically record sourced facts; returns a receipt (keys, new revision, needs_user, warnings).
 
         New keys and merge=true updates need no expected_revision. Replacing an
-        existing value wholesale needs the client_revision you read.
+        existing value wholesale needs the client_revision you read. valid_from:
+        when it became true ("went up in March"). value null forgets a key.
+        Evidence never overwrites what the person said: those writes come back in
+        needs_user. Ask with each item's question; never pick a side silently.
         """
         return service.remember(
             client_id, [item.model_dump() for item in facts], expected_revision, request_id
@@ -200,10 +204,26 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = True) -
         client_id: str,
         key: str | None = None,
         keys: list[str] | None = None,
-        detail: Literal["current", "history", "export"] = "current",
+        detail: Literal["current", "history", "contradictions", "export"] = "current",
     ) -> dict[str, Any]:
-        """Read full current facts (key/keys filter), one key's history, or a full export (only on request)."""
+        """Read current facts (key/keys filter), one key's timeline (history), pending contradictions,
+        or a full export (only on request)."""
         return service.inspect(client_id, detail=detail, key=key, keys=keys)
+
+    @tool(annotations=WRITE)
+    def wealth_resolve_contradiction(
+        client_id: str,
+        contradiction_id: str,
+        choice: Literal["keep", "use_new", "changed"],
+        valid_from: str | None = None,
+    ) -> dict[str, Any]:
+        """Save the person's answer to a contradiction (from needs_user or detail=contradictions).
+
+        Ask first, using its question; call only with their answer, never your own pick.
+        keep: theirs stands. use_new: theirs was wrong. changed: both were true in turn
+        (valid_from: when it changed; default the new evidence's date).
+        """
+        return service.resolve_contradiction(client_id, contradiction_id, choice, valid_from)
 
     @tool(annotations=WRITE)
     def wealth_client(
@@ -228,6 +248,8 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = True) -
             "Monitoring runs only when explicitly called and sends no external notifications. "
             "wealth_ingest action=confirm saves a stored proposal; call it only after the person "
             "explicitly says yes to the summary you showed. "
+            "When newer evidence contradicts what the person said, Wealth holds it as a "
+            "contradiction; ask them in its own wording and never pick a side silently. "
             "Exports contain sensitive history and should be fetched only when requested. "
             "Deleting a profile is not available here; the person runs `wealth client` forget "
             "themselves.\n"

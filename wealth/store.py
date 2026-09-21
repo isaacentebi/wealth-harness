@@ -23,12 +23,23 @@ from typing import Any, Iterator, Mapping, Sequence
 from .situation.schema import SchemaError, validate as validate_canonical
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _CONFIDENCES = frozenset({"confirmed", "reported", "inferred"})
-_SOURCE_KINDS = frozenset({"user", "document", "web", "tool", "inference", "connector"})
+_SOURCE_KINDS = frozenset({"user", "document", "web", "tool", "inference", "connector", "pattern"})
+# Sources that may not silently overwrite what the person told us (see ``remember``).
+_CHALLENGER_KINDS = frozenset({"document", "web", "connector", "inference", "pattern"})
 _DECISION_STATUSES = frozenset({"accepted", "dismissed"})
+# A fact revision is ``active`` (possibly closed by valid_to), ``corrected`` (it turned out
+# wrong), or a value-less terminal row: ``forgotten`` (the person removed it) or
+# ``replaced`` (a statement under another key took its place).
+_TERMINAL_STATUSES = ("forgotten", "replaced")
+_CONTRADICTION_CHOICES = ("keep", "use_new", "changed")
+# A stated balance within this share of the statement is not worth a question.
+STATED_TOLERANCE = 0.02
+STATED_TOLERANCE_APPROXIMATE = 0.10
 _TABLES = frozenset(
-    {"metadata", "clients", "facts", "batches", "decisions", "decision_events", "auxiliary"}
+    {"metadata", "clients", "facts", "batches", "decisions", "decision_events", "auxiliary",
+     "contradictions"}
 )
 _LEDGER_TABLES = frozenset({
     "ledger_accounts", "ledger_instruments", "ledger_entries", "ledger_fx", "ledger_assertions",
@@ -115,6 +126,31 @@ CREATE TABLE IF NOT EXISTS ledger_labels (
     recorded_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ledger_labels_entry ON ledger_labels(client_id, entry_id, id);
+"""
+# Version 3 adds valid time to facts and pending contradictions.
+_CONTRADICTION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS contradictions (
+    id TEXT PRIMARY KEY,
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('same_key','stated_vs_statement')),
+    key TEXT NOT NULL,
+    proposed_key TEXT NOT NULL,
+    current_fact_id TEXT NOT NULL,
+    current_json TEXT NOT NULL,
+    proposed_json TEXT NOT NULL,
+    question TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending','kept','used_new','changed','replaced')),
+    request_id TEXT,
+    created_at TEXT NOT NULL,
+    resolved_at TEXT,
+    resolution_json TEXT
+);
+CREATE INDEX IF NOT EXISTS contradictions_client_status
+    ON contradictions(client_id, status, created_at);
+CREATE INDEX IF NOT EXISTS contradictions_client_key
+    ON contradictions(client_id, key, proposed_key);
+CREATE INDEX IF NOT EXISTS facts_client_valid
+    ON facts(client_id, key, valid_from);
 """
 # Candidate duplicates from a different statement: same account/kind/amount
 # within this many days and similar descriptions.
@@ -306,6 +342,90 @@ def merge_patch(current: Any, patch: Any, field: str = "value") -> Any:
     return patch
 
 
+def _protected(row: Mapping[str, Any]) -> bool:
+    """A value the person stated or confirmed themselves."""
+
+    return row["source_kind"] == "user" and row["confidence"] in {"reported", "confirmed"}
+
+
+def describe(value: Any) -> str:
+    """A short readable rendering of a fact value (amount-shaped values as 'MXN 85,000')."""
+
+    from .situation.text import fmt
+
+    if value is None:
+        return "nothing"
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, (int, float)):
+        return fmt(value)
+    if isinstance(value, str):
+        return value if len(value) <= 60 else value[:57] + "..."
+    if isinstance(value, dict):
+        if isinstance(value.get("statement"), dict) and value["statement"]:
+            return " + ".join(f"{cur} {fmt(amount)}" for cur, amount in sorted(value["statement"].items()))
+        for field in ("amount", "balance", "total", "value"):
+            amount = value.get(field)
+            if isinstance(amount, (int, float)) and not isinstance(amount, bool):
+                text = f"{value.get('currency') or ''} {fmt(amount)}".strip()
+                period = value.get("frequency") or value.get("period")
+                if period in {"monthly", "month"}:
+                    text += " a month"
+                elif period in {"annual", "year"}:
+                    text += " a year"
+                return text
+    if isinstance(value, list):
+        return f"{len(value)} item{'s' if len(value) != 1 else ''}"
+    text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return text if len(text) <= 80 else text[:77] + "..."
+
+
+_SOURCE_PHRASES = {
+    "document": "a document ({ref})", "web": "a web page ({ref})", "connector": "a connected account",
+    "inference": "my own reading", "pattern": "your transactions", "tool": "a calculation",
+}
+
+
+def _question(kind: str, key: str, current: Mapping[str, Any], proposed: Mapping[str, Any]) -> str:
+    """The question to put to the person, in plain words (the agent translates it)."""
+
+    since = current.get("valid_from")
+    mine = f"You told me {key} is {describe(current['value'])}" + (f" (since {since})" if since else "")
+    source = proposed["source"]
+    where = _SOURCE_PHRASES.get(source["kind"], source["kind"]).format(ref=source["ref"])
+    if kind == "stated_vs_statement":
+        value = proposed["value"]
+        institution = proposed.get("institution")
+        return (f"{mine}{' at ' + institution if institution else ''}, but the statement "
+                f"dated {value.get('as_of') or source['observed_on']} shows {describe(value)}. "
+                "Keep your figure, use the statement, or did it change?")
+    return (f"{mine}, but {where} says {describe(proposed['value'])} as of "
+            f"{proposed.get('valid_from') or source['observed_on']}. "
+            "Keep yours, use the new one, or did it change?")
+
+
+def _period_text(fact: Mapping[str, Any]) -> str:
+    """One line of a timeline: '85,000 since 2026-03', 'forgotten on 2026-09-21'."""
+
+    start, end, status = fact.get("valid_from"), fact.get("valid_to"), fact.get("status")
+    if status == "forgotten":
+        return f"forgotten on {start}"
+    if status == "replaced":
+        return f"replaced by a statement from {start}"
+    text = describe(fact.get("value"))
+    if fact.get("confidence") == "inferred":
+        text += " (inferred)"
+    if status == "corrected":
+        return f"{text} (corrected)"
+    if not start:
+        return text
+    if end is None:
+        return f"{text} since {start[:7]}"
+    if end == start:
+        return f"{text} (superseded)"
+    return f"{text} from {start[:7]} to {end[:7]}"
+
+
 class WealthStore:
     """A local SQLite evidence store.
 
@@ -379,8 +499,13 @@ class WealthStore:
                 ).fetchone()
                 if row is None:
                     raise StoreError("database metadata has no schema version")
-                if row["value"] == "1" and existing_tables >= _TABLES:
+                version = row["value"]
+                base = _TABLES - {"contradictions"}
+                if version == "1" and existing_tables >= base:
                     self._migrate_to_2()
+                    version = "2"
+                if version == "2" and existing_tables >= base:
+                    self._migrate_to_3()
                     return
                 if row["value"] != str(SCHEMA_VERSION):
                     raise StoreError(
@@ -416,6 +541,9 @@ class WealthStore:
                     expires_on TEXT,
                     revision INTEGER NOT NULL,
                     recorded_at TEXT NOT NULL,
+                    valid_from TEXT,
+                    valid_to TEXT,
+                    status TEXT NOT NULL DEFAULT 'active',
                     UNIQUE (client_id, key, revision)
                 );
                 CREATE INDEX IF NOT EXISTS facts_client_key_revision
@@ -457,7 +585,7 @@ class WealthStore:
                     PRIMARY KEY (client_id, namespace)
                 );
                 INSERT OR IGNORE INTO metadata(key, value)
-                    VALUES('schema_version', '2');
+                    VALUES('schema_version', '3');
                 INSERT INTO decision_events(decision_id, status, recorded_at)
                     SELECT d.id, 'proposed', d.created_at
                     FROM decisions d
@@ -472,7 +600,7 @@ class WealthStore:
                         SELECT 1 FROM decision_events e
                         WHERE e.decision_id = d.id AND e.status = d.status
                     );
-                """ + _LEDGER_SCHEMA + """
+                """ + _LEDGER_SCHEMA + _CONTRADICTION_SCHEMA + """
                 COMMIT;
                 """
             )
@@ -484,6 +612,35 @@ class WealthStore:
             "BEGIN IMMEDIATE;"
             + _LEDGER_SCHEMA
             + "UPDATE metadata SET value = '2' WHERE key = 'schema_version'; COMMIT;"
+        )
+
+    def _migrate_to_3(self) -> None:
+        """Add valid time and contradictions to a version-2 database in one transaction.
+
+        Every existing revision becomes valid from its observation date and is
+        closed where the next revision of the same key begins.  Old null
+        retractions become ``forgotten`` tombstones.
+        """
+
+        columns = {row["name"] for row in self._db.execute("PRAGMA table_info(facts)")}
+        added = {"valid_from": "TEXT", "valid_to": "TEXT", "status": "TEXT NOT NULL DEFAULT 'active'"}
+        self._db.executescript(
+            "BEGIN IMMEDIATE;"
+            + "".join(f"ALTER TABLE facts ADD COLUMN {name} {kind};"
+                      for name, kind in added.items() if name not in columns)
+            + """
+            UPDATE facts SET valid_from = observed_on;
+            UPDATE facts SET status = 'forgotten' WHERE value_json = 'null';
+            UPDATE facts SET valid_to = (
+                SELECT MAX(n.valid_from, facts.valid_from) FROM facts n
+                WHERE n.client_id = facts.client_id AND n.key = facts.key
+                  AND n.revision > facts.revision
+                ORDER BY n.revision LIMIT 1
+            );
+            UPDATE facts SET valid_to = valid_from WHERE status = 'forgotten';
+            """
+            + _CONTRADICTION_SCHEMA
+            + "UPDATE metadata SET value = '3' WHERE key = 'schema_version'; COMMIT;"
         )
 
     def _begin(self) -> None:
@@ -553,7 +710,34 @@ class WealthStore:
             "expires_on": row["expires_on"],
             "revision": row["revision"],
             "recorded_at": row["recorded_at"],
+            "valid_from": row["valid_from"],
+            "valid_to": row["valid_to"],
+            "status": row["status"],
         }
+
+    def _current_rows(
+        self, client_id: str, keys: Sequence[str] | None = None
+    ) -> dict[str, sqlite3.Row]:
+        """The latest revision of each key, tombstones included (check ``status``)."""
+
+        where = f" AND key IN ({','.join('?' for _ in keys)})" if keys else ""
+        return {
+            row["key"]: row
+            for row in self._db.execute(
+                "SELECT f.* FROM facts f JOIN (SELECT key, MAX(revision) revision FROM facts "
+                f"WHERE client_id = ?{where} GROUP BY key) latest "
+                "ON latest.key = f.key AND latest.revision = f.revision "
+                "WHERE f.client_id = ? ORDER BY f.key",
+                (client_id, *(keys or ()), client_id),
+            )
+        }
+
+    def _active_facts(self, client_id: str) -> list[dict[str, Any]]:
+        return [
+            self._fact_from_row(row)
+            for row in self._current_rows(client_id).values()
+            if row["status"] == "active"
+        ]
 
     def _latest_ids(self, client_id: str) -> dict[str, tuple[str, int]]:
         return {
@@ -650,14 +834,7 @@ class WealthStore:
         with self._lock:
             with self._read_transaction():
                 client = self._client_row(client_id)
-                facts = self._db.execute(
-                    "SELECT f.* FROM facts f JOIN "
-                    "(SELECT key, MAX(revision) revision FROM facts "
-                    " WHERE client_id = ? GROUP BY key) latest "
-                    "ON latest.key = f.key AND latest.revision = f.revision "
-                    "WHERE f.client_id = ? ORDER BY f.key",
-                    (client_id, client_id),
-                ).fetchall()
+                facts = self._active_facts(client_id)
                 decisions = self._db.execute(
                     "SELECT * FROM decisions WHERE client_id = ? ORDER BY created_at, id",
                     (client_id,),
@@ -669,7 +846,7 @@ class WealthStore:
                         "display_name": client["display_name"],
                         "revision": client["revision"],
                     },
-                    "facts": [self._fact_from_row(row) for row in facts],
+                    "facts": facts,
                     "decisions": [self._decision_from_row(row, latest) for row in decisions],
                 }
 
@@ -678,7 +855,7 @@ class WealthStore:
             raise ValidationError("each fact must be an object")
         if any(not isinstance(field, str) for field in raw):
             raise ValidationError("fact field names must be strings")
-        allowed = {"key", "value", "source", "confidence", "expires_on", "merge"}
+        allowed = {"key", "value", "source", "confidence", "expires_on", "merge", "valid_from"}
         unknown = set(raw) - allowed
         if unknown:
             raise ValidationError(f"unknown fact fields: {sorted(unknown)!r}; allowed {sorted(allowed)!r}")
@@ -716,8 +893,16 @@ class WealthStore:
             raise ValidationError(f"{key}.confidence must be one of {sorted(_CONFIDENCES)!r}")
         if confidence == "confirmed" and kind != "user":
             raise ValidationError(f"{key}: only a user source can carry confirmed confidence")
-        if kind == "inference" and confidence != "inferred":
-            raise ValidationError(f"{key}: an inference source must carry inferred confidence")
+        if kind in {"inference", "pattern"} and confidence != "inferred":
+            raise ValidationError(
+                f"{key}: an {kind} source must carry inferred confidence until the person confirms it"
+            )
+        if raw.get("valid_from") is None:
+            valid_from = observed
+        else:
+            valid_from = _iso_date(raw["valid_from"], f"{key}.valid_from")
+            if valid_from > _today() + timedelta(days=1):
+                raise ValidationError(f"{key}.valid_from must not be in the future")
         warnings = []
         if kind in {"document", "web", "connector"} and _is_policy_key(key) and confidence != "inferred":
             confidence = "inferred"
@@ -744,27 +929,55 @@ class WealthStore:
             "confidence": confidence,
             "expires_on": expires.isoformat(),
             "merge": merge,
+            "valid_from": valid_from.isoformat(),
         }, warnings
 
+    def _action(self, row: sqlite3.Row) -> str:
+        """How a written revision relates to the one before it (derived, so replays agree)."""
+
+        if row["status"] in _TERMINAL_STATUSES:
+            return "forget" if row["status"] == "forgotten" else "replace"
+        prior = self._db.execute(
+            "SELECT confidence, status FROM facts WHERE client_id = ? AND key = ? AND revision < ? "
+            "ORDER BY revision DESC LIMIT 1",
+            (row["client_id"], row["key"], row["revision"]),
+        ).fetchone()
+        if prior is None or prior["status"] in _TERMINAL_STATUSES:
+            return "add"
+        if prior["confidence"] == "inferred" and row["confidence"] != "inferred":
+            return "supersede"
+        return "update"
+
     def _receipt(
-        self, client_id: str, revision: int, request_id: str | None, replayed: bool,
-        warnings: list[str],
+        self, client_id: str, revision: int | None, request_id: str | None, replayed: bool,
+        warnings: list[str], needs_user: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         client = self._client_row(client_id)
-        written = self._db.execute(
-            "SELECT id, key, confidence, expires_on, source_kind FROM facts "
-            "WHERE client_id = ? AND revision = ? ORDER BY key",
+        written = [] if revision is None else self._db.execute(
+            "SELECT * FROM facts WHERE client_id = ? AND revision = ? ORDER BY key",
             (client_id, revision),
         ).fetchall()
+        if needs_user is None:
+            needs_user = [] if request_id is None else [
+                self._contradiction_from_row(row) for row in self._db.execute(
+                    "SELECT * FROM contradictions WHERE client_id = ? AND request_id = ? "
+                    "AND status = 'pending' ORDER BY created_at, id",
+                    (client_id, request_id),
+                )
+            ]
         return {
             "client": {"id": client_id, "revision": client["revision"]},
             "written": [
                 {"key": row["key"], "id": row["id"], "confidence": row["confidence"],
-                 "expires_on": row["expires_on"], "source_kind": row["source_kind"]}
+                 "expires_on": row["expires_on"], "source_kind": row["source_kind"],
+                 "valid_from": row["valid_from"], "action": self._action(row)}
                 for row in written
             ],
+            "needs_user": needs_user,
             "write_result": {
-                "request_id": request_id, "resulting_revision": revision, "replayed": replayed,
+                "request_id": request_id,
+                "resulting_revision": client["revision"] if revision is None else revision,
+                "replayed": replayed,
             },
             "warnings": warnings,
         }
@@ -780,7 +993,20 @@ class WealthStore:
 
         Without ``expected_revision`` a write may add new keys or ``merge`` into
         existing ones inside the write transaction; replacing an existing key
-        requires the revision the caller read.
+        requires the revision the caller read, unless the current value is
+        inferred and the new one is better evidence.
+
+        Time: each revision is valid from ``valid_from`` (default: the source's
+        observation date).  A new value closes the previous revision at that
+        date instead of erasing it.  A ``null`` value forgets the key: the
+        history keeps a ``forgotten`` tombstone and the value is no longer used.
+
+        Update policy: a document, web, connector, inference or pattern source
+        never overwrites a value the person stated or confirmed.  The write is
+        held as a pending contradiction and returned in ``needs_user``; the
+        person decides (``resolve_contradiction``).  A statement saved under
+        ``account.*`` that disagrees with a stated ``investment.*``/``cash.*``
+        balance opens the same kind of contradiction.
         """
 
         client_id = _required_text(client_id, "client_id")
@@ -826,67 +1052,344 @@ class WealthStore:
                 if expected_revision is not None and current_revision != expected_revision:
                     raise StaleRevisionError(expected_revision, current_revision)
                 current = {
-                    row["key"]: row
-                    for row in self._db.execute(
-                        f"SELECT f.* FROM facts f JOIN (SELECT key, MAX(revision) revision "
-                        f"FROM facts WHERE client_id = ? AND key IN ({','.join('?' for _ in keys)}) "
-                        f"GROUP BY key) latest ON latest.key = f.key AND latest.revision = f.revision "
-                        f"WHERE f.client_id = ?",
-                        (client_id, *keys, client_id),
-                    )
+                    key: row for key, row in self._current_rows(client_id, keys).items()
+                    if row["status"] == "active"
                 }
+                needs_user: list[dict[str, Any]] = []
+                to_write: list[tuple[dict[str, Any], sqlite3.Row | None]] = []
                 for fact in normalized:
-                    prior_fact = current.get(fact["key"])
-                    if fact["merge"] and prior_fact is not None:
+                    key = fact["key"]
+                    prior_fact = current.get(key)
+                    if fact["merge"] and prior_fact is not None and fact["value"] is not None:
                         fact["value"] = merge_patch(
-                            json.loads(prior_fact["value_json"]), fact["value"], fact["key"]
-                        )
-                        if prior_fact["confidence"] == "inferred" or is_stale(dict(prior_fact)):
-                            warnings.append(
-                                f"{fact['key']} was merged into an inferred or past-review value "
-                                f"observed on {prior_fact['observed_on']}; reconfirm the unchanged parts"
-                            )
-                    elif prior_fact is not None and expected_revision is None:
-                        raise ValidationError(
-                            f"{fact['key']} already has a value; send it with merge=true to "
-                            f"update fields, or pass expected_revision={current_revision} to replace it"
+                            json.loads(prior_fact["value_json"]), fact["value"], key
                         )
                     elif fact["merge"] and isinstance(fact["value"], dict):
                         fact["value"] = merge_patch({}, fact["value"])
-                    try:
-                        warnings.extend(validate_canonical(fact["key"], fact["value"]))
-                    except SchemaError as exc:
-                        raise ValidationError(f"{exc}; see fact_contract.schema") from exc
-                new_revision = current_revision + 1
-                self._db.execute(
-                    "UPDATE clients SET revision = ? WHERE id = ?", (new_revision, client_id)
-                )
-                for fact in normalized:
+                    if (
+                        prior_fact is not None
+                        and _protected(prior_fact)
+                        and fact["source"]["kind"] in _CHALLENGER_KINDS
+                        and _json(fact["value"]) != prior_fact["value_json"]
+                    ):
+                        opened = self._open_contradiction(
+                            client_id, "same_key", key, key, prior_fact,
+                            {name: fact[name] for name in
+                             ("value", "source", "confidence", "expires_on", "valid_from")},
+                            request_id, now,
+                        )
+                        if opened is None:
+                            warnings.append(
+                                f"{key} was not changed: the person already chose to keep their "
+                                "value over this same figure"
+                            )
+                        else:
+                            needs_user.append(opened)
+                            warnings.append(
+                                f"{key} was not changed: the person told us something different. "
+                                f"Ask them (needs_user {opened['id']}); never pick a side silently"
+                            )
+                        continue
+                    if prior_fact is not None and not fact["merge"] and expected_revision is None:
+                        if not (prior_fact["confidence"] == "inferred"
+                                and fact["confidence"] != "inferred"):
+                            raise ValidationError(
+                                f"{key} already has a value; send it with merge=true to "
+                                f"update fields, or pass expected_revision={current_revision} to replace it"
+                            )
+                    if (fact["merge"] and prior_fact is not None
+                            and (prior_fact["confidence"] == "inferred" or is_stale(dict(prior_fact)))):
+                        warnings.append(
+                            f"{key} was merged into an inferred or past-review value "
+                            f"observed on {prior_fact['observed_on']}; reconfirm the unchanged parts"
+                        )
+                    if fact["value"] is not None:
+                        try:
+                            warnings.extend(validate_canonical(key, fact["value"]))
+                        except SchemaError as exc:
+                            raise ValidationError(f"{exc}; see fact_contract.schema") from exc
+                    to_write.append((fact, prior_fact))
+                new_revision = None
+                if to_write:
+                    new_revision = current_revision + 1
                     self._db.execute(
-                        "INSERT INTO facts(id, client_id, key, value_json, source_kind, "
-                        "source_ref, observed_on, confidence, expires_on, revision, recorded_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (
-                            uuid.uuid4().hex,
-                            client_id,
-                            fact["key"],
-                            _json(fact["value"]),
-                            fact["source"]["kind"],
-                            fact["source"]["ref"],
-                            fact["source"]["observed_on"],
-                            fact["confidence"],
-                            fact["expires_on"],
-                            new_revision,
-                            now,
-                        ),
+                        "UPDATE clients SET revision = ? WHERE id = ?", (new_revision, client_id)
                     )
+                    for fact, prior_fact in to_write:
+                        forgotten = fact["value"] is None
+                        self._insert_fact(
+                            client_id, fact, new_revision, now,
+                            status="forgotten" if forgotten else "active",
+                        )
+                        if prior_fact is not None:
+                            self._close(prior_fact["id"], fact["valid_from"])
+                    statement_keys = sorted(
+                        fact["key"] for fact, _ in to_write
+                        if fact["key"].startswith("account.") and fact["key"].count(".") == 1
+                        and fact["source"]["kind"] in _CHALLENGER_KINDS and fact["value"] is not None
+                    )
+                    for opened in (self._statement_contradictions(client_id, statement_keys, request_id, now)
+                                   if statement_keys else []):
+                        needs_user.append(opened)
+                        warnings.append(
+                            f"the statement in {opened['proposed_key']} disagrees with what the person told us "
+                            f"in {opened['key']}. Ask them (needs_user {opened['id']}); never pick a side silently"
+                        )
                 if request_id is not None:
                     self._db.execute(
                         "INSERT INTO batches(client_id, request_id, payload_hash, "
                         "resulting_revision, created_at) VALUES (?, ?, ?, ?, ?)",
-                        (client_id, request_id, payload_hash, new_revision, now),
+                        (client_id, request_id, payload_hash,
+                         current_revision if new_revision is None else new_revision, now),
                     )
-                result = self._receipt(client_id, new_revision, request_id, False, warnings)
+                result = self._receipt(
+                    client_id, new_revision, request_id, False, warnings, needs_user
+                )
+                self._db.execute("COMMIT")
+            except Exception:
+                if self._db.in_transaction:
+                    self._db.execute("ROLLBACK")
+                raise
+        return result
+
+    def _insert_fact(
+        self, client_id: str, fact: Mapping[str, Any], revision: int, now: str, *,
+        status: str = "active",
+    ) -> str:
+        fact_id = uuid.uuid4().hex
+        self._db.execute(
+            "INSERT INTO facts(id, client_id, key, value_json, source_kind, source_ref, "
+            "observed_on, confidence, expires_on, revision, recorded_at, valid_from, valid_to, "
+            "status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                fact_id, client_id, fact["key"], _json(fact["value"]),
+                fact["source"]["kind"], fact["source"]["ref"], fact["source"]["observed_on"],
+                fact["confidence"], fact.get("expires_on"), revision, now, fact["valid_from"],
+                fact["valid_from"] if status in _TERMINAL_STATUSES else None, status,
+            ),
+        )
+        return fact_id
+
+    def _close(self, fact_id: str, at: str, *, corrected: bool = False) -> None:
+        """End a revision's valid time (never before it began); the value is kept."""
+
+        if corrected:
+            self._db.execute(
+                "UPDATE facts SET status = 'corrected', valid_to = valid_from WHERE id = ?",
+                (fact_id,),
+            )
+        else:
+            self._db.execute(
+                "UPDATE facts SET valid_to = MAX(?, valid_from) WHERE id = ? AND valid_to IS NULL",
+                (at, fact_id),
+            )
+
+    # -- contradictions ------------------------------------------------------
+
+    def _contradiction_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        current = json.loads(row["current_json"])
+        proposed = json.loads(row["proposed_json"])
+        return {
+            "id": row["id"],
+            "kind": row["kind"],
+            "key": row["key"],
+            "proposed_key": row["proposed_key"],
+            "current_value": current["value"],
+            "proposed_value": proposed["value"],
+            "sources": {"current": current["source"], "proposed": proposed["source"]},
+            "valid_from": {"current": current.get("valid_from"), "proposed": proposed.get("valid_from")},
+            "question": row["question"],
+            "choices": list(_CONTRADICTION_CHOICES),
+            "status": row["status"],
+            "created_at": row["created_at"],
+            "resolved_at": row["resolved_at"],
+            "resolution": json.loads(row["resolution_json"]) if row["resolution_json"] else None,
+        }
+
+    def _open_contradiction(
+        self, client_id: str, kind: str, key: str, proposed_key: str, current: sqlite3.Row,
+        proposed: Mapping[str, Any], request_id: str | None, now: str,
+    ) -> dict[str, Any] | None:
+        """Record (or reuse) a pending question; None when the person already kept theirs."""
+
+        earlier = self._db.execute(
+            "SELECT * FROM contradictions WHERE client_id = ? AND key = ? AND proposed_key = ? "
+            "AND status IN ('pending', 'kept') ORDER BY created_at DESC, id",
+            (client_id, key, proposed_key),
+        ).fetchall()
+        for row in earlier:
+            same = (row["current_fact_id"] == current["id"]
+                    and json.loads(row["proposed_json"])["value"] == proposed["value"])
+            if same:
+                return self._contradiction_from_row(row) if row["status"] == "pending" else None
+        self._db.execute(
+            "UPDATE contradictions SET status = 'replaced', resolved_at = ? "
+            "WHERE client_id = ? AND key = ? AND proposed_key = ? AND status = 'pending'",
+            (now, client_id, key, proposed_key),
+        )
+        current_part = {
+            "fact_id": current["id"], "value": json.loads(current["value_json"]),
+            "source": {"kind": current["source_kind"], "ref": current["source_ref"],
+                       "observed_on": current["observed_on"]},
+            "confidence": current["confidence"], "valid_from": current["valid_from"],
+        }
+        question = _question(kind, key, current_part, proposed)
+        contradiction_id = uuid.uuid4().hex
+        self._db.execute(
+            "INSERT INTO contradictions(id, client_id, kind, key, proposed_key, current_fact_id, "
+            "current_json, proposed_json, question, status, request_id, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+            (contradiction_id, client_id, kind, key, proposed_key, current["id"],
+             _json(current_part), _json(dict(proposed)), question, request_id, now),
+        )
+        return self._contradiction_from_row(self._db.execute(
+            "SELECT * FROM contradictions WHERE id = ?", (contradiction_id,)
+        ).fetchone())
+
+    def _statement_contradictions(
+        self, client_id: str, statement_keys: Sequence[str], request_id: str | None, now: str,
+    ) -> list[dict[str, Any]]:
+        """Stated balances that a just-saved statement disagrees with (situation differences)."""
+
+        from .situation.model import build
+
+        rows = {r["key"]: r for r in self._current_rows(client_id).values() if r["status"] == "active"}
+        picture = build({"facts": [self._fact_from_row(r) for r in rows.values()]}, None, _today())
+        institutions = {
+            account["key"]: (account.get("institution") or "").strip().lower()
+            for account in picture["accounts"] if account.get("key") in statement_keys
+        }
+        opened = []
+        for difference in picture["differences"]:
+            stated_key = difference.get("key") or ""
+            stated_row = rows.get(stated_key)
+            if (difference.get("kind") == "cash" or stated_row is None or not _protected(stated_row)
+                    or not stated_key.startswith(("investment.", "cash."))):
+                continue
+            institution = (difference.get("institution") or "").strip().lower()
+            matching = sorted(k for k, name in institutions.items() if not institution or name == institution)
+            gap, value = difference.get("difference"), difference.get("statement_value")
+            if not matching or gap is None or value is None:
+                continue
+            stated_value = value - gap
+            tolerance = STATED_TOLERANCE_APPROXIMATE if difference.get("stated_approximate") else STATED_TOLERANCE
+            if abs(gap) <= abs(stated_value) * tolerance:
+                continue
+            account = rows[matching[0]]
+            proposed = {
+                "value": {"statement": difference.get("statement"), "value": value,
+                          "currency": difference.get("currency"), "as_of": difference.get("as_of")},
+                "source": {"kind": account["source_kind"], "ref": account["source_ref"],
+                           "observed_on": account["observed_on"]},
+                "valid_from": difference.get("as_of") or account["valid_from"],
+                "institution": difference.get("institution"),
+            }
+            found = self._open_contradiction(
+                client_id, "stated_vs_statement", stated_key, matching[0], stated_row, proposed,
+                request_id, now,
+            )
+            if found is not None:
+                opened.append(found)
+        return opened
+
+    def contradictions(self, client_id: str, status: str | None = "pending") -> list[dict[str, Any]]:
+        """Contradictions waiting for the person (or all of them with ``status=None``)."""
+
+        client_id = _required_text(client_id, "client_id")
+        with self._lock:
+            with self._read_transaction():
+                self._client_row(client_id)
+                sql = "SELECT * FROM contradictions WHERE client_id = ?"
+                params: tuple[Any, ...] = (client_id,)
+                if status is not None:
+                    sql += " AND status = ?"
+                    params += (status,)
+                return [
+                    self._contradiction_from_row(row)
+                    for row in self._db.execute(sql + " ORDER BY created_at, id", params)
+                ]
+
+    def resolve_contradiction(
+        self, client_id: str, contradiction_id: str, choice: str, valid_from: str | None = None,
+    ) -> dict[str, Any]:
+        """Apply the person's answer to a pending contradiction.
+
+        * ``keep``: their value stays; the same proposal is not asked again.
+        * ``use_new``: theirs was wrong; it is marked ``corrected`` and the new
+          value (or, for a statement under another key, the statement alone)
+          takes its place over the same period.
+        * ``changed``: both were true at different times; the old value is
+          closed at ``valid_from`` (default: the new evidence's date) and the
+          new one is valid from then.
+        """
+
+        client_id = _required_text(client_id, "client_id")
+        contradiction_id = _required_text(contradiction_id, "contradiction_id")
+        if choice not in _CONTRADICTION_CHOICES:
+            raise ValidationError(f"choice must be one of {', '.join(_CONTRADICTION_CHOICES)}")
+        if valid_from is not None:
+            if choice != "changed":
+                raise ValidationError("valid_from applies only to choice=changed")
+            if _iso_date(valid_from, "valid_from") > _today() + timedelta(days=1):
+                raise ValidationError("valid_from must not be in the future")
+        now = _utc_now()
+        with self._lock:
+            self._begin()
+            try:
+                client = self._client_row(client_id)
+                row = self._db.execute(
+                    "SELECT * FROM contradictions WHERE id = ? AND client_id = ?",
+                    (contradiction_id, client_id),
+                ).fetchone()
+                if row is None:
+                    raise ValidationError(
+                        f"contradiction {contradiction_id!r} does not exist for this client"
+                    )
+                if row["status"] != "pending":
+                    raise ValidationError(f"this contradiction was already resolved ({row['status']})")
+                current = self._current_rows(client_id, [row["key"]]).get(row["key"])
+                if current is None or current["id"] != row["current_fact_id"]:
+                    raise ValidationError(
+                        f"{row['key']} changed after this question was raised; reload the contradictions"
+                    )
+                proposed = json.loads(row["proposed_json"])
+                start = revision = None
+                if choice != "keep":
+                    if choice == "use_new":
+                        start = current["valid_from"]
+                    else:
+                        start = valid_from or proposed.get("valid_from") or proposed["source"]["observed_on"]
+                        if start < current["valid_from"]:
+                            raise ValidationError(
+                                f"valid_from must not precede {current['valid_from']}, "
+                                "when the current value began"
+                            )
+                    revision = client["revision"] + 1
+                    self._db.execute("UPDATE clients SET revision = ? WHERE id = ?", (revision, client_id))
+                    self._close(current["id"], start, corrected=choice == "use_new")
+                    if row["kind"] == "same_key":
+                        self._insert_fact(
+                            client_id, {**proposed, "key": row["key"], "valid_from": start}, revision, now
+                        )
+                    else:
+                        self._insert_fact(
+                            client_id,
+                            {"key": row["key"], "value": None, "source": proposed["source"],
+                             "confidence": "reported", "expires_on": None, "valid_from": start},
+                            revision, now, status="replaced",
+                        )
+                status = {"keep": "kept", "use_new": "used_new", "changed": "changed"}[choice]
+                self._db.execute(
+                    "UPDATE contradictions SET status = ?, resolved_at = ?, resolution_json = ? "
+                    "WHERE id = ?",
+                    (status, now, _json({"choice": choice, "valid_from": start, "revision": revision}),
+                     contradiction_id),
+                )
+                result = self._receipt(client_id, revision, None, False, [], [])
+                del result["needs_user"]
+                result["contradiction"] = self._contradiction_from_row(self._db.execute(
+                    "SELECT * FROM contradictions WHERE id = ?", (contradiction_id,)
+                ).fetchone())
                 self._db.execute("COMMIT")
             except Exception:
                 if self._db.in_transaction:
@@ -906,6 +1409,17 @@ class WealthStore:
                 (client_id, key),
             ).fetchall()
             return [self._fact_from_row(row) for row in rows]
+
+    def timeline(self, client_id: str, key: str) -> dict[str, Any]:
+        """One key's valid-time history, newest first, with a readable line.
+
+        e.g. "MXN 85,000 since 2026-03; MXN 78,000 from 2025-01 to 2026-03".
+        """
+
+        revisions = self.history(client_id, key)
+        ordered = sorted(revisions, key=lambda f: (f["valid_from"] or "", f["revision"]), reverse=True)
+        entries = [{**fact, "text": _period_text(fact)} for fact in ordered]
+        return {"key": key, "text": "; ".join(e["text"] for e in entries), "entries": entries}
 
     def _eligible_evidence(self, client_id: str, evidence_ids: Any) -> list[str]:
         if not isinstance(evidence_ids, list):
@@ -1071,6 +1585,12 @@ class WealthStore:
                     },
                     "facts": [self._fact_from_row(row) for row in facts],
                     "decisions": decision_exports,
+                    "contradictions": [
+                        self._contradiction_from_row(row) for row in self._db.execute(
+                            "SELECT * FROM contradictions WHERE client_id = ? ORDER BY created_at, id",
+                            (client_id,),
+                        )
+                    ],
                     "auxiliary": {
                         row["namespace"]: json.loads(row["value_json"])
                         for row in self._db.execute(
@@ -1491,6 +2011,7 @@ __all__ = [
     "DUPLICATE_WINDOW_DAYS",
     "REVIEW_DAYS",
     "SCHEMA_VERSION",
+    "STATED_TOLERANCE",
     "ClientExistsError",
     "ClientNotFoundError",
     "DecisionNotFoundError",
@@ -1500,6 +2021,7 @@ __all__ = [
     "StoreError",
     "ValidationError",
     "WealthStore",
+    "describe",
     "is_stale",
     "merge_patch",
     "review_days",

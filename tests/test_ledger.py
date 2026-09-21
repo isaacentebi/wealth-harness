@@ -380,7 +380,7 @@ def test_version_one_database_migrates_to_ledger_schema(tmp_path):
         assert len(migrated.ledger("c")["entries"]) == 1
         assert migrated.export_client("c")["ledger"]["batches"][0]["batch_id"] == "x"
     connection = sqlite3.connect(db)
-    assert connection.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()[0] == "2"
+    assert connection.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()[0] == "3"
     connection.close()
 
 

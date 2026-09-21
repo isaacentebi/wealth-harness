@@ -6,6 +6,9 @@ all start from its result.  Rules (documented once, applied everywhere):
 
 * Only eligible facts drive numbers: not inferred, not past review, not null.
   Stale and inferred keys are listed, never silently used.
+* Facts with source kind ``pattern`` (inferred from transactions) are listed
+  in ``patterns`` only, apart from what the person told us; forgotten or
+  replaced revisions are ignored.
 * Canonical keys win per section.  A legacy shape (``plan.resources`` lists,
   ``income.schedule.items``, profile-form amounts, ``household``) is read only
   when no canonical fact exists for that section, and is marked ``legacy``.
@@ -119,8 +122,16 @@ class _Facts:
     def __init__(self, snapshot: Mapping[str, Any], today: date):
         self.today = today
         self.all: dict[str, dict] = {}
+        self.patterns: list[dict] = []  # inferred from transactions; never mixed with told facts
         for fact in snapshot.get("facts") or []:
-            if isinstance(fact, dict) and isinstance(fact.get("key"), str):
+            if not isinstance(fact, dict) or not isinstance(fact.get("key"), str):
+                continue
+            if fact.get("status", "active") != "active":
+                continue  # forgotten or replaced: kept in history, never used
+            source = fact.get("source") if isinstance(fact.get("source"), dict) else {}
+            if source.get("kind") == "pattern":
+                self.patterns.append(fact)
+            else:
                 self.all[fact["key"]] = fact
         self.stale = sorted(k for k, f in self.all.items() if f.get("value") is not None and self._stale(f))
         self.inferred = sorted(k for k, f in self.all.items() if f.get("value") is not None
@@ -156,6 +167,7 @@ class _Facts:
         observed = _as_date(source.get("observed_on"))
         return {"key": key, "source": source.get("kind"), "observed_on": source.get("observed_on"),
                 "age_days": (self.today - observed).days if observed else None,
+                "valid_from": fact.get("valid_from"),
                 "stale": key in self.stale, "inferred": key in self.inferred, "revision": fact.get("revision")}
 
 
@@ -1003,6 +1015,9 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
         "threads": {"open": [t for t in threads if t["status"] == "open"],
                     "closed": [t for t in threads if t["status"] != "open"][:5]},
         "stale": facts.stale, "inferred": facts.inferred, "unknowns": unknowns,
+        "patterns": [{"key": f["key"], "value": f.get("value"), "id": f.get("id"),
+                      "confidence": f.get("confidence"), "observed_on": (f.get("source") or {}).get("observed_on"),
+                      "valid_from": f.get("valid_from")} for f in sorted(facts.patterns, key=lambda f: f["key"])],
         "legacy": sorted({k for k in (income_legacy, cash_legacy, liability_legacy) if k}
                          | {i["key"] for i in stated_investments if i.get("legacy")}
                          | ({"goals"} if any(g["legacy"] for g in goals) else set())),
