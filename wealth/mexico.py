@@ -563,6 +563,8 @@ def real_interest(inputs: dict[str, Any]) -> dict[str, Any]:
     warnings: list[str] = []
     total_nominal = total_adjustment = total_real = total_loss = total_retention = Decimal(0)
     retention_known = True
+    nominal_fallback: list[tuple[str, Decimal]] = []
+    definitive_basis = Decimal(0)  # Art. 135 test amount: real interest (Art. 134) per account
     for index, account in enumerate(accounts):
         if not isinstance(account, dict):
             raise ValueError(f"accounts[{index}] must be an object")
@@ -573,6 +575,8 @@ def real_interest(inputs: dict[str, Any]) -> dict[str, Any]:
             needed.append(f"{path}.inflation_factor or {path}.inpc_first_month+inpc_last_month")
         if needed:
             missing.extend(needed)
+            if "nominal_interest_mxn" in account:  # Art. 135 test falls back to nominal for this account
+                nominal_fallback.append((account_id, _decimal(account["nominal_interest_mxn"], f"{path}.nominal_interest_mxn")))
             continue
         nominal = _decimal(account["nominal_interest_mxn"], f"{path}.nominal_interest_mxn")
         udi_adjustment = _decimal(account.get("udi_adjustment_mxn", 0), f"{path}.udi_adjustment_mxn")
@@ -622,6 +626,9 @@ def real_interest(inputs: dict[str, Any]) -> dict[str, Any]:
                                                 "matches": abs(difference) <= Decimal("1.00")}
             if abs(difference) > Decimal("1.00"):
                 warnings.append(f"{account_id}: computed real interest differs from the constancia; the constancia is what the institution reported to SAT (Art. 55).")
+            definitive_basis += max(reported, Decimal(0))
+        else:
+            definitive_basis += max(real, Decimal(0))
         rows.append(row)
     missing.extend(params.missing)
     if not rows:
@@ -640,6 +647,13 @@ def real_interest(inputs: dict[str, Any]) -> dict[str, Any]:
             effect["net_isr_after_retention_mxn"] = _money(estimate["_change"] - total_retention)
             effect["note"] = "Negative net means retention exceeds the estimated ISR on real interest (a potential balance in favor), subject to the full annual return."
     definitive_limit = params.decimal("art135_definitive_option_limit_mxn", year)
+    # Art. 135 tests accumulable interest income, which is real interest (Art. 134): the constancia figure
+    # when supplied, else the computed one. Accounts without inflation inputs fall back to nominal interest.
+    definitive_tested = definitive_basis + sum((amount for _, amount in nominal_fallback), Decimal(0))
+    definitive_note = None
+    if nominal_fallback:
+        names = ", ".join(name for name, _ in nominal_fallback)
+        definitive_note = f"Real interest was not available for {names}; nominal interest is used for those accounts, which overstates the amount tested."
     warnings.append("Art. 134: a real-interest loss may reduce other income of the year except Chapters I (salaries) and II (business); the unused part carries forward five years, updated for inflation. It is reported, not applied, in this estimate.")
     if total_loss > 0:
         warnings.append("One or more accounts show a real-interest loss; confirm the offset against eligible income with a contador.")
@@ -651,7 +665,10 @@ def real_interest(inputs: dict[str, Any]) -> dict[str, Any]:
         "retention_rate": None if rate is None else _rate(rate),
         "annual_isr_effect": effect,
         "definitive_retention_option": {"limit_mxn": _money(definitive_limit) if definitive_limit is not None else None,
-            "within_limit": None if definitive_limit is None else total_nominal <= definitive_limit,
+            "within_limit": None if definitive_limit is None else definitive_tested <= definitive_limit,
+            "tested_amount_mxn": _money(definitive_tested),
+            "tested_basis": "real interest (Art. 134)" if not nominal_fallback else "real interest (Art. 134), nominal for accounts without inflation inputs",
+            **({"basis_note": definitive_note} if definitive_note else {}),
             "condition": "Available only if the person's only accumulable income is interest (Chapter VI) and it does not exceed the limit (Art. 135).",
             "note": "Art. 150 also allows salaried people with income up to $400,000 and real interest up to $100,000 subject to retention to skip the annual return."},
         **params.report(),
@@ -710,10 +727,18 @@ def personal_deductions(inputs: dict[str, Any]) -> dict[str, Any]:
     five_uma = uma_annual * 5
     global_cap = min(five_uma, total_income * Decimal("0.15"))
     general_allowed = min(general, global_cap)
+    # Art. 151 último párrafo: the global cap covers every personal deduction except fr. III and V,
+    # and Art. 185 deposits count against it. General deductions are applied first.
+    global_room_after_general = global_cap - general_allowed
     ppr_cap = min(accumulable * Decimal("0.10"), five_uma)
     allowed_151v = min(existing_151v, ppr_cap)
     ppr_room = max(ppr_cap - existing_151v, Decimal(0))
-    room_185 = max(limit_185 - existing_185, Decimal(0)) if limit_185 is not None else None
+    if limit_185 is not None:
+        allowed_185 = min(existing_185, limit_185, global_room_after_general)
+        global_room = global_room_after_general - allowed_185
+        room_185 = min(max(limit_185 - existing_185, Decimal(0)), global_room)
+    else:
+        allowed_185 = room_185 = global_room = None
     warnings: list[str] = [
         "The Art. 151 fr. V statutory text caps contributions at five general minimum wages elevated to the year; under the 2016 constitutional desindexation decree that reference is read as five annual UMAs. Confirm with SAT guidance.",
         "The annual UMA used is the value in force for the tax year (published in January, effective February 1); January uses the prior year's UMA. Confirm the value SAT applies in the annual return.",
@@ -722,6 +747,9 @@ def personal_deductions(inputs: dict[str, Any]) -> dict[str, Any]:
         warnings.append("General deductions exceed the global cap; the excess is not deductible.")
     if existing_151v > ppr_cap:
         warnings.append("Existing Art. 151 fr. V contributions already exceed the cap; the excess is not deductible.")
+    warnings.append("Art. 185 deposits count against the Art. 151 global cap (lesser of five annual UMAs or 15% of total income; only fr. III and V are outside it); the Art. 185 deduction is the lesser of its own limit and the global room left after general deductions.")
+    if allowed_185 is not None and existing_185 > allowed_185:
+        warnings.append("Existing Art. 185 deposits exceed the room left under the Art. 185 limit or the Art. 151 global cap; the excess is not deductible this year.")
     missing = []
     scenarios: dict[str, Any] = {}
     for key, room, label in (("proposed_ppr_contribution_mxn", ppr_room, "art151_v"), ("proposed_art185_mxn", room_185, "art185")):
@@ -752,9 +780,11 @@ def personal_deductions(inputs: dict[str, Any]) -> dict[str, Any]:
                  "global_cap_mxn": _money(global_cap), "art151_v_cap_mxn": _money(ppr_cap),
                  "art185_limit_mxn": None if limit_185 is None else _money(limit_185)},
         "allowed": {"general_mxn": _money(general_allowed), "art151_v_mxn": _money(allowed_151v), "outside_global_cap_mxn": _money(outside),
-                    "art185_mxn": None if limit_185 is None else _money(min(existing_185, limit_185)),
+                    "art185_mxn": None if allowed_185 is None else _money(allowed_185),
                     "total_personal_deductions_mxn": _money(general_allowed + allowed_151v + outside)},
-        "remaining_room": {"art151_v_mxn": _money(ppr_room), "art185_mxn": None if room_185 is None else _money(room_185)},
+        "remaining_room": {"art151_v_mxn": _money(ppr_room), "art185_mxn": None if room_185 is None else _money(room_185),
+                           "global_cap_mxn": None if global_room is None else _money(global_room),
+                           "note": "Art. 185 room is shared with the Art. 151 global cap; a general deduction added later reduces it."},
         "contribution_scenarios": scenarios,
         **params.report(),
         "scope": "Caps and marginal estimates only; donation (7%) and tuition-decree limits must be applied by the caller before passing outside_global_cap_mxn.",
@@ -768,6 +798,45 @@ def personal_deductions(inputs: dict[str, Any]) -> dict[str, Any]:
 # 4. Foreign securities held at foreign brokers
 # ---------------------------------------------------------------------------
 
+def _article_129_netting(inputs: dict[str, Any], year: int, scenario: Decimal) -> tuple[dict[str, Any], Decimal]:
+    """Net the scenario against the year's other Art. 129 results and eligible carryforwards (mirrors tax.py)."""
+    realized = _decimal(inputs["article_129_realized_gain_or_loss_mxn"], "article_129_realized_gain_or_loss_mxn", nonnegative=False)
+    carry_values = inputs["article_129_loss_carryforwards"]
+    if not isinstance(carry_values, list):
+        raise ValueError("article_129_loss_carryforwards must be a list")
+    available = Decimal(0)
+    carries = []
+    for index, item in enumerate(carry_values):
+        path = f"article_129_loss_carryforwards[{index}]"
+        if not isinstance(item, dict):
+            raise ValueError(f"{path} must be an object")
+        origin = item.get("origin_year")
+        if isinstance(origin, bool) or not isinstance(origin, int):
+            raise ValueError(f"{path}.origin_year must be an integer")
+        amount = _decimal(item.get("available_updated_mxn"), f"{path}.available_updated_mxn")
+        updated = _text(item.get("updated_through"), f"{path}.updated_through")
+        eligible = 1 <= year - origin <= 10
+        if eligible:
+            available += amount
+        carries.append({"origin_year": origin, "available_updated_mxn": _money(amount), "updated_through": updated, "eligible_this_year": eligible})
+
+    def net(value: Decimal) -> dict[str, Any]:
+        gain = max(value, Decimal(0))
+        used = min(gain, available)
+        return {"article_129_gain_or_loss_mxn": value, "carry_used_mxn": used, "taxable_gain_mxn": gain - used,
+                "new_loss_mxn": max(-value, Decimal(0))}
+
+    before, after = net(realized), net(realized + scenario)
+    rate = Decimal("0.10")
+    incremental = (after["taxable_gain_mxn"] - before["taxable_gain_mxn"]) * rate
+    return {"loss_carryforwards": carries,
+            "before_scenario": {k: _money(v) for k, v in before.items()},
+            "after_scenario": {k: _money(v) for k, v in after.items()},
+            "tax_before_mxn": _money(before["taxable_gain_mxn"] * rate), "tax_after_mxn": _money(after["taxable_gain_mxn"] * rate),
+            "incremental_tax_mxn": _money(incremental), "rate": "0.10",
+            "method": "Article 129 losses offset only Article 129 gains of the year and eligible carryforwards (ten years)"}, incremental
+
+
 def foreign_securities(inputs: dict[str, Any]) -> dict[str, Any]:
     """Scenario for foreign securities sold through a foreign broker: MXN gains incl. FX, dividends, credit.
 
@@ -780,6 +849,8 @@ def foreign_securities(inputs: dict[str, Any]) -> dict[str, Any]:
     ``equity_etf`` | ``other_etf``) and ``cost_update_factor`` (INPC update, Art. 124).
     ``dividends`` rows: ``id``, ``currency``, ``gross``, ``withheld``, ``fx``, ``paid_on``,
     ``source_country``, optional ``w8ben_on_file`` (bool, for US-source dividends).
+    SIC-listed sales also need ``article_129_realized_gain_or_loss_mxn`` (the year's other Art. 129
+    results) and ``article_129_loss_carryforwards``; without them the Art. 129 tax is not estimated.
     """
     sources = [_lisr("articulo 129 fraccion I", "10% definitive on shares of foreign issuers listed on Mexican exchanges, including the SIC"),
                {"title": "SAT Anexo 7 RMF 2026, criterio normativo 37/ISR/N (SIC-listed shares sold through foreign intermediaries)",
@@ -867,6 +938,10 @@ def foreign_securities(inputs: dict[str, Any]) -> dict[str, Any]:
         if needed:
             missing.extend(needed)
             continue
+        paid_on = _date(dividend["paid_on"], f"{path}.paid_on")
+        if paid_on.year != year:
+            warnings.append(f"{_text(dividend['id'], f'{path}.id')}: paid_on {paid_on.isoformat()} is outside tax_year {year}; the dividend is excluded.")
+            continue
         gross = _decimal(dividend["gross"], f"{path}.gross")
         withheld = _decimal(dividend["withheld"], f"{path}.withheld")
         if withheld > gross:
@@ -876,7 +951,7 @@ def foreign_securities(inputs: dict[str, Any]) -> dict[str, Any]:
         gross_mxn, withheld_mxn = gross * fx, withheld * fx
         total_div += gross_mxn
         total_withheld += withheld_mxn
-        row = {"id": _text(dividend["id"], f"{path}.id"), "source_country": country, "gross_mxn": _money(gross_mxn), "withheld_mxn": _money(withheld_mxn),
+        row = {"id": _text(dividend["id"], f"{path}.id"), "paid_on": paid_on.isoformat(), "source_country": country, "gross_mxn": _money(gross_mxn), "withheld_mxn": _money(withheld_mxn),
                "withholding_rate": _rate((withheld / gross).quantize(Decimal("0.0001"))) if gross else "0",
                "additional_10pct_definitive_mxn": None if additional_rate is None else _money(gross_mxn * additional_rate),
                "additional_10pct_due": "by the 17th of the month after receipt (Art. 142 fr. V)"}
@@ -913,10 +988,22 @@ def foreign_securities(inputs: dict[str, Any]) -> dict[str, Any]:
         warnings.append("The net result on progressive (non-SIC) sales is a loss; it is not deducted from other income in this estimate.")
     has_progressive = any(row["regime"] == "progressive" for row in sale_rows)
     has_sic = any(row["regime"] == "article_129" for row in sale_rows)
-    article_129_tax = max(sic_gain, Decimal(0)) * Decimal("0.10")
+    # Scenario-only figure: these sales alone, before the year's other Art. 129 results and carryforwards.
+    article_129_scenario_tax = max(sic_gain, Decimal(0)) * Decimal("0.10")
     dividend_additional = None if additional_rate is None else total_div * additional_rate
-    known_parts = {"article_129_tax_mxn": article_129_tax} if has_sic else {}
+    known_parts: dict[str, Decimal] = {}
     unknown_parts = []
+    article_129_netting = None
+    article_129_tax: Decimal | None = None
+    if has_sic:
+        a129_missing = [k for k in ("article_129_realized_gain_or_loss_mxn", "article_129_loss_carryforwards") if k not in inputs]
+        if a129_missing:
+            missing.extend(k for k in a129_missing if k not in missing)
+            unknown_parts.append("article_129_incremental_tax_mxn")
+            warnings.append("Current-year Article 129 results and carryforward coverage must be explicit before estimating Art. 129 tax; absence is not treated as zero. The scenario-only figure is before other Art. 129 results.")
+        else:
+            article_129_netting, article_129_tax = _article_129_netting(inputs, year, sic_gain)
+            known_parts["article_129_incremental_tax_mxn"] = article_129_tax
     if total_div > 0:
         if dividend_additional is None:
             unknown_parts.append("additional_10pct_dividend_tax_mxn")
@@ -934,9 +1021,11 @@ def foreign_securities(inputs: dict[str, Any]) -> dict[str, Any]:
         "tax_year": year, "currency": "MXN", "sales": sale_rows, "dividends": dividend_rows,
         "totals": {"progressive_net_gain_or_loss_mxn": _money(total_gain) if has_progressive else None,
                    "article_129_net_gain_or_loss_mxn": _money(sic_gain) if has_sic else None,
-                   "article_129_tax_mxn": _money(article_129_tax), "dividends_gross_mxn": _money(total_div), "foreign_tax_withheld_mxn": _money(total_withheld),
+                   "article_129_tax_before_other_results_mxn": _money(article_129_scenario_tax) if has_sic else None,
+                   "article_129_tax_mxn": None if article_129_tax is None else _money(article_129_tax), "dividends_gross_mxn": _money(total_div), "foreign_tax_withheld_mxn": _money(total_withheld),
                    "additional_10pct_dividend_tax_mxn": None if dividend_additional is None else _money(dividend_additional)},
         "progressive_isr_scenario": _public(estimate),
+        "article_129_netting": article_129_netting,
         "foreign_tax_credit": credit,
         # The whole estimate only when every part is known; the known part is always shown.
         "net_estimated_mexican_tax_mxn": None if unknown_parts else _money(sum(known_parts.values(), Decimal(0))),
