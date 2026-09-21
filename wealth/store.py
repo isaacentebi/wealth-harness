@@ -21,13 +21,103 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _CONFIDENCES = frozenset({"confirmed", "reported", "inferred"})
 _SOURCE_KINDS = frozenset({"user", "document", "web", "tool", "inference"})
 _DECISION_STATUSES = frozenset({"accepted", "dismissed"})
 _TABLES = frozenset(
     {"metadata", "clients", "facts", "batches", "decisions", "decision_events", "auxiliary"}
 )
+_LEDGER_TABLES = frozenset({
+    "ledger_accounts", "ledger_instruments", "ledger_entries", "ledger_fx", "ledger_assertions",
+    "ledger_batches", "ledger_rules", "ledger_labels",
+})
+# Version 2 adds the transaction ledger.  Tables are additive; facts are untouched.
+_LEDGER_SCHEMA = """
+CREATE TABLE IF NOT EXISTS ledger_accounts (
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    id TEXT NOT NULL,
+    data_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (client_id, id)
+);
+CREATE TABLE IF NOT EXISTS ledger_instruments (
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    id TEXT NOT NULL,
+    data_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (client_id, id)
+);
+CREATE TABLE IF NOT EXISTS ledger_entries (
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    batch_id TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    date TEXT NOT NULL,
+    amount TEXT,
+    currency TEXT,
+    instrument_id TEXT,
+    quantity TEXT,
+    dedupe_hash TEXT NOT NULL,
+    source_identity TEXT NOT NULL,
+    reverses_id TEXT,
+    data_json TEXT NOT NULL,
+    posted_at TEXT NOT NULL,
+    PRIMARY KEY (client_id, id),
+    UNIQUE (client_id, dedupe_hash),
+    UNIQUE (client_id, seq)
+);
+CREATE INDEX IF NOT EXISTS ledger_entries_account_date
+    ON ledger_entries(client_id, account_id, date);
+CREATE UNIQUE INDEX IF NOT EXISTS ledger_entries_one_reversal
+    ON ledger_entries(client_id, reverses_id) WHERE reverses_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS ledger_fx (
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    date TEXT NOT NULL,
+    base TEXT NOT NULL,
+    quote TEXT NOT NULL,
+    rate TEXT NOT NULL,
+    source TEXT NOT NULL,
+    PRIMARY KEY (client_id, date, base, quote)
+);
+CREATE TABLE IF NOT EXISTS ledger_assertions (
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    id TEXT NOT NULL,
+    data_json TEXT NOT NULL,
+    PRIMARY KEY (client_id, id)
+);
+CREATE TABLE IF NOT EXISTS ledger_batches (
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    batch_id TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    receipt_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (client_id, batch_id)
+);
+CREATE TABLE IF NOT EXISTS ledger_rules (
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    id TEXT NOT NULL,
+    data_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (client_id, id)
+);
+CREATE TABLE IF NOT EXISTS ledger_labels (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    entry_id TEXT NOT NULL,
+    category TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('confirmed','reported','inferred')),
+    source TEXT NOT NULL,
+    recorded_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ledger_labels_entry ON ledger_labels(client_id, entry_id, id);
+"""
+# Candidate duplicates from a different statement: same account/kind/amount
+# within this many days and similar descriptions.
+DUPLICATE_WINDOW_DAYS = 3
+DUPLICATE_SIMILARITY = 0.6
 # Review horizons in days by key (exact) or prefix (ending in "."); the first match
 # wins. A fact without an explicit expires_on is due for review this long after
 # its observation. The horizon is a review deadline, not a prediction.
@@ -286,12 +376,15 @@ class WealthStore:
                 ).fetchone()
                 if row is None:
                     raise StoreError("database metadata has no schema version")
+                if row["value"] == "1" and existing_tables >= _TABLES:
+                    self._migrate_to_2()
+                    return
                 if row["value"] != str(SCHEMA_VERSION):
                     raise StoreError(
                         f"unsupported schema version {row['value']}; "
                         f"expected {SCHEMA_VERSION}"
                     )
-                if existing_tables >= _TABLES:
+                if existing_tables >= _TABLES | _LEDGER_TABLES:
                     return
             elif existing_tables:
                 raise StoreError("existing database has no wealth schema version")
@@ -361,7 +454,7 @@ class WealthStore:
                     PRIMARY KEY (client_id, namespace)
                 );
                 INSERT OR IGNORE INTO metadata(key, value)
-                    VALUES('schema_version', '1');
+                    VALUES('schema_version', '2');
                 INSERT INTO decision_events(decision_id, status, recorded_at)
                     SELECT d.id, 'proposed', d.created_at
                     FROM decisions d
@@ -376,9 +469,19 @@ class WealthStore:
                         SELECT 1 FROM decision_events e
                         WHERE e.decision_id = d.id AND e.status = d.status
                     );
+                """ + _LEDGER_SCHEMA + """
                 COMMIT;
                 """
             )
+
+    def _migrate_to_2(self) -> None:
+        """Add ledger tables to a version-1 database in one transaction."""
+
+        self._db.executescript(
+            "BEGIN IMMEDIATE;"
+            + _LEDGER_SCHEMA
+            + "UPDATE metadata SET value = '2' WHERE key = 'schema_version'; COMMIT;"
+        )
 
     def _begin(self) -> None:
         self._ensure_open()
@@ -967,6 +1070,7 @@ class WealthStore:
                             "SELECT namespace, value_json FROM auxiliary WHERE client_id = ?", (client_id,)
                         )
                     },
+                    "ledger": self._ledger_rows(client_id, include_batches=True),
                 }
 
     def auxiliary(self, client_id: str, namespace: str) -> dict:
@@ -1014,6 +1118,346 @@ class WealthStore:
                     self._db.execute("ROLLBACK")
                 raise
 
+    # -- transaction ledger ------------------------------------------------
+
+    def _ledger_rows(self, client_id: str, include_batches: bool = False) -> dict[str, Any]:
+        def rows(sql: str) -> list[sqlite3.Row]:
+            return self._db.execute(sql, (client_id,)).fetchall()
+
+        entries = []
+        for row in rows("SELECT seq, batch_id, data_json, posted_at FROM ledger_entries "
+                        "WHERE client_id = ? ORDER BY seq"):
+            entry = json.loads(row["data_json"])
+            entry.update(seq=row["seq"], batch_id=row["batch_id"], posted_at=row["posted_at"])
+            entries.append(entry)
+        result = {
+            "accounts": [json.loads(r["data_json"]) for r in rows(
+                "SELECT data_json FROM ledger_accounts WHERE client_id = ? ORDER BY id")],
+            "instruments": [json.loads(r["data_json"]) for r in rows(
+                "SELECT data_json FROM ledger_instruments WHERE client_id = ? ORDER BY id")],
+            "entries": entries,
+            "fx": [{"date": r["date"], "base": r["base"], "quote": r["quote"], "rate": r["rate"],
+                    "source": r["source"]} for r in rows(
+                "SELECT * FROM ledger_fx WHERE client_id = ? ORDER BY date, base, quote")],
+            "assertions": [json.loads(r["data_json"]) for r in rows(
+                "SELECT data_json FROM ledger_assertions WHERE client_id = ? ORDER BY id")],
+            "category_rules": [json.loads(r["data_json"]) for r in rows(
+                "SELECT data_json FROM ledger_rules WHERE client_id = ? ORDER BY created_at, id")],
+            "labels": [{"entry_id": r["entry_id"], "category": r["category"], "status": r["status"],
+                        "source": r["source"], "recorded_at": r["recorded_at"]} for r in rows(
+                "SELECT * FROM ledger_labels WHERE client_id = ? ORDER BY id")],
+            "revision": entries[-1]["seq"] if entries else 0,
+        }
+        if include_batches:
+            result["batches"] = [
+                {"batch_id": r["batch_id"], "created_at": r["created_at"],
+                 "receipt": json.loads(r["receipt_json"])}
+                for r in rows("SELECT * FROM ledger_batches WHERE client_id = ? ORDER BY created_at, batch_id")
+            ]
+        return result
+
+    def ledger(self, client_id: str) -> dict[str, Any]:
+        """Return the client's whole ledger as plain JSON-safe data (one snapshot)."""
+
+        client_id = _required_text(client_id, "client_id")
+        with self._lock:
+            with self._read_transaction():
+                self._client_row(client_id)
+                return self._ledger_rows(client_id)
+
+    def _possible_duplicates(self, client_id: str, entry: Mapping[str, Any], identity: str) -> list[str]:
+        from difflib import SequenceMatcher
+        from .ledger.model import fold
+
+        day = date.fromisoformat(entry["date"])
+        low = (day - timedelta(days=DUPLICATE_WINDOW_DAYS)).isoformat()
+        high = (day + timedelta(days=DUPLICATE_WINDOW_DAYS)).isoformat()
+        candidates = self._db.execute(
+            "SELECT id, data_json FROM ledger_entries WHERE client_id = ? AND account_id = ? "
+            "AND kind = ? AND date BETWEEN ? AND ? AND amount IS ? AND currency IS ? "
+            "AND instrument_id IS ? AND quantity IS ? AND source_identity != ? ORDER BY seq",
+            (client_id, entry["account_id"], entry["kind"], low, high, entry.get("amount"),
+             entry.get("currency"), entry.get("instrument_id"), entry.get("quantity"), identity),
+        ).fetchall()
+        mine = fold(entry.get("description"))
+        matches = []
+        for row in candidates:
+            theirs = fold(json.loads(row["data_json"]).get("description"))
+            if not mine or not theirs or SequenceMatcher(None, mine, theirs).ratio() >= DUPLICATE_SIMILARITY:
+                matches.append(row["id"])
+        return matches
+
+    def post_ledger(self, client_id: str, batch: Mapping[str, Any]) -> dict[str, Any]:
+        """Post a batch atomically and idempotently; return a receipt.
+
+        Exact duplicates (same external id, or the same line content already
+        posted from any source) are skipped.  Lines that closely resemble an
+        entry from a *different* source are held for review, not posted; post
+        them again with ``confirm_not_duplicate: true`` once the person agrees.
+        Entries are append-only: correct one with a ``reversal`` plus a new line.
+        """
+
+        from .ledger.model import LedgerInputError, digest, normalize_batch, source_identity
+
+        client_id = _required_text(client_id, "client_id")
+        try:
+            normalized, warnings = normalize_batch(batch)
+        except LedgerInputError as exc:
+            raise ValidationError(str(exc)) from exc
+        payload_hash = digest(normalized)
+        batch_id = normalized["batch_id"]
+        now = _utc_now()
+        with self._lock:
+            self._begin()
+            try:
+                self._client_row(client_id)
+                prior = self._db.execute(
+                    "SELECT payload_hash, receipt_json FROM ledger_batches WHERE client_id = ? AND batch_id = ?",
+                    (client_id, batch_id),
+                ).fetchone()
+                if prior is not None:
+                    if prior["payload_hash"] != payload_hash:
+                        raise RequestConflictError(
+                            f"batch_id {batch_id!r} was already posted with different content; "
+                            "use a new batch_id for new or corrected lines"
+                        )
+                    receipt = json.loads(prior["receipt_json"])
+                    receipt["replayed"] = True
+                    self._db.execute("COMMIT")
+                    return receipt
+                receipt: dict[str, Any] = {
+                    "batch_id": batch_id, "replayed": False,
+                    "accounts": {"created": [], "updated": [], "unchanged": []},
+                    "instruments": {"created": [], "updated": [], "unchanged": []},
+                    "posted": [], "duplicates": [], "held": [],
+                    "fx": {"added": 0, "existing": 0}, "assertions": {"added": [], "existing": []},
+                    "warnings": warnings,
+                }
+                for table, rows, label in (
+                    ("ledger_accounts", normalized["accounts"], "accounts"),
+                    ("ledger_instruments", normalized["instruments"], "instruments"),
+                ):
+                    for row in rows:
+                        existing = self._db.execute(
+                            f"SELECT data_json FROM {table} WHERE client_id = ? AND id = ?",
+                            (client_id, row["id"]),
+                        ).fetchone()
+                        if existing is None:
+                            receipt[label]["created"].append(row["id"])
+                        elif json.loads(existing["data_json"]) == row:
+                            receipt[label]["unchanged"].append(row["id"])
+                            continue
+                        else:
+                            before = json.loads(existing["data_json"])
+                            changed = sorted(k for k in {*before, *row} if before.get(k) != row.get(k))
+                            if "currency" in changed:
+                                raise ValidationError(
+                                    f"{label[:-1]} {row['id']} currency cannot change once posted; "
+                                    "create a new id"
+                                )
+                            receipt[label]["updated"].append({"id": row["id"], "fields": changed})
+                        self._db.execute(
+                            f"INSERT INTO {table}(client_id, id, data_json, updated_at) VALUES (?, ?, ?, ?) "
+                            "ON CONFLICT(client_id, id) DO UPDATE SET data_json = excluded.data_json, "
+                            "updated_at = excluded.updated_at",
+                            (client_id, row["id"], _json(row), now),
+                        )
+                for rate in normalized["fx"]:
+                    existing = self._db.execute(
+                        "SELECT rate FROM ledger_fx WHERE client_id = ? AND date = ? AND base = ? AND quote = ?",
+                        (client_id, rate["date"], rate["base"], rate["quote"]),
+                    ).fetchone()
+                    if existing is None:
+                        self._db.execute(
+                            "INSERT INTO ledger_fx(client_id, date, base, quote, rate, source) VALUES (?, ?, ?, ?, ?, ?)",
+                            (client_id, rate["date"], rate["base"], rate["quote"], rate["rate"], rate["source"]),
+                        )
+                        receipt["fx"]["added"] += 1
+                    elif existing["rate"] == rate["rate"]:
+                        receipt["fx"]["existing"] += 1
+                    else:
+                        raise ValidationError(
+                            f"fx {rate['base']}/{rate['quote']} on {rate['date']} is already {existing['rate']}; "
+                            f"refusing conflicting rate {rate['rate']}"
+                        )
+                accounts = {r["id"] for r in self._db.execute(
+                    "SELECT id FROM ledger_accounts WHERE client_id = ?", (client_id,))}
+                instruments = {r["id"]: json.loads(r["data_json"]) for r in self._db.execute(
+                    "SELECT id, data_json FROM ledger_instruments WHERE client_id = ?", (client_id,))}
+                problems = []
+                for entry in normalized["transactions"]:
+                    line = f"transactions[{entry['line']}]"
+                    venue = instruments.get(entry.get("instrument_id"), {}).get("venue")
+                    carries_basis = entry["kind"] in {"buy", "sell"} or entry.get("cost_basis") is not None
+                    if venue == "sic" and carries_basis and entry.get("currency") != "MXN":
+                        problems.append(f"{line}: {entry['instrument_id']} is a SIC listing; its trades and basis "
+                                        "must be in MXN (post the MXN amount the statement shows)")
+                    if entry["account_id"] not in accounts:
+                        problems.append(f"{line}.account_id {entry['account_id']!r} is not a ledger account")
+                    for name in ("instrument_id", "new_instrument_id"):
+                        if entry.get(name) and entry[name] not in instruments:
+                            problems.append(f"{line}.{name} {entry[name]!r} is not a ledger instrument")
+                    if entry.get("counterparty_account_id") and entry["counterparty_account_id"] not in accounts:
+                        problems.append(f"{line}.counterparty_account_id is not a ledger account")
+                for assertion in normalized["balance_assertions"]:
+                    if assertion["account_id"] not in accounts:
+                        problems.append(f"balance assertion {assertion['id']} names an unknown account")
+                    if assertion.get("instrument_id") and assertion["instrument_id"] not in instruments:
+                        problems.append(f"balance assertion {assertion['id']} names an unknown instrument")
+                if problems:
+                    raise ValidationError("; ".join(problems))
+                seq = self._db.execute(
+                    "SELECT COALESCE(MAX(seq), 0) FROM ledger_entries WHERE client_id = ?", (client_id,)
+                ).fetchone()[0]
+                reversed_in_batch: set[str] = set()
+                for entry in normalized["transactions"]:
+                    line = entry.pop("line")
+                    identity = source_identity(entry["source"])
+                    existing = self._db.execute(
+                        "SELECT id FROM ledger_entries WHERE client_id = ? AND dedupe_hash = ?",
+                        (client_id, entry["dedupe_hash"]),
+                    ).fetchone()
+                    if existing is not None:
+                        receipt["duplicates"].append({"line": line, "id": existing["id"], "reason": "already posted"})
+                        continue
+                    if entry["kind"] == "reversal":
+                        target = self._db.execute(
+                            "SELECT kind, account_id FROM ledger_entries WHERE client_id = ? AND id = ?",
+                            (client_id, entry["reverses_id"]),
+                        ).fetchone()
+                        if target is None:
+                            raise ValidationError(f"transactions[{line}] reverses unknown entry {entry['reverses_id']}")
+                        if target["kind"] == "reversal":
+                            raise ValidationError(f"transactions[{line}] cannot reverse a reversal; post the entry again")
+                        if target["account_id"] != entry["account_id"]:
+                            raise ValidationError(f"transactions[{line}] must use the reversed entry's account")
+                        taken = self._db.execute(
+                            "SELECT id FROM ledger_entries WHERE client_id = ? AND reverses_id = ?",
+                            (client_id, entry["reverses_id"]),
+                        ).fetchone()
+                        if taken is not None or entry["reverses_id"] in reversed_in_batch:
+                            raise ValidationError(f"entry {entry['reverses_id']} is already reversed")
+                        reversed_in_batch.add(entry["reverses_id"])
+                    elif not entry.get("confirm_not_duplicate"):
+                        matches = self._possible_duplicates(client_id, entry, identity)
+                        if matches:
+                            receipt["held"].append({
+                                "line": line, "id": entry["id"], "matches": matches,
+                                "reason": "resembles an entry from another statement (same account, amount, "
+                                          f"within {DUPLICATE_WINDOW_DAYS} days); repost with "
+                                          "confirm_not_duplicate=true if it is a separate transaction",
+                            })
+                            continue
+                    seq += 1
+                    self._db.execute(
+                        "INSERT INTO ledger_entries(client_id, id, seq, batch_id, account_id, kind, date, "
+                        "amount, currency, instrument_id, quantity, dedupe_hash, source_identity, "
+                        "reverses_id, data_json, posted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (client_id, entry["id"], seq, batch_id, entry["account_id"], entry["kind"], entry["date"],
+                         entry.get("amount"), entry.get("currency"), entry.get("instrument_id"),
+                         entry.get("quantity"), entry["dedupe_hash"], identity, entry.get("reverses_id"),
+                         _json(entry), now),
+                    )
+                    receipt["posted"].append(entry["id"])
+                    if entry.get("category"):
+                        self._db.execute(
+                            "INSERT INTO ledger_labels(client_id, entry_id, category, status, source, recorded_at) "
+                            "VALUES (?, ?, ?, ?, ?, ?)",
+                            (client_id, entry["id"], entry["category"],
+                             "confirmed" if entry["confidence"] == "confirmed" else "reported",
+                             "statement:" + identity, now),
+                        )
+                for assertion in normalized["balance_assertions"]:
+                    added = self._db.execute(
+                        "INSERT OR IGNORE INTO ledger_assertions(client_id, id, data_json) VALUES (?, ?, ?)",
+                        (client_id, assertion["id"], _json(assertion)),
+                    ).rowcount
+                    receipt["assertions"]["added" if added else "existing"].append(assertion["id"])
+                if receipt["held"]:
+                    receipt["warnings"].append(
+                        f"{len(receipt['held'])} line(s) held as possible duplicates of another statement; "
+                        "nothing was guessed. Confirm each with the person."
+                    )
+                receipt["ledger_revision"] = seq
+                self._db.execute(
+                    "INSERT INTO ledger_batches(client_id, batch_id, payload_hash, receipt_json, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (client_id, batch_id, payload_hash, _json(receipt), now),
+                )
+                self._db.execute("COMMIT")
+            except sqlite3.IntegrityError as exc:
+                if self._db.in_transaction:
+                    self._db.execute("ROLLBACK")
+                raise ValidationError(f"ledger write rejected: {exc}") from exc
+            except Exception:
+                if self._db.in_transaction:
+                    self._db.execute("ROLLBACK")
+                raise
+        return receipt
+
+    def add_category_rule(self, client_id: str, rule: Mapping[str, Any]) -> dict[str, Any]:
+        """Remember a categorisation rule (append-only; identical content is idempotent)."""
+
+        from .ledger.model import digest
+
+        client_id = _required_text(client_id, "client_id")
+        if not isinstance(rule, Mapping):
+            raise ValidationError("rule must be an object")
+        rule = dict(rule)
+        _validate_json(rule, "rule")
+        rule_id = rule.get("id") or "rule_" + digest({k: v for k, v in rule.items() if k != "id"})[:20]
+        rule["id"] = rule_id
+        with self._lock:
+            self._begin()
+            try:
+                self._client_row(client_id)
+                existing = self._db.execute(
+                    "SELECT data_json FROM ledger_rules WHERE client_id = ? AND id = ?", (client_id, rule_id)
+                ).fetchone()
+                if existing is not None and json.loads(existing["data_json"]) != rule:
+                    raise ValidationError(f"rule {rule_id} already exists with different content")
+                if existing is None:
+                    self._db.execute(
+                        "INSERT INTO ledger_rules(client_id, id, data_json, created_at) VALUES (?, ?, ?, ?)",
+                        (client_id, rule_id, _json(rule), _utc_now()),
+                    )
+                self._db.execute("COMMIT")
+            except Exception:
+                if self._db.in_transaction:
+                    self._db.execute("ROLLBACK")
+                raise
+        return rule
+
+    def label_entry(self, client_id: str, entry_id: str, category: str, status: str, source: str) -> dict[str, Any]:
+        """Append a category label for an entry; the latest label wins, history is kept."""
+
+        client_id = _required_text(client_id, "client_id")
+        entry_id = _required_text(entry_id, "entry_id")
+        category = _required_text(category, "category").strip().lower()
+        source = _required_text(source, "source")
+        if status not in _CONFIDENCES:
+            raise ValidationError(f"status must be one of {sorted(_CONFIDENCES)!r}")
+        now = _utc_now()
+        with self._lock:
+            self._begin()
+            try:
+                self._client_row(client_id)
+                if self._db.execute(
+                    "SELECT 1 FROM ledger_entries WHERE client_id = ? AND id = ?", (client_id, entry_id)
+                ).fetchone() is None:
+                    raise ValidationError(f"entry {entry_id!r} is not in this client's ledger")
+                self._db.execute(
+                    "INSERT INTO ledger_labels(client_id, entry_id, category, status, source, recorded_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (client_id, entry_id, category, status, source, now),
+                )
+                self._db.execute("COMMIT")
+            except Exception:
+                if self._db.in_transaction:
+                    self._db.execute("ROLLBACK")
+                raise
+        return {"entry_id": entry_id, "category": category, "status": status, "source": source, "recorded_at": now}
+
     def delete_client(
         self, client_id: str, confirm_client_id: str
     ) -> dict[str, Any]:
@@ -1036,6 +1480,8 @@ class WealthStore:
 
 __all__ = [
     "DEFAULT_REVIEW_DAYS",
+    "DUPLICATE_SIMILARITY",
+    "DUPLICATE_WINDOW_DAYS",
     "REVIEW_DAYS",
     "SCHEMA_VERSION",
     "ClientExistsError",
