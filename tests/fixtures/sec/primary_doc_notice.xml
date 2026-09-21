@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A 13F notice (13F-NT): no information table; the holdings are in another manager's report. -->
+<edgarSubmission xmlns="http://www.sec.gov/edgar/thirteenffiler" xmlns:ns1="http://www.sec.gov/edgar/common">
+  <headerData>
+    <submissionType>13F-NT</submissionType>
+    <filerInfo>
+      <periodOfReport>06-30-2023</periodOfReport>
+    </filerInfo>
+  </headerData>
+  <formData>
+    <coverPage>
+      <reportCalendarOrQuarter>06-30-2023</reportCalendarOrQuarter>
+      <isAmendment>false</isAmendment>
+      <filingManager>
+        <name>Fixture Capital LP</name>
+      </filingManager>
+      <reportType>13F NOTICE</reportType>
+      <otherManagersInfo>
+        <otherManager>
+          <cik>0009990009</cik>
+          <form13FFileNumber>028-99990</form13FFileNumber>
+          <name>Fixture Parent Inc.</name>
+        </otherManager>
+      </otherManagersInfo>
+      <provideInfoForInstruction5>Y</provideInfoForInstruction5>
+      <additionalInformation>Holdings of this reporting manager are included in the report of its parent.</additionalInformation>
+    </coverPage>
+    <summaryPage>
+      <otherIncludedManagersCount>0</otherIncludedManagersCount>
+      <tableEntryTotal>0</tableEntryTotal>
+      <tableValueTotal>0</tableValueTotal>
+    </summaryPage>
+  </formData>
+</edgarSubmission>
