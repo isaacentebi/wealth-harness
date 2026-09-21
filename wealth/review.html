@@ -284,6 +284,8 @@
       return minus(new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(x));
     }
     const quarterName = label => { const m = /^(\d{4})-Q([1-4])$/.exec(label || ''); return m ? t('q', { n: m[2], y: m[1] }) : ''; };
+    // The quarter in progress reads as partial ("T3 2026 · en curso"); closed quarters by their name.
+    const periodName = label => data && data.current && label === data.current.period ? L(data.current.label) : quarterName(label);
     const note = value => value ? h('p', { class: 'note', text: '— ' + L(value) }) : null;
     function part(no, key, ...kids) {
       return h('section', { class: 'part', 'aria-labelledby': 'h-' + key },
@@ -343,7 +345,7 @@
       const tr = (key, field, total) => h('tr', { class: total ? 'total' : null },
         h('th', { scope: 'row', text: t(key) }), h('td', { text: V(cur[field], { places: 0 }) }), h('td', { class: 'prior', text: V(pri[field], { places: 0 }) }));
       return [h('table', { class: 'flow' },
-          h('thead', {}, h('tr', {}, h('th', {}, h('span', { class: 'sr', text: t('s_cash_flow') })), h('th', { scope: 'col', text: quarterName(data.period) }), h('th', { scope: 'col', text: quarterName(prev) }))),
+          h('thead', {}, h('tr', {}, h('th', {}, h('span', { class: 'sr', text: t('s_cash_flow') })), h('th', { scope: 'col', text: periodName(data.period) }), h('th', { scope: 'col', text: quarterName(prev) }))),
           h('tbody', {}, tr('income', 'income'), tr('spending', 'spending'), tr('net', 'net'), tr('rate', 'savings_rate', true))),
         note(s.note)];
     }
@@ -402,13 +404,13 @@
       document.title = `${t('title')} · Wealth`;
       document.getElementById('back').textContent = t('you');
       if (!data) return;
-      const quarters = data.quarters || [];
+      const quarters = [...(data.current ? [data.current.period] : []), ...(data.quarters || [])];
       const header = [
         h('p', { class: 'origin', text: t('origin', { a: date(data.start), b: date(data.end) }) }),
-        h('h1', {}, quarterName(data.period), h('span', { class: 'dot', text: '.' })),
+        h('h1', {}, periodName(data.period), h('span', { class: 'dot', text: '.' })),
         h('div', { class: 'controls' },
           quarters.length > 1 ? h('nav', { class: 'quarters', 'aria-label': t('quarters') }, quarters.slice(0, 6).map(q =>
-            h('a', { href: '/review?period=' + q, 'aria-current': q === data.period ? 'page' : null, text: quarterName(q),
+            h('a', { href: '/review?period=' + q, 'aria-current': q === data.period ? 'page' : null, text: periodName(q),
               onclick: e => { e.preventDefault(); if (q !== data.period) { period = q; history.replaceState(null, '', '/review?period=' + q); load(); } } }))) : h('span'),
           data.sections ? h('button', { class: 'txt', type: 'button', text: t('pdf'), onclick: () => window.print() }) : null)];
       if (!data.sections) {

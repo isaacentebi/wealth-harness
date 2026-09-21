@@ -281,6 +281,66 @@ def test_review_needs_a_ledger_and_an_ended_quarter(tmp_path):
     assert profile.review_quarters(date(2025, 11, 3), TODAY) == ["2026-Q2", "2026-Q1", "2025-Q4"]
 
 
+def _august_only(db, client="ana"):
+    """A person whose only statement is August's: Q3 is under way and no quarter has closed."""
+    service = WealthService(db)
+    service.create(client, "Ana")
+    service.remember(client, [{"key": "client.profile", "value": {"name": "Ana", "language": "es",
+                                                                   "reporting_currency": "MXN"},
+                               "source": {"kind": "user", "ref": "chat", "observed_on": "2026-09-10"}}])
+    entries = [{"account_id": "bbva", "kind": "opening_balance", "date": "2026-07-31", "amount": "90000",
+                "currency": "MXN", "external_id": "open"},
+               {"account_id": "bbva", "kind": "income", "date": "2026-08-01", "amount": "60000", "currency": "MXN",
+                "subtype": "salary", "description": "PAGO DE NOMINA ACME", "external_id": "n1"},
+               {"account_id": "bbva", "kind": "expense", "date": "2026-08-28", "amount": "-25000", "currency": "MXN",
+                "description": "RENTA DEPTO", "external_id": "r1"}]
+    with WealthStore(db) as store:
+        ledger_module.post(store, client, {
+            "batch_id": "aug", "source": {"kind": "document", "ref": "estado de cuenta agosto", "observed_on": "2026-09-02"},
+            "accounts": [_MX_REVIEW_LEDGER["accounts"][0]], "instruments": [], "transactions": entries, "fx": []})
+    return service
+
+
+def test_review_offers_the_quarter_in_progress_to_date(tmp_path):
+    service = _august_only(tmp_path / "w.sqlite3")
+    view = profile.review_view(service, "ana", today=TODAY)
+    assert view["quarters"] == []  # no closed quarter yet ...
+    assert view["period"] == "2026-Q3" and view["partial"] is True  # ... so the quarter so far is the review
+    assert view["label"] == {"en": "Q3 2026 · to date", "es": "T3 2026 · en curso"}
+    assert view["start"] == "2026-07-01" and view["end"] == "2026-08-28" and view["quarter_end"] == "2026-09-30"
+    assert view["current"]["label"]["es"] == "T3 2026 · en curso" and view["current"]["end"] == "2026-08-28"
+    assert view["sections"] is not None and view["status"] != "needs_input"
+    assert view["sections"]["cash_flow"]["current"]["income"]["v"] == "60000.00"
+    assert "lo que va del T3 2026" in " ".join(view["letter"]["summary"]["es"])
+    assert "Q3 2026 so far" in " ".join(view["letter"]["summary"]["en"])
+
+
+def test_closed_quarters_stay_the_letter_and_the_current_one_is_offered(tmp_path):
+    service = _seed(tmp_path / "w.sqlite3")
+    closed = profile.review_view(service, "ana", today=TODAY)
+    assert closed["period"] == "2026-Q2" and closed["partial"] is False
+    assert closed["label"] == {"en": "Q2 2026", "es": "T2 2026"} and closed["end"] == "2026-06-30"
+    assert closed["current"]["period"] == "2026-Q3"  # offered alongside, not instead
+    to_date = profile.review_view(service, "ana", "2026-Q3", today=TODAY)
+    assert to_date["partial"] is True and to_date["end"] == "2026-09-01" and to_date["sections"] is not None
+    page = (ROOT / "review.html").read_text()
+    assert "data.current.period" in page and "L(data.current.label)" in page
+
+
+def test_the_review_engine_takes_a_quarter_to_date():
+    from wealth import review
+    context = {"ledger": _MX_REVIEW_LEDGER, "currency": "MXN"}
+    partial = review.quarterly(context, "2026-04-01", "2026-05-31")
+    period = partial["result"]["period"]
+    assert period["to_date"] is True and period["quarter_end"] == "2026-06-30" and period["end"] == "2026-05-31"
+    assert partial["result"]["narrative_inputs"]["period"]["to_date"] is True
+    # The comparison is the same stretch of the quarter before, not the two months just before.
+    assert "The prior window is 2026-01-01..2026-02-28." in partial["result"]["sections"]["cash_flow"]["assumptions"]
+    full = review.quarterly(context, "2026-04-01", "2026-06-30")
+    assert full["result"]["period"]["to_date"] is False
+    assert "The prior window is 2026-01-01..2026-03-31." in full["result"]["sections"]["cash_flow"]["assumptions"]
+
+
 def test_connections_payload_never_carries_a_secret(tmp_path, monkeypatch):
     service = _seed(tmp_path / "w.sqlite3")
     monkeypatch.setenv("WEALTH_ALPACA_SECRET", "sk-live-SHOULD-NEVER-APPEAR")

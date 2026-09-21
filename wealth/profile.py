@@ -1897,13 +1897,39 @@ def _next_item(candidate: dict, currency: str | None, plan_names: dict[str, dict
             "prompt": {"en": ask_en.format(**en), "es": ask_es.format(**es)}}
 
 
-def _review_summary(narrative: dict, label: str) -> dict:
+def _quarter_label(label: str, partial: bool = False) -> dict:
+    """How the page names a quarter: "T3 2026" / "Q3 2026", and "T3 2026 · en curso" / "Q3 2026 · to date"."""
+    year, q = label.split("-Q")
+    return {"en": f"Q{q} {year}" + (" · to date" if partial else ""),
+            "es": f"T{q} {year}" + (" · en curso" if partial else "")}
+
+
+def _latest_evidence(service: Any, client_id: str, ledger_dates: Iterable[date | None], today: date) -> date | None:
+    """The latest ledger entry or statement date on or before today (None when there is neither)."""
+    days = [d for d in ledger_dates if d]
+    try:
+        facts = _snapshot(service, client_id)["facts"]
+    except Exception:  # noqa: BLE001 - the review still works from the ledger alone
+        facts = []
+    for fact in facts:
+        if fact["key"].startswith("account.") and isinstance(fact.get("value"), dict):
+            day = _as_date(fact["value"].get("as_of"))
+            if day:
+                days.append(day)
+    days = [d for d in days if d <= today]
+    return max(days, default=None)
+
+
+def _review_summary(narrative: dict, label: str, partial: bool = False) -> dict:
     """The letter's slot until the model writes it: two plain sentences from ``narrative_inputs``."""
     nw = narrative.get("net_worth") or {}
     cf = narrative.get("cash_flow") or {}
     pf = narrative.get("performance") or {}
     year, q = label.split("-Q")
-    when = {"en": f"Q{q} {year}", "es": f"el T{q} {year}"}
+    when = ({"en": f"Q{q} {year} so far", "es": f"lo que va del T{q} {year}"} if partial else
+            {"en": f"Q{q} {year}", "es": f"el T{q} {year}"})
+    before = ({"en": "the same stretch of the quarter before", "es": "el mismo tramo del trimestre anterior"}
+              if partial else {"en": "the quarter before", "es": "el trimestre anterior"})
     start, end = _money_words(nw.get("start")), _money_words(nw.get("end"))
     contrib, market = _money_words(nw.get("contributions")), _money_words(nw.get("market"))
     if start and end:
@@ -1922,9 +1948,9 @@ def _review_summary(narrative: dict, label: str) -> dict:
     if rate:
         pts = None if change is None or change == 0 else f"{abs(change) * 100:.0f}"
         second_en = f"You saved {rate} of your income" + (
-            f", {pts} points {'more' if change > 0 else 'less'} than the quarter before" if pts else "")
+            f", {pts} points {'more' if change > 0 else 'less'} than {before['en']}" if pts else "")
         second_es = f"Ahorraste el {rate} de tu ingreso" + (
-            f", {pts} puntos {'más' if change > 0 else 'menos'} que el trimestre anterior" if pts else "")
+            f", {pts} puntos {'más' if change > 0 else 'menos'} que {before['es']}" if pts else "")
         if twr and bench:
             second_en += f"; your portfolio returned {twr} against {bench} for its benchmark."
             second_es += f"; tu portafolio rindió {twr} contra {bench} de su referencia."
@@ -1956,13 +1982,28 @@ def review_view(service: Any, client_id: str, period: str | None = None, today: 
     dates = [_as_date(e.get("date")) for e in ledger.get("entries") or []]
     first = min((d for d in dates if d), default=None)
     quarters = review_quarters(first, today)
-    label = period or (quarters[0] if quarters else _quarter_of(quarter_bounds(_quarter_of(today))[0] - timedelta(days=1)))
+    # The quarter in progress is offered to date once a statement or ledger entry falls inside it.
+    current_label = _quarter_of(today)
+    current_start, current_end = quarter_bounds(current_label)
+    latest = _latest_evidence(service, client_id, dates, today)
+    current = None
+    if latest is not None and latest >= current_start:
+        current = {"period": current_label, "start": current_start.isoformat(), "end": latest.isoformat(),
+                   "quarter_end": current_end.isoformat(), "label": _quarter_label(current_label, partial=True)}
+    label = period or (quarters[0] if quarters else current_label if current else
+                       _quarter_of(current_start - timedelta(days=1)))
     start, end = quarter_bounds(label)
-    if end >= today:
+    partial = label == current_label
+    if partial:
+        if current is None:
+            raise ValueError("Choose a quarter that has ended, or upload a statement from this quarter.")
+        end = latest
+    elif end >= today:
         raise ValueError("Choose a quarter that has ended.")
     base = {"version": 1, "period": label, "start": start.isoformat(), "end": end.isoformat(), "quarters": quarters,
-            "today": today.isoformat()}
-    if not quarters or first is None or end < first:
+            "current": current, "partial": partial, "label": _quarter_label(label, partial=partial),
+            "quarter_end": quarter_bounds(label)[1].isoformat(), "today": today.isoformat()}
+    if first is None or end < first or not (quarters or partial):
         return {**base, "status": "needs_input", "currency": None, "letter": None, "sections": None}
     report = service.run("quarterly_review", {**(inputs or {}), "period_start": start.isoformat(),
                                               "period_end": end.isoformat()}, client_id)
@@ -2082,7 +2123,8 @@ def review_view(service: Any, client_id: str, period: str | None = None, today: 
 
     return {**base, "status": report.get("status"), "currency": cur,
             "name": (result.get("narrative_inputs") or {}).get("name"),
-            "letter": {"narrative": None, "summary": _review_summary(result.get("narrative_inputs") or {}, label)},
+            "letter": {"narrative": None,
+                       "summary": _review_summary(result.get("narrative_inputs") or {}, label, partial)},
             "sections": {"net_worth": net_worth, "performance": performance_view, "allocation": allocation,
                          "cash_flow": cash_flow, "goals": goals, "decisions": decisions, "dca": dca, "taxes": taxes,
                          "fees": fees, "next_quarter": next_quarter},

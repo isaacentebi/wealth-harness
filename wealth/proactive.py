@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from statistics import median
@@ -44,6 +45,7 @@ SEVERITIES = ("act", "consider", "fyi")
 # Trigger thresholds (docs/scope.md section 3).
 SURPLUS_BALANCE_MULTIPLE = Decimal("1.5")     # checking > 1.5x monthly spend ...
 SURPLUS_CYCLES = 2                            # ... at two consecutive month ends
+SURPLUS_ADVICE_TOLERANCE = Decimal("0.05")    # a thread naming the monthly surplus within 5% is about it
 CASH_DRAG_MONTHS = Decimal(12)
 WINDFALL_MULTIPLE = Decimal("1.5")            # deposit >= 1.5x typical
 WINDFALL_LOOKBACK_DAYS = 14
@@ -74,7 +76,7 @@ TAXABLE_TYPES = frozenset({"brokerage", "taxable"})
 RETIREMENT_SAVINGS_TYPES = frozenset({"ppr", "afore"})
 FIBRA_TICKERS = frozenset({"FUNO11", "FMTY14", "FIBRAPL14", "DANHOS13", "TERRA13", "FIHO12", "FIBRAMQ12", "FSHOP13"})
 KIND_ORDER = ("scam", "reserve_low", "concentration", "tax_deadline", "harvest", "ppr_headroom", "windfall",
-              "drift", "surplus", "cash_drag", "dca_slipped", "fee_creep", "thread_ready", "life_calendar",
+              "drift", "surplus", "follow_through", "cash_drag", "dca_slipped", "fee_creep", "thread_ready", "life_calendar",
               "guilt_free", "statement_overdue", "stale_facts")
 
 _MONTHS_ES = ("ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic")
@@ -358,6 +360,25 @@ def _surplus(run: _Run) -> None:
     if unallocated <= 0:
         return
     amount = run.money(unallocated)
+    advised = _advised_surplus(run, unallocated)
+    if advised is not None:
+        # The adviser already said where this money goes: never call it "sin destino". Ask whether it is
+        # happening instead, and say nothing once the person committed to it.
+        thread, target, committed = advised
+        if committed:
+            return
+        run.items.append(_item(
+            "follow_through", thread["id"], severity="consider", priority="opportunity",
+            title=(f"Sending the {amount} {target[0]}?", f"¿Ya mandas los {amount} {target[1]}?"),
+            why=(f"We agreed the {amount} left each month goes {target[0]}.",
+                 f"Quedamos en que los {amount} que te quedan cada mes van {target[1]}."),
+            next_step=(f"Confirm I'm already doing it: {amount} a month {target[0]}.",
+                       f"Confirmar que ya lo hago: mando {amount} al mes {target[1]}."),
+            data={"thread_id": thread["id"], "text": thread["text"], "unallocated_monthly": num(unallocated),
+                  "currency": run.currency, "related": list(thread.get("related") or [])},
+            sources=[thread["key"], *[k for k in run.sit["evidence"] if k.startswith(("income.", "spending."))]],
+            trigger=[thread["id"], _sig2(unallocated)]))
+        return
     run.items.append(_item(
         "surplus", None, severity="consider", priority="opportunity",
         title=(f"{amount}/month has no job yet", f"{amount} al mes todavía sin destino"),
@@ -369,6 +390,78 @@ def _surplus(run: _Run) -> None:
               "surplus_monthly": run.sit["cash_flow"]["surplus"], "committed_monthly": run.sit["commitments"]["total"]},
         sources=[k for k in run.sit["evidence"] if k.startswith(("income.", "spending.", "goals", "planning.dca", "liability."))],
         trigger=["flow", _sig2(unallocated)]))
+
+
+_AMOUNT = re.compile(r"(?<![\d.,])(\d{1,3}(?:[,. ]\d{3})+|\d+(?:[.,]\d+)?)\s*(k|mil|thousand)?(?![\w])", re.I)
+_TARGETS = {"auto": ("to the car", "al auto"), "mortgage": ("to the mortgage", "a la hipoteca"),
+            "card": ("to the card", "a la tarjeta"), "student": ("to the student loan", "al crédito educativo"),
+            "personal": ("to the personal loan", "al préstamo personal")}
+
+
+def _amounts(text: str) -> list[Decimal]:
+    """Money amounts written in a sentence: 25,500 / 25 500 / 25.5 mil / 25k."""
+    found = []
+    for match in _AMOUNT.finditer(text or ""):
+        raw, unit = match.group(1), match.group(2)
+        if re.fullmatch(r"\d{1,3}(?:[,. ]\d{3})+", raw):
+            value = Decimal(re.sub(r"\D", "", raw))
+        else:
+            value = Decimal(raw.replace(",", "."))
+        found.append(value * 1000 if unit else value)
+    return found
+
+
+def _near(value: Decimal | None, amount: Decimal) -> bool:
+    return value is not None and amount > 0 and abs(value - amount) <= SURPLUS_ADVICE_TOLERANCE * amount
+
+
+def _advice_target(run: _Run, thread: Mapping[str, Any]) -> tuple[str, str]:
+    related = [k for k in thread.get("related") or [] if isinstance(k, str)]
+    for liability in run.sit.get("liabilities") or []:
+        if liability.get("key") in related:
+            if liability.get("kind") in _TARGETS:
+                return _TARGETS[liability["kind"]]
+            lender = liability.get("lender") or liability.get("name")
+            return (f"to the {lender} loan", f"al crédito de {lender}") if lender else ("to that debt", "a esa deuda")
+    for goal in run.sit.get("goals") or []:
+        if goal["id"] in related or f"goals.{goal['id']}" in related:
+            return (f"to {goal['name']}", f"a {goal['name']}")
+    if re.search(r"invest|invert|invier", thread.get("text") or "", re.I):
+        return ("to investing", "a invertir")
+    return ("to that plan", "a ese plan")
+
+
+def _advised_surplus(run: _Run, amount: Decimal) -> tuple[dict, tuple[str, str], bool] | None:
+    """The open advice or commitment that already gives this monthly surplus a job, if any.
+
+    A thread relates to the surplus when it points at a debt, the goals or spending, or its text names
+    the amount (within 5%).  It counts as committed when it is a commitment, or when a goal or plan the
+    situation already counts is tied to it (a pay_off goal for the same liability, or the same amount).
+    """
+    related_threads = []
+    for thread in (run.sit.get("threads") or {}).get("open") or []:
+        if thread.get("kind") not in ("advice", "commitment"):
+            continue
+        related = [k for k in thread.get("related") or [] if isinstance(k, str)]
+        names_amount = any(_near(value, amount) for value in _amounts(thread.get("text") or ""))
+        points = any(k.startswith(("liability.", "goals", "spending.")) for k in related)
+        if names_amount or points:
+            related_threads.append((not names_amount, thread))
+    if not related_threads:
+        return None
+    thread = min(related_threads, key=lambda row: row[0])[1]  # one that names the amount first, else the newest
+    related = set(thread.get("related") or [])
+    stated = _amounts(thread.get("text") or "")
+    committed = thread.get("kind") == "commitment"
+    for goal in run.sit.get("goals") or []:
+        if goal["status"] != "active" or goal["monthly_contribution"] is None or not goal.get("eligible", True):
+            continue
+        tied = goal.get("liability") in related or goal["id"] in related or f"goals.{goal['id']}" in related
+        if tied or any(_near(D(goal["monthly_value"]), value) for value in stated):
+            committed = True
+    if "planning.dca" in related and run.sit.get("dca"):
+        committed = True
+    return thread, _advice_target(run, thread), committed
 
 
 def _reserve(run: _Run) -> None:

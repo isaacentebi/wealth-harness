@@ -664,3 +664,63 @@ def test_cash_drag_without_a_target_states_its_default():
     assert item["data"]["keep_basis"] == "default" and "12" in item["why"]["en"] and "default" in item["why"]["en"]
     no_spending = [f for f in facts if f[0] != "spending.monthly"]
     assert "cash_drag" not in kinds(evaluate(no_spending))  # never measured against an unknown
+
+
+# ------------------------------------------------------------------ nudges follow the adviser's open advice
+
+
+_FLOW = [("client.profile", MX), ("income.salary", {"amount": 80500, "currency": "MXN", "frequency": "monthly"}),
+         ("spending.monthly", {"total": 45000, "currency": "MXN"}),
+         ("liability.auto", {"kind": "auto", "balance": 180000, "currency": "MXN", "annual_rate": 0.14,
+                             "payment": 10000, "payment_frequency": "monthly", "in_spending": False})]
+_CAR_ADVICE = ("thread.auto-primero", {"kind": "advice", "status": "open", "related": ["liability.auto"],
+                                       "text": "Manda los $25,500 restantes al mes al crédito del auto hasta liquidarlo"})
+
+
+def test_open_advice_about_the_surplus_turns_sin_destino_into_a_follow_through():
+    plain = kinds(evaluate(_FLOW))
+    assert plain["surplus"]["title"]["es"] == "$25,500 al mes todavía sin destino"
+    found = kinds(evaluate([*_FLOW, _CAR_ADVICE]))
+    assert "surplus" not in found
+    item = found["follow_through"]
+    assert item["title"] == {"en": "Sending the $25,500 to the car?", "es": "¿Ya mandas los $25,500 al auto?"}
+    assert item["next_step"]["es"].startswith("Confirmar que ya lo hago")
+    assert item["data"]["thread_id"] == "auto-primero" and item["id"] == "follow_through:auto-primero"
+    shown = today([*_FLOW, _CAR_ADVICE])["today"]
+    assert not any("sin destino" in i["title"]["es"] for i in shown)
+
+
+def test_a_thread_naming_the_amount_relates_even_without_related_keys():
+    advice = ("thread.invertir", {"kind": "advice", "status": "open",
+                                  "text": "Invierte unos 25 mil al mes en un fondo indexado"})  # within 5%
+    found = kinds(evaluate([*_FLOW, advice]))
+    assert "surplus" not in found and found["follow_through"]["title"]["es"] == "¿Ya mandas los $25,500 a invertir?"
+    far = ("thread.otro", {"kind": "advice", "status": "open", "text": "Aparta 5,000 para el seguro"})
+    assert "surplus" in kinds(evaluate([*_FLOW, far]))  # unrelated advice leaves the nudge alone
+
+
+def test_nothing_shows_once_the_person_committed():
+    commitment = ("thread.auto-primero", {**_CAR_ADVICE[1], "kind": "commitment"})
+    found = kinds(evaluate([*_FLOW, commitment]))
+    assert "surplus" not in found and "follow_through" not in found
+    # A counted pay_off goal for the same debt settles it too, even for part of the amount.
+    goal = ("goals", [{"id": "liquidar-auto", "name": "Liquidar el auto", "action": "pay_off",
+                       "liability": "liability.auto", "monthly_contribution": 20000, "currency": "MXN"}])
+    found = kinds(evaluate([*_FLOW, _CAR_ADVICE, goal]))
+    assert "surplus" not in found and "follow_through" not in found
+
+
+def test_a_pay_off_goal_is_a_commitment_the_situation_counts():
+    goal = ("goals", [{"id": "liquidar-auto", "name": "Liquidar el auto", "action": "pay_off",
+                       "liability": "liability.auto", "monthly_contribution": 25500, "currency": "MXN"}])
+    sit = situation.build(snap([*_FLOW, goal]), None, AS_OF)
+    assert sit["commitments"]["total"] == 25500 and sit["commitments"]["unallocated"] == 0
+    assert sit["goals"][0]["liability"] == "liability.auto" and sit["goals"][0]["action"] == "pay_off"
+    found = kinds(evaluate([*_FLOW, _CAR_ADVICE, goal]))
+    assert "surplus" not in found and "follow_through" not in found
+
+
+def test_a_goal_liability_must_name_a_debt():
+    from wealth.situation.schema import SchemaError, validate
+    with pytest.raises(SchemaError, match="liability"):
+        validate("goals", [{"id": "x", "name": "X", "liability": "cash.bbva"}])

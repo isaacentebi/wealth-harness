@@ -247,6 +247,7 @@ def test_acceptance_is_status_only_and_export_contains_full_history(store):
     store.remember("c", [fact("constraint.liquidity", "medium")], 1)
     exported = store.export_client("c")
     assert exported["schema_version"] == 3
+    assert exported["conversations"] == []  # the chat history travels with the export
     assert len(exported["facts"]) == 2
     assert exported["decisions"][0]["status"] == "accepted"
     assert exported["decisions"][0]["needs_review"] is True
