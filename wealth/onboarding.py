@@ -264,6 +264,8 @@ def _identity_prefill(sit, ctx) -> dict | None:
         out["country"] = residence["country"] if residence["country"] in ("MX", "US") else "other"
     if residence.get("region"):
         out["region"] = residence["region"]
+    if residence.get("city"):
+        out["city"] = residence["city"]
     return out or None
 
 
@@ -282,6 +284,9 @@ def _identity_writer(answer: dict, ctx: dict) -> list[tuple[str, Any]]:
         region = str(answer.get("region") or "").strip()
         if region and country == "US":
             residence["region"] = region[:80]
+        city = " ".join(str(answer.get("city") or "").split())
+        if city:  # "Ciudad de México" is kept, so "Vives en…" names it
+            residence["city"] = city[:80]
         profile["residence"] = residence
     if ctx.get("language") in ("es", "en"):
         profile["language"] = ctx["language"]

@@ -478,9 +478,7 @@ def sentences(sit: Mapping[str, Any], language: str | None = None) -> list[dict]
         approx = about(item["approximate"])
         where = (f" en {item['institution']}" if es else f" at {item['institution']}") if item.get("institution") else ""
         if item.get("balance_unknown") or item.get("amount") is None:
-            label = item.get("name") or item.get("institution") or item["id"]
-            add("own", item["key"], (f"Tienes {label}; aún no sé el saldo." if es else f"You have {label}; I don't know the balance yet."),
-                ref=_item_ref(item, "investments"))
+            add("own", item["key"], _unknown_balance(item, es), ref=_item_ref(item, "investments"))
             continue
         add("own", item["key"], (f"Tienes {approx}{{a}} invertidos{where}." if es else f"You have {approx}{{a}} invested{where}."),
             ref=_item_ref(item, "investments"), a=_amount(item["amount"], item["currency"], code(item["currency"])))
@@ -582,11 +580,36 @@ def sentences(sit: Mapping[str, Any], language: str | None = None) -> list[dict]
             extra={"institution": institution, "readonly": True},
             u=_Emph(_instrument(top["underlying"], lang)), w=_Emph(pct(round(Decimal(str(top["weight"])), 2))))
     for overlap in (holdings.get("overlaps") or [])[:2]:
-        symbols = (" y " if es else " and ").join(overlap["symbols"])
-        add("invest", statement_key, "Tienes {u} dos veces: a través de {s}." if es else
-            "You own {u} twice: through {s}.", extra={"readonly": True},
+        names = list(overlap["symbols"])
+        symbols = ", ".join(names[:-1]) + (" y " if es else " and ") + names[-1]
+        times = {2: ("dos veces", "twice"), 3: ("tres veces", "three times"), 4: ("cuatro veces", "four times")}.get(
+            len(names), (f"{len(names)} veces", f"{len(names)} times"))
+        add("invest", statement_key, f"Tienes {{u}} {times[0]}: a través de {{s}}." if es else
+            f"You own {{u}} {times[1]}: through {{s}}.", extra={"readonly": True},
             u=_Emph(_instrument(overlap["underlying"], lang)), s=symbols)
     return out
+
+
+_KIND_PHRASE = {"brokerage": ("una cuenta de inversión", "a brokerage account"),
+                "afore": ("una AFORE", "an AFORE"), "retirement": ("un plan de retiro", "a retirement account"),
+                "fund": ("un fondo", "a fund")}
+
+
+def _unknown_balance(item: Mapping[str, Any], es: bool) -> str:
+    """'You have an account at GBM; I don't know its balance yet.' Never a bare type name as a noun."""
+    name, institution = item.get("name"), item.get("institution")
+    kind = str(item.get("kind") or "").lower()
+    if institution:
+        return (f"Tienes una cuenta en {institution}; aún no sé el saldo." if es else
+                f"You have an account at {institution}; I don't know its balance yet.")
+    if kind in _KIND_PHRASE:
+        phrase = _KIND_PHRASE[kind][0 if es else 1]
+        # A name that only repeats the type ("Brokerage") adds nothing; a real one ("GBM / casa de bolsa") is kept.
+        if name and name.strip().lower() not in {kind, phrase.split(" ", 1)[1].lower(), "casa de bolsa", "retiro"}:
+            phrase += f" ({name})"
+        return (f"Tienes {phrase}; aún no sé el saldo." if es else f"You have {phrase}; I don't know its balance yet.")
+    label = name or str(item["id"]).replace("_", " ")
+    return (f"Tienes {label}; aún no sé el saldo." if es else f"You have {label}; I don't know its balance yet.")
 
 
 def _item_ref(item: Mapping[str, Any], list_name: str) -> str | None:
