@@ -1,0 +1,9 @@
+Account Number,Investment Name,Symbol,Shares,Share Price,Total Value,
+12345678,VANGUARD TOTAL STOCK MARKET INDEX ADMIRAL,VTSAX,100.5,120.00,12060.00,
+12345678,VANGUARD FEDERAL MONEY MARKET,VMFXX,500,1.00,500.00,
+
+
+
+Account Number,Trade Date,Settlement Date,Transaction Type,Transaction Description,Investment Name,Symbol,Shares,Share Price,Principal Amount,Commissions and Fees,Net Amount,Accrued Interest,Account Type,
+12345678,2026-08-15,2026-08-16,Buy,Buy,VANGUARD TOTAL STOCK MARKET INDEX ADMIRAL,VTSAX,10,119.00,-1190.00,0,-1190.00,0,CASH,
+12345678,2026-08-01,2026-08-01,Dividend,Dividend Received,VANGUARD FEDERAL MONEY MARKET,VMFXX,0,1.00,2.10,0,2.10,0,CASH,

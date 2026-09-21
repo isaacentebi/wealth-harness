@@ -12,7 +12,7 @@ dependencies = ["mcp>=2.2,<3", "yfinance>=0.2.50", "pandas>=2", "numpy>=1.26", "
 [project.optional-dependencies]
 mcp = []
 analytics = []
-dev = ["pytest>=8,<10", "scikit-learn>=1.5"]
+dev = ["pytest>=8,<10", "scikit-learn>=1.5", "fpdf2>=2.8"]
 
 [project.scripts]
 wealth = "wealth.cli:main"
