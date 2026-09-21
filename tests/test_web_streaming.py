@@ -221,7 +221,9 @@ def test_security_headers_and_socket_timeout(tmp_path):
     with serving(chat) as (base, server):
         response = urlopen(base + "/", timeout=5)
         assert response.headers["Referrer-Policy"] == "no-referrer"
-        assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
+        csp = response.headers["Content-Security-Policy"]
+        assert "frame-ancestors 'none'" in csp
+        assert "font-src https://fonts.gstatic.com" in csp and "https://fonts.googleapis.com" in csp
         assert server.RequestHandlerClass.timeout == 30
     with pytest.raises(ValueError):
         web.create_server(chat, 0, "0.0.0.0")
@@ -233,7 +235,10 @@ def test_page_never_injects_html_from_model_text():
     for sink in ("innerHTML =", "innerHTML=", "outerHTML", "insertAdjacentHTML", "document.write"):
         assert sink not in page
     assert "event.isComposing" in page and "(pointer: coarse)" in page
-    assert "prefers-color-scheme: dark" in page
+    # Dot design language: light only, Inter + Roboto Mono, no warning glyphs or checkmarks.
+    assert "prefers-color-scheme: dark" not in page
+    assert '<meta name="color-scheme" content="light">' in page
+    assert "fonts.googleapis.com" in page and "Roboto+Mono" in page
 
 
 def test_friendly_names_and_memory_labels():

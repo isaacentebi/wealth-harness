@@ -27,6 +27,7 @@ from .agent import (
     AgentError, REASONING_LEVELS, TurnControl, TurnEvent, profile_state, resolve_model,
     run_turn, seed_demo, stream_turn,
 )
+from .behavior import ONBOARDING_WELCOME, ONBOARDING_WELCOME_ES
 from .service import WealthService, database_path
 from .store import ClientExistsError, ClientNotFoundError, StoreError
 
@@ -258,7 +259,8 @@ class Chat:
         return {"client_id": self.client_id, "display_name": self.display_name,
                 "model": resolve_model(self.model),
                 "reasoning": self.reasoning, "reasoning_levels": list(REASONING_LEVELS),
-                "csrf_token": self.token, "messages": list(self.messages), "welcome": self.welcome,
+                "csrf_token": self.token, "messages": list(self.messages),
+                "welcome": {"en": ONBOARDING_WELCOME, "es": ONBOARDING_WELCOME_ES} if self.welcome else "",
                 "starters": list(STARTERS) if not self.messages else [],
                 "turn": turn.summary() if turn and turn.status in {"running", "error", "cancelled"} else None,
                 "uploads": {"max_bytes": MAX_UPLOAD_BYTES, "types": list(UPLOAD_TYPES),
@@ -402,7 +404,8 @@ SECURITY_HEADERS = (
     ("X-Content-Type-Options", "nosniff"),
     ("Referrer-Policy", "no-referrer"),
     ("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; "
-     "style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; "
+     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; "
+     "img-src 'self' data:; connect-src 'self'; "
      "frame-ancestors 'none'; base-uri 'none'; form-action 'self'"),
 )
 
