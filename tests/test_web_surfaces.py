@@ -407,3 +407,22 @@ def test_profile_never_shows_or_takes_a_secret():
     assert 'type="password"' not in page and "type: 'password'" not in script
     assert "security add-generic-password" not in page  # the commands come from the server, from the docs
     assert "'/api/connections'" in script and "'/api/export'" in script and "forget_command" in script
+
+
+def test_delete_my_data_is_one_folded_line_and_the_hoy_value_is_bold_whole():
+    page, script = _script("profile.html")
+    data = script[script.index("function renderData("):script.index("function setLang(")]
+    # One quiet line; the Terminal command and its copy button stay folded until the line is tapped.
+    assert "'aria-expanded': 'false', 'aria-controls': 'erase-how'" in data and "hidden: true" in data
+    assert "text: t('copy')" in data and "navigator.clipboard.writeText(command)" in data
+    assert data.count("class: 'data-row'") == 2 and ".erase-how[hidden] { display: none; }" in page
+    assert "eraseLine: 'Only from the Terminal, so nothing does it by accident.'" in script
+    # The emphasis span is snapped to the value it lands on, on both pages, with the same rule.
+    chat = Path(web.__file__).with_name("chat.html").read_text(encoding="utf-8")
+    for source in (script, chat):
+        fn = source[source.index("function hoyEmphasis("):]
+        fn = fn[:fn.index("\n    }\n")]
+        assert "if (inNumber(a) && inNumber(a - 1)) { while (inNumber(a - 1)) a -= 1; }" in fn
+        assert "while (inNumber(b) || word(b)) b += 1;" in fn and "/[$€£]/.test(at(a - 1))" in fn and "at(b) === '%'" in fn
+    assert "const span = hoyEmphasis(title, (item.emphasis?.[lang] || [])[0]);" in script
+    assert "const span = hoyEmphasis(title, ((item.emphasis || {})[LANG] || [])[0]);" in chat

@@ -189,3 +189,43 @@ def test_the_order_card_strings_exist_in_both_languages():
     assert "code:" not in en and "ticket.nonce)" not in _section().split("// The card's code")[0]
     used = set(re.findall(r"\bO\.(\w+)", _section()))
     assert used <= keys[0], used - keys[0]
+
+
+def test_a_price_move_returns_the_repriced_card_and_a_fresh_tap_places_it(tmp_path, fake):
+    with serving(tmp_path) as (chat, base):
+        ticket_id = propose(chat, [{"symbol": "VTI", "side": "buy", "qty": 10}])
+        _, listed = call(base, "/api/orders", token=chat.token)
+        card = next(t for t in listed["tickets"] if t["id"] == ticket_id)
+        assert card["lines"][0]["limit_price"] == "251.25"
+        fake.prices["VTI"] = "300.00"  # the market moves 20% while the card is on screen
+        status, moved = call(base, f"/api/orders/{ticket_id}/confirm", token=chat.token, body={"nonce": card["nonce"]})
+        assert status == 409 and moved["kind"] == "price_moved" and fake.posts() == []
+        # The 409 carries the re-priced card: still pending, same code, new lines, the changed fields named.
+        fresh = moved["ticket"]
+        assert fresh["status"] == "pending" and not fresh["blocked"] and fresh["nonce"] == card["nonce"]
+        assert fresh["lines"][0]["limit_price"] == "301.5"
+        notice = next(n for n in fresh["notices"] if n["code"] == "price_moved")
+        assert notice["line"] == 0 and set(notice["params"]["fields"]) >= {"limit_price", "estimated_amount"}
+        status, placed = call(base, f"/api/orders/{ticket_id}/confirm", token=chat.token, body={"nonce": card["nonce"]})
+        assert status == 200 and placed["ticket"]["status"] == "submitted"
+        assert fake.posts()[0]["body"]["limit_price"] == "301.5"
+
+
+def test_the_card_reprices_in_place_when_the_price_moved():
+    section = _section()
+    action = section[section.index("async function orderAction("):]
+    # A 409 that carries a ticket re-renders that card; price_moved gets the page's own quiet line, not the server's.
+    assert "if (data.ticket) showOrder(data.ticket);" in action.split("if (!response.ok)")[1]
+    assert "data.kind === 'price_moved' ? T.orders.priceMoved" in action
+    card = section[section.index("function orderCard("):section.index("function showOrder(")]
+    line = section[section.index("function orderLine("):section.index("function orderCard(")]
+    # The re-priced figures are set in weight; the price_moved notice never repeats as a note.
+    assert "n.code !== 'price_moved'" in card and "movedBy.get(line.index)" in card
+    assert "if (movedBy.size) problem.textContent = O.priceMoved;" in card
+    for field in ("order_qty", "limit_price", "estimated_amount"):
+        assert f"moved.includes('{field}')" in line
+    assert "el('span', 'moved', text)" in line
+    css = PAGE[PAGE.index("/* Order card"):PAGE.index("/* Engine-drawn views")]
+    assert ".order .moved { color: var(--ink); font-weight: 600; }" in css
+    for text in ("The price moved; review and confirm again.", "El precio cambió; revisa y confirma de nuevo."):
+        assert text in PAGE

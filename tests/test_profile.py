@@ -510,3 +510,31 @@ def test_empty_memory_has_no_groups(tmp_path):
     service.create("e", "E")
     memory = profile_view(service, "e")["memory"]
     assert memory["en"]["groups"] == [] and memory["es"]["conflicts"] == [] and memory["es"]["review"] == []
+
+
+def test_government_paper_reads_as_people_say_it():
+    from wealth.profile import _instrument_label
+    assert _instrument_label("S UDIBONO 351122") == "Udibono 2035"
+    assert _instrument_label("BI CETES 261015") == "Cetes 2026"
+    assert _instrument_label("M BONO 291201") == "Bono 2029"
+    assert _instrument_label("LD BONDESF 290104") == "Bondes F 2029"
+    assert _instrument_label("CETES") == "Cetes"
+    for ticker in ("VOO", "NAFTRAC", "S&P 500", "IVVPESO"):
+        assert _instrument_label(ticker) == ticker
+
+
+def test_a_pending_contradiction_is_worded_with_both_amounts(tmp_path):
+    from wealth.profile import memory_view
+    service = WealthService(tmp_path / "w.sqlite3")
+    service.create("ana", "Ana")
+    today = TODAY.isoformat()
+    service.remember("ana", [{"key": "cash.nu", "value": {"amount": 150000, "currency": "MXN", "institution": "Nu"},
+                              "source": {"kind": "user", "ref": "chat", "observed_on": today}}])
+    receipt = service.remember("ana", [{"key": "cash.nu", "value": {"amount": 160000, "currency": "MXN", "institution": "Nu"},
+                                        "source": {"kind": "web", "ref": "https://example.com/nu", "observed_on": today},
+                                        "confidence": "reported"}])
+    assert receipt["needs_user"]
+    view = profile_view(service, "ana", language="en")
+    card = next(iter(view["memory"]["en"]["conflicts"]))
+    assert "$150,000" in card["text"] and "$160,000" in card["text"]
+    assert [card["text"][a:b] for a, b in card["emphasis"]] == ["$150,000", "$160,000"]
