@@ -98,8 +98,10 @@ def _slug(heading: str) -> str:
 
 
 def _markdown_files() -> list[Path]:
-    return [path for path in sorted(ROOT.rglob("*.md"))
-            if not SKIP_DIRS & set(path.relative_to(ROOT).parts)]
+    """Tracked Markdown only: private, ignored notes are not part of the published docs."""
+    import subprocess
+    tracked = subprocess.run(["git", "ls-files", "*.md"], cwd=ROOT, capture_output=True, text=True).stdout.split()
+    return [ROOT / name for name in sorted(tracked) if not SKIP_DIRS & set(Path(name).parts)]
 
 
 def test_internal_markdown_links_resolve():
