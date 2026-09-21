@@ -116,7 +116,10 @@
 
     .message { animation: arrive .24s cubic-bezier(.2, .7, .2, 1); min-width: 0; }
 
-    .message.user { align-self: flex-end; max-width: min(85%, 34rem); }
+    /* The user's turn hugs the right; a failure under it spans the full column, like any reply. */
+    .message.user { display: flex; flex-direction: column; align-items: flex-end; }
+    .message.user > .bubble, .message.user > .attachments { max-width: min(85%, 34rem); }
+    .message.user > .alert { align-self: stretch; }
 
     .message.user .bubble {
       padding: 11px 16px;
@@ -325,16 +328,16 @@
     .alert p { margin: 0; text-wrap: pretty; }
     .alert code { font: .875em var(--mono); }
     .alert .detail { grid-column: -2 / -1; color: var(--muted); font-size: 13px; }
-    .alert .detail summary { display: inline-flex; align-items: center; min-height: 44px; cursor: pointer; list-style: none; }
+    .alert .detail summary { display: inline-flex; align-items: center; min-height: 44px; padding: 0 8px; margin-left: -8px; cursor: pointer; list-style: none; }
     .alert .detail summary::-webkit-details-marker { display: none; }
     .alert .detail summary:hover { color: var(--ink); }
     .alert .detail code { display: block; margin-bottom: 8px; font: 400 12px/1.5 var(--mono); overflow-wrap: anywhere; }
-    .alert .detail + button { margin-top: -8px; }
     .alert button {
       grid-column: -2 / -1;
       justify-self: start;
       min-height: 44px;
-      padding: 0;
+      margin-left: -8px;
+      padding: 0 8px;
       border: 0;
       background: transparent;
       color: var(--ink);
@@ -357,7 +360,13 @@
       letter-spacing: -.02em;
       text-wrap: balance;
     }
-    .intro .greeting .stop { color: var(--vermilion); }
+    .intro .welcome {
+      margin: 0;
+      max-width: 34rem;
+      font: 500 22px/32px var(--sans);
+      letter-spacing: -.01em;
+      text-wrap: pretty;
+    }
     .starters { margin: 32px 0 0; padding: 0; list-style: none; border-top: 1px solid var(--hairline); }
     .starters li { border-bottom: 1px solid var(--hairline); }
     .starter {
@@ -371,6 +380,7 @@
       font-size: 16px;
       font-weight: 500;
       text-align: left;
+      text-wrap: balance;
     }
     .starter:hover { color: var(--pressed); }
     .privacy { margin-top: 24px; color: var(--muted); font-size: 13px; }
@@ -439,6 +449,8 @@
     .segmented label {
       display: inline-flex;
       align-items: center;
+      justify-content: center;
+      min-width: 44px;
       min-height: 44px;
       padding: 0 8px;
       color: var(--muted);
@@ -446,12 +458,9 @@
       font-weight: 500;
       cursor: pointer;
       user-select: none;
-      position: relative;
     }
-    .segmented label::after { content: ""; position: absolute; left: 8px; right: 8px; bottom: 10px; height: 1.5px; background: var(--ink); opacity: 0; }
-    .segmented input:checked + label { color: var(--ink); }
-    .segmented input:checked + label::after { opacity: 1; }
-    .segmented input:focus-visible + label { outline: 2px solid var(--ink); outline-offset: -4px; border-radius: 4px; }
+    .segmented input:checked + label { color: var(--ink); text-decoration: underline; text-decoration-thickness: 1.5px; text-underline-offset: 8px; }
+    .segmented input:focus-visible + label { outline: 2px solid var(--ink); outline-offset: 0; border-radius: 4px; }
     .segmented input:disabled + label { cursor: default; opacity: .55; }
 
     .send {
@@ -500,10 +509,9 @@
     }
 
     @media (max-width: 420px) {
-      .message.user { max-width: 92%; }
+      .message.user > .bubble, .message.user > .attachments { max-width: 92%; }
       .segmented label { padding: 0 6px; }
       .answer th, .answer td { padding-right: 12px; }
-      .segmented label::after { left: 6px; right: 6px; }
     }
 
     @media (prefers-reduced-motion: reduce) {
@@ -578,7 +586,7 @@
         send: 'Send message', stopResponse: 'Stop response', newChat: 'New conversation', profile: 'Profile',
         conversation: 'Conversation', attachments: 'Attachments', drop: 'Drop PDF, CSV or image to attach',
         you: 'You', wealth: 'Wealth', replied: 'Wealth replied.', table: 'Table', welcome: 'Welcome',
-        firstRun: 'Start with a rough picture of your finances.', returning: 'What’s on your mind?',
+        returning: 'What’s on your mind?',
         privacy: 'How your data is handled',
         privacyText: 'Client memory and attachments are stored on this computer. Messages and selected context are sent to the model provider; research uses external search and market-data services.',
         webOn: 'Web search is on.', webOff: 'Web search is off.',
@@ -603,7 +611,7 @@
         send: 'Enviar mensaje', stopResponse: 'Detener respuesta', newChat: 'Nueva conversación', profile: 'Perfil',
         conversation: 'Conversación', attachments: 'Adjuntos', drop: 'Suelta un PDF, CSV o imagen para adjuntarlo',
         you: 'Tú', wealth: 'Wealth', replied: 'Wealth respondió.', table: 'Tabla', welcome: 'Bienvenida',
-        firstRun: 'Empieza con una idea general de tus finanzas.', returning: '¿Qué tienes en mente?',
+        returning: '¿Qué tienes en mente?',
         privacy: 'Cómo se manejan tus datos',
         privacyText: 'La memoria y los adjuntos se guardan en esta computadora. Los mensajes y el contexto seleccionado se envían al proveedor del modelo; la investigación usa servicios externos de búsqueda y datos de mercado.',
         webOn: 'La búsqueda web está activada.', webOff: 'La búsqueda web está desactivada.',
@@ -1170,11 +1178,14 @@
     function renderIntro(state) {
       const box = el('section', 'intro');
       box.setAttribute('aria-label', T.welcome);
-      // One headline: the invitation itself. First run asks for the rough picture; later visits ask what's next.
-      const headline = state.welcome ? T.firstRun : T.returning;
-      const title = el('h2', 'greeting', headline.replace(/\.$/, ''));
-      if (headline.endsWith('.')) title.append(el('span', 'stop', '.'));
-      box.append(title);
+      // One dominant text: the first-run welcome in the reader's language, or a short question on later visits.
+      const welcome = state.welcome && typeof state.welcome === 'object' ? (state.welcome[LANG] || state.welcome.en) : state.welcome;
+      if (welcome) {
+        box.append(el('h2', 'welcome', String(welcome)));
+      } else {
+        const title = el('h2', 'greeting', T.returning);
+        box.append(title);
+      }
       const starters = Array.isArray(state.starters) ? state.starters.slice(0, 3) : [];
       if (starters.length) {
         const rows = el('ul', 'starters');
