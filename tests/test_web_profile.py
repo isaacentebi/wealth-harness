@@ -15,8 +15,9 @@ from wealth.service import WealthService
 from test_web_streaming import _post, serving
 
 
-def _get(base, path):
-    return urlopen(base + path, timeout=10)
+def _get(base, token, path):
+    from urllib.request import Request
+    return urlopen(Request(base + path, headers={"X-Wealth-Token": token}), timeout=10)
 
 
 def _seed(db):
@@ -34,9 +35,9 @@ def test_profile_page_and_view_are_served(tmp_path):
     _seed(db)
     chat = web.Chat(db, "personal")
     with serving(chat) as (base, _):
-        with _get(base, "/profile") as response:
+        with _get(base, chat.token, "/profile") as response:
             assert b"<html" in response.read().lower()
-        with _get(base, "/api/profile") as response:
+        with _get(base, chat.token, "/api/profile") as response:
             view = json.loads(response.read())
     assert view["client"]["revision"] >= 1
 
@@ -47,7 +48,7 @@ def test_fact_confirm_returns_the_new_view_and_detects_conflicts(tmp_path):
     chat = web.Chat(db, "personal")
     path = "/api/facts/" + quote("client.profile", safe="")
     with serving(chat) as (base, _):
-        revision = json.loads(_get(base, "/api/profile").read())["client"]["revision"]
+        revision = json.loads(_get(base, chat.token, "/api/profile").read())["client"]["revision"]
         body = json.dumps({"action": "confirm", "expected_revision": revision}).encode()
         with _post(base, path, chat.token, body) as response:
             assert response.status == 200
@@ -72,8 +73,11 @@ def test_profile_writes_need_the_token_and_a_known_fact(tmp_path):
             _post(base, "/api/profile/form", chat.token, b'{"form": {}}')
         assert empty.value.code == 400
         with pytest.raises(HTTPError) as unknown:
-            urlopen(Request(base + "/api/facts/nope"), timeout=10)
+            urlopen(Request(base + "/api/facts/nope", headers={"X-Wealth-Token": chat.token}), timeout=10)
         assert unknown.value.code == 422
+        with pytest.raises(HTTPError) as unsigned:
+            urlopen(Request(base + "/api/profile"), timeout=10)
+        assert unsigned.value.code == 403
 
 
 def test_contradictions_and_history_endpoints(tmp_path):
@@ -89,15 +93,15 @@ def test_contradictions_and_history_endpoints(tmp_path):
     assert receipt["needs_user"]
     chat = web.Chat(db, "personal")
     with serving(chat) as (base, _):
-        listed = json.loads(_get(base, "/api/profile/contradictions").read())
+        listed = json.loads(_get(base, chat.token, "/api/profile/contradictions").read())
         items = listed.get("contradictions") or listed.get("items") or []
         assert len(items) == 1
         cid = items[0]["id"]
         with _post(base, f"/api/profile/contradictions/{cid}", chat.token, b'{"choice": "keep"}') as response:
             assert "profile" in json.loads(response.read())
-        after = json.loads(_get(base, "/api/profile/contradictions").read())
+        after = json.loads(_get(base, chat.token, "/api/profile/contradictions").read())
         assert not (after.get("contradictions") or after.get("items"))
-        timeline = json.loads(_get(base, "/api/profile/fact/cash.nu/history").read())
+        timeline = json.loads(_get(base, chat.token, "/api/profile/fact/cash.nu/history").read())
         assert timeline["key"] == "cash.nu" and timeline["entries"]
-        with _get(base, "/api/profile?lang=es") as response:
+        with _get(base, chat.token, "/api/profile?lang=es") as response:
             assert json.loads(response.read())

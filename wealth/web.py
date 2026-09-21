@@ -137,7 +137,7 @@ _ORDER_PATH = re.compile(r"^/api/orders/([A-Za-z0-9-]{1,64})/(confirm|cancel)$")
 # Profile reads (the profile, contradictions, one fact, its history) need the session token like every
 # other /api read. profile.html sends it once its owner's update lands; until then this stays False so the
 # page keeps working. Flip to True (or set WEALTH_PROFILE_READS_NEED_TOKEN=1) to enforce it.
-PROFILE_READS_NEED_TOKEN = False
+PROFILE_READS_NEED_TOKEN = True
 
 
 def profile_reads_need_token() -> bool:

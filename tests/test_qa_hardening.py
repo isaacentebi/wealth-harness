@@ -122,9 +122,10 @@ def test_one_unreadable_legacy_fact_is_skipped_and_named(service, stored):
 
     chat = web.Chat(service.db_path, "ana")
     with serving(chat) as (base, _):
-        from urllib.request import urlopen
+        from urllib.request import Request, urlopen
         assert urlopen(base + "/api/state", timeout=10).status == 200
-        assert urlopen(base + "/api/profile", timeout=10).status == 200
+        request = Request(base + "/api/profile", headers={"X-Wealth-Token": chat.token})
+        assert urlopen(request, timeout=10).status == 200
         # The person can remove it from the page.
         revision = service.inspect("ana")["client"]["revision"]
         body = json.dumps({"action": "delete", "expected_revision": revision}).encode()
