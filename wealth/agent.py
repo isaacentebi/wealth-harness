@@ -293,6 +293,27 @@ def _profile_line(profile: Mapping[str, Sequence[str]] | None, profile_empty: bo
     return "Saved profile: unknown; check client context."
 
 
+_SPANISH = re.compile(r"[áéíóúñ¿¡]|\b(?:que|qué|cómo|como|tengo|quiero|mi|mis|para|pero|gracias|hola|dinero|"
+                      r"cuánto|cuanto|ahorro|invertir|gasto|mes|pesos)\b", re.IGNORECASE)
+
+
+def guess_language(text: str) -> str:
+    """es or en from the person's own words; only picks the brief's labels."""
+
+    return "es" if len(_SPANISH.findall(text or "")) >= 2 else "en"
+
+
+def situation_brief(db_path: str | Path, client_id: str, user_prompt: str = "",
+                    since_revision: int | None = None) -> tuple[str, int | None]:
+    """The compact situation block for this turn and the revision it reflects."""
+
+    from . import situation
+
+    sit = WealthService(db_path).situation(client_id, since_revision=since_revision)
+    language = sit["profile"].get("language") or guess_language(user_prompt)
+    return situation.brief(sit, language), sit["revision"]
+
+
 def build_prompt(
     user_prompt: str,
     client_id: str,
@@ -300,6 +321,7 @@ def build_prompt(
     *,
     profile_empty: bool | None = None,
     profile: Mapping[str, Sequence[str]] | None = None,
+    brief: str | None = None,
     web_search: bool = True,
     timezone_name: str | None = None,
     attachments: Sequence[Mapping[str, Any]] = (),
@@ -314,9 +336,13 @@ def build_prompt(
     if local:
         lines.append(f"Client local time: {local}")
     lines.append(f"client_id: {_escape(client_id)!r}")
-    lines.append(_profile_line(profile, profile_empty))
+    if brief is None:
+        lines.append(_profile_line(profile, profile_empty))
     lines.append("Web search: on" if web_search else "Web search: off")
     sections = ["<turn_context>\n" + "\n".join(lines) + "\n</turn_context>"]
+    if brief is not None:
+        # The saved picture, built deterministically from memory: numbers and open threads, no advice.
+        sections.append("<situation>\n" + _escape(brief) + "\n</situation>")
     if attachments:
         described = []
         for item in attachments:
@@ -396,6 +422,7 @@ _TASK_STEPS = {
     "value": "Running a valuation",
     "plan": "Checking your plan",
     "calendar": "Mapping your cash calendar",
+    "debt_payoff": "Working out your debt payoff",
     "project": "Projecting your finances",
     "income": "Comparing income strategies",
     "ladder": "Matching cash flows",
@@ -465,6 +492,24 @@ def _keys_of(entries: object) -> list[str]:
     if not isinstance(entries, list):
         return []
     return [str(e["key"]) for e in entries if isinstance(e, dict) and isinstance(e.get("key"), str)]
+
+
+def _ingested_keys(item: Mapping[str, Any]) -> list[str]:
+    """Fact keys saved by a successful wealth_ingest confirm, or []."""
+
+    if _arguments(item).get("action") != "confirm":
+        return []
+    if item.get("status") not in (None, "completed") or item.get("error"):
+        return []
+    result = item.get("result")
+    if isinstance(result, dict) and (result.get("isError") or result.get("is_error")):
+        return []
+    structured = _structured_result(result)
+    if not isinstance(structured, dict) or structured.get("status") != "saved":
+        return []
+    saved = (structured.get("result") or {}).get("saved") or {}
+    keys = saved.get("keys") if isinstance(saved, dict) else None
+    return list(dict.fromkeys(str(k) for k in keys or [] if isinstance(k, str)))
 
 
 def _remembered_keys(item: Mapping[str, Any]) -> list[str]:
@@ -556,8 +601,8 @@ class _TurnParser:
                     self.tools.append(label)
                 if event_type == "item.started":
                     out += self._step(_tool_step(item))
-                elif event_type == "item.completed" and tool == "wealth_remember":
-                    keys = _remembered_keys(item)
+                elif event_type == "item.completed" and tool in {"wealth_remember", "wealth_ingest"}:
+                    keys = _remembered_keys(item) if tool == "wealth_remember" else _ingested_keys(item)
                     if keys:
                         out.append(TurnEvent("memory", data={"keys": keys}))
         if event_type in {"error", "turn.failed"}:
@@ -771,6 +816,7 @@ def stream_turn(
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     profile_empty: bool | None = None,
     profile: Mapping[str, Sequence[str]] | None = None,
+    brief: str | None = None,
     web_search: bool = True,
     reasoning: str = "low",
     thread_id: str | None = None,
@@ -797,7 +843,7 @@ def stream_turn(
             resume_thread=resume, ephemeral=ephemeral,
         )
         prompt = build_prompt(
-            user_prompt, client_id, history, profile_empty=profile_empty, profile=profile,
+            user_prompt, client_id, history, profile_empty=profile_empty, profile=profile, brief=brief,
             web_search=web_search, timezone_name=timezone_name, attachments=attachments,
             resumed=resume is not None,
         )
@@ -1009,7 +1055,7 @@ def main(argv: list[str] | None = None) -> int:
                     pass
 
         history: list[tuple[str, str]] = []
-        session: dict[str, str | None] = {"thread_id": None}
+        session: dict[str, Any] = {"thread_id": None, "revision": None}
         zone = local_timezone_name()
 
         def show(event: TurnEvent) -> None:
@@ -1022,6 +1068,7 @@ def main(argv: list[str] | None = None) -> int:
 
         def ask(text: str) -> str:
             state = profile_state(db_path, client_id)
+            brief, revision = situation_brief(db_path, client_id, text, session["revision"])
             answer = run_turn(
                 text,
                 client_id=client_id,
@@ -1031,6 +1078,7 @@ def main(argv: list[str] | None = None) -> int:
                 timeout=args.timeout,
                 profile_empty=not any(state.values()),
                 profile=state,
+                brief=brief,
                 web_search=args.web_search,
                 reasoning=args.reasoning,
                 thread_id=session["thread_id"],
@@ -1040,6 +1088,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             history.extend((("user", text), ("assistant", answer)))
             del history[:-100]
+            session["revision"] = revision
             return answer
 
         if args.prompt is not None:

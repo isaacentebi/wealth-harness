@@ -34,6 +34,15 @@ every task's inputs with a runnable example. MCP and CLI share
 
 - `store.py`: client-scoped facts, correction history, atomic revisions,
   idempotent writes, proposal lifecycle, export/delete, derived-state cursors.
+- `situation/`: the canonical personal-finance model. `schema.py` validates
+  every write under a canonical key (`client.profile`, `income.<id>`,
+  `spending.monthly`, `cash.<id>`, `liability.<id>`, `investment.<id>`,
+  `goals`, `reserve`, `thread.<id>`, `preference.risk`, `onboarding`);
+  `model.build(snapshot, ledger, today)` is the one reader (legacy shapes are
+  adapted there; statements win over stated balances and the difference is
+  kept); `text.brief` is the ≤15-line block in every turn prompt and
+  `text.sentences` the profile's memory; `insights.py` reads uploads against
+  memory; `plans.py` derives plan/calendar inputs and debt payoff.
 - `recall.py`: bounded lexical/concept retrieval; optional host-supplied vectors.
 - `ingest/`: statement PDFs, CSV/XLSX exports, host-read image text, host LLM
   extraction (checked against the page text) and chat facts become one

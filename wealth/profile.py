@@ -1,7 +1,10 @@
 """Read model for the "My profile" dashboard, plus the fact edits it can request.
 
 Everything here is pure with respect to storage: ``profile_view`` only reads
-through ``WealthService.inspect``; ``fact_action`` and ``form_facts`` return fact
+through ``WealthService.inspect`` (and ``situation`` when the service has it);
+amounts, names and "missing" come from the canonical model
+(``wealth.situation.build``), so what the conversation saves is what this page
+shows; ``fact_action`` and ``form_facts`` return fact
 payloads that the web layer passes to ``WealthService.remember`` with the
 revision the page was rendered at.  Unknown values stay ``None``; they are never zero.
 The code tolerates store shape differences (missing fields, legacy values).
@@ -13,6 +16,9 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Iterable
+
+from .situation import build as build_situation, sentences
+from .situation.model import goal_name
 
 FORM_FIELDS = ("income", "spending", "savings", "investments", "debts", "dependents",
                "tax_residence", "currencies", "goals", "risk")
@@ -271,21 +277,138 @@ def _household_rows(fact: dict, overview: dict, today: date) -> tuple[list[dict]
     return accounts, debts
 
 
+# Keys whose rows come from the canonical model (one human row per item, never a raw id).
+_MODEL_PREFIXES = ("income.", "cash.", "liability.", "investment.", "account.", "thread.")
+_MODEL_KEYS = {"spending.monthly", "reserve", "onboarding"}
+_LABELS = {
+    "en": {"income": "Income", "take_home": "Take-home pay", "salary": "Salary", "aguinaldo": "Aguinaldo",
+           "ptu": "Profit sharing (PTU)", "bonus": "Bonus", "rent": "Rent", "business": "Business", "pension": "Pension",
+           "other": "Income", "spending": "Spending", "essential": "Essential spending", "cash": "Cash",
+           "reserve": "emergency fund", "investments": "Investments", "auto": "Car loan", "mortgage": "Mortgage",
+           "card": "Credit card", "personal": "Personal loan", "student": "Student loan", "loan": "Loan",
+           "reserve_target": "Emergency reserve"},
+    "es": {"income": "Ingreso", "take_home": "Ingreso neto", "salary": "Sueldo", "aguinaldo": "Aguinaldo",
+           "ptu": "PTU", "bonus": "Bono", "rent": "Rentas", "business": "Negocio", "pension": "Pensión",
+           "other": "Ingreso", "spending": "Gasto mensual", "essential": "Gasto esencial", "cash": "Efectivo",
+           "reserve": "fondo de emergencia", "investments": "Inversiones", "auto": "Crédito del coche",
+           "mortgage": "Hipoteca", "card": "Tarjeta de crédito", "personal": "Préstamo personal",
+           "student": "Crédito educativo", "loan": "Préstamo", "reserve_target": "Fondo de emergencia"},
+}
+
+
+def _model_key(key: str) -> bool:
+    return key in _MODEL_KEYS or key.startswith(_MODEL_PREFIXES) and key != "income.schedule"
+
+
+def _model_row(sit: dict, key: str, row_id: str, label: str, amount: Any, currency: Any, today: date, *,
+               period: str | None = None, editable: bool = False) -> dict:
+    meta = (sit.get("meta") or {}).get(key, {})
+    value = {"amount": amount, "currency": currency}
+    if period:
+        value["period"] = period
+    entry = {"id": row_id, "key": key, "field": None, "label": label, "value": value,
+             "editor": "amount" if editable else None,
+             "source": _source_label(meta.get("source")), "observed_on": meta.get("observed_on")}
+    if not editable:
+        entry["derived"] = True
+    if meta.get("stale"):
+        entry["stale"] = True
+        entry["can_confirm"] = editable
+    if meta.get("inferred"):
+        entry["unconfirmed"] = True
+    return entry
+
+
+def _situation_rows(sit: dict, today: date) -> dict[str, list[dict]]:
+    """Rows for canonical keys and legacy lists, labelled with names and institutions."""
+    lang = "es" if (sit["profile"].get("language") or "") == "es" else "en"
+    t = _LABELS[lang]
+    rows: dict[str, list[dict]] = {group: [] for group in GROUPS}
+    exploded = {"client.profile"}  # its form amounts already have their own rows
+    for item in [*sit["income"]["items"], *sit["income"]["extras"]]:
+        if item["key"] in exploded:
+            continue
+        label = item.get("name") or (t["take_home"] if item.get("net") and item.get("kind") in (None, "salary")
+                                     else t.get(item.get("kind") or "income", t["income"]))
+        period = {"monthly": "month", "annual": "year"}.get(item["frequency"])
+        canonical = item["key"] != "income.schedule"
+        rows["money_in"].append(_model_row(sit, item["key"], item["key"] if canonical else f"{item['key']}#{item['id']}",
+                                           label, item["amount"], item["currency"], today, period=period, editable=canonical))
+    spending = sit["spending"]
+    if spending["key"] == "spending.monthly" and spending["stated"]:
+        stated = spending["stated"]
+        name = "total" if stated.get("total") is not None else "essential"
+        rows["money_out"].append(_model_row(sit, "spending.monthly", "spending.monthly",
+                                            t["spending"] if name == "total" else t["essential"],
+                                            stated[name], stated["currency"], today, period="month", editable=True))
+    for item in sit["cash"]:
+        if item["key"] in exploded or not item["counted"]:
+            continue
+        label = item.get("institution") or item.get("name") or t["cash"]
+        if item.get("purpose") == "reserve":
+            label += " · " + t["reserve"]
+        canonical = item["key"].startswith("cash.")
+        rows["own"].append(_model_row(sit, item["key"], item["key"] if canonical else f"{item['key']}#{item['id']}",
+                                      label, item["amount"], item["currency"], today, editable=canonical))
+    for account in sit["accounts"]:
+        if account["source"] != "statement" or account.get("native") is None:
+            continue
+        native = account["native"]
+        amount, currency = (next(iter(native.values())), next(iter(native))) if len(native) == 1 else (
+            account["value"], sit["currency"])
+        rows["own"].append(_model_row(sit, account["key"], account["key"], account["label"], amount, currency, today))
+    for item in sit["investments"]:
+        if item["key"] in exploded or not item["counted"]:
+            continue
+        canonical = item["key"].startswith("investment.")
+        rows["own"].append(_model_row(sit, item["key"], item["key"] if canonical else f"{item['key']}#{item['id']}",
+                                      item.get("institution") or item.get("name") or t["investments"],
+                                      item["amount"], item["currency"], today, editable=canonical))
+    for item in sit["liabilities"]:
+        if item["key"] in exploded or item["source"] == "household":
+            continue
+        label = item.get("name") if item["kind"] == "other" and item.get("name") else t.get(item["kind"], t["loan"])
+        if item.get("lender"):
+            label += f" · {item['lender']}"
+        canonical = item["key"].startswith("liability.") and item["source"] == "stated"
+        row_id = item["key"] if item["key"].startswith("liability.") else f"{item['key']}#{item['id']}"
+        rows["owe"].append(_model_row(sit, item["key"], row_id, label, item["balance"], item["currency"], today,
+                                      editable=canonical))
+    reserve = sit["reserve"]
+    if "reserve" in (sit.get("meta") or {}) and reserve["target_months"] is not None:
+        meta = sit["meta"]["reserve"]
+        rows["goals"].append({"id": "reserve#target_months", "key": "reserve", "field": "target_months",
+                              "label": t["reserve_target"], "value": reserve["target_months"], "editor": "number",
+                              "source": _source_label(meta.get("source")), "observed_on": meta.get("observed_on")})
+    return rows
+
+
 def memory_groups(snapshot: dict, today: date, overview: dict | None = None,
-                  goals: dict | None = None, missing: Iterable[str] = ()) -> list[dict]:
+                  goals: dict | None = None, missing: Iterable[str] = (), sit: dict | None = None) -> list[dict]:
     buckets: dict[str, list[dict]] = {group: [] for group in GROUPS}
     funding = {g["id"]: g for g in (goals or {}).get("items", [])}
     ov = overview or {}
+    if sit is not None:
+        for group, entries in _situation_rows(sit, today).items():
+            buckets[group].extend(entries)
     for fact in snapshot["facts"]:
         value = fact.get("value")
         if value is None:  # a retracted fact
             continue
         key = fact["key"]
+        if sit is not None and _model_key(key):
+            continue
+        if key == "income.schedule" and isinstance(value, dict) and isinstance(value.get("items"), list) and sit is not None:
+            continue  # its items are rows above
         if key in _EXPLODED_KEYS and isinstance(value, dict):
             hidden = _HIDDEN_FIELDS.get(key, set())
             for name, item in value.items():
                 if item is None or name in hidden:
                     continue
+                if key == "plan.resources" and isinstance(item, list) and sit is not None:
+                    continue  # legacy cash/debts/investments lists: one row per item above
+                if key == "client.profile" and isinstance(item, dict) and name == "residence":
+                    continue  # stated in sentences; not an amount row
                 # Planning resources fund goals; they are not assets and must not sit beside holdings.
                 group = "goals" if key == "plan.resources" and name in _PLANNING_FIELDS \
                     else _KIND_GROUP[_field_kind(name)]
@@ -295,7 +418,7 @@ def memory_groups(snapshot: dict, today: date, overview: dict | None = None,
                 if not isinstance(goal, dict):
                     continue
                 goal_id = str(goal.get("id") or index)
-                entry = _entry(fact, today, field=goal_id, value=goal, label=str(goal.get("name") or goal_id))
+                entry = _entry(fact, today, field=goal_id, value=goal, label=goal_name(goal))
                 entry["funded_ratio"] = (funding.get(goal_id) or {}).get("funded_ratio")
                 buckets["goals"].append(entry)
         elif key == "household" and ov.get("status") in {"ready", "partial"}:
@@ -327,7 +450,8 @@ def memory_groups(snapshot: dict, today: date, overview: dict | None = None,
 
 # ---------------------------------------------------------------- completeness
 
-def completeness(snapshot: dict) -> dict:
+def completeness(snapshot: dict, sit: dict | None = None) -> dict:
+    """Known and missing form fields; the canonical model counts whatever the conversation saved."""
     facts = {k: f for k, f in _facts_by_key(snapshot).items() if f.get("value") is not None}
     profile = _dict_value(facts.get("client.profile"))
     resources = _dict_value(facts.get("plan.resources"))
@@ -357,6 +481,22 @@ def completeness(snapshot: dict) -> dict:
         "goals": isinstance(goals, list),  # an explicit empty list means "no goals", which is known
         "risk": prefixed("preference.risk") or has("risk_tolerance", "risk_preference", "risk"),
     }
+    if sit is not None:
+        profile_model = sit["profile"]
+        steps = (profile_model.get("onboarding") or {}).get("steps") or {}
+        model = {
+            "income": bool(sit["income"]["items"] or sit["income"]["extras"]),
+            "spending": sit["spending"]["monthly"] is not None or sit["spending"]["stated"] is not None,
+            "savings": bool(sit["cash"]),
+            "investments": bool(sit["investments"]) or any(a["source"] != "ledger" for a in sit["accounts"]),
+            "debts": bool(sit["liabilities"]) or steps.get("debts") == "done",
+            "dependents": profile_model.get("dependents") is not None,
+            "tax_residence": bool(profile_model.get("tax_residence")),
+            "currencies": bool(sit.get("currency")) and bool(profile_model.get("currencies")),
+            "goals": bool(sit["goals"]),
+            "risk": bool(profile_model.get("risk")),
+        }
+        checks = {n: checks[n] or model[n] for n in FORM_FIELDS}
     return {"known": [n for n in FORM_FIELDS if checks[n]], "missing": [n for n in FORM_FIELDS if not checks[n]]}
 
 
@@ -543,6 +683,45 @@ def overview(snapshot: dict, today: date) -> dict:
             "rows": lookthrough[:6],
         },
     }
+
+
+def situation_overview(sit: dict) -> dict:
+    """Net worth and holdings from the canonical model: stated balances, statements and debts."""
+    nw = sit["net_worth"]
+    if nw["total"] is None:
+        return {"status": "empty"}
+    currency = nw["currency"]
+    dated = [a["as_of"] for a in sit["accounts"] if a.get("as_of")]
+    accounts = [{"name": r.get("institution") or r.get("name") or r["id"], "id": r["key"], "value": r["value"]}
+                for r in sit["cash"] if r["counted"] and r["value"] is not None]
+    accounts += [{"name": a["label"], "id": a["key"], "value": a["value"]} for a in sit["accounts"] if a["value"] is not None]
+    accounts += [{"name": r.get("institution") or r.get("name") or r["id"], "id": r["key"], "value": r["value"]}
+                 for r in sit["investments"] if r["counted"] and r["value"] is not None]
+    assets = _num(nw["assets"]) or 0.0
+    rows = [{**r, "weight": _ratio(_num(r["value"]), assets)} for r in sorted(accounts, key=lambda r: -(r["value"] or 0))]
+    by_currency = {c: v for c, v in nw["by_currency"].items()}
+    currency_rows = [{"name": c, "id": c, "value": None if c != currency else v,
+                      "weight": None, "native": {"amount": v, "currency": c} if c != currency else None}
+                     for c, v in sorted(by_currency.items())]
+    view = {
+        "status": "ready" if nw["complete"] else "partial", "source": "model",
+        "as_of": max(dated) if dated else sit["as_of"], "currency": currency,
+        "net_worth": _num(nw["total"]), "known_assets": _num(nw["assets"]),
+        "known_liabilities": _num(nw["liabilities"]), "liquid": _num(nw["liquid"]),
+        "allocations": {"asset_class": [], "currency": currency_rows, "account": rows, "owner": []},
+        "liabilities": [{"name": r.get("name") or r["kind"], "value": r["value"]} for r in sit["liabilities"]],
+        "top_positions": [], "lookthrough": {"direct": _num(nw["assets"]), "through_funds": 0.0, "rows": []},
+    }
+    if any(sit["meta"].get(k, {}).get("stale") for k in (a["key"] for a in sit["accounts"] if a.get("key"))):
+        view["stale"] = True
+    return view
+
+
+def differences(sit: dict) -> list[dict]:
+    """What the person said vs what a statement shows: one quiet line each, nothing overwritten."""
+    return [{"institution": d["institution"], "stated": d["stated"], "stated_approximate": d["stated_approximate"],
+             "statement": d["statement"], "as_of": d["as_of"]}
+            for d in sit["differences"] if d.get("statement")]
 
 
 # ---------------------------------------------------------------- performance math
@@ -767,7 +946,24 @@ def goals_view(snapshot: dict, today: date) -> dict:
 
 # ---------------------------------------------------------------- upcoming
 
-def upcoming(snapshot: dict, today: date, horizon_days: int = 60) -> list[dict]:
+def fact_labels(sit: dict | None) -> dict[str, str]:
+    """Human names for canonical fact keys (institution, account type, debt kind), never raw ids."""
+    if not sit:
+        return {}
+    labels = {a["key"]: a["label"] for a in sit["accounts"] if a.get("key")}
+    for row in [*sit["cash"], *sit["investments"]]:
+        if row["key"].startswith(("cash.", "investment.")):
+            labels[row["key"]] = row.get("institution") or row.get("name") or _humanize(row["id"])
+    for row in sit["liabilities"]:
+        if row["key"].startswith("liability."):
+            labels[row["key"]] = row.get("name") or _LABELS["en"].get(row["kind"], "Loan")
+    for row in sit["income"]["items"] + sit["income"]["extras"]:
+        if row["key"].startswith("income.") and row["key"] != "income.schedule":
+            labels[row["key"]] = row.get("name") or _LABELS["en"].get(row.get("kind") or "income", "Income")
+    return labels
+
+
+def upcoming(snapshot: dict, today: date, horizon_days: int = 60, labels: dict[str, str] | None = None) -> list[dict]:
     """Dated things to act on that the rows do not already show.
 
     Stale facts ask "Still true?" on their own row and goals show their date,
@@ -780,7 +976,7 @@ def upcoming(snapshot: dict, today: date, horizon_days: int = 60) -> list[dict]:
             continue
         if today <= review <= today + timedelta(days=horizon_days):
             items.append({"type": "review", "date": review.isoformat(), "key": fact["key"],
-                          "label": _humanize(fact["key"])})
+                          "label": (labels or {}).get(fact["key"]) or _humanize(fact["key"])})
     for decision in snapshot["decisions"]:
         status = decision.get("status")
         if status == "proposed" or (status == "accepted" and decision.get("needs_review")):
@@ -793,6 +989,15 @@ def upcoming(snapshot: dict, today: date, horizon_days: int = 60) -> list[dict]:
 
 # ---------------------------------------------------------------- entry point
 
+def _situation(service: Any, client_id: str, snapshot: dict, today: date) -> dict:
+    if hasattr(service, "situation"):
+        try:
+            return service.situation(client_id, today=today)
+        except TypeError:  # an older service without the today argument
+            return service.situation(client_id)
+    return build_situation(snapshot, None, today)
+
+
 def profile_view(service: Any, client_id: str, today: Any = None) -> dict:
     """Assemble the JSON-able dashboard model: only what the page renders."""
     today = _today(today)
@@ -800,14 +1005,20 @@ def profile_view(service: Any, client_id: str, today: Any = None) -> dict:
     facts = _facts_by_key(snapshot)
     profile = _dict_value(facts.get("client.profile"))
     household = _dict_value(facts.get("household"))
+    sit = _situation(service, client_id, snapshot, today)
     ov = overview(snapshot, today)
+    if ov.get("status") == "empty":
+        ov = situation_overview(sit)
+    if ov.get("status") != "empty":
+        ov["differences"] = differences(sit)
     goals = goals_view(snapshot, today)
-    known = completeness(snapshot)
-    groups = memory_groups(snapshot, today, ov, goals, known["missing"])
+    known = completeness(snapshot, sit)
+    groups = memory_groups(snapshot, today, ov, goals, known["missing"], sit)
     reporting = next((c for c in (profile.get("reporting_currency"), household.get("currency"),
-                                  _dict_value(facts.get("plan.resources")).get("currency"))
+                                  _dict_value(facts.get("plan.resources")).get("currency"), sit.get("currency"))
                       if isinstance(c, str) and _CURRENCY.match(c)), None)
     locale = next((profile.get(k) for k in ("locale", "language") if isinstance(profile.get(k), str)), None)
+    language = sit["profile"].get("language") or ("es" if str(locale or "").lower().startswith("es") else "en")
     return {
         "version": 2, "today": today.isoformat(),
         "client": {"display_name": snapshot["client"].get("display_name"),
@@ -815,9 +1026,11 @@ def profile_view(service: Any, client_id: str, today: Any = None) -> dict:
         "reporting_currency": reporting, "locale": locale,
         "overview": ov,
         "performance": performance(snapshot, _history(service, client_id, "household"), today),
-        "memory": groups,
+        "groups": groups,
+        # What Wealth knows as sentences (see wealth.situation.sentences); the page picks a language.
+        "memory": {"language": language, "en": sentences(sit, "en"), "es": sentences(sit, "es")},
         "completeness": known,
-        "upcoming": upcoming(snapshot, today),
+        "upcoming": upcoming(snapshot, today, labels=fact_labels(sit)),
     }
 
 
@@ -934,6 +1147,11 @@ def fact_action(snapshot: dict, key: str, action: str, *, field: str | None = No
     if field is None:
         if action == "delete":
             return [_user_fact(key, None, "profile page: removed", today)]
+        amount_field = _canonical_amount_field(key, current)
+        if amount_field:
+            amount = _amount(value)
+            return [_user_fact(key, {amount_field: amount["amount"], "currency": amount["currency"]},
+                               "profile page edit", today, merge=True)]
         if key == "goals" or key in _MARKET_VALUED:
             raise ValueError("this value is structured; update it in the chat")
         return [_user_fact(key, _coerce(_editor(current), value), "profile page edit", today)]
@@ -958,6 +1176,19 @@ def fact_action(snapshot: dict, key: str, action: str, *, field: str | None = No
     if isinstance(new_value, list):  # the store merges only id-keyed lists; replace the object
         return [_user_fact(key, {**current, field: new_value}, "profile page edit", today)]
     return [_user_fact(key, {field: new_value}, "profile page edit", today, merge=True)]
+
+
+def _canonical_amount_field(key: str, current: Any) -> str | None:
+    """The amount field a row edit changes on a canonical fact, or None."""
+    if not isinstance(current, dict) or "proposal_id" in current:
+        return None
+    if key.startswith(("income.", "cash.", "investment.")) and key != "income.schedule" and "amount" in current:
+        return "amount"
+    if key.startswith("liability.") and "balance" in current:
+        return "balance"
+    if key == "spending.monthly":
+        return "total" if current.get("total") is not None else "essential"
+    return None
 
 
 def form_facts(snapshot: dict, form: dict, today: Any = None) -> list[dict]:
@@ -1025,5 +1256,5 @@ def form_facts(snapshot: dict, form: dict, today: Any = None) -> list[dict]:
     return out
 
 
-__all__ = ["profile_view", "fact_detail", "fact_action", "form_facts", "time_weighted_return", "xirr", "classify_key",
+__all__ = ["profile_view", "situation_overview", "differences", "fact_detail", "fact_action", "form_facts", "time_weighted_return", "xirr", "classify_key",
            "memory_groups", "completeness", "overview", "performance", "goals_view", "upcoming"]

@@ -10,6 +10,8 @@ import importlib
 from inspect import signature
 import uuid
 
+from . import situation as situation_module
+from .situation.schema import SCHEMA
 from .store import DEFAULT_REVIEW_DAYS, REVIEW_DAYS, WealthStore, is_stale
 from .workflows import prepare
 
@@ -34,7 +36,7 @@ TASK_MODULES = {
     "ledger": "ledger", "performance": "ledger", "spending": "cashflow", "dca": "dca",
 }
 # Tasks answered by the service itself rather than one module.
-SERVICE_TASKS = ("plan", "calendar", "monitor")
+SERVICE_TASKS = ("plan", "calendar", "monitor", "debt_payoff")
 TASKS = (*TASK_MODULES, *SERVICE_TASKS)
 # Tasks whose module reads the client's transaction ledger from context["ledger"].
 LEDGER_TASKS = frozenset({"ledger", "performance", "spending", "dca"})
@@ -75,6 +77,14 @@ def capabilities() -> dict:
     }
 
 
+def _canonical_resources(value) -> bool:
+    return isinstance(value, dict) and value.get("available_capital") is not None
+
+
+def _calendar_schedule(value) -> bool:
+    return isinstance(value, dict) and isinstance(value.get("months"), list)
+
+
 def fact_contract() -> dict:
     today = datetime.now(timezone.utc).date()
     return {
@@ -87,10 +97,14 @@ def fact_contract() -> dict:
                         "constraints or tax profile are saved as inferred until the person confirms them.",
         "confidence": "confirmed: the person explicitly confirmed it | reported (default): the person stated it "
                       "or a document shows it | inferred: an interpretation. Only a user source may be confirmed.",
-        "keys": ["client.profile", "household", "portfolio.snapshot", "goals", "plan.resources", "income.schedule",
-                 "constraint.*", "preference.*", "thesis.*", "research.<SYMBOL>", "planning.project",
-                 "planning.income", "planning.ladder", "planning.dca", "tax.profile", "monitor.rules",
-                 "account.<id>", "liability.<id>", "income.<id>"],
+        "keys": ["client.profile", "income.<id>", "spending.monthly", "cash.<id>", "liability.<id>",
+                 "investment.<id>", "goals", "reserve", "thread.<id>", "preference.*", "constraint.*", "onboarding",
+                 "thesis.*", "research.<SYMBOL>", "planning.project", "planning.income", "planning.ladder",
+                 "planning.dca", "tax.profile", "monitor.rules", "account.<id> (statements, via wealth_ingest)"],
+        "schema": SCHEMA,
+        "legacy_keys": "plan.resources and income.schedule still work as explicit plan/calendar inputs; for the "
+                       "person's picture save the canonical keys above (plan and calendar derive their inputs "
+                       "from them).",
         "review_days": {**{pattern + ("*" if pattern.endswith(".") else ""): days for pattern, days in REVIEW_DAYS},
                         "other keys": DEFAULT_REVIEW_DAYS},
         "freshness": "Omit expires_on unless the source states a shorter validity; the store sets the review date "
@@ -162,6 +176,14 @@ class WealthService:
         with WealthStore(self.db_path) as store:
             return store.create_client(client_id, display_name)
 
+    def situation(self, client_id: str, since_revision: int | None = None, today=None) -> dict:
+        """The person's canonical picture (see ``wealth.situation.build``)."""
+        with WealthStore(self.db_path) as store:
+            snapshot = store.snapshot(client_id)
+            ledger = store.ledger(client_id)
+        return situation_module.build(snapshot, ledger, today or datetime.now(timezone.utc).date(),
+                                      since_revision=since_revision)
+
     def remember(self, client_id: str, facts: list[dict], expected_revision: int | None = None,
                  request_id: str | None = None) -> dict:
         with WealthStore(self.db_path) as store:
@@ -173,6 +195,15 @@ class WealthService:
             return prepare(store.snapshot(client_id), intent)
 
     def context(self, client_id: str | None = None, intent: str = "overview", query: str = "") -> dict:
+        if intent == "situation":
+            if client_id is None:
+                raise ValueError("intent=situation needs client_id")
+            sit = self.situation(client_id)
+            return {"client_id": client_id, "client_revision": sit["revision"],
+                    "brief": situation_module.brief(sit, sit["profile"].get("language")),
+                    "situation": {k: v for k, v in sit.items() if k not in {"meta", "evidence"}},
+                    "missing_for_onboarding": situation_module.missing_for_onboarding(sit),
+                    "fact_contract": fact_contract()}
         if client_id is None:
             catalog = capabilities()
             if intent != "overview":
@@ -254,7 +285,7 @@ class WealthService:
         if client_id:
             with WealthStore(self.db_path) as store:
                 snapshot = store.snapshot(client_id)
-                if task in LEDGER_TASKS and "ledger" not in inputs:
+                if (task in LEDGER_TASKS or task in {"plan", "calendar", "debt_payoff"}) and "ledger" not in inputs:
                     ledger = store.ledger(client_id)
         eligible = [f for f in snapshot["facts"] if f["confidence"] != "inferred"
                     and (not f.get("expires_on") or f["expires_on"] >= today)]
@@ -268,20 +299,46 @@ class WealthService:
         if isinstance(remembered_plan, dict) and all(key in inputs for key in remembered_plan):
             context.overridden.add(planning_key)
         context["_evidence"] = {f["key"]: {k: f.get(k) for k in ("id", "source", "expires_on")} for f in eligible}
-        if task in {"plan", "calendar"}:
+        derived_evidence: list[str] = []
+        if task == "debt_payoff":
+            report = self._debt_payoff(inputs, snapshot, ledger, today)
+            derived_evidence = report.pop("_evidence", [])
+        elif task in {"plan", "calendar"}:
             # Direct inputs may supply the same canonical facts without requiring a profile.
             keys = ("plan.resources", "goals") if task == "plan" else ("income.schedule",)
             working = {**snapshot, "facts": [f for f in snapshot["facts"] if f["key"] in {*keys, "client.profile"}]}
-            for key in keys:
-                if key in inputs:
-                    working["facts"] = [f for f in working["facts"] if f["key"] != key]
-                    working["facts"].append({"id": "request:" + key, "key": key, "value": inputs[key],
-                        "confidence": "reported", "source": {"kind": "user", "ref": "current request", "observed_on": today},
-                        "expires_on": today, "revision": 0})
-            packet = prepare(working, "plan" if task == "plan" else "income")
+            supplied = {key: inputs[key] for key in keys if key in inputs}
+            derived_missing, derived_assumptions = [], []
+            stored = {f["key"]: f["value"] for f in snapshot["facts"]}
+            needs_model = bool(client_id) and (
+                (task == "plan" and "plan.resources" not in inputs and not _canonical_resources(stored.get("plan.resources")))
+                or (task == "calendar" and "income.schedule" not in inputs and not _calendar_schedule(stored.get("income.schedule"))))
+            if needs_model:
+                # The canonical model supplies what the person told us; no hand-assembled plan.resources.
+                sit = situation_module.build(snapshot, ledger, today)
+                derive = situation_module.plan_inputs if task == "plan" else situation_module.calendar_inputs
+                values, derived_missing, derived_assumptions = derive(sit)
+                for key, value in values.items():
+                    supplied.setdefault(key, value)
+                derived_evidence = list(sit["evidence"].values())
+            for key, value in supplied.items():
+                working["facts"] = [f for f in working["facts"] if f["key"] != key]
+                working["facts"].append({"id": "request:" + key, "key": key, "value": value,
+                    "confidence": "reported", "source": {"kind": "user", "ref": "current request", "observed_on": today},
+                    "expires_on": today, "revision": 0})
+            if derived_missing:
+                packet = {"status": "needs_input", "calculations": {}, "missing": derived_missing,
+                          "warnings": [], "evidence_ids": []}
+            else:
+                packet = prepare(working, "plan" if task == "plan" else "income")
             report = {"status": packet["status"], "result": packet["calculations"],
                       "missing": packet["missing"], "warnings": packet["warnings"],
-                      "sources": packet["evidence_ids"], "assumptions": []}
+                      "sources": packet["evidence_ids"] + derived_evidence if needs_model else packet["evidence_ids"],
+                      "assumptions": derived_assumptions}
+            if needs_model:
+                report["sources"] = [i for i in report["sources"] if not str(i).startswith("request:")]
+                report["assumptions"].append("Inputs were derived from the saved picture (income, spending, cash, "
+                                             "investments, debts, goals, reserve).")
         elif task == "monitor":
             if not client_id:
                 raise ValueError("monitoring requires an explicit client")
@@ -296,8 +353,8 @@ class WealthService:
         else:
             module = importlib.import_module("." + TASK_MODULES[task], __package__)
             report = module.run(task, inputs, context)
-        if task in {"plan", "calendar"}:
-            used_ids = set(packet["evidence_ids"])
+        if task in {"plan", "calendar", "debt_payoff"}:
+            used_ids = set(packet["evidence_ids"] if task != "debt_payoff" else []) | set(derived_evidence)
             consumed = [f for f in eligible if f["id"] in used_ids and f["key"] not in inputs]
         elif task == "monitor":
             consumed = eligible  # rules may inspect all facts and decision freshness
@@ -309,7 +366,9 @@ class WealthService:
                       evidence_ids=[f["id"] for f in consumed])
         report["excluded_evidence"] = [{"key": f["key"], "reason": "inferred" if f["confidence"] == "inferred" else "expired"}
                                        for f in snapshot["facts"] if f not in eligible]
-        if task in {"plan", "calendar"}:
+        if task == "debt_payoff":
+            relevant = {f["key"] for f in snapshot["facts"] if f["key"].startswith("liability.")}
+        elif task in {"plan", "calendar"}:
             relevant = set(keys)
         else:
             relevant = {f["key"] for f in snapshot["facts"]} if task == "monitor" else context.requested
@@ -333,6 +392,30 @@ class WealthService:
                     "confidence": "reported", "expires_on": derived_expiry}], snapshot["client"]["revision"])
             report["saved"] = {"key": save_as, "client_revision": saved["write_result"]["resulting_revision"],
                                "expires_on": derived_expiry}
+        return report
+
+    def _debt_payoff(self, inputs: dict, snapshot: dict, ledger, today: str) -> dict:
+        """Payoff dates for a monthly debt budget: stored liabilities unless ``liabilities`` is supplied."""
+        allowed = {"monthly_amount", "liabilities", "order", "currency", "as_of"}
+        unknown = sorted(set(inputs) - allowed)
+        if unknown or "monthly_amount" not in inputs:
+            raise ValueError(f"debt_payoff inputs: {'unknown ' + str(unknown) if unknown else 'missing monthly_amount'}; "
+                             "expected {monthly_amount, liabilities?, order?, currency?, as_of?}")
+        as_of = inputs.get("as_of", today)
+        evidence: list[str] = []
+        liabilities = inputs.get("liabilities")
+        if liabilities is None:
+            sit = situation_module.build(snapshot, ledger, as_of)
+            liabilities = [{"id": r["id"], "name": r.get("name") or r["kind"], "balance": r["balance"],
+                            "annual_rate": r["annual_rate"], "monthly_payment": r["monthly_payment"],
+                            "currency": r["currency"]} for r in sit["liabilities"]
+                           if inputs.get("currency") is None or r["currency"] == inputs["currency"]]
+            evidence = [sit["evidence"][r["key"]] for r in sit["liabilities"] if r["key"] in sit["evidence"]]
+        if not isinstance(liabilities, list):
+            raise ValueError("liabilities must be a list of {id, balance, annual_rate, monthly_payment, currency?}")
+        report = situation_module.debt_payoff(liabilities, inputs["monthly_amount"], inputs.get("currency"),
+                                              inputs.get("order"), as_of)
+        report["_evidence"] = sorted(set(evidence))
         return report
 
     def client(self, action: str, client_id: str, inputs: dict | None = None) -> dict:
@@ -439,6 +522,9 @@ class WealthService:
         else:
             self._ingest_state(client_id)  # still validates the client
         shown = {**proposal, "result": dict(result)}
+        if pid and isinstance(result.get("household"), dict):
+            # What the statement means next to what the person already told us (deterministic).
+            shown["result"]["insights"] = situation_module.statement_insights(result, self.situation(client_id))
         if extraction_id:
             shown["result"]["extraction_id"] = extraction_id
         if pid:
@@ -512,11 +598,15 @@ class WealthService:
             return packet
         facts = packet["result"]["facts"]
         batch_id = "ingest:" + proposal_id
+        today = datetime.now(timezone.utc).date()
         with WealthStore(self.db_path) as store:
-            revision = store.snapshot(client_id)["client"]["revision"]
+            snapshot = store.snapshot(client_id)
+            before = situation_module.build(snapshot, store.ledger(client_id), today)
+            revision = snapshot["client"]["revision"]
             saved = store.remember(client_id, facts, revision, packet["result"]["request_id"])
             mapping = proposal_to_batch(proposal, batch_id=batch_id, ledger=store.ledger(client_id))
             receipt = ledger_module.post(store, client_id, mapping["batch"]) if mapping["batch"] else None
+            after = situation_module.build(store.snapshot(client_id), store.ledger(client_id), today)
         ledger_view = _ledger_summary(receipt, mapping)
         summary = [f"Saved {len(facts)} record{'s' if len(facts) != 1 else ''} dated {proposal['result']['as_of']}."]
         if receipt is not None:
@@ -529,6 +619,7 @@ class WealthService:
                           "expires_on": packet["result"]["expires_on"]},
                 "ledger": ledger_view,
                 "statement_prices": mapping["prices"],
+                "picture_after": situation_module.picture_delta(before, after, after["profile"].get("language")),
                 "next_step": ("To value these holdings, run task=ledger view=household with currency and "
                               "prices=result.statement_prices, then task=exposure with that household."),
             },

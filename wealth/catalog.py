@@ -252,6 +252,7 @@ CATALOG: dict[str, dict[str, Any]] = {
     "plan": {
         "purpose": "Reserve capital for essentials, selected debt payments, and protected dated goals without double-counting outside funds.",
         "required": ["plan.resources and goals, unless both are stored for the client"],
+        "derived": "With client_id and no stored plan.resources object, inputs come from the saved picture: liquid cash and investments, spending.monthly, reserve.target_months and dated goals.",
         "optional": ["plan.resources.cash_available: explicitly known unrestricted cash within available_capital, not total assets; omit if unknown", "outside_sources", "reserve_funding", "goal outside_funding"],
         "scope": "Available capital may already be invested. Only additional_cash_to_invest answers new cash deployment; null means unknown. Reserve, debt payments and goals must be disjoint; do not also list the emergency reserve as a protected goal.",
         "example": {
@@ -263,7 +264,18 @@ CATALOG: dict[str, dict[str, Any]] = {
         "purpose": "Compare explicitly expected monthly cash receipts with needs and commitments, including calendar gaps.",
         "required": ["income.schedule, unless stored for the client"],
         "optional": [],
+        "scope": "With client_id and no calendar-shaped income.schedule, the 12 months are derived from income.<id>, spending.monthly and debt payments.",
         "example": {"income.schedule": {"currency": "USD", "monthly_need": 3000, "months": [{"month": "2026-10", "expected_cash_received": 2500, "committed_outflow": 300}]}},
+    },
+    "debt_payoff": {
+        "purpose": "Payoff dates and interest for a monthly debt budget: avalanche (highest rate first) against a chosen order.",
+        "required": ["monthly_amount: the whole monthly budget for these debts, minimums included"],
+        "optional": ["liabilities [{id, balance, annual_rate (decimal), monthly_payment (minimum), currency}]; default: the client's stored liability.<id> facts",
+                     "order: debt ids in the order extra money goes (default smallest balance first)", "currency", "as_of"],
+        "scope": "Fixed rates, monthly accrual, no new borrowing. A debt without rate or payment is listed as missing, never guessed.",
+        "example": {"monthly_amount": 12000, "as_of": "2026-09-21", "liabilities": [
+            {"id": "car", "balance": 60000, "annual_rate": 0.13, "monthly_payment": 3500, "currency": "MXN"},
+            {"id": "card", "balance": 18000, "annual_rate": 0.42, "monthly_payment": 1200, "currency": "MXN"}]},
     },
     "project": {
         "purpose": "Project dated contributions and withdrawals under explicit returns, fees, tax drag, and inflation.",
