@@ -217,7 +217,6 @@
     .order { margin: 0; padding: 20px 16px 12px; border: 1px solid var(--hairline); border-radius: 8px; background: var(--surface); }
     .order .mode { margin: 0; color: var(--muted); font: 500 11px/16px var(--mono); letter-spacing: .06em; text-transform: uppercase; }
     .order .mode.live { color: var(--ink); font-weight: 600; }
-    .order .mode .code { letter-spacing: .12em; }
     .order .total { margin: 4px 0 0; font: 600 32px/40px var(--sans); letter-spacing: -.02em; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
     .order .caption { margin: 0; color: var(--muted); font-size: 13px; line-height: 20px; }
     .order dl { margin: 16px 0 0; }
@@ -519,16 +518,16 @@
     .alert.quiet { grid-template-columns: minmax(0, 1fr); }
     .alert p { margin: 0; text-wrap: pretty; }
     .alert code { font: .875em var(--mono); }
-    .alert .detail { grid-column: -2 / -1; color: var(--muted); font-size: 13px; }
-    .alert .detail summary { display: inline-flex; align-items: center; min-height: 44px; padding: 0 8px; margin-left: -8px; cursor: pointer; list-style: none; }
+    /* One row under the statement: the way forward, then the raw cause behind a tap. */
+    .alert .ways { grid-column: -2 / -1; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 0 16px; margin: 4px 0 0 -8px; }
+    .alert .detail { flex: 1 1 auto; min-width: 0; color: var(--muted); font-size: 13px; }
+    .alert .detail summary { display: inline-flex; align-items: center; min-height: 44px; padding: 0 8px; cursor: pointer; list-style: none; }
     .alert .detail summary::-webkit-details-marker { display: none; }
     .alert .detail summary:hover { color: var(--ink); }
-    .alert .detail code { display: block; margin-bottom: 8px; font: 400 12px/1.5 var(--mono); overflow-wrap: anywhere; }
+    .alert .detail code { display: block; margin: 0 0 8px 8px; font: 400 12px/1.5 var(--mono); overflow-wrap: anywhere; }
+    .alert .ways:empty { display: none; }
     .alert button {
-      grid-column: -2 / -1;
-      justify-self: start;
       min-height: 44px;
-      margin-left: -8px;
       padding: 0 8px;
       border: 0;
       background: transparent;
@@ -575,11 +574,6 @@
       text-wrap: balance;
     }
     .starter:hover { color: var(--pressed); }
-    .privacy { margin-top: 24px; color: var(--muted); font-size: 13px; }
-    .privacy summary { display: inline-flex; align-items: center; min-height: 44px; cursor: pointer; list-style: none; }
-    .privacy summary::-webkit-details-marker { display: none; }
-    .privacy summary:hover { color: var(--ink); }
-    .privacy p { margin: 0 0 8px; max-width: 34rem; }
 
     /* ---------- setup: one question per card, inline in the conversation ---------- */
 
@@ -611,13 +605,12 @@
     .answered:hover .edit { color: var(--ink); text-decoration: underline; text-decoration-color: var(--hairline); text-underline-offset: 4px; }
     .answered:focus-visible { outline-offset: -2px; }
 
-    /* The running picture: numbers so far, settled ink on quiet text. */
+    /* The running picture: one quiet sentence of numbers so far. */
     .picture {
       margin: 8px 0 0;
-      color: var(--ink);
-      font: 500 13px/20px var(--mono);
+      color: var(--ink-soft);
+      font: 400 14px/20px var(--sans);
       font-variant-numeric: tabular-nums;
-      letter-spacing: -.01em;
       text-wrap: pretty;
     }
     .picture:empty { display: none; }
@@ -746,8 +739,6 @@
     .primary:focus-visible { outline-offset: 3px; border-radius: 8px; }
     .card .actions .text-control { margin: 0 -8px; }
     .card .actions .text-control:last-child { margin-right: -8px; }
-
-    .setup .privacy { margin-top: 32px; }
 
     /* Resume: one row, not the whole flow. */
     .starter.resume { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
@@ -1008,13 +999,10 @@
       en: {
         message: 'Message', placeholder: 'Ask me something…', attach: 'Attach a file (PDF, CSV or image)',
         depth: 'Response depth', low: 'Fast', medium: 'Balanced', high: 'Deep',
-        send: 'Send message', stopResponse: 'Stop response', newChat: 'New conversation', profile: 'Profile',
+        send: 'Send message', stopResponse: 'Stop response', newChat: 'New conversation', profile: 'You',
         conversation: 'Conversation', attachments: 'Attachments', drop: 'Drop PDF, CSV or image to attach',
         you: 'You', wealth: 'Wealth', replied: 'Wealth replied.', table: 'Table', welcome: 'Welcome',
         returning: 'What’s on your mind?',
-        privacy: 'How your data is handled',
-        privacyText: 'Client memory and attachments are stored on this computer. Messages and selected context are sent to the model provider; research uses external search and market-data services.',
-        webOn: 'Web search is on.', webOff: 'Web search is off.',
         working: 'Working on it', inProgress: 'Response in progress', stopping: 'Stopping…',
         remembered: 'Remembered', attachedOnly: 'I’ve attached a file.',
         source: 'Source', sources: 'Sources',
@@ -1032,7 +1020,7 @@
           reserve: 'emergency fund'
         },
         orders: {
-          region: 'Order ticket', paper: 'Paper · practice', live: 'Live · real money', code: 'Confirmation code',
+          region: 'Order ticket', paper: 'Practice', live: 'Real money', settledTotal: 'Total',
           total: 'Estimated total to pay', receive: 'Estimated net to receive', shares: 'shares',
           buy: 'Buy', sell: 'Sell', limit: 'limit', market: 'market', account: 'Alpaca',
           place: 'Place orders', cancel: 'Cancel', cancelOpen: 'Cancel open orders', placing: 'Placing…',
@@ -1102,13 +1090,10 @@
       es: {
         message: 'Mensaje', placeholder: 'Pídeme algo…', attach: 'Adjuntar un archivo (PDF, CSV o imagen)',
         depth: 'Profundidad de la respuesta', low: 'Rápido', medium: 'Equilibrado', high: 'A fondo',
-        send: 'Enviar mensaje', stopResponse: 'Detener respuesta', newChat: 'Nueva conversación', profile: 'Perfil',
+        send: 'Enviar mensaje', stopResponse: 'Detener respuesta', newChat: 'Nueva conversación', profile: 'Tú',
         conversation: 'Conversación', attachments: 'Adjuntos', drop: 'Suelta un PDF, CSV o imagen para adjuntarlo',
         you: 'Tú', wealth: 'Wealth', replied: 'Wealth respondió.', table: 'Tabla', welcome: 'Bienvenida',
         returning: '¿Qué tienes en mente?',
-        privacy: 'Cómo se manejan tus datos',
-        privacyText: 'La memoria y los adjuntos se guardan en esta computadora. Los mensajes y el contexto seleccionado se envían al proveedor del modelo; la investigación usa servicios externos de búsqueda y datos de mercado.',
-        webOn: 'La búsqueda web está activada.', webOff: 'La búsqueda web está desactivada.',
         working: 'Trabajando en ello', inProgress: 'Respuesta en curso', stopping: 'Deteniendo…',
         remembered: 'Guardado', attachedOnly: 'Adjunté un archivo.',
         source: 'Fuente', sources: 'Fuentes',
@@ -1126,7 +1111,7 @@
           reserve: 'fondo de emergencia'
         },
         orders: {
-          region: 'Órdenes por enviar', paper: 'Paper · práctica', live: 'Live · dinero real', code: 'Código de confirmación',
+          region: 'Órdenes por enviar', paper: 'Práctica', live: 'Dinero real', settledTotal: 'Total',
           total: 'Total estimado a pagar', receive: 'Neto estimado a recibir', shares: 'acciones',
           buy: 'Compra', sell: 'Venta', limit: 'límite', market: 'a mercado', account: 'Alpaca',
           place: 'Enviar órdenes', cancel: 'Cancelar', cancelOpen: 'Cancelar órdenes abiertas', placing: 'Enviando…',
@@ -1974,7 +1959,7 @@
       const dt = el('dt', '', `${line.side === 'sell' ? O.sell : O.buy} ${line.symbol}`);
       const qty = line.qty !== undefined ? orderQty(line.qty) : '—';
       const price = line.type === 'market' ? O.market : `${O.limit} ${orderUsd(line.limit_price)}`;
-      dt.append(el('span', 'sub', [`${qty} ${O.shares}`, price, line.account].filter(Boolean).join(' · ')));
+      dt.append(el('span', 'sub', [`${qty} ${O.shares}`, price].join(' · ')));  // the card's head already names the account
       const dd = el('dd', '', orderUsd(line.estimated_amount));
       const state = O.states[line.state] || '';
       if (state) {
@@ -1991,18 +1976,14 @@
       const box = el('section', 'order');
       box.dataset.ticket = ticket.id;
       box.setAttribute('aria-label', O.region);
+      // The card's code travels with the confirm request; the person never needs to read it.
       const mode = el('p', ticket.mode === 'live' ? 'mode live' : 'mode', `${O.account} · ${ticket.mode === 'live' ? O.live : O.paper}`);
-      if (ticket.status === 'pending' && ticket.nonce) {
-        mode.append(document.createTextNode(' · '));
-        const code = el('span', 'code', ticket.nonce);
-        code.setAttribute('aria-label', `${O.code} ${ticket.nonce.split('').join(' ')}`);
-        mode.append(code);
-      }
       box.append(mode);
       const net = Number(ticket.total && ticket.total.amount);
       const receive = Number.isFinite(net) && net < 0;
       const total = el('p', 'total', orderUsd(ticket.total && ticket.total.amount !== null ? Math.abs(net) : null));
-      box.append(total, el('p', 'caption', receive ? O.receive : O.total));
+      const pending = ticket.status === 'pending';
+      box.append(total, el('p', 'caption', pending ? (receive ? O.receive : O.total) : O.settledTotal));
       const list = el('dl');
       (ticket.lines || []).forEach(line => list.append(orderLine(line)));
       box.append(list);
@@ -2021,9 +2002,10 @@
       }
       const t = ticket.total || {};
       const costs = [];
-      if (t.estimated_tax !== null && t.estimated_tax !== undefined) costs.push(`${O.tax} ${orderUsd(t.estimated_tax)}`);
-      if (t.estimated_cost !== null && t.estimated_cost !== undefined) costs.push(`${O.cost} ${orderUsd(t.estimated_cost)}`);
-      if (costs.length) box.append(el('p', 'costs', costs.join(' · ')));
+      // A zero line says nothing; a cost or tax shows only once there is one.
+      if (Number(t.estimated_tax) > 0) costs.push(`${O.tax} ${orderUsd(t.estimated_tax)}`);
+      if (Number(t.estimated_cost) > 0) costs.push(`${O.cost} ${orderUsd(t.estimated_cost)}`);
+      if (costs.length && pending) box.append(el('p', 'costs', costs.join(' · ')));
 
       if (ticket.status === 'pending') {
         const problem = el('p', 'problem');
@@ -2461,18 +2443,20 @@
         p.append(part.startsWith('`') && part.endsWith('`') ? el('code', '', part.slice(1, -1)) : document.createTextNode(part));
       });
       box.append(p);
-      if (error.detail && kind !== 'cancelled') {
-        // The raw cause is for diagnosis, not the first read: behind a tap.
-        const more = el('details', 'detail');
-        more.append(el('summary', '', T.details), el('code', '', error.detail));
-        box.append(more);
-      }
+      const ways = el('div', 'ways');
       if (retry) {
         const button = el('button', '', kind === 'cancelled' ? T.askAgain : T.retry);
         button.type = 'button';
         button.addEventListener('click', () => { box.remove(); retry(); });
-        box.append(button);
+        ways.append(button);
       }
+      if (error.detail && kind !== 'cancelled') {
+        // The raw cause is for diagnosis, not the first read: behind a tap.
+        const more = el('details', 'detail');
+        more.append(el('summary', '', T.details), el('code', '', error.detail));
+        ways.append(more);
+      }
+      if (ways.childNodes.length) box.append(ways);
       userNode.append(box);
       follow();
     }
@@ -2516,7 +2500,6 @@
         });
         box.append(rows);
       }
-      box.append(privacyNote(state));
       messages.append(box);
     }
 
@@ -3017,17 +3000,9 @@
       setup.card = null;
       if (!card) return;
       const form = renderCard(card);
-      setup.node.insertBefore(form, setup.node.querySelector(':scope > .privacy'));
+      setup.node.append(form);
       setup.card = form;
       return form;
-    }
-
-    function privacyNote(state) {
-      const privacy = el('details', 'privacy');
-      privacy.append(el('summary', '', T.privacy));
-      const web = state.capabilities && state.capabilities.web_search === true;
-      privacy.append(el('p', '', `${T.privacyText} ${web ? T.webOn : T.webOff}`));
-      return privacy;
     }
 
     function answered(form, data, options) {
@@ -3093,10 +3068,9 @@
       article.setAttribute('aria-label', S.picture);
       const ticketNode = pictureTicket(data.picture || {});
       if (ticketNode) article.append(ticketNode);
+      // The answers now live in the picture (and on the profile page): the setup rows leave with the cards.
+      if (setup.node) { setup.node.remove(); setup.node = null; setup.list = null; setup.picture = null; }
       messages.append(article);
-      if (setup.picture) setup.picture.textContent = '';
-      const note = setup.node && setup.node.querySelector(':scope > .privacy');
-      if (note) note.remove();
       follow(true);
       if (data.reveal && data.reveal.id) trackReveal(data.reveal, article);
     }
@@ -3116,8 +3090,6 @@
       if (!onboarding || !onboarding.active || !onboarding.card) return;
       removeIntro();
       ensureSetup();
-      // First run: the data-handling note stays one tap away under the card.
-      if (state && onboarding.card.index === 1 && !setup.node.querySelector(':scope > .privacy')) setup.node.append(privacyNote(state));
       setSetupActive(true);
       setPicture(onboarding.picture);
       const form = showCard(onboarding.card);
