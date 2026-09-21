@@ -158,7 +158,7 @@ server session. File upload is not implemented.
 
 ## Skill review (2026-09-21)
 
-The active Wealth skill was shortened from 160 to 107 lines, keeping task routing,
+The active Wealth skill was shortened from 152 to 107 lines, keeping task routing,
 automatic memory, revisions, evidence and decision boundaries. The interpretation
 guide is conditional reading, with current scoped tax, calendar and simulation
 capabilities described accurately. Unlinked theme notes are marked historical.
