@@ -293,3 +293,18 @@ def test_onboarding_missing_list_follows_step_order(tmp_path):
     assert "birth_year" not in situation.missing_for_onboarding(fresh.situation("ana"))
     context = service.context("ana", intent="situation")
     assert context["brief"].startswith("Situación") and context["missing_for_onboarding"] == []
+
+
+def test_older_flat_shapes_feed_income_retirement_assets_and_debt_rates(tmp_path):
+    older = {
+        "income.schedule": {"currency": "MXN", "monthly_take_home": 22000, "stability": "salaried"},
+        "household": {"currency": "MXN", "complete": False, "as_of": TODAY.isoformat(), "people": [{"id": "p1"}],
+                      "accounts": [], "positions": [], "lots": [], "fx": [], "fund_holdings": [], "income_exposures": [],
+                      "external_assets": [{"id": "afore", "value": 310000, "currency": "MXN", "name": "AFORE", "liquid": False}],
+                      "liabilities": [{"id": "tarjeta", "currency": "MXN", "annual_rate_percent": 72, "value": 68000}]},
+    }
+    service = _client(tmp_path, older)
+    sit = service.situation("ana")
+    assert sit["cash_flow"]["income"] == 22000
+    assert sit["net_worth"]["illiquid"] == 310000 and sit["net_worth"]["liquid"] == 0
+    assert sit["liabilities"][0]["annual_rate"] == 0.72

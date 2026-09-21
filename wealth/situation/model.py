@@ -297,6 +297,13 @@ def _income(facts: _Facts) -> tuple[list[dict], str | None]:
                           "id": str(item.get("id") or f"item{index}"), "key": "income.schedule", "legacy": True})
         if items:
             return items, "income.schedule"
+    if isinstance(schedule, dict):
+        for field, net in (("monthly_take_home", True), ("monthly_net", True), ("net_monthly", True),
+                           ("monthly_income", None), ("monthly_gross", False)):
+            if D(schedule.get(field)) is not None:
+                facts.used["income.schedule"] = facts.all["income.schedule"].get("id")
+                return [{"amount": schedule[field], "currency": schedule.get("currency"), "frequency": "monthly",
+                         "net": net, "id": field, "key": "income.schedule", "legacy": True}], "income.schedule"
     stated = _profile_amount(facts, "monthly_income")
     if stated:
         facts.used["client.profile"] = facts.all["client.profile"].get("id")
@@ -472,7 +479,10 @@ def _liabilities(facts: _Facts, statement_accounts: list[dict]) -> tuple[list[di
                               "name": raw.get("name"), "balance": raw.get("value"), "currency": raw.get("currency"),
                               "payment": raw.get("monthly_payment"),
                               "payment_frequency": "monthly" if raw.get("monthly_payment") is not None else None,
-                              "annual_rate": raw.get("interest_rate"), "source": "household", "as_of": household.get("as_of")})
+                              "annual_rate": raw.get("interest_rate") if raw.get("interest_rate") is not None
+                              else (D(raw["annual_rate_percent"]) / 100 if D(raw.get("annual_rate_percent")) is not None
+                                    else raw.get("annual_rate")),
+                              "source": "household", "as_of": household.get("as_of")})
     if any(i["source"] == "stated" for i in items):
         return items, None
     resources = _plan_resources(facts)
@@ -606,6 +616,16 @@ def _statement_accounts(facts: _Facts, ledger: Mapping[str, Any] | None) -> list
                              or account.get("name"), "type": account.get("type"), "currency": account.get("currency"),
                              "as_of": household.get("as_of"), "native": native, "positions": positions,
                              "liabilities": [], "fx": household.get("fx") or [], "eligible": True, "source": "household"})
+            facts.used["household"] = facts.all["household"].get("id")
+        for asset in household.get("external_assets") or []:
+            amount = D(asset.get("value")) if isinstance(asset, dict) else None
+            if amount is None or not asset.get("currency") or asset.get("id") in covered:
+                continue
+            accounts.append({"key": "household", "id": asset.get("id"), "institution": asset.get("name"),
+                             "type": asset.get("type") or ("retirement" if asset.get("liquid") is False else "other"),
+                             "currency": asset["currency"], "as_of": household.get("as_of"),
+                             "native": {asset["currency"]: amount}, "positions": [], "liabilities": [], "fx": [],
+                             "eligible": True, "source": "household", "liquid": asset.get("liquid")})
             facts.used["household"] = facts.all["household"].get("id")
     if ledger:
         covered = {a["id"] for a in accounts}
@@ -849,7 +869,8 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
                "institution": account.get("institution"), "type": account.get("type"),
                "currency": account.get("currency"), "as_of": account["as_of"], "source": account["source"],
                "native": {c: num(v) for c, v in sorted((account["native"] or {}).items())} if account["native"] is not None else None,
-               "value": None, "liquid": (account.get("type") or "").lower() not in _ILLIQUID_TYPES,
+               "value": None, "liquid": account["liquid"] if isinstance(account.get("liquid"), bool)
+               else (account.get("type") or "").lower() not in _ILLIQUID_TYPES,
                "stale": not account["eligible"], "positions": len(account["positions"])}
         if account["eligible"] and account["native"] is not None:
             total, known = Decimal(0), True
