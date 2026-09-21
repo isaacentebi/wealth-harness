@@ -415,3 +415,23 @@ def test_the_review_page_hides_what_is_unknown():
     page = (Path(review.__file__).with_name("review.html")).read_text(encoding="utf-8")
     assert "['next', (s.next_quarter.items || []).length ? next(s.next_quarter) : null]" in page
     assert "feesUnknown" in page and "data.sections ? periodName(data.period) : t('title')" in page
+
+
+def test_profile_state_never_asks_to_reconfirm_activity_or_never_known_balances(tmp_path):
+    from datetime import date, timedelta
+    from wealth.agent import profile_state
+    from wealth.service import WealthService
+
+    db = tmp_path / "w.sqlite3"
+    service = WealthService(db)
+    service.create("p", "p")
+    old = (date.today() - timedelta(days=800)).isoformat()
+    service.remember("p", [
+        {"key": "investment.gbm", "value": {"currency": "MXN", "balance_unknown": True},
+         "source": {"kind": "user", "ref": "chat", "observed_on": old}},
+        {"key": "cash.nu", "value": {"amount": 1000, "currency": "MXN"},
+         "source": {"kind": "user", "ref": "chat", "observed_on": old}},
+    ])
+    state = profile_state(db, "p")
+    assert "investment.gbm" not in state["stale"]
+    assert not any(k.endswith(".activity") for keys in state.values() for k in keys)

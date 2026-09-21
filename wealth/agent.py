@@ -436,7 +436,11 @@ def profile_state(db_path: str | Path, client_id: str, today: date | None = None
         if not isinstance(fact, Mapping) or not fact.get("key"):
             continue
         key = str(fact["key"])
-        is_stale = fact.get("stale")
+        if key.endswith(".activity"):
+            continue  # statement activity belongs to its account, never a fact to ask about
+        value = fact.get("value")
+        never_known = isinstance(value, Mapping) and value.get("balance_unknown") is True
+        is_stale = False if never_known else fact.get("stale")
         if not isinstance(is_stale, bool):
             is_stale = fact.get("status") == "stale"
             expires = fact.get("expires_on")
