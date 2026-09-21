@@ -12,7 +12,7 @@ from decimal import Decimal
 from typing import Any, Mapping
 
 from .model import CASH_DRAG_SHARE, CONCENTRATION_SHARE, D, num, ticker_of, underlying_of
-from .text import fmt
+from .text import _clean_symbol, fmt
 
 
 def _rates(household: Mapping[str, Any]) -> dict[tuple[str, str], Decimal]:
@@ -130,7 +130,7 @@ def statement_insights(result: Mapping[str, Any], before: Mapping[str, Any] | No
                 continue
             share = value / total
             if share > CONCENTRATION_SHARE:
-                symbol = position.get("symbol") or position.get("instrument_id")
+                symbol = _clean_symbol(position.get("symbol") or position.get("instrument_id"))
                 out.append({"kind": "concentration", "account": account_id, "symbol": symbol,
                             "value": num(value), "currency": account.get("currency"), "share": num(share, 4),
                             "text": f"{symbol} is {num(share * 100, 0)}% of the {account.get('institution') or account_id} "

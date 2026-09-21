@@ -234,7 +234,7 @@ def test_statement_insights_and_picture_after_confirm(tmp_path, monkeypatch):
     assert stated["statement"] == {"MXN": 217837.35, "USD": 1000}
     assert stated["statement_value"] == 236087.35 and stated["difference"] == 36087.35
     assert insights["overlap"]["underlying"] == "S&P 500" and insights["overlap"]["symbols"] == ["CSPX", "IVV"]
-    assert insights["concentration"]["symbol"] == "S UDIBONO 351122" and insights["concentration"]["share"] > 0.39
+    assert insights["concentration"]["symbol"] == "Udibono 2035" and insights["concentration"]["share"] > 0.39
     assert "IVV" in insights["domicile"]["us_domiciled"] and insights["domicile"]["ucits"] == ["CSPX"]
     assert insights["cash_drag"]["currency"] == "USD"
 
