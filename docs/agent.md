@@ -110,3 +110,15 @@ Official references:
 [authentication](https://learn.chatgpt.com/docs/auth),
 [Codex SDK](https://learn.chatgpt.com/docs/codex-sdk),
 [models](https://learn.chatgpt.com/docs/models).
+
+## Prompt delivery
+
+Each instance serves one person; the profile ID is an internal tool argument.
+The launcher includes the shared behavior contract once in its turn prompt and
+sets `WEALTH_BEHAVIOR_IN_HOST=1` on its MCP subprocess to omit the duplicate.
+A standalone MCP server still supplies that contract by default.
+
+Task schemas come from `wealth_context(intent=task)` without a profile ID.
+Personal recall uses the same tool with the profile ID. Conversation and current
+request sections are explicitly delimited; financial and memory behavior is
+otherwise unchanged.

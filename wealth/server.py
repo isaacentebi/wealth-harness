@@ -1,6 +1,7 @@
 """Local stdio MCP boundary. Install with ``uv sync --extra mcp``."""
 from __future__ import annotations
 
+import os
 import sqlite3
 from functools import wraps
 from typing import Any, Literal
@@ -54,7 +55,7 @@ def _safe_reason(error: Exception) -> str:
     return (reason or "Input failed the operation contract.")[:300]
 
 
-def build_server(db_path: str | None = None) -> MCPServer:
+def build_server(db_path: str | None = None, *, include_behavior: bool = True) -> MCPServer:
     service = WealthService(db_path)
     registered_tools: list[Tool] = []
 
@@ -99,7 +100,11 @@ def build_server(db_path: str | None = None) -> MCPServer:
         intent: str = "overview",
         query: str = "",
     ) -> dict[str, Any]:
-        """Discover tasks with no client, or recall compact context for one client."""
+        """Omit client_id for task schemas; include it for personal recall instead.
+
+        intent is an exact task name (e.g. plan, exposure, analyze, research,
+        income, tax), not a natural-language request. Use overview to list tasks.
+        """
         return service.context(client_id=client_id, intent=intent, query=query)
 
     @tool(annotations=WRITE)
@@ -181,13 +186,13 @@ def build_server(db_path: str | None = None) -> MCPServer:
             "a ready result is not a suitability judgment. Decisions are not orders. "
             "Monitoring runs only when explicitly called and sends no external notifications. "
             "Exports contain sensitive history and should be fetched only when requested.\n"
-            + ASSISTANT_CONTRACT
+            + (ASSISTANT_CONTRACT if include_behavior else "")
         ),
     )
 
 
 def main() -> None:
-    build_server().run(transport="stdio")
+    build_server(include_behavior=os.environ.get("WEALTH_BEHAVIOR_IN_HOST") != "1").run(transport="stdio")
 
 
 if __name__ == "__main__":

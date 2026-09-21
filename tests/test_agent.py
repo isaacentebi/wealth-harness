@@ -250,3 +250,16 @@ def test_interactive_onboarding_starts_before_input_and_only_for_empty_profile(m
     assert agent.main(args) == 0
     assert agent.ONBOARDING_WELCOME not in capsys.readouterr().out
     assert captured[-1][1]["profile_empty"] is False
+
+
+def test_launcher_supplies_behavior_once_and_preserves_standalone_mcp_contract(tmp_path):
+    from wealth.server import build_server
+    from wealth.behavior import ASSISTANT_CONTRACT
+    command = agent.build_command("sol", tmp_path / "db")
+    assert 'mcp_servers.wealth.env.WEALTH_BEHAVIOR_IN_HOST="1"' in command
+    prompt = agent.build_prompt("hello", "profile")
+    assert prompt.count(ASSISTANT_CONTRACT) == 1
+    assert ASSISTANT_CONTRACT not in build_server(include_behavior=False).instructions
+    assert ASSISTANT_CONTRACT in build_server().instructions
+    assert "This instance serves one person" in prompt
+    assert "WITHOUT client_id" in prompt
