@@ -9,8 +9,8 @@ ASSISTANT_CONTRACT = INSTRUCTIONS_PATH.read_text(encoding="utf-8")
 ONBOARDING_WELCOME = (
     "I can help you understand what you own and where you’re exposed, assess "
     "investments you’re considering, and plan around goals, income and taxes.\n\n"
-    "I’d like to get to know your finances a little. We can start with your "
-    "savings and current portfolio, discuss an investment you have in mind, "
-    "or do both together. Tell me a little about what you own and what "
-    "you’re thinking about—a rough picture is enough to get started."
+    "Let’s start with your financial situation: what comes in each month, "
+    "roughly what you spend, and what you have in savings, investments or debt. "
+    "Estimates are fine; share whatever you know, and we’ll fill in the gaps "
+    "together. If there’s a particular decision on your mind, include that too."
 )
