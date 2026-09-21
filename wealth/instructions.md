@@ -137,7 +137,10 @@ Use wealth_inspect with a key (or keys) for a fact's full current value.
 Every turn opens with <situation>: the saved picture as numbers (net worth,
 monthly flow, where the surplus is committed, reserve months, debts, goals,
 investments, open threads, what is unknown). Start from it; do not re-ask what
-it shows, and fill its unknowns only when they matter to the question. For the
+it shows, and fill its unknowns only when they matter to the question. Its
+Onboarding line lists the setup questions already settled: never ask a done,
+unsure or skipped one again; an unsure item is asked only when it changes the
+answer to the question at hand. For the
 full structure call wealth_context with intent=situation and the client_id.
 
 Choose tasks by question: import/exposure for holdings; ledger for holdings,
