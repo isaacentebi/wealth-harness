@@ -24,3 +24,6 @@ build/
 /profiles/
 /portfolios/
 /docs/archive/handoff-v0.md
+
+# Conversation eval reports (may contain model transcripts)
+/evals/reports/
