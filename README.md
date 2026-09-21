@@ -45,6 +45,14 @@ Provision one profile for the instance. Discover task schemas with
 `wealth_context(intent="overview")` without a profile ID; include the ID for
 personal recall. See the [CLI and MCP reference](docs/cli.md).
 
+### OpenClaw (WhatsApp, Telegram, iMessage, Signal)
+
+To talk to Wealth from your own [OpenClaw](https://github.com/openclaw/openclaw)
+assistant, run `integrations/openclaw/install.sh` (try `--dry-run` first) and
+restart the gateway. It installs the skill, registers the MCP server and creates
+a private data directory. Setup, text-channel onboarding, images and privacy
+notes: [docs/openclaw.md](docs/openclaw.md).
+
 ## What it can run
 
 | Area | Tasks | Current capability |
