@@ -708,7 +708,9 @@ def safe_diagnostic(text: str) -> str:
         line = line.replace(home, "~")
     for pattern in _SECRETS:
         line = pattern.sub("[redacted]", line)
-    return line[:240]
+    # RFC, CURP, SSN, CLABE, card and account numbers never reach the page or the log.
+    from .ingest.redact import redact_text
+    return redact_text(line)[:240]
 
 
 def classify_error(text: str) -> str:

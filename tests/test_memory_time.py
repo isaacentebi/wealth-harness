@@ -139,8 +139,9 @@ def test_evidence_never_overwrites_what_the_person_said(store):
     assert held["kind"] == "same_key" and held["key"] == held["proposed_key"] == "income.salary"
     assert held["current_value"]["amount"] == 85000 and held["proposed_value"]["amount"] == 90000
     assert held["sources"]["current"]["kind"] == "user" and held["sources"]["proposed"]["kind"] == "document"
-    assert held["question"].startswith("You told me income.salary is MXN 85,000 a month")
-    assert "MXN 90,000 a month" in held["question"] and held["choices"] == ["keep", "use_new", "changed"]
+    assert held["question"].startswith("You told me your salary is $85,000 a month")
+    assert "income.salary" not in held["question"]
+    assert "$90,000 a month" in held["question"] and held["choices"] == ["keep", "use_new", "changed"]
     assert any("never pick a side" in w for w in receipt["warnings"])
     assert current(store, "income.salary")["value"]["amount"] == 85000
 
@@ -195,7 +196,8 @@ def test_statement_on_another_key_opens_the_same_kind_of_question(tmp_path):
     assert (held["kind"], held["key"], held["proposed_key"]) == ("stated_vs_statement", "investment.gbm",
                                                                  "account.gbm-1")
     assert held["proposed_value"]["statement"] == {"MXN": 612000}
-    assert "at GBM" in held["question"] and "MXN 612,000" in held["question"]
+    assert "at GBM" in held["question"] and "$612,000" in held["question"]
+    assert "investment.gbm" not in held["question"]
     assert [c["id"] for c in service.situation("c")["contradictions"]] == [held["id"]]
     assert dispatch("contradictions", {"client_id": "c"}, service.db_path)["contradictions"][0]["id"] == held["id"]
 

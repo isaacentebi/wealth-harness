@@ -7,8 +7,11 @@ when printed, the period's transactions.  The ledger stores transactions, so:
   statement period, derived as *end state minus the period's posted lines*, so
   the ledger reproduces the statement's closing numbers exactly.
 * An account already in the ledger gets only the new lines; its closing
-  numbers become balance assertions, so drift shows up in reconciliation
-  instead of being papered over with another opening balance.
+  numbers become balance assertions (a holding the ledger has but a newer
+  statement no longer lists is asserted at zero).  After posting, differences
+  the statement's own lines do not explain are reconciled with labelled
+  adjustment entries (``reconciliation_lines``) when the statement is at least
+  as new as anything the ledger knows about the account.
 
 Lines that cannot be expressed in the ledger contract (a dividend without a
 symbol, a split without a ratio, an installment-plan memo row) are returned in
@@ -20,6 +23,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any, Mapping
 
+from .ledger import active_entries, holdings as ledger_holdings
 from .ledger.model import LedgerInputError, normalize_transaction
 
 
@@ -115,6 +119,110 @@ def _line(tx: Mapping[str, Any], instruments: dict[str, dict[str, Any]], symbols
     return None, error
 
 
+def latest_ledger_date(ledger: Mapping[str, Any], account_id: str) -> str | None:
+    """The newest date the ledger knows anything about for this account (lines or statement checks)."""
+    entries, _ = active_entries(ledger, include_inferred=True)
+    dates = [e["date"] for e in entries if e.get("account_id") == account_id]
+    dates += [a["date"] for a in ledger.get("assertions") or [] if a.get("account_id") == account_id]
+    return max(dates) if dates else None
+
+
+def is_newest(ledger: Mapping[str, Any], account_id: str, as_of: str) -> bool:
+    latest = latest_ledger_date(ledger, account_id)
+    return latest is None or as_of >= latest
+
+
+def missing_positions(proposal: Mapping[str, Any], ledger: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """Holdings the ledger still has for this statement's accounts that the statement no longer lists.
+
+    Only for a statement at least as new as what the ledger knows about the
+    account (an older statement says nothing about today's holdings).
+    """
+    if not ledger or not ledger.get("entries"):
+        return []
+    result = proposal.get("result") or {}
+    household = result.get("household") or {}
+    as_of = result.get("as_of")
+    if not as_of:
+        return []
+    accounts = {a["id"] for a in household.get("accounts") or [] if is_newest(ledger, a["id"], as_of)}
+    if not accounts:
+        return []
+    positions = [p for p in household.get("positions") or [] if not _is_cash(p)]
+    listed = {(p["account_id"], p["instrument_id"]) for p in positions}
+    listed_symbols = {(p["account_id"], str(p.get("symbol") or "").upper()) for p in positions}
+    held = ledger_holdings(ledger, as_of, include_inferred=True)["result"]["positions"]
+    out = []
+    for position in held:
+        key = (position["account_id"], position["instrument_id"])
+        if position["account_id"] not in accounts or key in listed:
+            continue
+        if (position["account_id"], str(position.get("symbol") or "").upper()) in listed_symbols:
+            continue
+        if Decimal(position["quantity"]) == 0:
+            continue
+        out.append({"account_id": position["account_id"], "instrument_id": position["instrument_id"],
+                    "symbol": position.get("symbol") or position["instrument_id"], "quantity": position["quantity"],
+                    "as_of": as_of})
+    return out
+
+
+def reconciliation_lines(breaks: list[Mapping[str, Any]], accounts: set[str],
+                         instruments: Mapping[str, Mapping[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Adjustment lines that bring the ledger to the statement, and a plain list of what changed.
+
+    ``breaks`` are the statement's balance checks the ledger still misses after
+    the statement's own lines were posted; only those on ``accounts`` are
+    adjusted.  Cash gets an opening-balance correction; a larger position an
+    opening position without basis; a smaller or vanished one an outgoing
+    transfer (nothing is assumed sold, so no gain or loss is invented).
+    """
+    lines, changes = [], []
+    for item in breaks:
+        if item["account_id"] not in accounts:
+            continue
+        expected, derived = Decimal(str(item["expected"])), Decimal(str(item["derived"]))
+        change = expected - derived
+        if change == 0:
+            continue
+        base = {"account_id": item["account_id"], "date": item["date"], "confirm_not_duplicate": True}
+        instrument = item.get("instrument_id")
+        if instrument is None:
+            lines.append({**base, "kind": "opening_balance", "amount": _s(change), "currency": item["currency"],
+                          "description": "Statement reconciliation: cash set to the statement's balance"})
+            reason = "cash balance"
+        elif change > 0:
+            line = {**base, "kind": "opening_balance", "instrument_id": instrument, "quantity": _s(change),
+                    "description": "Statement reconciliation: position set to the statement's quantity"}
+            if instruments.get(instrument, {}).get("currency"):
+                line["currency"] = instruments[instrument]["currency"]
+            lines.append(line)
+            reason = "more units than the ledger had"
+        else:
+            gone = expected == 0
+            lines.append({**base, "kind": "transfer", "instrument_id": instrument, "quantity": _s(change),
+                          "description": "Statement reconciliation: position no longer on the statement" if gone
+                          else "Statement reconciliation: position set to the statement's quantity"})
+            reason = "no longer on the statement" if gone else "fewer units than the ledger had"
+        changes.append({"account_id": item["account_id"], "instrument_id": instrument, "currency": item.get("currency"),
+                        "symbol": instruments.get(instrument, {}).get("symbol", instrument) if instrument else None,
+                        "date": item["date"], "ledger": _s(derived), "statement": _s(expected), "change": _s(change),
+                        "reason": reason})
+    return lines, changes
+
+
+def describe_changes(changes: list[Mapping[str, Any]]) -> str:
+    """'VTI 100 to 110; AAPL 10.5 to 0 (no longer on the statement); USD cash 1500 to 1000'."""
+    parts = []
+    for change in changes:
+        what = change["symbol"] or f"{change['currency']} cash"
+        text = f"{what} {change['ledger']} to {change['statement']}"
+        if change["reason"] == "no longer on the statement":
+            text += " (no longer on the statement)"
+        parts.append(text)
+    return "; ".join(parts)
+
+
 def proposal_to_batch(proposal: Mapping[str, Any], *, batch_id: str, ledger: Mapping[str, Any]) -> dict[str, Any]:
     """Return ``{"batch": ..., "not_posted": [...], "notes": [...], "prices": {...}}``.
 
@@ -133,6 +241,7 @@ def proposal_to_batch(proposal: Mapping[str, Any], *, batch_id: str, ledger: Map
     if provenance.get("sha256"):
         source["file_hash"] = provenance["sha256"]
     active = {e["account_id"] for e in ledger.get("entries", [])}
+    missing = missing_positions(proposal, ledger)
     notes: list[str] = []
     not_posted: list[dict[str, Any]] = []
     accounts, instruments, lines, assertions = [], {}, [], []
@@ -249,6 +358,11 @@ def proposal_to_batch(proposal: Mapping[str, Any], *, batch_id: str, ledger: Map
             if not _is_cash(position):
                 assertions.append({"account_id": account_id, "date": as_of, "instrument_id": position["instrument_id"],
                                    "quantity": str(position["quantity"])})
+        if account_id in active:
+            for gone in missing:
+                if gone["account_id"] == account_id:
+                    assertions.append({"account_id": account_id, "date": as_of, "instrument_id": gone["instrument_id"],
+                                       "quantity": "0"})
     fx = []
     for item in household.get("fx") or []:
         fx.append({"date": item.get("as_of") or as_of, "base": item["from"], "quote": item["to"],
@@ -261,4 +375,5 @@ def proposal_to_batch(proposal: Mapping[str, Any], *, batch_id: str, ledger: Map
     return {"batch": batch, "not_posted": not_posted, "notes": notes, "prices": prices}
 
 
-__all__ = ["proposal_to_batch"]
+__all__ = ["describe_changes", "is_newest", "latest_ledger_date", "missing_positions", "proposal_to_batch",
+           "reconciliation_lines"]

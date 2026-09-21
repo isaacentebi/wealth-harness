@@ -20,7 +20,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
-from .situation.schema import SchemaError, validate as validate_canonical
+from .situation.schema import SchemaError, out_of_range, validate as validate_canonical
 
 
 SCHEMA_VERSION = 3
@@ -152,6 +152,90 @@ CREATE INDEX IF NOT EXISTS contradictions_client_key
 CREATE INDEX IF NOT EXISTS facts_client_valid
     ON facts(client_id, key, valid_from);
 """
+# The base tables of a new database (version 3 without the ledger and contradictions).
+_BASE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS metadata (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS clients (
+    id TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 0),
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS facts (
+    id TEXT PRIMARY KEY,
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    key TEXT NOT NULL,
+    value_json TEXT NOT NULL,
+    source_kind TEXT NOT NULL,
+    source_ref TEXT NOT NULL,
+    observed_on TEXT NOT NULL,
+    confidence TEXT NOT NULL,
+    expires_on TEXT,
+    revision INTEGER NOT NULL,
+    recorded_at TEXT NOT NULL,
+    valid_from TEXT,
+    valid_to TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    UNIQUE (client_id, key, revision)
+);
+CREATE INDEX IF NOT EXISTS facts_client_key_revision
+    ON facts(client_id, key, revision DESC);
+CREATE TABLE IF NOT EXISTS batches (
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    request_id TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    resulting_revision INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (client_id, request_id)
+);
+CREATE TABLE IF NOT EXISTS decisions (
+    id TEXT PRIMARY KEY,
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    rationale TEXT NOT NULL,
+    input_revision INTEGER NOT NULL,
+    evidence_ids_json TEXT NOT NULL,
+    alternatives_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('proposed','accepted','dismissed')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS decisions_client_created
+    ON decisions(client_id, created_at, id);
+CREATE TABLE IF NOT EXISTS decision_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    decision_id TEXT NOT NULL REFERENCES decisions(id) ON DELETE CASCADE,
+    status TEXT NOT NULL CHECK (status IN ('proposed','accepted','dismissed')),
+    recorded_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS decision_events_decision
+    ON decision_events(decision_id, id);
+CREATE TABLE IF NOT EXISTS auxiliary (
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    namespace TEXT NOT NULL,
+    value_json TEXT NOT NULL,
+    PRIMARY KEY (client_id, namespace)
+);
+INSERT OR IGNORE INTO metadata(key, value)
+    VALUES('schema_version', '3');
+INSERT INTO decision_events(decision_id, status, recorded_at)
+    SELECT d.id, 'proposed', d.created_at
+    FROM decisions d
+    WHERE NOT EXISTS (
+        SELECT 1 FROM decision_events e WHERE e.decision_id = d.id
+    );
+INSERT INTO decision_events(decision_id, status, recorded_at)
+    SELECT d.id, d.status, d.updated_at
+    FROM decisions d
+    WHERE d.status != 'proposed'
+      AND NOT EXISTS (
+        SELECT 1 FROM decision_events e
+        WHERE e.decision_id = d.id AND e.status = d.status
+    );
+"""
 # Candidate duplicates from a different statement: same account/kind/amount
 # within this many days and similar descriptions.
 DUPLICATE_WINDOW_DAYS = 3
@@ -166,6 +250,12 @@ REVIEW_DAYS: tuple[tuple[str, int], ...] = (
     ("planning.", 90), ("research.", 90), ("income.", 90), ("thesis.", 180), ("thread.", 180),
 )
 DEFAULT_REVIEW_DAYS = 365  # client.profile, goals, reserve, preference.*, constraint.*, tax.*, other
+# The review horizons a version-1 store applied by default (everything else got 365 days).
+_V1_REVIEW_DAYS: tuple[tuple[str, int], ...] = (
+    ("portfolio.snapshot", 30), ("household", 30), ("account.", 30), ("lot.", 30),
+    ("analysis.", 30), ("plan.resources", 90), ("income.schedule", 90),
+    ("planning.", 90), ("research.", 90), ("thesis.", 180),
+)
 # Facts that set financial policy; document/web sources cannot establish them.
 _POLICY_KEYS = frozenset({"goals", "client.profile", "tax.profile", "monitor.rules"})
 _POLICY_PREFIXES = ("preference.", "constraint.")
@@ -215,6 +305,10 @@ class RequestConflictError(StoreError):
 
 class DecisionNotFoundError(StoreError):
     """The requested decision does not exist for this client."""
+
+
+class ContradictionNotFoundError(ValidationError, LookupError):
+    """The requested contradiction does not exist for this client."""
 
 
 class IneligibleEvidenceError(StoreError):
@@ -286,11 +380,15 @@ def _json(value: Any) -> str:
     )
 
 
-def review_days(key: str) -> int:
-    for pattern, days in REVIEW_DAYS:
+def review_days(key: str, table: Sequence[tuple[str, int]] = REVIEW_DAYS) -> int:
+    for pattern, days in table:
         if key == pattern or (pattern.endswith(".") and key.startswith(pattern)):
             return days
     return DEFAULT_REVIEW_DAYS
+
+
+def _v1_review_days(key: str) -> int:
+    return review_days(key, _V1_REVIEW_DAYS)
 
 
 def is_stale(fact: Mapping[str, Any], today: date | None = None) -> bool:
@@ -381,27 +479,154 @@ def describe(value: Any) -> str:
 
 
 _SOURCE_PHRASES = {
-    "document": "a document ({ref})", "web": "a web page ({ref})", "connector": "a connected account",
-    "inference": "my own reading", "pattern": "your transactions", "tool": "a calculation",
+    "en": {"document": "a statement you shared", "web": "a web page", "connector": "your connected account",
+           "inference": "my own reading", "pattern": "your transactions", "tool": "a calculation"},
+    "es": {"document": "un estado de cuenta que compartiste", "web": "una página web",
+           "connector": "tu cuenta conectada", "inference": "mi propia lectura", "pattern": "tus movimientos",
+           "tool": "un cálculo"},
+}
+_INCOME_LABELS = {
+    "en": {"salary": "your salary", "aguinaldo": "your aguinaldo", "ptu": "your profit sharing (PTU)",
+           "bonus": "your bonus", "rent": "your rental income", "business": "your business income",
+           "pension": "your pension"},
+    "es": {"salary": "tu sueldo", "aguinaldo": "tu aguinaldo", "ptu": "tu reparto de utilidades (PTU)",
+           "bonus": "tu bono", "rent": "tus ingresos por renta", "business": "los ingresos de tu negocio",
+           "pension": "tu pensión"},
+}
+_DEBT_LABELS = {
+    "en": {"auto": "car loan", "mortgage": "mortgage", "card": "credit card", "personal": "personal loan",
+           "student": "student loan"},
+    "es": {"auto": "crédito del coche", "mortgage": "hipoteca", "card": "tarjeta de crédito",
+           "personal": "préstamo personal", "student": "crédito educativo"},
+}
+_MONTH_NAMES = {
+    "en": ("January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
+           "November", "December"),
+    "es": ("enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre",
+           "noviembre", "diciembre"),
 }
 
 
-def _question(kind: str, key: str, current: Mapping[str, Any], proposed: Mapping[str, Any]) -> str:
-    """The question to put to the person, in plain words (the agent translates it)."""
+def _words(identifier: str) -> str:
+    return identifier.replace("_", " ").replace("-", " ").strip()
 
-    since = current.get("valid_from")
-    mine = f"You told me {key} is {describe(current['value'])}" + (f" (since {since})" if since else "")
+
+def _label(key: str, value: Any, lang: str) -> str:
+    """What a fact is, in the person's words: 'your salary', 'tus inversiones en GBM'."""
+
+    es = lang == "es"
+    head, _, rest = key.partition(".")
+    value = value if isinstance(value, dict) else {}
+    institution = value.get("institution") or value.get("lender")
+    name = value.get("name") if isinstance(value.get("name"), str) else None
+    if head == "income":
+        known = _INCOME_LABELS[lang].get(value.get("kind") or rest)
+        return known or (f"tu ingreso «{name or _words(rest)}»" if es else f"your income “{name or _words(rest)}”")
+    if key == "spending.monthly":
+        return "tu gasto mensual" if es else "your monthly spending"
+    if head == "cash":
+        if institution:
+            return f"tu dinero en {institution}" if es else f"your cash at {institution}"
+        return f"tu efectivo «{name or _words(rest)}»" if es else f"your cash “{name or _words(rest)}”"
+    if head == "investment":
+        if institution:
+            return f"tus inversiones en {institution}" if es else f"your investments at {institution}"
+        return f"tus inversiones «{name or _words(rest)}»" if es else f"your investments “{name or _words(rest)}”"
+    if head == "liability":
+        kind = _DEBT_LABELS[lang].get(value.get("kind"), "deuda" if es else "debt")
+        where = f" con {institution}" if es and institution else (f" with {institution}" if institution else "")
+        return f"tu {kind}{where}" if es else f"your {kind}{where}"
+    if head == "account":
+        account = value.get("account") if isinstance(value.get("account"), dict) else {}
+        if account.get("institution"):
+            return f"tu cuenta en {account['institution']}" if es else f"your account at {account['institution']}"
+    return f"«{_words(rest or head)}»" if es else f"“{_words(rest or head)}”"
+
+
+def _money(amount: Any, currency: Any, show_code: bool) -> str:
+    from .situation.text import fmt
+
+    if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+        return "?"
+    places = 0 if abs(amount) >= 1000 else None
+    text = f"${fmt(round(amount) if places == 0 else amount, places)}"
+    return text + (f" {currency}" if show_code and isinstance(currency, str) else "")
+
+
+def _say(value: Any, lang: str, show_code: bool) -> str:
+    """A fact value as a person would say it: '$85,000 al mes', '$38,601 USD'."""
+
+    if isinstance(value, dict):
+        statement = value.get("statement")
+        if isinstance(statement, dict) and statement:
+            return " + ".join(_money(amount, cur, show_code or len(statement) > 1)
+                              for cur, amount in sorted(statement.items()))
+        for field in ("amount", "balance", "total", "value"):
+            amount = value.get(field)
+            if isinstance(amount, (int, float)) and not isinstance(amount, bool):
+                text = _money(amount, value.get("currency"), show_code)
+                period = value.get("frequency") or value.get("period")
+                if period in {"monthly", "month"}:
+                    text += " al mes" if lang == "es" else " a month"
+                elif period in {"annual", "year"}:
+                    text += " al año" if lang == "es" else " a year"
+                return text
+    return describe(value)
+
+
+def _date(iso: Any, lang: str) -> str:
+    try:
+        day = date.fromisoformat(str(iso)[:10])
+    except ValueError:
+        return str(iso)
+    month = _MONTH_NAMES[lang][day.month - 1]
+    return f"{day.day} de {month} de {day.year}" if lang == "es" else f"{month} {day.day}, {day.year}"
+
+
+def _currencies(*values: Any) -> set[str]:
+    found = set()
+    for value in values:
+        if isinstance(value, dict):
+            if isinstance(value.get("currency"), str):
+                found.add(value["currency"])
+            if isinstance(value.get("statement"), dict):
+                found.update(value["statement"])
+    return found
+
+
+def _question(kind: str, key: str, current: Mapping[str, Any], proposed: Mapping[str, Any],
+              language: str | None = None) -> str:
+    """The question to put to the person, in their language and words (never raw keys)."""
+
+    lang = "es" if str(language or "").lower().startswith("es") else "en"
+    es = lang == "es"
+    mine_value, new_value = current["value"], proposed["value"]
+    show_code = len(_currencies(mine_value, new_value)) > 1
+    about = isinstance(mine_value, dict) and mine_value.get("approximate") is True
+    label = _label(key, mine_value, lang)
+    mine = _say(mine_value, lang, show_code)
     source = proposed["source"]
-    where = _SOURCE_PHRASES.get(source["kind"], source["kind"]).format(ref=source["ref"])
     if kind == "stated_vs_statement":
-        value = proposed["value"]
-        institution = proposed.get("institution")
-        return (f"{mine}{' at ' + institution if institution else ''}, but the statement "
-                f"dated {value.get('as_of') or source['observed_on']} shows {describe(value)}. "
-                "Keep your figure, use the statement, or did it change?")
-    return (f"{mine}, but {where} says {describe(proposed['value'])} as of "
-            f"{proposed.get('valid_from') or source['observed_on']}. "
-            "Keep yours, use the new one, or did it change?")
+        institution = proposed.get("institution") or (mine_value.get("institution") if isinstance(mine_value, dict) else None)
+        where = (f" en {institution}" if es else f" at {institution}") if institution else ""
+        day = _date(new_value.get("as_of") or source["observed_on"], lang)
+        theirs = _say(new_value, lang, True if show_code else False)
+        if es:
+            return (f"Dijiste {'unos ' if about else ''}{mine}{where}, pero el estado de cuenta del {day} muestra "
+                    f"{theirs}. ¿Mantengo tu cifra, uso la del estado de cuenta o cambió?")
+        return (f"You said {'about ' if about else ''}{mine}{where}, but the statement from {day} shows {theirs}. "
+                "Keep your figure, use the statement's, or did it change?")
+    since = current.get("valid_from")
+    where = _SOURCE_PHRASES[lang].get(source["kind"], source["kind"])
+    day = _date(proposed.get("valid_from") or source["observed_on"], lang)
+    theirs = _say(new_value, lang, show_code)
+    if es:
+        return (f"Me dijiste que {label} es {'de unos ' if about else 'de '}{mine}"
+                + (f" (desde el {_date(since, lang)})" if since else "")
+                + f", pero {where} indica {theirs} al {day}. ¿Mantengo la tuya, uso la nueva o cambió?")
+    return (f"You told me {label} is {'about ' if about else ''}{mine}"
+            + (f" (since {_date(since, lang)})" if since else "")
+            + f", but {where} shows {theirs} as of {day}. Keep yours, use the new one, or did it change?")
 
 
 def _period_text(fact: Mapping[str, Any]) -> str:
@@ -426,11 +651,71 @@ def _period_text(fact: Mapping[str, Any]) -> str:
     return f"{text} from {start[:7]} to {end[:7]}"
 
 
+def secure_delete(path: str | os.PathLike[str]) -> bool:
+    """Overwrite a regular file with zeros, flush it to disk, then unlink it.
+
+    A symbolic link is removed without touching its target.  Returns whether
+    something was removed.  (On copy-on-write or journaling filesystems and SSDs
+    an overwrite cannot guarantee the old blocks are gone; it still removes the
+    plain copy the next reader would find.)
+    """
+
+    target = Path(path)
+    try:
+        info = target.lstat()
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        target.unlink()
+        return True
+    flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(target, flags)
+    except OSError:
+        fd = None
+    if fd is not None:
+        try:
+            remaining = info.st_size
+            block = b"\0" * 65_536
+            while remaining > 0:
+                written = os.write(fd, block[:min(len(block), remaining)])
+                remaining -= written
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    target.unlink()
+    return True
+
+
+def secure_delete_tree(root: str | os.PathLike[str]) -> int:
+    """Securely delete every file under ``root`` (links are unlinked, never followed), then the directories."""
+
+    base = Path(root)
+    if base.is_symlink():
+        base.unlink()
+        return 0
+    if not base.is_dir():
+        return 0
+    count = 0
+    for current, directories, files in os.walk(base, topdown=False, followlinks=False):
+        for name in files:
+            count += secure_delete(Path(current) / name)
+        for name in directories:
+            path = Path(current) / name
+            if path.is_symlink():
+                path.unlink()
+            else:
+                path.rmdir()
+    base.rmdir()
+    return count
+
+
 class WealthStore:
     """A local SQLite evidence store.
 
-    ``delete_client`` removes only this database's rows.  Copies previously
-    exported by callers and external backups are outside that operation.
+    ``delete_client`` removes this database's rows and securely deletes the
+    client's upload directory (raw statements).  Copies previously exported by
+    callers and external backups are outside that operation.
     """
 
     def __init__(self, path: str | os.PathLike[str]):
@@ -441,6 +726,8 @@ class WealthStore:
             raise ValidationError("path must not be empty")
         self._closed = False
         self._lock = threading.RLock()
+        self._atomic_depth = 0
+        self._savepoints: list[str] = []
         if self.path != ":memory:":
             db_path = Path(self.path).expanduser()
             db_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -484,151 +771,97 @@ class WealthStore:
         if self._closed:
             raise StoreError("store is closed")
 
-    def _create_schema(self) -> None:
-        with self._lock:
-            existing_tables = {
-                row["name"]
-                for row in self._db.execute(
-                    "SELECT name FROM sqlite_master "
-                    "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-                )
-            }
-            if "metadata" in existing_tables:
-                row = self._db.execute(
-                    "SELECT value FROM metadata WHERE key = 'schema_version'"
-                ).fetchone()
-                if row is None:
-                    raise StoreError("database metadata has no schema version")
-                version = row["value"]
-                base = _TABLES - {"contradictions"}
-                if version == "1" and existing_tables >= base:
-                    self._migrate_to_2()
-                    version = "2"
-                if version == "2" and existing_tables >= base:
-                    self._migrate_to_3()
-                    return
-                if row["value"] != str(SCHEMA_VERSION):
-                    raise StoreError(
-                        f"unsupported schema version {row['value']}; "
-                        f"expected {SCHEMA_VERSION}"
-                    )
-                if existing_tables >= _TABLES | _LEDGER_TABLES:
-                    return
-            elif existing_tables:
-                raise StoreError("existing database has no wealth schema version")
-            self._db.executescript(
-                """
-                BEGIN IMMEDIATE;
-                CREATE TABLE IF NOT EXISTS metadata (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS clients (
-                    id TEXT PRIMARY KEY,
-                    display_name TEXT NOT NULL,
-                    revision INTEGER NOT NULL CHECK (revision >= 0),
-                    created_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS facts (
-                    id TEXT PRIMARY KEY,
-                    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
-                    key TEXT NOT NULL,
-                    value_json TEXT NOT NULL,
-                    source_kind TEXT NOT NULL,
-                    source_ref TEXT NOT NULL,
-                    observed_on TEXT NOT NULL,
-                    confidence TEXT NOT NULL,
-                    expires_on TEXT,
-                    revision INTEGER NOT NULL,
-                    recorded_at TEXT NOT NULL,
-                    valid_from TEXT,
-                    valid_to TEXT,
-                    status TEXT NOT NULL DEFAULT 'active',
-                    UNIQUE (client_id, key, revision)
-                );
-                CREATE INDEX IF NOT EXISTS facts_client_key_revision
-                    ON facts(client_id, key, revision DESC);
-                CREATE TABLE IF NOT EXISTS batches (
-                    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
-                    request_id TEXT NOT NULL,
-                    payload_hash TEXT NOT NULL,
-                    resulting_revision INTEGER NOT NULL,
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY (client_id, request_id)
-                );
-                CREATE TABLE IF NOT EXISTS decisions (
-                    id TEXT PRIMARY KEY,
-                    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
-                    title TEXT NOT NULL,
-                    rationale TEXT NOT NULL,
-                    input_revision INTEGER NOT NULL,
-                    evidence_ids_json TEXT NOT NULL,
-                    alternatives_json TEXT NOT NULL,
-                    status TEXT NOT NULL CHECK (status IN ('proposed','accepted','dismissed')),
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS decisions_client_created
-                    ON decisions(client_id, created_at, id);
-                CREATE TABLE IF NOT EXISTS decision_events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    decision_id TEXT NOT NULL REFERENCES decisions(id) ON DELETE CASCADE,
-                    status TEXT NOT NULL CHECK (status IN ('proposed','accepted','dismissed')),
-                    recorded_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS decision_events_decision
-                    ON decision_events(decision_id, id);
-                CREATE TABLE IF NOT EXISTS auxiliary (
-                    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
-                    namespace TEXT NOT NULL,
-                    value_json TEXT NOT NULL,
-                    PRIMARY KEY (client_id, namespace)
-                );
-                INSERT OR IGNORE INTO metadata(key, value)
-                    VALUES('schema_version', '3');
-                INSERT INTO decision_events(decision_id, status, recorded_at)
-                    SELECT d.id, 'proposed', d.created_at
-                    FROM decisions d
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM decision_events e WHERE e.decision_id = d.id
-                    );
-                INSERT INTO decision_events(decision_id, status, recorded_at)
-                    SELECT d.id, d.status, d.updated_at
-                    FROM decisions d
-                    WHERE d.status != 'proposed'
-                      AND NOT EXISTS (
-                        SELECT 1 FROM decision_events e
-                        WHERE e.decision_id = d.id AND e.status = d.status
-                    );
-                """ + _LEDGER_SCHEMA + _CONTRADICTION_SCHEMA + """
-                COMMIT;
-                """
+    def _script(self, sql: str) -> None:
+        """Run semicolon-separated DDL/DML inside the current transaction.
+
+        (``executescript`` would commit first, so it cannot be used under a lock.)
+        """
+
+        for statement in sql.split(";"):
+            if statement.strip():
+                self._db.execute(statement)
+
+    def _tables(self) -> set[str]:
+        return {
+            row["name"]
+            for row in self._db.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
             )
+        }
+
+    def _schema_version(self, tables: set[str]) -> str | None:
+        if "metadata" not in tables:
+            return None
+        row = self._db.execute("SELECT value FROM metadata WHERE key = 'schema_version'").fetchone()
+        if row is None:
+            raise StoreError("database metadata has no schema version")
+        return row["value"]
+
+    def _create_schema(self) -> None:
+        """Create or migrate the schema; safe when several processes open one file at once.
+
+        A current database is recognised without taking the write lock.  Anything
+        else happens under ``BEGIN IMMEDIATE`` and re-reads the state first, so a
+        process that waited for another's migration finds nothing left to do, and
+        every step checks before it alters (idempotent).
+        """
+
+        with self._lock:
+            tables = self._tables()
+            if self._schema_version(tables) == str(SCHEMA_VERSION) and tables >= _TABLES | _LEDGER_TABLES:
+                return
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._create_or_migrate()
+                self._db.execute("COMMIT")
+            except Exception:
+                if self._db.in_transaction:
+                    self._db.execute("ROLLBACK")
+                raise
+
+    def _create_or_migrate(self) -> None:
+        tables = self._tables()
+        version = self._schema_version(tables)
+        if version is None and tables:
+            raise StoreError("existing database has no wealth schema version")
+        if version is not None:
+            base = _TABLES - {"contradictions"}
+            migrated_from = version
+            if version == "1" and tables >= base:
+                self._migrate_to_2()
+                version = "2"
+            if version == "2" and tables >= base:
+                self._migrate_to_3(recompute_review=migrated_from == "1")
+                return
+            if version != str(SCHEMA_VERSION):
+                raise StoreError(f"unsupported schema version {version}; expected {SCHEMA_VERSION}")
+            if tables >= _TABLES | _LEDGER_TABLES:
+                return
+        self._script(_BASE_SCHEMA + _LEDGER_SCHEMA + _CONTRADICTION_SCHEMA)
 
     def _migrate_to_2(self) -> None:
-        """Add ledger tables to a version-1 database in one transaction."""
+        """Add ledger tables to a version-1 database (inside the caller's transaction)."""
 
-        self._db.executescript(
-            "BEGIN IMMEDIATE;"
-            + _LEDGER_SCHEMA
-            + "UPDATE metadata SET value = '2' WHERE key = 'schema_version'; COMMIT;"
-        )
+        self._script(_LEDGER_SCHEMA + "UPDATE metadata SET value = '2' WHERE key = 'schema_version';")
 
-    def _migrate_to_3(self) -> None:
-        """Add valid time and contradictions to a version-2 database in one transaction.
+    def _migrate_to_3(self, recompute_review: bool = False) -> None:
+        """Add valid time and contradictions to a version-2 database (inside the caller's transaction).
 
         Every existing revision becomes valid from its observation date and is
         closed where the next revision of the same key begins.  Old null
-        retractions become ``forgotten`` tombstones.
+        retractions become ``forgotten`` tombstones.  Facts written by a
+        version-1 store got a 365-day review date for most keys; a date that was
+        that default is recomputed from ``REVIEW_DAYS`` so migrated facts go
+        stale when the same fact written today would.
         """
 
         columns = {row["name"] for row in self._db.execute("PRAGMA table_info(facts)")}
         added = {"valid_from": "TEXT", "valid_to": "TEXT", "status": "TEXT NOT NULL DEFAULT 'active'"}
-        self._db.executescript(
-            "BEGIN IMMEDIATE;"
-            + "".join(f"ALTER TABLE facts ADD COLUMN {name} {kind};"
-                      for name, kind in added.items() if name not in columns)
-            + """
+        for name, kind in added.items():
+            if name not in columns:
+                self._db.execute(f"ALTER TABLE facts ADD COLUMN {name} {kind}")
+        self._script(
+            """
             UPDATE facts SET valid_from = observed_on;
             UPDATE facts SET status = 'forgotten' WHERE value_json = 'null';
             UPDATE facts SET valid_to = (
@@ -640,12 +873,75 @@ class WealthStore:
             UPDATE facts SET valid_to = valid_from WHERE status = 'forgotten';
             """
             + _CONTRADICTION_SCHEMA
-            + "UPDATE metadata SET value = '3' WHERE key = 'schema_version'; COMMIT;"
         )
+        if recompute_review:
+            for row in self._db.execute("SELECT id, key, observed_on, expires_on FROM facts").fetchall():
+                try:
+                    observed = date.fromisoformat(row["observed_on"])
+                except (TypeError, ValueError):
+                    continue
+                default = (observed + timedelta(days=_v1_review_days(row["key"]))).isoformat()
+                current = (observed + timedelta(days=review_days(row["key"]))).isoformat()
+                if row["expires_on"] == default and current != default:
+                    self._db.execute("UPDATE facts SET expires_on = ? WHERE id = ?", (current, row["id"]))
+        self._db.execute("UPDATE metadata SET value = ? WHERE key = 'schema_version'", (str(SCHEMA_VERSION),))
 
     def _begin(self) -> None:
+        """Start a write: a transaction, or a savepoint inside ``atomic``."""
+
         self._ensure_open()
-        self._db.execute("BEGIN IMMEDIATE")
+        if self._atomic_depth:
+            name = f"wealth_{len(self._savepoints) + 1}"
+            self._db.execute(f"SAVEPOINT {name}")
+            self._savepoints.append(name)
+        else:
+            self._db.execute("BEGIN IMMEDIATE")
+
+    def _commit(self) -> None:
+        if self._savepoints:
+            self._db.execute(f"RELEASE {self._savepoints.pop()}")
+        else:
+            self._db.execute("COMMIT")
+
+    def _rollback(self) -> None:
+        if self._savepoints:
+            name = self._savepoints.pop()
+            self._db.execute(f"ROLLBACK TO {name}")
+            self._db.execute(f"RELEASE {name}")
+        elif self._db.in_transaction:
+            self._db.execute("ROLLBACK")
+
+    @contextmanager
+    def atomic(self) -> Iterator[WealthStore]:
+        """Run several store operations as one write transaction (all or nothing).
+
+        The write lock is taken up front (``BEGIN IMMEDIATE``), so what is read
+        inside cannot change underneath: other processes wait, then see either
+        none or all of the writes.  Nested calls join the outer transaction.
+        """
+
+        with self._lock:
+            if self._atomic_depth:
+                self._atomic_depth += 1
+                try:
+                    yield self
+                finally:
+                    self._atomic_depth -= 1
+                return
+            self._begin()
+            self._atomic_depth = 1
+            try:
+                yield self
+            except BaseException:
+                self._atomic_depth = 0
+                self._savepoints.clear()
+                if self._db.in_transaction:
+                    self._db.execute("ROLLBACK")
+                raise
+            else:
+                self._atomic_depth = 0
+                self._savepoints.clear()
+                self._db.execute("COMMIT")
 
     @contextmanager
     def _read_transaction(self) -> Iterator[None]:
@@ -864,6 +1160,9 @@ class WealthStore:
             raise ValidationError(f"fact {key!r} requires value")
         value = raw["value"]
         _validate_json(value, f"{key}.value")
+        too_large = out_of_range(value, f"{key}.value")
+        if too_large:
+            raise ValidationError(too_large)
         merge = raw.get("merge", False)
         if not isinstance(merge, bool):
             raise ValidationError(f"{key}.merge must be true or false")
@@ -1046,7 +1345,7 @@ class WealthStore:
                         result = self._receipt(
                             client_id, prior["resulting_revision"], request_id, True, []
                         )
-                        self._db.execute("COMMIT")
+                        self._commit()
                         return result
                 current_revision = client["revision"]
                 if expected_revision is not None and current_revision != expected_revision:
@@ -1145,10 +1444,9 @@ class WealthStore:
                 result = self._receipt(
                     client_id, new_revision, request_id, False, warnings, needs_user
                 )
-                self._db.execute("COMMIT")
+                self._commit()
             except Exception:
-                if self._db.in_transaction:
-                    self._db.execute("ROLLBACK")
+                self._rollback()
                 raise
         return result
 
@@ -1206,6 +1504,18 @@ class WealthStore:
             "resolution": json.loads(row["resolution_json"]) if row["resolution_json"] else None,
         }
 
+    def _language(self, client_id: str) -> str | None:
+        """The person's language from client.profile (questions are worded in it)."""
+
+        row = self._current_rows(client_id, ["client.profile"]).get("client.profile")
+        if row is None or row["status"] != "active":
+            return None
+        value = json.loads(row["value_json"])
+        if not isinstance(value, dict):
+            return None
+        language = value.get("language") or value.get("locale")
+        return language if isinstance(language, str) else None
+
     def _open_contradiction(
         self, client_id: str, kind: str, key: str, proposed_key: str, current: sqlite3.Row,
         proposed: Mapping[str, Any], request_id: str | None, now: str,
@@ -1233,7 +1543,7 @@ class WealthStore:
                        "observed_on": current["observed_on"]},
             "confidence": current["confidence"], "valid_from": current["valid_from"],
         }
-        question = _question(kind, key, current_part, proposed)
+        question = _question(kind, key, current_part, proposed, self._language(client_id))
         contradiction_id = uuid.uuid4().hex
         self._db.execute(
             "INSERT INTO contradictions(id, client_id, kind, key, proposed_key, current_fact_id, "
@@ -1342,7 +1652,7 @@ class WealthStore:
                     (contradiction_id, client_id),
                 ).fetchone()
                 if row is None:
-                    raise ValidationError(
+                    raise ContradictionNotFoundError(
                         f"contradiction {contradiction_id!r} does not exist for this client"
                     )
                 if row["status"] != "pending":
@@ -1390,10 +1700,9 @@ class WealthStore:
                 result["contradiction"] = self._contradiction_from_row(self._db.execute(
                     "SELECT * FROM contradictions WHERE id = ?", (contradiction_id,)
                 ).fetchone())
-                self._db.execute("COMMIT")
+                self._commit()
             except Exception:
-                if self._db.in_transaction:
-                    self._db.execute("ROLLBACK")
+                self._rollback()
                 raise
         return result
 
@@ -1480,10 +1789,9 @@ class WealthStore:
                     "VALUES (?, 'proposed', ?)",
                     (decision_id, now),
                 )
-                self._db.execute("COMMIT")
+                self._commit()
             except Exception:
-                if self._db.in_transaction:
-                    self._db.execute("ROLLBACK")
+                self._rollback()
                 raise
             return self._decision(client_id, decision_id)
 
@@ -1548,10 +1856,9 @@ class WealthStore:
                         "VALUES (?, ?, ?)",
                         (decision_id, status, now),
                     )
-                self._db.execute("COMMIT")
+                self._commit()
             except Exception:
-                if self._db.in_transaction:
-                    self._db.execute("ROLLBACK")
+                self._rollback()
                 raise
             return self._decision(client_id, decision_id)
 
@@ -1638,11 +1945,10 @@ class WealthStore:
                     "ON CONFLICT(client_id, namespace) DO UPDATE SET value_json = excluded.value_json",
                     (client_id, namespace, _json(result)),
                 )
-                self._db.execute("COMMIT")
+                self._commit()
                 return result
             except Exception:
-                if self._db.in_transaction:
-                    self._db.execute("ROLLBACK")
+                self._rollback()
                 raise
 
     # -- transaction ledger ------------------------------------------------
@@ -1750,7 +2056,7 @@ class WealthStore:
                         )
                     receipt = json.loads(prior["receipt_json"])
                     receipt["replayed"] = True
-                    self._db.execute("COMMIT")
+                    self._commit()
                     return receipt
                 receipt: dict[str, Any] = {
                     "batch_id": batch_id, "replayed": False,
@@ -1911,14 +2217,12 @@ class WealthStore:
                     "VALUES (?, ?, ?, ?, ?)",
                     (client_id, batch_id, payload_hash, _json(receipt), now),
                 )
-                self._db.execute("COMMIT")
+                self._commit()
             except sqlite3.IntegrityError as exc:
-                if self._db.in_transaction:
-                    self._db.execute("ROLLBACK")
+                self._rollback()
                 raise ValidationError(f"ledger write rejected: {exc}") from exc
             except Exception:
-                if self._db.in_transaction:
-                    self._db.execute("ROLLBACK")
+                self._rollback()
                 raise
         return receipt
 
@@ -1948,10 +2252,9 @@ class WealthStore:
                         "INSERT INTO ledger_rules(client_id, id, data_json, created_at) VALUES (?, ?, ?, ?)",
                         (client_id, rule_id, _json(rule), _utc_now()),
                     )
-                self._db.execute("COMMIT")
+                self._commit()
             except Exception:
-                if self._db.in_transaction:
-                    self._db.execute("ROLLBACK")
+                self._rollback()
                 raise
         return rule
 
@@ -1978,10 +2281,9 @@ class WealthStore:
                     "VALUES (?, ?, ?, ?, ?, ?)",
                     (client_id, entry_id, category, status, source, now),
                 )
-                self._db.execute("COMMIT")
+                self._commit()
             except Exception:
-                if self._db.in_transaction:
-                    self._db.execute("ROLLBACK")
+                self._rollback()
                 raise
         return {"entry_id": entry_id, "category": category, "status": status, "source": source, "recorded_at": now}
 
@@ -1997,12 +2299,16 @@ class WealthStore:
             try:
                 self._client_row(client_id)
                 self._db.execute("DELETE FROM clients WHERE id = ?", (client_id,))
-                self._db.execute("COMMIT")
+                self._commit()
             except Exception:
-                if self._db.in_transaction:
-                    self._db.execute("ROLLBACK")
+                self._rollback()
                 raise
-        return {"deleted": True, "client_id": client_id}
+        removed = 0
+        if self.path != ":memory:":
+            from .service import upload_dir
+
+            removed = secure_delete_tree(upload_dir(client_id, self.path))
+        return {"deleted": True, "client_id": client_id, "uploads_removed": removed}
 
 
 __all__ = [
@@ -2014,6 +2320,7 @@ __all__ = [
     "STATED_TOLERANCE",
     "ClientExistsError",
     "ClientNotFoundError",
+    "ContradictionNotFoundError",
     "DecisionNotFoundError",
     "IneligibleEvidenceError",
     "RequestConflictError",
@@ -2025,4 +2332,6 @@ __all__ = [
     "is_stale",
     "merge_patch",
     "review_days",
+    "secure_delete",
+    "secure_delete_tree",
 ]

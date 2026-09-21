@@ -12,8 +12,8 @@ import uuid
 
 from . import situation as situation_module
 from . import views as views_module
-from .situation.schema import SCHEMA
-from .store import DEFAULT_REVIEW_DAYS, REVIEW_DAYS, WealthStore, is_stale
+from .situation.schema import SCHEMA, out_of_range
+from .store import DEFAULT_REVIEW_DAYS, REVIEW_DAYS, WealthStore, is_stale, secure_delete
 from .workflows import prepare
 
 
@@ -60,6 +60,146 @@ def upload_dir(client_id: str, db_path: str | Path | None = None) -> Path:
     root = (Path(configured).expanduser() if configured
             else database_path(db_path).expanduser().resolve().parent / "uploads")
     return root / safe[:64]
+
+
+UPLOAD_RETENTION_DAYS = 30
+"""Uploads not purged by a confirm are deleted after this many days (``WEALTH_UPLOAD_RETENTION_DAYS``)."""
+
+
+def upload_retention_days() -> int | None:
+    """Days an unconfirmed upload is kept; ``None`` when age-based purging is off (``0``)."""
+    raw = os.environ.get("WEALTH_UPLOAD_RETENTION_DAYS", "").strip()
+    try:
+        days = int(raw) if raw else UPLOAD_RETENTION_DAYS
+    except ValueError:
+        days = UPLOAD_RETENTION_DAYS
+    return days if days > 0 else None
+
+
+def purge_on_confirm() -> bool:
+    """Whether a confirmed statement's upload is deleted (``WEALTH_KEEP_CONFIRMED_UPLOADS=1`` keeps it)."""
+    return os.environ.get("WEALTH_KEEP_CONFIRMED_UPLOADS", "").strip().lower() not in {"1", "true", "yes"}
+
+
+def _upload_files(root: Path) -> list[Path]:
+    if not root.is_dir() or root.is_symlink():
+        return []
+    return [p for p in root.rglob("*") if p.is_file() and not p.is_symlink()]
+
+
+def _sidecar(path: Path) -> Path:
+    """The browser chat's metadata file next to an upload (``<id>.json``)."""
+    return path.with_suffix(".json")
+
+
+def purge_uploads(client_id: str, db_path: str | Path | None = None, *, sha256: str | None = None,
+                  now: datetime | None = None) -> list[str]:
+    """Securely delete this client's uploads: the file with ``sha256``, or those past retention.
+
+    Returns the names removed.  Raw statements carry RFC, CURP, CLABE and account
+    numbers; the saved facts and ledger never need the file again.
+    """
+    root = upload_dir(client_id, db_path)
+    removed = []
+    if sha256 is not None:
+        for path in _upload_files(root):
+            if path.suffix == ".json" or path.suffix == ".part":
+                continue
+            try:
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError:
+                continue
+            if digest == sha256:
+                for target in (path, _sidecar(path)):
+                    if target.exists() and secure_delete(target):
+                        removed.append(target.name)
+        return removed
+    days = upload_retention_days()
+    if days is None:
+        return removed
+    cutoff = (now or datetime.now(timezone.utc)).timestamp() - days * 86_400
+    for path in _upload_files(root):
+        try:
+            old = path.stat().st_mtime < cutoff
+        except OSError:
+            continue
+        if old and secure_delete(path):
+            removed.append(path.name)
+    return removed
+
+
+def usable_snapshot(snapshot: dict) -> tuple[dict, list[dict]]:
+    """The snapshot without facts no reader can handle, and those facts named.
+
+    A fact saved before the schema bounded numbers (an amount of 1e308, say)
+    would otherwise break every read of the picture.  It is left out, and
+    listed so the person can correct or remove it.
+    """
+    kept, invalid = [], []
+    for fact in snapshot.get("facts") or []:
+        problem = out_of_range(fact.get("value"), str(fact.get("key")))
+        if problem:
+            invalid.append(_invalid(fact, problem))
+        else:
+            kept.append(fact)
+    return ({**snapshot, "facts": kept} if invalid else snapshot), invalid
+
+
+def _invalid(fact: dict, problem: str) -> dict:
+    return {"key": fact.get("key"), "id": fact.get("id"), "problem": problem,
+            "fix": f"This saved value of {fact.get('key')} cannot be used; correct it or remove it."}
+
+
+def closed_ledger_accounts(ledger: dict | None) -> set[str]:
+    """Ledger accounts whose every entry has been reversed (e.g. removed from the profile)."""
+    entries = (ledger or {}).get("entries") or []
+    reversed_ids = {e.get("reverses_id") for e in entries if e.get("kind") == "reversal"}
+    seen, live = set(), set()
+    for entry in entries:
+        if entry.get("kind") == "reversal":
+            continue
+        seen.add(entry.get("account_id"))
+        if entry.get("id") not in reversed_ids:
+            live.add(entry.get("account_id"))
+    return seen - live
+
+
+def current_ledger(ledger: dict | None) -> dict | None:
+    """The ledger without closed accounts: their history stays stored, but they no longer count."""
+    closed = closed_ledger_accounts(ledger)
+    if not closed:
+        return ledger
+    return {**ledger,
+            "accounts": [a for a in ledger.get("accounts") or [] if a.get("id") not in closed],
+            "entries": [e for e in ledger.get("entries") or [] if e.get("account_id") not in closed],
+            "assertions": [a for a in ledger.get("assertions") or [] if a.get("account_id") not in closed]}
+
+
+def build_situation(snapshot: dict, ledger: dict | None, today, *, since_revision: int | None = None) -> dict:
+    """``situation.build`` that one bad fact cannot take down.
+
+    Facts with numbers no reader can handle are left out up front; if the
+    picture still fails, each fact is tried alone and the ones that fail are
+    left out too.  Every excluded fact is named in ``invalid_facts``.
+    """
+    clean, invalid = usable_snapshot(snapshot)
+    ledger = current_ledger(ledger)
+    try:
+        sit = situation_module.build(clean, ledger, today, since_revision=since_revision)
+    except Exception:
+        bad = []
+        for fact in clean.get("facts") or []:
+            try:
+                situation_module.build({**clean, "facts": [fact]}, None, today)
+            except Exception as exc:  # noqa: BLE001 - isolate the fact, name it, keep the rest
+                bad.append(fact["id"])
+                invalid.append(_invalid(fact, f"{fact['key']} could not be read ({type(exc).__name__})"))
+        if not bad:
+            raise
+        clean = {**clean, "facts": [f for f in clean["facts"] if f["id"] not in bad]}
+        sit = situation_module.build(clean, ledger, today, since_revision=since_revision)
+    sit["invalid_facts"] = invalid
+    return sit
 
 
 def capabilities() -> dict:
@@ -199,15 +339,26 @@ class WealthService:
             snapshot = store.snapshot(client_id)
             ledger = store.ledger(client_id)
             pending = store.contradictions(client_id)
-        sit = situation_module.build(snapshot, ledger, today or datetime.now(timezone.utc).date(),
-                                     since_revision=since_revision)
+        sit = build_situation(snapshot, ledger, today or datetime.now(timezone.utc).date(),
+                              since_revision=since_revision)
         sit["contradictions"] = pending  # questions waiting for the person, in their own wording
         return sit
 
     def remember(self, client_id: str, facts: list[dict], expected_revision: int | None = None,
                  request_id: str | None = None) -> dict:
+        """Save facts; forgetting a statement account (``account.<id>``) also retires its ledger data.
+
+        The account's ledger entries get reversal entries in the same
+        transaction (append-only: the history stays, the numbers stop counting),
+        so the brief, the net worth and ``task=ledger`` agree that it is gone.
+        """
         with WealthStore(self.db_path) as store:
-            return store.remember(client_id, facts, expected_revision, request_id)
+            with store.atomic():
+                receipt = store.remember(client_id, facts, expected_revision, request_id)
+                closed = _retire_forgotten_accounts(store, client_id, receipt)
+        if closed:
+            receipt["ledger"] = closed
+        return receipt
 
     def contradictions(self, client_id: str) -> dict:
         """Pending contradictions between what the person said and newer evidence."""
@@ -326,12 +477,14 @@ class WealthService:
         today = datetime.now(timezone.utc).date().isoformat()
         snapshot = {"client": {"id": None, "revision": None}, "facts": [], "decisions": []}
         ledger = None
+        invalid: list[dict] = []
         if client_id:
             with WealthStore(self.db_path) as store:
                 snapshot = store.snapshot(client_id)
                 if (task in LEDGER_TASKS or task in {"plan", "calendar", "debt_payoff"} or task in POLICY_TASKS) \
                         and "ledger" not in inputs:
-                    ledger = store.ledger(client_id)
+                    ledger = current_ledger(store.ledger(client_id))
+            snapshot, invalid = usable_snapshot(snapshot)
         eligible = [f for f in snapshot["facts"] if f["confidence"] != "inferred"
                     and (not f.get("expires_on") or f["expires_on"] >= today)]
         context = _Context({f["key"]: f["value"] for f in eligible}, overridden=inputs.keys())
@@ -363,7 +516,8 @@ class WealthService:
                 or (task == "calendar" and "income.schedule" not in inputs and not _calendar_schedule(stored.get("income.schedule"))))
             if needs_model:
                 # The canonical model supplies what the person told us; no hand-assembled plan.resources.
-                sit = situation_module.build(snapshot, ledger, today)
+                sit = build_situation(snapshot, ledger, today)
+                invalid += [i for i in sit["invalid_facts"] if i["key"] not in {x["key"] for x in invalid}]
                 derive = situation_module.plan_inputs if task == "plan" else situation_module.calendar_inputs
                 values, derived_missing, derived_assumptions = derive(sit)
                 for key, value in values.items():
@@ -428,6 +582,8 @@ class WealthService:
                 report.setdefault("warnings", []).append(
                     f"{fact['key']} is stale (observed {fact['source']['observed_on']}, review date "
                     f"{fact['expires_on']} passed) and was not used; reconfirm it with the person.")
+        for item in invalid:
+            report.setdefault("warnings", []).append(f"{item['problem']}; it was left out. {item['fix']}")
         if save_as:
             report["request_inputs"] = inputs
         if inputs:
@@ -458,7 +614,7 @@ class WealthService:
         evidence: list[str] = []
         liabilities = inputs.get("liabilities")
         if liabilities is None:
-            sit = situation_module.build(snapshot, ledger, as_of)
+            sit = build_situation(snapshot, ledger, as_of)
             liabilities = [{"id": r["id"], "name": r.get("name") or r["kind"], "balance": r["balance"],
                             "annual_rate": r["annual_rate"], "monthly_payment": r["monthly_payment"],
                             "currency": r["currency"]} for r in sit["liabilities"]
@@ -549,6 +705,7 @@ class WealthService:
             return decision
 
     def forget(self, client_id: str, confirm_client_id: str) -> dict:
+        """Delete the client's rows and securely delete its upload directory (raw statements)."""
         with WealthStore(self.db_path) as store:
             return store.delete_client(client_id, confirm_client_id)
 
@@ -567,6 +724,10 @@ class WealthService:
                     "connector_status": self._ingest_connector_status}
         if action not in handlers:
             raise ValueError(f"action must be one of {', '.join(INGEST_ACTIONS)}")
+        try:
+            purge_uploads(client_id, self.db_path)  # unconfirmed uploads past retention
+        except OSError:
+            pass
         return _call(handlers[action], f"ingest {action}", inputs or {}, client_id=client_id)
 
     def _ingest_state(self, client_id: str, update=None) -> dict:
@@ -605,6 +766,10 @@ class WealthService:
         if pid and isinstance(result.get("household"), dict):
             # What the statement means next to what the person already told us (deterministic).
             shown["result"]["insights"] = situation_module.statement_insights(result, self.situation(client_id))
+            from .ingest_posting import missing_positions
+            with WealthStore(self.db_path) as store:
+                gone = missing_positions(proposal, current_ledger(store.ledger(client_id)))
+            shown["result"]["reconciliation"] = {"missing_positions": gone}
         if extraction_id:
             shown["result"]["extraction_id"] = extraction_id
         if pid:
@@ -659,69 +824,139 @@ class WealthService:
 
     def _ingest_confirm(self, client_id: str, proposal_id: str, acknowledge_discrepancies: bool = False,
                         expires_on: str | None = None) -> dict:
+        """Save a held proposal: facts, ledger lines, reconciliation and proposal state in one transaction.
+
+        Idempotent: a confirm that already succeeded (including one that won a
+        race with this call) returns the same receipt with ``replayed=true``;
+        one that failed part-way left nothing behind, so it can simply be retried.
+        Other writes in the meantime do not conflict with it.
+        """
         from . import ledger as ledger_module
         from .connectors import batch_mapper
         from .ingest import proposal_to_facts
-        from .ingest_posting import proposal_to_batch
+        from .ingest_posting import describe_changes, is_newest, missing_positions, proposal_to_batch, reconciliation_lines
         if not isinstance(acknowledge_discrepancies, bool):
             raise ValueError("acknowledge_discrepancies must be true or false")
-        state = self._ingest_state(client_id)
-        done = (state.get("confirmed") or {}).get(proposal_id)
-        if done is not None:
-            return {**done["report"], "replayed": True}
-        stored = (state.get("pending") or {}).get(proposal_id)
-        if stored is None:
-            raise ValueError("proposal_id is unknown or expired; ingest the file or chat again and show the new summary")
-        proposal = stored["proposal"]
-        packet = proposal_to_facts(proposal, confirmed=True, proposal_id=proposal_id,
-                                   acknowledge_discrepancies=acknowledge_discrepancies, expires_on=expires_on)
-        if packet["status"] != "ready":
-            return packet
-        facts = packet["result"]["facts"]
-        batch_id = "ingest:" + proposal_id
         today = datetime.now(timezone.utc).date()
         with WealthStore(self.db_path) as store:
-            snapshot = store.snapshot(client_id)
-            before = situation_module.build(snapshot, store.ledger(client_id), today)
-            revision = snapshot["client"]["revision"]
-            saved = store.remember(client_id, facts, revision, packet["result"]["request_id"])
-            mapper = batch_mapper(proposal) or proposal_to_batch
-            mapping = mapper(proposal, batch_id=batch_id, ledger=store.ledger(client_id))
-            receipt = ledger_module.post(store, client_id, mapping["batch"]) if mapping["batch"] else None
-            after = situation_module.build(store.snapshot(client_id), store.ledger(client_id), today)
-        ledger_view = _ledger_summary(receipt, mapping)
-        summary = [f"Saved {len(facts)} record{'s' if len(facts) != 1 else ''} dated {proposal['result']['as_of']}."]
-        if receipt is not None:
-            summary.append(ledger_view["plain"])
-        report = {
-            "status": "saved",
-            "result": {
-                "summary": " ".join(summary),
-                "saved": {"keys": [w["key"] for w in saved["written"]], "client_revision": saved["client"]["revision"],
-                          "expires_on": packet["result"]["expires_on"]},
-                "needs_user": saved["needs_user"],
-                "ledger": ledger_view,
-                "statement_prices": mapping["prices"],
-                "picture_after": situation_module.picture_delta(before, after, after["profile"].get("language")),
-                "next_step": ("To value these holdings, run task=ledger view=household with currency and "
-                              "prices=result.statement_prices, then task=exposure with that household."),
-            },
-            "missing": [], "warnings": packet["warnings"] + saved.get("warnings", []) + mapping["notes"],
-            "sources": packet["sources"], "assumptions": packet["assumptions"],
-        }
-        now = datetime.now(timezone.utc).isoformat()
+            with store.atomic():
+                state = store.auxiliary(client_id, "ingest")
+                done = (state.get("confirmed") or {}).get(proposal_id)
+                if done is not None:
+                    return {**done["report"], "replayed": True}
+                stored = (state.get("pending") or {}).get(proposal_id)
+                if stored is None:
+                    raise ValueError("proposal_id is unknown or expired; ingest the file or chat again and show "
+                                     "the new summary")
+                proposal = stored["proposal"]
+                packet = proposal_to_facts(proposal, confirmed=True, proposal_id=proposal_id,
+                                           acknowledge_discrepancies=acknowledge_discrepancies, expires_on=expires_on)
+                if packet["status"] != "ready":
+                    return packet
+                facts = packet["result"]["facts"]
+                batch_id = "ingest:" + proposal_id
+                snapshot = store.snapshot(client_id)
+                ledger_before = store.ledger(client_id)
+                before = build_situation(snapshot, ledger_before, today)
+                # The write lock is held, so the revision just read is current: statement keys are
+                # replaced without a conflict from writes that happened since the proposal was made.
+                saved = store.remember(client_id, facts, snapshot["client"]["revision"],
+                                       packet["result"]["request_id"])
+                gone = missing_positions(proposal, ledger_before)
+                mapper = batch_mapper(proposal) or proposal_to_batch
+                mapping = mapper(proposal, batch_id=batch_id, ledger=ledger_before)
+                receipt = ledger_module.post(store, client_id, mapping["batch"]) if mapping["batch"] else None
+                changes = []
+                if receipt is not None and (receipt.get("reconciliation") or {}).get("breaks"):
+                    changes = self._reconcile_to_statement(store, client_id, proposal, mapping, receipt,
+                                                           ledger_before, batch_id, is_newest, reconciliation_lines)
+                after = build_situation(store.snapshot(client_id), store.ledger(client_id), today)
+                ledger_view = _ledger_summary(receipt, mapping)
+                if changes:
+                    ledger_view["adjustments"] = changes
+                    ledger_view["plain"] += (" Reconciled to the statement with labelled adjustments: "
+                                             + describe_changes(changes) + ".")
+                summary = [f"Saved {len(facts)} record{'s' if len(facts) != 1 else ''} dated "
+                           f"{proposal['result']['as_of']}."]
+                if receipt is not None:
+                    summary.append(ledger_view["plain"])
+                if gone:
+                    summary.append("No longer on this statement: " + ", ".join(
+                        f"{g['symbol']} ({g['quantity']} units)" for g in gone) + ".")
+                report = {
+                    "status": "saved",
+                    "result": {
+                        "summary": " ".join(summary),
+                        "saved": {"keys": [w["key"] for w in saved["written"]],
+                                  "client_revision": saved["client"]["revision"],
+                                  "expires_on": packet["result"]["expires_on"]},
+                        "needs_user": saved["needs_user"],
+                        "ledger": ledger_view,
+                        "reconciliation": {"adjustments": changes, "missing_positions": gone},
+                        "statement_prices": mapping["prices"],
+                        "picture_after": situation_module.picture_delta(before, after,
+                                                                        after["profile"].get("language")),
+                        "next_step": ("To value these holdings, run task=ledger view=household with currency and "
+                                      "prices=result.statement_prices, then task=exposure with that household."),
+                    },
+                    "missing": [], "warnings": packet["warnings"] + saved.get("warnings", []) + mapping["notes"],
+                    "sources": packet["sources"], "assumptions": packet["assumptions"],
+                }
+                now = datetime.now(timezone.utc).isoformat()
 
-        def update(old):
-            state = {k: dict(old.get(k) or {}) for k in ("pending", "extractions", "confirmed")}
-            state["pending"].pop(proposal_id, None)
-            state["confirmed"][proposal_id] = {"proposal": proposal, "created_at": now, "batch": mapping["batch"],
-                                               "held": ledger_view["held"], "report": report}
-            state["confirmed"] = dict(sorted(state["confirmed"].items(),
-                                             key=lambda item: item[1].get("created_at", ""))[-_KEEP_PROPOSALS:])
-            return state
+                def update(old):
+                    state = {k: dict(old.get(k) or {}) for k in ("pending", "extractions", "confirmed")}
+                    state["pending"].pop(proposal_id, None)
+                    state["confirmed"][proposal_id] = {"proposal": proposal, "created_at": now,
+                                                       "batch": mapping["batch"], "held": ledger_view["held"],
+                                                       "report": report}
+                    state["confirmed"] = dict(sorted(state["confirmed"].items(),
+                                                     key=lambda item: item[1].get("created_at", ""))[-_KEEP_PROPOSALS:])
+                    return state
 
-        self._ingest_state(client_id, update)
+                store.update_auxiliary(client_id, "ingest", update)
+        sha = ((proposal.get("result") or {}).get("provenance") or {}).get("sha256")
+        if sha and purge_on_confirm():
+            try:
+                report["result"]["upload_removed"] = bool(purge_uploads(client_id, self.db_path, sha256=sha))
+            except OSError:
+                report["result"]["upload_removed"] = False
         return report
+
+    @staticmethod
+    def _reconcile_to_statement(store, client_id, proposal, mapping, receipt, ledger_before, batch_id,
+                                is_newest, reconciliation_lines) -> list[dict]:
+        """Post labelled adjustments for balance checks the statement's own lines do not explain.
+
+        Only for accounts the ledger already had, when this statement is at least
+        as new as anything the ledger knows about them, and when none of their
+        lines are held as possible duplicates (those may explain the gap).
+        """
+        from . import ledger as ledger_module
+        as_of = proposal["result"]["as_of"]
+        known = {e["account_id"] for e in ledger_before.get("entries") or []}
+        held_lines = {item["line"] for item in receipt.get("held") or []}
+        held_accounts = {line.get("account_id") for index, line in enumerate(mapping["batch"]["transactions"])
+                         if index in held_lines}
+        accounts = {a["id"] for a in mapping["batch"]["accounts"]
+                    if a["id"] in known and a["id"] not in held_accounts and is_newest(ledger_before, a["id"], as_of)}
+        if not accounts:
+            return []
+        ledger_now = store.ledger(client_id)
+        instruments = {i["id"]: i for i in ledger_now.get("instruments") or []}
+        lines, changes = reconciliation_lines(receipt["reconciliation"]["breaks"], accounts, instruments)
+        if not lines:
+            return []
+        source = dict(mapping["batch"]["source"])
+        ledger_module.post(store, client_id, {"batch_id": batch_id + ":reconcile", "source": source,
+                                              "transactions": lines})
+        asserted = set(receipt["assertions"]["added"]) | set(receipt["assertions"]["existing"])
+        ledger_now = store.ledger(client_id)
+        check = ledger_module.reconcile(dict(ledger_now, assertions=[a for a in ledger_now["assertions"]
+                                                                     if a["id"] in asserted]))
+        receipt["reconciliation"] = {"status": check["status"], "breaks": check["result"]["breaks"],
+                                     "checks": len(check["result"]["checks"])}
+        return changes
 
     def _ingest_confirm_duplicates(self, client_id: str, proposal_id: str, entry_ids: list) -> dict:
         from . import ledger as ledger_module
@@ -827,6 +1062,42 @@ class WealthService:
                 "result": {"proposal_id": proposal_id, "previous_proposal_id": previous_id, "changes": changes},
                 "missing": [], "warnings": [] if previous_id else ["No earlier confirmed statement covers these accounts; every item is new."],
                 "sources": [], "assumptions": []}
+
+
+def _retire_forgotten_accounts(store: WealthStore, client_id: str, receipt: dict) -> dict | None:
+    """Reverse the ledger entries of statement accounts this write forgot (inside the caller's transaction)."""
+    from . import ledger as ledger_module
+    forgotten = [w for w in receipt.get("written") or []
+                 if w.get("action") == "forget" and w["key"].startswith("account.") and w["key"].count(".") == 1]
+    if not forgotten:
+        return None
+    account_ids = {}
+    for write in forgotten:
+        account_id = write["key"].split(".", 1)[1]
+        for row in reversed(store.history(client_id, write["key"])):
+            value = row.get("value")
+            if isinstance(value, dict) and isinstance(value.get("account"), dict) and value["account"].get("id"):
+                account_id = value["account"]["id"]
+                break
+        account_ids[account_id] = write
+    ledger = store.ledger(client_id)
+    entries = ledger.get("entries") or []
+    reversed_ids = {e.get("reverses_id") for e in entries if e.get("kind") == "reversal"}
+    today = datetime.now(timezone.utc).date().isoformat()
+    result = {"reversed": 0, "accounts": sorted(account_ids)}
+    for account_id, write in sorted(account_ids.items()):
+        lines = [{"kind": "reversal", "account_id": account_id, "date": max(today, e["date"]),
+                  "reverses_id": e["id"], "description": "Account removed from the profile"}
+                 for e in entries if e.get("account_id") == account_id and e.get("kind") != "reversal"
+                 and e["id"] not in reversed_ids]
+        if not lines:
+            continue
+        posted = ledger_module.post(store, client_id, {
+            "batch_id": f"forget:{write['key']}:{write['id']}",
+            "source": {"kind": "user", "ref": f"removed {write['key']} from the profile", "observed_on": today},
+            "transactions": lines})
+        result["reversed"] += len(posted["posted"])
+    return result
 
 
 def _ledger_summary(receipt: dict | None, mapping: dict) -> dict:
