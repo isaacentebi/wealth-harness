@@ -284,6 +284,8 @@ def _instrument(name: str, lang: str) -> str:
 def _clean_symbol(name: str) -> str:
     """'S UDIBONO 351122' -> 'Udibono 351122': a series letter and shouting are not how people say it."""
     name = re.sub(r"^[SMB]\s+(?=(?:UDIBONO|BONO|CETES)\b)", "", str(name).strip())
+    # Government series are named by maturity (YYMMDD); people say the year: "Udibono 2035".
+    name = re.sub(r"\b(UDIBONO|BONO)\s+(\d{2})\d{4}\b", lambda m: f"{m.group(1)} 20{m.group(2)}", name)
     return re.sub(r"\b(UDIBONO|BONO|CETES)\b", lambda m: m.group(1).capitalize() if m.group(1) != "CETES" else "Cetes", name)
 
 

@@ -394,7 +394,7 @@ def test_memory_reads_as_grouped_sentences_with_quiet_origins(tmp_path, monkeypa
     assert cash["origin"] == {"kind": "said"} and cash["edit"] == {
         "field": "cash:cash0", "kind": "amount", "amount": 150000, "currency": "MXN"}
     assert [f["text"] for f in groups["invest"]["facts"]] == [
-        "Tu posición más grande es el Udibono 351122: 36% de lo que tienes invertido.",
+        "Tu posición más grande es el Udibono 2035: 36% de lo que tienes invertido.",
         "Tienes el S&P 500 dos veces: a través de CSPX y IVV."]
     # The contradiction is one card, worded from the person's side, with the statement's figure ready.
     (card,) = memory["conflicts"]

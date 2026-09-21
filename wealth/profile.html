@@ -512,13 +512,19 @@
       if (o.kind === 'statement') {
         parts.push(o.institution ? t('o_statement', { i: o.institution }) : t('o_statement_any'));
         if (o.as_of) parts.push(t('o_asof', { d: short(o.as_of) }));
-      } else parts.push(t('o_' + (o.kind || 'calculated')));
+      } else if (o.kind !== 'said') parts.push(t('o_' + (o.kind || 'calculated')));
+      // Something the person told us recently needs no attribution; say where it came from only when it helps.
       if (item.since) parts.push(t('since', { d: monthYear(item.since, 'long') }));
-      else if (o.kind !== 'statement' && isNum(item.age_days) && item.age_days >= 30) parts.push(ago(item.age_days));
+      else if (o.kind !== 'statement' && isNum(item.age_days) && item.age_days >= 30) {
+        if (o.kind === 'said') parts.push(t('o_said'));
+        parts.push(ago(item.age_days));
+      }
       return parts;
     }
     function cue(item) {
-      const [first, ...rest] = cueText(item);
+      const parts = cueText(item);
+      if (!parts.length) return null;
+      const [first, ...rest] = parts;
       const guess = item.origin?.kind === 'guess';
       const label = [guess ? h('em', { text: first }) : first, rest.length ? ' · ' + rest.join(' · ') : ''];
       return h('div', { class: 'cue' },
