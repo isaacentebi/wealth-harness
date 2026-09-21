@@ -11,14 +11,13 @@ for discussion, not an instruction.
 from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
-from calendar import monthrange
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any, Mapping
 
 from .ledger.derive import FxTable, active_entries, envelope
 from .ledger.model import LedgerInputError, currency as _currency, dec, iso, money, out, text
-from .ledger.performance import xirr
+from .finmath import add_months, xirr
 
 
 FACT_KEY = "planning.dca"
@@ -90,9 +89,7 @@ def plan_fact(plan: Mapping[str, Any], observed_on: str, *, source_ref: str = "c
 
 
 def _add_months(start: date, months: int, day: int) -> date:
-    year, month = divmod(start.month - 1 + months, 12)
-    year, month = start.year + year, month + 1
-    return date(year, month, min(day, monthrange(year, month)[1]))
+    return add_months(start, months, day)
 
 
 def schedule(plan: Mapping[str, Any], through: str, *, extra: int = 0) -> list[str]:

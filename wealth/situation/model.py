@@ -19,8 +19,16 @@ all start from its result.  Rules (documented once, applied everywhere):
   months of bank activity; otherwise from what the person stated.
 * Annual and one-off income is listed as ``extras`` and kept out of the
   monthly surplus.
-* Conversion uses stored rates only (ledger, statement and household FX).  An
-  amount without a rate stays in ``unconverted``; unknown is never zero.
+* Conversion uses stored rates only (ledger, statement and household FX): the
+  newest of the pair and its inverse, no older than ``SITUATION_FX_MAX_AGE_DAYS``
+  (:class:`wealth.finmath.FxTable`).  An amount without a rate stays in
+  ``unconverted`` and every total that needs it is unknown or marked
+  incomplete with the missing pair named; unknown is never zero.
+* Spending whose essentiality is unknown counts as essential
+  (:data:`wealth.finmath.ESSENTIAL_RULE`), as in the cash-flow report.
+* A stated balance and a statement for the same institution (matched loosely:
+  aliases, accents, legal suffixes) are never both counted.  The statement
+  wins unless the person chose to keep their figure (``snapshot["kept"]``).
 """
 from __future__ import annotations
 
@@ -30,21 +38,39 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Iterable, Mapping
 
+from .. import finmath
 from .schema import country_code
 
 # ------------------------------------------------------------------ constants
 
 SPENDING_LEDGER_MIN_MONTHS = 2
+# Stored rates are statement or ledger rates, usually a few weeks old; one statement cycle.
+SITUATION_FX_MAX_AGE_DAYS = 35
 CONCENTRATION_SHARE = Decimal("0.25")
 CASH_DRAG_SHARE = Decimal("0.10")
-_FREQ_PER_MONTH = {"monthly": Decimal(1), "biweekly": Decimal(26) / Decimal(12), "annual": Decimal(1) / Decimal(12)}
-_CADENCE_PER_MONTH = {"weekly": Decimal(52) / Decimal(12), "biweekly": Decimal(26) / Decimal(12),
-                      "monthly": Decimal(1), "quarterly": Decimal(1) / Decimal(3)}
+_INVESTMENT_ACCOUNT_TYPES = {"brokerage", "taxable", "retirement", "afore", "ppr", "ira", "401k", "investment"}
 _COUNTRY_CURRENCY = {"MX": "MXN", "US": "USD", "CA": "CAD", "ES": "EUR"}
 _ILLIQUID_TYPES = {"retirement", "afore", "pension", "ira", "401k", "real_estate", "ppr"}
-_LIABILITY_ALIASES = {"car": "auto", "auto": "auto", "vehicle": "auto", "coche": "auto", "carro": "auto",
-                      "mortgage": "mortgage", "hipoteca": "mortgage", "card": "card", "credit_card": "card",
-                      "tarjeta": "card", "personal": "personal", "student": "student", "other": "other"}
+# Checked in order against whole words, so "credit_card" is a card and never a car.
+_LIABILITY_ALIASES = (("credit card", "card"), ("tarjeta de credito", "card"), ("card", "card"), ("tarjeta", "card"),
+                      ("tdc", "card"), ("mortgage", "mortgage"), ("hipoteca", "mortgage"), ("hipotecario", "mortgage"),
+                      ("auto", "auto"), ("car", "auto"), ("vehicle", "auto"), ("coche", "auto"), ("carro", "auto"),
+                      ("automotriz", "auto"), ("personal", "personal"), ("student", "student"), ("other", "other"))
+# Institutions people name in different ways (normalised: lower case, no accents or punctuation).
+_INSTITUTION_ALIASES = {
+    "schwab": ("schwab", "charles schwab"),
+    "bbva": ("bbva", "bbva mexico", "bbva bancomer", "bancomer"),
+    "gbm": ("gbm", "gbm+", "gbm plus", "grupo bursatil mexicano", "gbm homebroker"),
+    "nu": ("nu", "nu mexico", "nubank"),
+    "ibkr": ("ibkr", "interactive brokers"),
+    "banorte": ("banorte", "grupo financiero banorte"),
+    "santander": ("santander", "banco santander"),
+    "citibanamex": ("citibanamex", "banamex"),
+    "fidelity": ("fidelity", "fidelity investments"),
+    "vanguard": ("vanguard",),
+}
+_INSTITUTION_NOISE = {"inc", "co", "corp", "llc", "ltd", "sa", "de", "cv", "sab", "the", "and", "y", "bank", "banco",
+                      "casa", "bolsa", "grupo", "financiero", "mexico", "institucion", "banca", "multiple"}
 # Funds and listings that track the same index, keyed by symbol (upper case, series dropped).
 UNDERLYING = {
     "IVV": "S&P 500", "CSPX": "S&P 500", "VOO": "S&P 500", "SPY": "S&P 500", "SPLG": "S&P 500",
@@ -112,11 +138,35 @@ def humanize(text: str) -> str:
 
 
 def add_months(day: date, months: int) -> date:
-    total = day.year * 12 + day.month - 1 + months
-    year, month = divmod(total, 12)
-    last = [31, 29 if year % 4 == 0 and (year % 100 or year % 400 == 0) else 28, 31, 30, 31, 30,
-            31, 31, 30, 31, 30, 31][month]
-    return date(year, month + 1, min(day.day, last))
+    return finmath.add_months(day, months)
+
+
+def _fold(text: str) -> str:
+    import unicodedata
+    plain = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode().lower()
+    return " ".join(re.sub(r"[^a-z0-9+]+", " ", plain).split())
+
+
+def institution_key(name: Any) -> tuple[str | None, frozenset[str]]:
+    """(canonical alias or None, significant tokens) for loose institution matching."""
+    if not isinstance(name, str) or not name.strip():
+        return None, frozenset()
+    folded = _fold(name)
+    padded = f" {folded} "
+    canonical = next((key for key, names in _INSTITUTION_ALIASES.items()
+                      if any(f" {alias} " in padded for alias in names)), None)
+    tokens = frozenset(t for t in folded.replace("+", " ").split() if t not in _INSTITUTION_NOISE)
+    return canonical, tokens or frozenset(folded.split())
+
+
+def same_institution(a: Any, b: Any) -> bool:
+    """Whether two institution names are the same firm: alias, equal, or one's words contain the other's."""
+    (alias_a, tokens_a), (alias_b, tokens_b) = institution_key(a), institution_key(b)
+    if not tokens_a or not tokens_b:
+        return False
+    if alias_a or alias_b:
+        return alias_a == alias_b
+    return tokens_a <= tokens_b or tokens_b <= tokens_a
 
 
 # ------------------------------------------------------------------ facts
@@ -178,34 +228,27 @@ class _Facts:
 
 
 class _FX:
-    """Stored rates only; the latest on or before today wins."""
+    """Stored rates only, as of today (:class:`wealth.finmath.FxTable`); records the rates used."""
 
-    def __init__(self, today: date):
+    def __init__(self, today: date, max_age_days: int | None = SITUATION_FX_MAX_AGE_DAYS):
         self.today = today
-        self.rates: dict[tuple[str, str], tuple[str, Decimal, str]] = {}
-        self.used: dict[tuple[str, str], tuple[str, Decimal, str]] = {}
+        self.table = finmath.FxTable(max_age_days=max_age_days)
+        self.used: dict[tuple[str, str], tuple[str, Decimal, str | None]] = {}
 
     def add(self, base: Any, quote: Any, rate: Any, on: Any, source: str) -> None:
-        value, when = D(rate), _as_date(on)
-        if not (isinstance(base, str) and isinstance(quote, str)) or value is None or value <= 0:
+        when = _as_date(on) or self.today
+        if when > self.today:
             return
-        day = (when or self.today).isoformat()
-        if day > self.today.isoformat():
-            return
-        current = self.rates.get((base, quote))
-        if current is None or day > current[0]:
-            self.rates[(base, quote)] = (day, value, source)
+        self.table.add(base, quote, D(rate), when, source)
 
     def rate(self, base: str, quote: str) -> Decimal | None:
-        if base == quote:
-            return Decimal(1)
-        if (base, quote) in self.rates:
-            self.used[(base, quote)] = self.rates[(base, quote)]
-            return self.rates[(base, quote)][1]
-        if (quote, base) in self.rates:
-            self.used[(quote, base)] = self.rates[(quote, base)]
-            return Decimal(1) / self.rates[(quote, base)][1]
-        return None
+        found = self.table.quote(base, quote, self.today)
+        if found is None:
+            return None
+        if base != quote:
+            stored = found.rate if found.pair == (base, quote) else Decimal(1) / found.rate
+            self.used[found.pair] = (found.date, stored, found.source)
+        return found.rate
 
     def convert(self, amount: Decimal | None, currency: str | None, to: str | None) -> Decimal | None:
         if amount is None or not currency or not to:
@@ -323,7 +366,7 @@ def _income_view(items: list[dict], fx: _FX, currency: str | None) -> dict:
     rows, extras, monthly, unconverted = [], [], Decimal(0), []
     for item in items:
         amount, freq = D(item.get("amount")), item.get("frequency")
-        per_month = amount * _FREQ_PER_MONTH[freq] if amount is not None and freq in ("monthly", "biweekly") else None
+        per_month = finmath.per_month(amount, freq) if freq in ("monthly", "biweekly") else None
         row = {"id": item["id"], "key": item["key"], "name": item.get("name"), "kind": item.get("kind"),
                "amount": num(amount), "currency": item.get("currency"), "frequency": freq,
                "net": item.get("net") if isinstance(item.get("net"), bool) else None,
@@ -344,36 +387,48 @@ def _income_view(items: list[dict], fx: _FX, currency: str | None) -> dict:
 
 
 def _ledger_spending(ledger: Mapping[str, Any] | None, currency: str | None, today: date) -> dict | None:
-    """Average monthly spending from the ledger when it covers two full months of bank activity."""
+    """Average monthly spending from the ledger when it covers two full months of bank activity.
+
+    The ledger wins only when bank or card accounts actually show spending in
+    at least two months of the window; a ledger holding only brokerage
+    statements says nothing about spending (it is not zero).
+    """
     if not ledger or not currency or not ledger.get("entries"):
         return None
-    brokerage = {a.get("id") for a in ledger.get("accounts") or [] if a.get("type") in {"brokerage", "retirement"}}
-    days = sorted(e["date"] for e in ledger["entries"] if e.get("kind") in {"expense", "income", "fee", "opening_balance"}
-                  and e.get("account_id") not in brokerage and isinstance(e.get("date"), str))
+    investment = {a.get("id") for a in ledger.get("accounts") or [] if a.get("type") in _INVESTMENT_ACCOUNT_TYPES}
+    spending_entries = [e for e in ledger["entries"] if e.get("account_id") not in investment and isinstance(e.get("date"), str)]
+    days = sorted(e["date"] for e in spending_entries if e.get("kind") in {"expense", "income", "fee", "opening_balance"})
     if not days:
         return None
     first, last = date.fromisoformat(days[0]), min(date.fromisoformat(days[-1]), today)
     start = first if first.day == 1 else add_months(first.replace(day=1), 1)
     end_exclusive = (last + timedelta(days=1)).replace(day=1) if (last + timedelta(days=1)).day == 1 else last.replace(day=1)
-    months = (end_exclusive.year - start.year) * 12 + end_exclusive.month - start.month
+    months = finmath.months_between(start, end_exclusive)
     if months < SPENDING_LEDGER_MIN_MONTHS:
+        return None
+    end = (end_exclusive - timedelta(days=1)).isoformat()
+    spent_months = {e["date"][:7] for e in spending_entries
+                    if e.get("kind") in {"expense", "fee"} and start.isoformat() <= e["date"] <= end}
+    if len(spent_months) < SPENDING_LEDGER_MIN_MONTHS:
         return None
     try:
         from ..cashflow import spending_report
-        report = spending_report(ledger, start.isoformat(), (end_exclusive - timedelta(days=1)).isoformat(), currency)
+        report = spending_report(ledger, start.isoformat(), end, currency)
     except Exception:  # an unreadable ledger falls back to stated spending
         return None
     result = report.get("result") or {}
     total, month_rows = D(result.get("total")), result.get("months") or {}
     if total is None or not month_rows:
         return None
-    essential = sum((D(m.get("essential")) or Decimal(0) for m in month_rows.values()), Decimal(0)) / len(month_rows)
-    discretionary = sum((D(m.get("discretionary")) or Decimal(0) for m in month_rows.values()), Decimal(0)) / len(month_rows)
-    unknown = sum((D(m.get("unknown_essentiality")) or Decimal(0) for m in month_rows.values()), Decimal(0))
-    return {"total": total / len(month_rows), "essential": essential if not unknown else None,
-            "discretionary": discretionary if not unknown else None, "currency": currency,
-            "months": len(month_rows), "start": start.isoformat(),
-            "end": (end_exclusive - timedelta(days=1)).isoformat(), "partial": report.get("status") != "ready"}
+    count = len(month_rows)
+    essential = sum((finmath.essential_spending(D(m.get("essential")) or Decimal(0), D(m.get("unknown_essentiality")) or Decimal(0))
+                     for m in month_rows.values()), Decimal(0)) / count
+    discretionary = sum((D(m.get("discretionary")) or Decimal(0) for m in month_rows.values()), Decimal(0)) / count
+    missing_fx = sorted({m["key"].split("@")[0][3:] for m in report.get("missing") or []
+                         if isinstance(m, dict) and str(m.get("key", "")).startswith("fx.")})
+    return {"total": total / count, "essential": essential, "discretionary": discretionary, "currency": currency,
+            "months": count, "start": start.isoformat(), "end": end, "partial": report.get("status") != "ready",
+            "missing_fx": missing_fx}
 
 
 def _spending(facts: _Facts, ledger: Mapping[str, Any] | None, fx: _FX, currency: str | None, today: date) -> dict:
@@ -392,28 +447,34 @@ def _spending(facts: _Facts, ledger: Mapping[str, Any] | None, fx: _FX, currency
             "plan.resources", True
         facts.used["plan.resources"] = facts.all["plan.resources"].get("id")
     view = {"source": None, "key": key, "currency": currency, "total": None, "essential": None,
-            "discretionary": None, "approximate": False, "legacy": legacy, "stated": None, "ledger_months": None}
+            "discretionary": None, "approximate": False, "legacy": legacy, "stated": None, "ledger_months": None,
+            "complete": True, "missing_fx": [], "essential_rule": finmath.ESSENTIAL_RULE}
     if stated:
         cur = stated.get("currency")
         conv = {n: fx.convert(D(stated.get(n)), cur, currency) for n in ("total", "essential", "discretionary")}
         if conv["total"] is None and conv["essential"] is not None and conv["discretionary"] is not None:
             conv["total"] = conv["essential"] + conv["discretionary"]
         view["stated"] = {n: num(D(stated.get(n))) for n in ("total", "essential", "discretionary")} | {"currency": cur}
+        if cur and currency and any(D(stated.get(n)) is not None and conv[n] is None
+                                    for n in ("total", "essential", "discretionary")):
+            view["missing_fx"] = [f"{cur}/{currency}"]
         view.update(source="stated", approximate=bool(stated.get("approximate")),
                     total=num(conv["total"]), essential=num(conv["essential"]), discretionary=num(conv["discretionary"]))
     if from_ledger:
         view.update(source="ledger", total=num(from_ledger["total"]), essential=num(from_ledger["essential"]),
                     discretionary=num(from_ledger["discretionary"]), approximate=False,
-                    ledger_months=from_ledger["months"], ledger_period=[from_ledger["start"], from_ledger["end"]])
+                    ledger_months=from_ledger["months"], ledger_period=[from_ledger["start"], from_ledger["end"]],
+                    missing_fx=from_ledger["missing_fx"], complete=not from_ledger["missing_fx"])
     # The amount used for the monthly flow and for reserve months.
+    view["complete"] = not view["missing_fx"]
     view["monthly"] = view["total"] if view["total"] is not None else view["essential"]
     view["monthly_basis"] = "total" if view["total"] is not None else "essential" if view["essential"] is not None else None
     view["essential_for_reserve"] = view["essential"] if view["essential"] is not None else view["total"]
     return view
 
 
-def _covered(institution: str | None, statements: set[str]) -> bool:
-    return bool(institution) and institution.strip().lower() in statements
+def _covered(institution: str | None, statements: Iterable[str]) -> bool:
+    return bool(institution) and any(same_institution(institution, name) for name in statements)
 
 
 def _cash(facts: _Facts) -> tuple[list[dict], str | None]:
@@ -445,9 +506,9 @@ def _cash(facts: _Facts) -> tuple[list[dict], str | None]:
 def _liability_kind(value: Any, name: Any = None) -> str:
     for text in (value, name):
         if isinstance(text, str):
-            lowered = text.lower()
-            for alias, kind in _LIABILITY_ALIASES.items():
-                if alias in lowered:
+            words = f" {_fold(text.replace('_', ' '))} "
+            for alias, kind in _LIABILITY_ALIASES:
+                if f" {alias} " in words:
                     return kind
     return "other"
 
@@ -512,6 +573,32 @@ def _liabilities(facts: _Facts, statement_accounts: list[dict]) -> tuple[list[di
     return items, legacy_from
 
 
+def _lender(item: Mapping[str, Any]) -> str | None:
+    for field in ("lender", "institution"):
+        if isinstance(item.get(field), str) and item[field].strip():
+            return item[field]
+    return None
+
+
+def _dedupe_liabilities(items: list[dict]) -> tuple[list[dict], list[tuple[dict, dict]]]:
+    """Drop a stated debt that a statement from the same lender and of the same kind already shows.
+
+    Returns the items to count and (stated, statement) pairs that were merged.
+    """
+    statements = [i for i in items if i.get("source") in ("statement", "household") and _lender(i)]
+    kept, merged = [], []
+    for item in items:
+        if item.get("source") == "stated" and _lender(item):
+            kind = _liability_kind(item.get("kind"), item.get("name"))
+            match = next((st for st in statements if same_institution(_lender(item), _lender(st))
+                          and (st.get("kind") or "other") == kind), None)
+            if match is not None:
+                merged.append((item, match))
+                continue
+        kept.append(item)
+    return kept, merged
+
+
 def payoff(balance: Decimal | None, annual_rate: Decimal | None, monthly_payment: Decimal | None,
            today: date, *, max_months: int = 600) -> dict:
     """Months, date and interest to repay ``balance`` at a fixed monthly payment."""
@@ -530,7 +617,7 @@ def payoff(balance: Decimal | None, annual_rate: Decimal | None, monthly_payment
         months += 1
     if remaining > 0:
         return {"status": "never", "detail": f"not repaid within {max_months} months"}
-    interest += remaining  # the last payment is smaller
+    # The last payment is smaller (what is left plus that month's interest); the interest is unchanged.
     return {"status": "ready", "months": months, "date": add_months(today, months).isoformat()[:7],
             "interest": num(interest)}
 
@@ -548,11 +635,11 @@ def annuity_payment(balance: Decimal, annual_rate: Decimal, months: int) -> Deci
 def _liability_view(item: dict, fx: _FX, currency: str | None, today: date) -> dict:
     balance, rate = D(item.get("balance")), D(item.get("annual_rate"))
     payment, freq = D(item.get("payment")), item.get("payment_frequency")
-    monthly = payment * _FREQ_PER_MONTH[freq] if payment is not None and freq in _FREQ_PER_MONTH else None
+    monthly = finmath.per_month(payment, freq) if freq in ("monthly", "biweekly", "annual") else None
     term = item.get("remaining_term_months")
     maturity = _as_date(item.get("maturity"))
     if term is None and maturity and maturity > today:
-        term = (maturity.year - today.year) * 12 + maturity.month - today.month
+        term = finmath.months_between(today, maturity)
     payment_basis = "stated" if monthly is not None else None
     if monthly is None and balance is not None and rate is not None and isinstance(term, int) and term > 0:
         monthly, payment_basis = annuity_payment(balance, rate, term), "from remaining term"
@@ -584,6 +671,29 @@ def _account_label(account: dict, duplicates: set[tuple]) -> str:
     return label
 
 
+def _same_account(household_account: Mapping[str, Any], statement: Mapping[str, Any]) -> bool:
+    """A legacy household account and a statement account that describe the same account.
+
+    Same institution (loosely), and type and currency equal or unknown on one side.
+    Account types compare by family (a brokerage is a taxable investment account).
+    """
+    if not same_institution(household_account.get("institution") or household_account.get("name"),
+                            statement.get("institution")):
+        return False
+
+    def family(kind: Any) -> str | None:
+        if not isinstance(kind, str) or not kind:
+            return None
+        kind = kind.lower()
+        return "investment" if kind in _INVESTMENT_ACCOUNT_TYPES - {"retirement", "afore", "ppr", "ira", "401k"} else kind
+
+    a, b = family(household_account.get("type")), family(statement.get("type"))
+    if a and b and a != b:
+        return False
+    ca, cb = household_account.get("currency"), statement.get("currency")
+    return not (ca and cb and ca != cb)
+
+
 def _statement_accounts(facts: _Facts, ledger: Mapping[str, Any] | None) -> list[dict]:
     accounts = []
     for key in facts.keys("account."):
@@ -610,9 +720,12 @@ def _statement_accounts(facts: _Facts, ledger: Mapping[str, Any] | None) -> list
     household = facts.value("household", use=False)
     if isinstance(household, dict):
         covered = {a["id"] for a in accounts}
+        statements = [a for a in accounts if a["eligible"]]
         for account in household.get("accounts") or []:
             if not isinstance(account, dict) or account.get("id") in covered:
                 continue
+            if any(_same_account(account, statement) for statement in statements):
+                continue  # the statement for this account wins; never count both
             native: dict[str, Decimal] = {}
             positions = [p for p in household.get("positions") or []
                          if isinstance(p, dict) and p.get("account_id") == account.get("id")]
@@ -698,7 +811,7 @@ def _holdings(accounts: list[dict], fx: _FX, currency: str | None) -> dict:
             symbol = position.get("symbol") or position.get("instrument_id")
             asset_class = position.get("asset_class") or ("cash" if str(position.get("instrument_id", "")).startswith("CASH:") else None)
             rows.append({"account": account["id"], "institution": account.get("institution"), "symbol": symbol,
-                         "value": value, "quantity": num(D(position.get("quantity"))),
+                         "value": value, "quantity": num(D(position.get("quantity")), 4),
                          "underlying": underlying_of(position.get("underlying_symbol") or symbol) or symbol,
                          "venue": position.get("venue"), "domicile": position.get("issuer_domicile"),
                          "asset_class": asset_class})
@@ -783,7 +896,7 @@ def _goals(facts: _Facts, fx: _FX, currency: str | None, today: date) -> list[di
             "monthly_value": num(fx.convert(monthly, goal_currency, currency)) if monthly is not None else None,
             "priority": goal.get("priority"), "status": goal.get("status") or "active",
             "protect_now": goal.get("protect_now") if isinstance(goal.get("protect_now"), bool) else None,
-            "months_left": ((when.year - today.year) * 12 + when.month - today.month) if when else None,
+            "months_left": finmath.months_between(today, when) if when else None,
             "approximate": bool(goal.get("approximate")) or "aproximad" in text or "about" in text,
             "eligible": usable, "legacy": "name" not in goal,
         })
@@ -792,16 +905,17 @@ def _goals(facts: _Facts, fx: _FX, currency: str | None, today: date) -> list[di
 
 def _dca(facts: _Facts, fx: _FX, currency: str | None) -> list[dict]:
     plans = facts.value("planning.dca")
+    if isinstance(plans, dict) and isinstance(plans.get("plans"), list):
+        plans = plans["plans"]  # the stored shape (dca.plan_fact): {"plans": [...]}
     plans = plans if isinstance(plans, list) else [plans] if isinstance(plans, dict) else []
     out = []
     for plan in plans:
         if not isinstance(plan, dict) or plan.get("status") in {"stopped", "paused", "ended"}:
             continue
-        factor = _CADENCE_PER_MONTH.get(plan.get("cadence"))
         legs = sum((D(l.get("amount")) or Decimal(0) for l in plan.get("legs") or [] if isinstance(l, dict)), Decimal(0))
-        if factor is None or not legs:
+        monthly = finmath.per_month(legs, plan.get("cadence")) if legs else None
+        if monthly is None:
             continue
-        monthly = legs * factor
         out.append({"id": plan.get("id"), "monthly": num(monthly), "currency": plan.get("currency"),
                     "value": num(fx.convert(monthly, plan.get("currency"), currency))})
     return out
@@ -825,24 +939,54 @@ def _threads(facts: _Facts) -> list[dict]:
 # ------------------------------------------------------------------ build
 
 
+def _kept(snapshot: Mapping[str, Any], facts: _Facts) -> dict[str, list[dict]]:
+    """Stated balances the person chose to keep over a statement: stated key -> [{account key, as_of}]."""
+    kept: dict[str, list[dict]] = {}
+    for row in snapshot.get("kept") or []:
+        if not isinstance(row, dict) or not isinstance(row.get("key"), str) or not isinstance(row.get("proposed_key"), str):
+            continue
+        current = facts.all.get(row["key"])
+        if current is None or (row.get("current_fact_id") and current.get("id") != row["current_fact_id"]):
+            continue  # the stated value changed since; the choice no longer applies
+        kept.setdefault(row["key"], []).append({"account": row["proposed_key"], "as_of": row.get("as_of")})
+    return kept
+
+
 def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, today: date | str | None = None,
-          *, since_revision: int | None = None) -> dict:
+          *, since_revision: int | None = None, fx_max_age_days: int | None = SITUATION_FX_MAX_AGE_DAYS) -> dict:
     """The person's current picture: deterministic, JSON-safe, unknown kept as ``None``."""
     today = _as_date(today) or datetime.now(timezone.utc).date()
     facts = _Facts(snapshot, today)
-    fx = _FX(today)
+    fx = _FX(today, fx_max_age_days)
     for row in (ledger or {}).get("fx") or []:
         fx.add(row.get("base"), row.get("quote"), row.get("rate"), row.get("date"), "ledger")
+    household_fact = facts.value("household", use=False)
+    if isinstance(household_fact, dict):
+        for row in household_fact.get("fx") or []:
+            if isinstance(row, dict):
+                fx.add(row.get("from"), row.get("to"), row.get("rate"), row.get("as_of") or household_fact.get("as_of"),
+                       f"household {household_fact.get('as_of')}")
     statement_accounts = _statement_accounts(facts, ledger)
     for account in statement_accounts:
         for row in account["fx"]:
             if isinstance(row, dict):
                 fx.add(row.get("from"), row.get("to"), row.get("rate"), row.get("as_of") or account["as_of"],
                        f"statement {account['as_of']}")
+    # A statement the person answered "keep my figure" to stays out of the totals.
+    kept = _kept(snapshot, facts)
+    superseded: dict[str, str] = {}
+    for stated_key, rows in kept.items():
+        for kept_row in rows:
+            for account in statement_accounts:
+                if account["key"] == kept_row["account"] and (
+                        not kept_row["as_of"] or not account["as_of"] or account["as_of"] <= kept_row["as_of"]):
+                    superseded[account["key"]] = stated_key
+    keeping = set(superseded.values())  # stated keys that currently stand in for a statement
     profile = _profile(facts)
     income_items, income_legacy = _income(facts)
     cash_items, cash_legacy = _cash(facts)
     liability_items, liability_legacy = _liabilities(facts, statement_accounts)
+    liability_items, merged_liabilities = _dedupe_liabilities(liability_items)
     stated_investments = _stated_investments(facts)
     seen = [i.get("currency") for i in (*income_items, *cash_items, *liability_items, *stated_investments)]
     seen += [a.get("currency") for a in statement_accounts]
@@ -853,9 +997,9 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
     spending = _spending(facts, ledger, fx, currency, today)
 
     # -- assets
-    statements = {a["institution"].strip().lower() for a in statement_accounts
-                  if a["eligible"] and a["source"] != "ledger" and a.get("institution")}
-    has_statement = any(a["eligible"] and a["source"] != "ledger" for a in statement_accounts)
+    live = [a for a in statement_accounts if a["eligible"] and a["source"] != "ledger" and a["key"] not in superseded]
+    statements = {a["institution"] for a in live if a.get("institution")}
+    has_statement = bool(live)
     unconverted: list[dict] = []
     by_currency: dict[str, Decimal] = {}
     differences = []
@@ -875,7 +1019,7 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
                "amount": num(amount), "currency": item.get("currency"), "purpose": item.get("purpose"),
                "liquid": item.get("liquid") is not False, "approximate": bool(item.get("approximate")),
                "legacy": bool(item.get("legacy")), "counted": True, "value": None}
-        if _covered(item.get("institution"), statements):
+        if item["key"] not in keeping and _covered(item.get("institution"), statements):
             row["counted"] = False
         else:
             row["value"] = num(value_of(amount, item.get("currency")))
@@ -895,7 +1039,13 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
                "value": None, "liquid": account["liquid"] if isinstance(account.get("liquid"), bool)
                else (account.get("type") or "").lower() not in _ILLIQUID_TYPES,
                "stale": not account["eligible"], "positions": len(account["positions"])}
-        if account["eligible"] and account["native"] is not None:
+        if account["key"] in superseded:
+            # Kept out of the totals: the person kept their stated figure over this statement.
+            row["superseded_by"] = superseded[account["key"]]
+            if account["native"] is not None:
+                parts = [fx.convert(amount, cur, currency) for cur, amount in account["native"].items()]
+                row["value"] = num(sum(parts, Decimal(0))) if None not in parts else None
+        elif account["eligible"] and account["native"] is not None:
             total, known = Decimal(0), True
             for cur, amount in account["native"].items():
                 converted = value_of(amount, cur)
@@ -915,11 +1065,11 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
                "name": item.get("name"), "amount": num(amount), "currency": item.get("currency"),
                "approximate": bool(item.get("approximate")), "legacy": bool(item.get("legacy")),
                "liquid": (item.get("kind") or "").lower() not in _ILLIQUID_TYPES, "counted": True, "value": None}
-        covered = _covered(institution, statements) or (not institution and has_statement)
+        covered = item["key"] not in keeping and (_covered(institution, statements) or (not institution and has_statement))
         if covered:
             row["counted"] = False
-            matching = [a for a in accounts if a["source"] != "ledger" and not a["stale"] and (
-                not institution or (a.get("institution") or "").strip().lower() == institution.strip().lower())]
+            matching = [a for a in accounts if a["source"] != "ledger" and not a["stale"] and not a.get("superseded_by")
+                        and (not institution or same_institution(a.get("institution"), institution))]
             statement_value = sum((D(a.get("value_known_part")) or Decimal(0) for a in matching), Decimal(0))
             native: dict[str, Any] = {}
             for account in matching:
@@ -944,19 +1094,30 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
                                 "difference": None, "kind": "cash"})
 
     liabilities = [_liability_view(item, fx, currency, today) for item in liability_items]
+    for stated, statement in merged_liabilities:
+        balance, shown = D(stated.get("balance")), D(statement.get("balance"))
+        if balance is None or shown is None or (balance == shown and stated.get("currency") == statement.get("currency")):
+            continue
+        stated_value = fx.convert(balance, stated.get("currency"), currency)
+        statement_value = fx.convert(shown, statement.get("currency"), currency)
+        differences.append({
+            "institution": _lender(statement), "key": stated["key"], "stated": _money(balance, stated.get("currency")),
+            "stated_approximate": bool(stated.get("approximate")), "statement": {statement.get("currency"): num(shown)},
+            "statement_value": num(statement_value), "currency": currency, "as_of": statement.get("as_of"),
+            "difference": num(statement_value - stated_value) if None not in (statement_value, stated_value) else None,
+            "kind": "liability"})
     for row in liabilities:
         if row["balance"] is not None and row["currency"]:
             by_currency[row["currency"]] = by_currency.get(row["currency"], Decimal(0)) - D(row["balance"])
             if row["value"] is None:
                 unconverted.append({"amount": -row["balance"], "currency": row["currency"]})
 
-    liquid = sum((D(r["value"]) or Decimal(0) for r in (*cash_rows, *accounts, *investments)
-                  if r.get("value") is not None and r.get("liquid", True)), Decimal(0))
-    illiquid = sum((D(r["value"]) or Decimal(0) for r in (*accounts, *investments)
-                    if r.get("value") is not None and not r.get("liquid", True)), Decimal(0))
+    counted = [r for r in (*cash_rows, *accounts, *investments) if r.get("value") is not None and not r.get("superseded_by")]
+    liquid = sum((D(r["value"]) for r in counted if r.get("liquid", True)), Decimal(0))
+    illiquid = sum((D(r["value"]) for r in counted if not r.get("liquid", True)), Decimal(0))
     owed = sum((D(r["value"]) or Decimal(0) for r in liabilities if r["value"] is not None), Decimal(0))
     unvalued_accounts = [a["label"] for a in accounts if a["source"] == "ledger"]
-    any_assets = any(r.get("value") is not None for r in (*cash_rows, *accounts, *investments))
+    any_assets = bool(counted)
     net_worth = {
         "currency": currency, "currency_basis": currency_basis,
         "total": num(liquid + illiquid - owed) if (any_assets or liabilities) and currency else None,
@@ -968,30 +1129,56 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
     }
 
     # -- monthly flow
-    debt_known = sum((D(r["monthly_payment"]) for r in liabilities
-                      if r["monthly_payment"] is not None and not r["in_spending"]), Decimal(0))
+    paying = [r for r in liabilities if r["monthly_payment"] is not None and not r["in_spending"]]
     debt_unknown = [r["id"] for r in liabilities if r["monthly_payment"] is None and not r["in_spending"]
                     and (r["balance"] or 0) > 0]
-    debt_converted = sum((fx.convert(D(r["monthly_payment"]), r["currency"], currency) or Decimal(0)
-                          for r in liabilities if r["monthly_payment"] is not None and not r["in_spending"]), Decimal(0))
+    debt_known, debt_unconverted = Decimal(0), []
+    for r in paying:
+        converted = fx.convert(D(r["monthly_payment"]), r["currency"], currency)
+        if converted is None:
+            debt_unconverted.append(_money(D(r["monthly_payment"]), r["currency"]))
+        else:
+            debt_known += converted
+    # A payment without a rate is unknown, never zero: the debt total and the surplus are unknown.
+    debt_converted = None if debt_unconverted else debt_known
     income_monthly, spend_monthly = D(income["monthly"]), D(spending["monthly"])
-    surplus = income_monthly - spend_monthly - debt_converted if income_monthly is not None and spend_monthly is not None else None
+    surplus = (income_monthly - spend_monthly - debt_converted
+               if None not in (income_monthly, spend_monthly, debt_converted) else None)
+    flow_missing_fx = sorted(set(finmath.pairs(debt_unconverted, currency)) | set(spending["missing_fx"]))
     cash_flow = {"currency": currency, "income": income["monthly"], "spending": spending["monthly"],
                  "spending_basis": spending["monthly_basis"], "spending_source": spending["source"],
-                 "debt_payments": num(debt_converted) if debt_known or not debt_unknown else None,
-                 "debt_payments_known": num(debt_converted), "debt_payments_unknown": debt_unknown,
-                 "surplus": num(surplus), "complete": surplus is not None and not debt_unknown}
+                 "debt_payments": num(debt_converted) if debt_converted is not None and not debt_unknown else None,
+                 "debt_payments_known": num(debt_known), "debt_payments_unknown": debt_unknown,
+                 "debt_payments_unconverted": debt_unconverted,
+                 "surplus": num(surplus), "missing_fx": flow_missing_fx,
+                 "complete": surplus is not None and not debt_unknown and spending["complete"]}
 
     # -- commitments
     goals = _goals(facts, fx, currency, today)
     dca = _dca(facts, fx, currency)
-    committed = [{"kind": "goal", "id": g["id"], "name": g["name"], "monthly": g["monthly_value"]}
-                 for g in goals if g["status"] == "active" and g["monthly_value"] is not None and g["eligible"]]
-    committed += [{"kind": "dca", "id": d["id"], "name": d["id"], "monthly": d["value"]} for d in dca if d["value"] is not None]
+    committed, commit_unconverted = [], []
+    for g in goals:
+        if g["status"] != "active" or not g["eligible"] or g["monthly_contribution"] is None:
+            continue
+        if g["monthly_value"] is None:
+            commit_unconverted.append({"kind": "goal", "id": g["id"], "name": g["name"],
+                                       "amount": g["monthly_contribution"], "currency": g["currency"]})
+        else:
+            committed.append({"kind": "goal", "id": g["id"], "name": g["name"], "monthly": g["monthly_value"]})
+    for d in dca:
+        if d["value"] is None:
+            commit_unconverted.append({"kind": "dca", "id": d["id"], "name": d["id"], "amount": d["monthly"],
+                                       "currency": d["currency"]})
+        else:
+            committed.append({"kind": "dca", "id": d["id"], "name": d["id"], "monthly": d["value"]})
     total_committed = sum((D(c["monthly"]) for c in committed), Decimal(0))
+    commit_complete = not commit_unconverted
     commitments = {"currency": currency, "items": committed, "total": num(total_committed),
-                   "unallocated": num(surplus - total_committed) if surplus is not None else None,
-                   "overcommitted": surplus is not None and total_committed > surplus}
+                   "complete": commit_complete, "unconverted": commit_unconverted,
+                   "missing_fx": finmath.pairs(commit_unconverted, currency),
+                   "unallocated": num(surplus - total_committed) if surplus is not None and commit_complete else None,
+                   "overcommitted": (surplus is not None and total_committed > surplus)
+                   or (None if not commit_complete or surplus is None else False)}
 
     # -- reserve
     reserve_fact = facts.value("reserve")
@@ -1019,7 +1206,7 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
                "gap": num(target_amount - reserve_amount) if target_amount is not None and reserve_amount is not None else None,
                "sources": [r["id"] for r in designated]}
 
-    holdings = _holdings(statement_accounts, fx, currency)
+    holdings = _holdings([a for a in statement_accounts if a["key"] not in superseded], fx, currency)
     threads = _threads(facts)
 
     # -- unknowns that matter, most consequential first
@@ -1033,7 +1220,8 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
         for field in row["missing"]:
             code = "liability_rate" if field == "annual_rate" else "liability_payment"
             unknowns.append({"code": code, "field": f"liability.{row['id']}.{field.split()[0]}", "liability": row["id"]})
-    for currency_code in sorted({u["currency"] for u in unconverted if u and u.get("currency")}):
+    for currency_code in sorted({u["currency"] for u in (*unconverted, *debt_unconverted, *commit_unconverted)
+                                 if u and u.get("currency")} | {p.split("/")[0] for p in spending["missing_fx"]}):
         if currency:
             unknowns.append({"code": "fx", "field": f"fx.{currency_code}/{currency}", "pair": f"{currency_code}/{currency}"})
     if profile["residence"] and not profile["tax_residence"]:

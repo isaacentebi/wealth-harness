@@ -840,7 +840,7 @@ class WealthStore:
                     (client_id,),
                 ).fetchall()
                 latest = self._latest_ids(client_id) if decisions else {}
-                return {
+                snapshot = {
                     "client": {
                         "id": client["id"],
                         "display_name": client["display_name"],
@@ -849,6 +849,23 @@ class WealthStore:
                     "facts": facts,
                     "decisions": [self._decision_from_row(row, latest) for row in decisions],
                 }
+                kept = self._kept_statements(client_id)
+                if kept:
+                    # Stated balances the person kept over a statement; the situation honours them.
+                    snapshot["kept"] = kept
+                return snapshot
+
+    def _kept_statements(self, client_id: str) -> list[dict[str, Any]]:
+        try:
+            rows = self._db.execute(
+                "SELECT key, proposed_key, current_fact_id, proposed_json FROM contradictions "
+                "WHERE client_id = ? AND kind = 'stated_vs_statement' AND status = 'kept' ORDER BY created_at, id",
+                (client_id,),
+            ).fetchall()
+        except sqlite3.OperationalError:  # a database from before contradictions existed
+            return []
+        return [{"key": row["key"], "proposed_key": row["proposed_key"], "current_fact_id": row["current_fact_id"],
+                 "as_of": (json.loads(row["proposed_json"]).get("value") or {}).get("as_of")} for row in rows]
 
     def _normalize_fact(self, raw: Any) -> tuple[dict[str, Any], list[str]]:
         if not isinstance(raw, Mapping):
@@ -1251,7 +1268,7 @@ class WealthStore:
     ) -> list[dict[str, Any]]:
         """Stated balances that a just-saved statement disagrees with (situation differences)."""
 
-        from .situation.model import build
+        from .situation.model import build, same_institution
 
         rows = {r["key"]: r for r in self._current_rows(client_id).values() if r["status"] == "active"}
         picture = build({"facts": [self._fact_from_row(r) for r in rows.values()]}, None, _today())
@@ -1267,7 +1284,8 @@ class WealthStore:
                     or not stated_key.startswith(("investment.", "cash."))):
                 continue
             institution = (difference.get("institution") or "").strip().lower()
-            matching = sorted(k for k, name in institutions.items() if not institution or name == institution)
+            matching = sorted(k for k, name in institutions.items()
+                              if not institution or same_institution(name, institution))
             gap, value = difference.get("difference"), difference.get("statement_value")
             if not matching or gap is None or value is None:
                 continue

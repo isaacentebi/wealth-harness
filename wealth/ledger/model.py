@@ -21,7 +21,7 @@ module here touches a database; :mod:`wealth.store` persists normalized rows.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
@@ -66,7 +66,7 @@ _TX_FIELDS = frozenset({
     "lot_selection", "transfer_group", "counterparty_account_id", "ratio", "new_instrument_id",
     "basis_allocation", "to_amount", "to_currency", "principal", "interest", "cost_basis",
     "acquired_on", "reverses_id", "confirm_not_duplicate", "page", "confidence", "source",
-    "liability_id", "memo",
+    "liability_id", "memo", "executed_at",
 })
 _SENSITIVE_KEYS = frozenset({
     "password", "passcode", "pin", "ssn", "curp", "rfc", "account_number", "routing_number",
@@ -429,6 +429,20 @@ def _lot_selection(value: Any, field: str) -> list[dict[str, str]]:
     return selection
 
 
+def _execution_time(value: Any, field: str, day: str) -> str:
+    """ISO execution timestamp on the entry's date; orders same-day trades."""
+
+    if not isinstance(value, str):
+        raise LedgerInputError(f"{field} must be an ISO date-time")
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise LedgerInputError(f"{field} must be an ISO date-time") from exc
+    if parsed.date().isoformat() != day:
+        raise LedgerInputError(f"{field} must fall on the entry date {day}")
+    return parsed.replace(tzinfo=None).isoformat(timespec="seconds") if parsed.tzinfo is None else parsed.isoformat(timespec="seconds")
+
+
 def normalize_transaction(raw: Any, index: int, *, source: Mapping[str, Any], confidence: str | None) -> tuple[dict[str, Any], list[str]]:
     """Validate one line and return the canonical entry (without its id) plus warnings.
 
@@ -460,6 +474,8 @@ def normalize_transaction(raw: Any, index: int, *, source: Mapping[str, Any], co
     }
     if raw.get("settle_date") is not None:
         entry["settle_date"] = iso(raw["settle_date"], f"{field}.settle_date")
+    if raw.get("executed_at") is not None:
+        entry["executed_at"] = _execution_time(raw["executed_at"], f"{field}.executed_at", entry["date"])
     if raw.get("external_id") is not None:
         entry["external_id"] = text(str(raw["external_id"]) if isinstance(raw["external_id"], int) else raw["external_id"], f"{field}.external_id")
     for name in ("description", "memo"):

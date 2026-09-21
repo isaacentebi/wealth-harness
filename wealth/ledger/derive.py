@@ -13,11 +13,12 @@ Every function here is deterministic and side-effect free.  Unknown values stay
 from __future__ import annotations
 
 from bisect import bisect_right
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import Decimal
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
+from ..finmath import FxTable, holding_character
 from .model import LIABILITY_TYPES, money, out
 
 
@@ -43,60 +44,8 @@ def status_for(missing: Sequence[Any], warnings: Sequence[str]) -> str:
 
 # -- FX ---------------------------------------------------------------------
 
-class FxTable:
-    """Dated FX lookups: the latest rate on or before a date within ``max_age_days``.
-
-    Only the supplied pair or its inverse is used; no cross rate is inferred.
-    A missing rate returns ``None`` (unknown), never 1 and never 0.
-    """
-
-    def __init__(self, rows: Iterable[Mapping[str, Any]], max_age_days: int = DEFAULT_FX_AGE_DAYS):
-        self.max_age_days = max_age_days
-        self._series: dict[tuple[str, str], tuple[list[str], list[Decimal]]] = {}
-        grouped: dict[tuple[str, str], dict[str, Decimal]] = {}
-        for row in rows:
-            grouped.setdefault((row["base"], row["quote"]), {})[row["date"]] = Decimal(str(row["rate"]))
-        for pair, values in grouped.items():
-            days = sorted(values)
-            self._series[pair] = (days, [values[day] for day in days])
-
-    def _lookup(self, pair: tuple[str, str], on: str) -> tuple[Decimal, str] | None:
-        series = self._series.get(pair)
-        if not series:
-            return None
-        days, rates = series
-        index = bisect_right(days, on) - 1
-        if index < 0:
-            return None
-        found = days[index]
-        if (date.fromisoformat(on) - date.fromisoformat(found)).days > self.max_age_days:
-            return None
-        return rates[index], found
-
-    def rate(self, base: str, quote: str, on: str) -> Decimal | None:
-        if base == quote:
-            return Decimal(1)
-        direct = self._lookup((base, quote), on)
-        inverse = self._lookup((quote, base), on)
-        if direct and (not inverse or direct[1] >= inverse[1]):
-            return direct[0]
-        if inverse:
-            return Decimal(1) / inverse[0]
-        return None
-
-    def convert(self, amount: Decimal | None, base: str | None, quote: str, on: str) -> Decimal | None:
-        if amount is None or base is None:
-            return None
-        rate = self.rate(base, quote, on)
-        return None if rate is None else amount * rate
-
-    def latest(self, on: str) -> list[dict[str, Any]]:
-        rows = []
-        for (base, quote), (days, rates) in sorted(self._series.items()):
-            found = self._lookup((base, quote), on)
-            if found:
-                rows.append({"from": base, "to": quote, "rate": out(found[0]), "as_of": found[1]})
-        return rows
+# ``FxTable`` lives in :mod:`wealth.finmath` (one implementation for the ledger and
+# the situation); it is re-exported here for existing callers.
 
 
 # -- selection and transfer matching ---------------------------------------
@@ -119,7 +68,41 @@ def active_entries(ledger: Mapping[str, Any], *, include_inferred: bool = False)
         notes.append(f"{len(reversed_ids)} reversed entr{'y' if len(reversed_ids) == 1 else 'ies'} and their reversals are excluded.")
     if inferred:
         notes.append(f"{inferred} inferred entr{'y' if inferred == 1 else 'ies'} excluded; confirm them to include.")
-    return sorted(active, key=lambda e: (e["date"], 0 if e["kind"] == "opening_balance" else 1, e["seq"])), notes
+    return sorted(active, key=_day_order(active)), notes
+
+
+def _is_trade(entry: Mapping[str, Any]) -> bool:
+    return entry["kind"] in {"buy", "sell"} or (entry["kind"] == "transfer" and bool(entry.get("instrument_id")))
+
+
+def _disposes(entry: Mapping[str, Any]) -> bool:
+    if entry["kind"] == "sell":
+        return True
+    quantity = _d(entry.get("quantity")) if entry["kind"] == "transfer" and entry.get("instrument_id") else None
+    return quantity is not None and quantity < 0
+
+
+def _day_order(entries: Sequence[Mapping[str, Any]]) -> Callable[[Mapping[str, Any]], tuple]:
+    """Sort key: date, opening balances first, then intraday order.
+
+    When every trade on a day carries ``executed_at`` the trades follow the
+    execution time.  Otherwise, with no time to go by, acquisitions come before
+    disposals on the same day (a same-day buy and sell is a day trade, not a
+    sale of shares that were never recorded), and posting order breaks ties.
+    """
+
+    timed: dict[str, bool] = {}
+    for entry in entries:
+        if _is_trade(entry):
+            timed[entry["date"]] = timed.get(entry["date"], True) and bool(entry.get("executed_at"))
+
+    def key(entry: Mapping[str, Any]) -> tuple:
+        opening = 0 if entry["kind"] == "opening_balance" else 1
+        if timed.get(entry["date"]):
+            return (entry["date"], opening, entry.get("executed_at") or "", 0, entry["seq"])
+        return (entry["date"], opening, "", 1 if _disposes(entry) else 0, entry["seq"])
+
+    return key
 
 
 def match_transfers(entries: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -212,20 +195,29 @@ class State:
     missing: list[dict[str, Any]]
     in_transit: dict[str, list[Lot]]
     snapshots: dict[str, dict[str, Any]]
+    # Matched cash transfers whose other leg has not posted yet: key -> (from, to, currency, amount).
+    # The amount is positive while money has left one account and not reached the other, and
+    # negative while it has reached the destination before leaving the source.
+    cash_in_transit: dict[str, tuple[str, str, str | None, Decimal]] = field(default_factory=dict)
+    # In-kind transfer (incoming leg id) -> destination account.
+    transit_to: dict[str, str] = field(default_factory=dict)
+
+    def transit(self) -> list[dict[str, Any]]:
+        """Value in transit between own accounts, attributed to the source and destination."""
+        rows = [{"from": source, "to": dest, "currency": ccy, "amount": amount}
+                for source, dest, ccy, amount in self.cash_in_transit.values() if amount]
+        for in_id, lots in self.in_transit.items():
+            for lot in lots:
+                rows.append({"from": lot.account_id, "to": self.transit_to.get(in_id), "instrument_id": lot.instrument_id,
+                             "quantity": lot.quantity})
+        return rows
 
     def quantity(self, account_id: str, instrument_id: str) -> Decimal:
         return sum((lot.quantity for lot in self.lots.get((account_id, instrument_id), [])), _ZERO)
 
 
 def _holding(acquired: str | None, sold: str) -> str:
-    if acquired is None:
-        return "unknown"
-    start = date.fromisoformat(acquired)
-    try:
-        anniversary = start.replace(year=start.year + 1)
-    except ValueError:
-        anniversary = start.replace(year=start.year + 1, day=28)
-    return "long" if date.fromisoformat(sold) > anniversary else "short"
+    return holding_character(acquired, sold)
 
 
 def replay(ledger: Mapping[str, Any], as_of: str | None = None, *, lot_method: str = "fifo",
@@ -250,14 +242,15 @@ def replay(ledger: Mapping[str, Any], as_of: str | None = None, *, lot_method: s
     by_id = {e["id"]: e for e in entries}
     # An incoming in-kind leg is applied no earlier than its outgoing leg, so lots
     # are never in two accounts at once (they are "in transit" in between).
+    position = {e["id"]: index for index, e in enumerate(entries)}  # date and intraday order
+
     def effective(entry: Mapping[str, Any]) -> tuple[str, int, int]:
-        order = 0 if entry["kind"] == "opening_balance" else 1
         role = pair_of.get(entry["id"])
         if role and role[0] == "in" and entry.get("instrument_id"):
             other = by_id[role[1]["out"]]
             if other["date"] > entry["date"]:
-                return (other["date"], 2, entry["seq"])
-        return (entry["date"], order, entry["seq"])
+                return (other["date"], 1, position[entry["id"]])
+        return (entry["date"], 0, position[entry["id"]])
 
     ordered = sorted(entries, key=effective)
     state = State({}, {}, [], [], [], [], [], {}, {})
@@ -265,6 +258,7 @@ def replay(ledger: Mapping[str, Any], as_of: str | None = None, *, lot_method: s
             "used_sources": {}}
     points = sorted(set(checkpoints))
     point_index = 0
+    split_applied: set[tuple[str, str, str]] = set()
     counter = 0
 
     def snapshot(day: str) -> None:
@@ -272,6 +266,7 @@ def replay(ledger: Mapping[str, Any], as_of: str | None = None, *, lot_method: s
             "cash": dict(state.cash),
             "quantities": {key: sum((l.quantity for l in lots), _ZERO) for key, lots in state.lots.items()},
             "lots": {key: list(lots) for key, lots in state.lots.items()},
+            "transit": state.transit(),
         }
 
     def add_cash(account: str, ccy: str | None, amount: Decimal | None) -> None:
@@ -383,6 +378,15 @@ def replay(ledger: Mapping[str, Any], as_of: str | None = None, *, lot_method: s
         elif kind == "transfer":
             if instrument is None:
                 add_cash(account, ccy, amount)
+                role = pair_of.get(entry["id"])
+                if role and amount is not None:
+                    pair = role[1]
+                    key = f"{pair['out']}>{pair['in']}"
+                    if key in state.cash_in_transit:
+                        del state.cash_in_transit[key]
+                    else:
+                        state.cash_in_transit[key] = (by_id[pair["out"]]["account_id"], by_id[pair["in"]]["account_id"],
+                                                      ccy, -amount)
             else:
                 role = pair_of.get(entry["id"])
                 add_cash(account, ccy, amount)
@@ -390,8 +394,10 @@ def replay(ledger: Mapping[str, Any], as_of: str | None = None, *, lot_method: s
                     moved = relieve(entry, -quantity, None)
                     if role:
                         state.in_transit[role[1]["in"]] = [replace(l, quantity=q, basis=None if l.basis is None else l.basis * q / l.quantity) for l, q in moved]
+                        state.transit_to[role[1]["in"]] = by_id[role[1]["in"]]["account_id"]
                 else:
                     moving = state.in_transit.pop(entry["id"], None) if role else None
+                    state.transit_to.pop(entry["id"], None)
                     if moving is not None:
                         for lot in moving:
                             add_lot(replace(lot, account_id=account))
@@ -420,6 +426,16 @@ def replay(ledger: Mapping[str, Any], as_of: str | None = None, *, lot_method: s
             state.lots[key] = [replace(l, quantity=l.quantity * ratio) for l in state.lots.get(key, [])]
             if not state.lots[key]:
                 del state.lots[key]
+            # Shares moving between the person's accounts split too; the split may be posted by
+            # either broker, and is applied once per transfer.
+            for in_id, moving in state.in_transit.items():
+                if (in_id, entry["date"], entry["ratio"]) in split_applied:
+                    continue
+                if any(l.instrument_id == instrument for l in moving) and account in {
+                        state.transit_to.get(in_id), *(l.account_id for l in moving)}:
+                    state.in_transit[in_id] = [replace(l, quantity=l.quantity * ratio) if l.instrument_id == instrument else l
+                                               for l in moving]
+                    split_applied.add((in_id, entry["date"], entry["ratio"]))
             add_cash(account, ccy, amount)
             if amount:
                 meta["notes"].append(f"Cash in lieu on split {entry['id']} is recorded as cash; its gain is not computed.")
@@ -457,6 +473,8 @@ def replay(ledger: Mapping[str, Any], as_of: str | None = None, *, lot_method: s
         point_index += 1
     if state.in_transit:
         meta["notes"].append(f"{len(state.in_transit)} in-kind transfer(s) are in transit at the as-of date.")
+    if state.cash_in_transit:
+        meta["notes"].append(f"{len(state.cash_in_transit)} cash transfer(s) between own accounts are in transit at the as-of date.")
     return state, meta
 
 

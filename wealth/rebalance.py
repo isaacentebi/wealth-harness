@@ -1054,12 +1054,65 @@ def _us_engine(ctx: _Context, sim: _Sim, model: Any) -> tuple[dict[str, Any] | N
              "permanently_disallowed_loss": _money(outcome.permanently_disallowed)}
     if outcome.disallowed:
         ctx.warnings.append("The tax engine found a wash sale in the final plan; review the disallowed loss before acting.")
+    netting = _netting_model(ctx, model)
     total = None
-    if model is not None and model.ready:
-        estimate = model.estimate(outcome.short_term, outcome.long_term)
+    if netting is not None:
+        estimate = netting.estimate(outcome.short_term, outcome.long_term)
         check["incremental_tax_estimate"] = estimate
         total = Decimal(estimate["incremental_tax"])
+        _attribute_us_tax(ctx, sim, netting, book, lots_plan)
     return check, total
+
+
+def _netting_model(ctx: _Context, model: Any) -> Any:
+    """A tax model that nets the plan's ST/LT gains and losses (IRC 1222 netting, 1211(b) limit).
+
+    With full-year facts the model is used as given.  With caller marginal rates but no
+    us_tax_facts, the plan is netted on its own: no other realized results this year and the
+    statutory capital-loss deduction limit (said so in the assumptions).
+    """
+    if model is None:
+        return None
+    if model.ready:
+        return model
+    if model.method != "marginal_rates":
+        return None
+    from dataclasses import replace as dc_replace
+
+    limit = tax_engine.us_params.capital_loss_limit(model.filing_status or "single")
+    facts = {key: ZERO for key in tax_engine._FACT_KEYS}
+    facts["ordinary_income_loss_deduction_available"] = limit
+    ctx.assumptions.append(
+        "Plan tax nets the plan's short- and long-term gains and losses against each other (US netting) at the supplied "
+        f"marginal rates, assuming no other realized gains or losses this year and a {_money(limit)} USD capital-loss "
+        "deduction limit; supply us_tax_facts for the full-year picture.")
+    return dc_replace(model, facts=facts)
+
+
+def _attribute_us_tax(ctx: _Context, sim: _Sim, netting: Any, book: Any, lots_plan: dict[str, Decimal]) -> None:
+    """Per-trade tax = the marginal change in the netted plan tax as each sell is added in order.
+
+    The per-trade figures therefore add up to the netted plan total.
+    """
+    cumulative: dict[str, Decimal] = {}
+    previous = ZERO
+    for trade in sim.trades:
+        if trade["side"] != "sell" or trade.get("tax_regime") != "us_capital_gain":
+            continue
+        added = False
+        for lot in trade.get("lots") or []:
+            if lot["lot_id"] in lots_plan:
+                cumulative[lot["lot_id"]] = cumulative.get(lot["lot_id"], ZERO) + Decimal(lot["quantity"])
+                added = True
+        if not added:
+            continue
+        outcome = tax_engine._realize(book, dict(cumulative), set())
+        running = netting.incremental(outcome.short_term, outcome.long_term)
+        marginal = running - previous
+        previous = running
+        converted = ctx.fx.convert(marginal, "USD", ctx.currency, "estimated tax")
+        trade["estimated_tax"] = None if converted is None else {"currency": ctx.currency, "amount": _money(converted)}
+        trade["tax_attribution"] = "marginal change in the netted plan tax when this sale is added"
 
 
 def _summary(ctx: _Context, sim: _Sim, before: dict[str, Any], engine_total: Decimal | None, engine_used: bool) -> dict[str, Any]:

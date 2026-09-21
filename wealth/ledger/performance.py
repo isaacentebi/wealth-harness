@@ -26,6 +26,7 @@ from typing import Any, Callable, Mapping, Sequence
 from .derive import (DEFAULT_FX_AGE_DAYS, FxTable, PriceProvider, _d, _identity, _sources, _unique,
                      envelope, replay)
 from .model import money, out
+from .. import finmath
 
 
 _ZERO = Decimal(0)
@@ -69,6 +70,25 @@ def _value(snapshot: Mapping[str, Any], scope: set[str], day: str, currency: str
             gaps.append(f"price {instrument} on {day}")
             continue
         converted = fx.convert(quantity * price, ccy, currency, day)
+        if converted is None:
+            gaps.append(f"fx {ccy}/{currency} on {day}")
+        else:
+            total += converted
+    # Value moving between two accounts of the scope still belongs to it.  When only one
+    # side is in scope the transfer is an external flow of that account and is not added.
+    for item in snapshot.get("transit", []):
+        if item["from"] not in scope or item["to"] not in scope:
+            continue
+        if item.get("instrument_id"):
+            price = prices(item["instrument_id"], day)
+            ccy = instruments.get(item["instrument_id"], {}).get("currency")
+            if price is None:
+                gaps.append(f"price {item['instrument_id']} on {day}")
+                continue
+            amount = item["quantity"] * price
+        else:
+            amount, ccy = item["amount"], item["currency"]
+        converted = fx.convert(amount, ccy, currency, day)
         if converted is None:
             gaps.append(f"fx {ccy}/{currency} on {day}")
         else:
@@ -151,53 +171,35 @@ def valuation_series(ledger: Mapping[str, Any], dates: Sequence[str], currency: 
 def xirr(cashflows: Sequence[tuple[str, Decimal]]) -> float | None:
     """Annual money-weighted return; investor view (contributions negative).
 
-    Deterministic bracket scan plus bisection.  Returns ``None`` when there is
-    no sign change (no unique economically meaningful rate).
+    One implementation for the whole app: :func:`wealth.finmath.xirr`.
     """
 
-    if not cashflows or all(c >= 0 for _, c in cashflows) or all(c <= 0 for _, c in cashflows):
-        return None
-    origin = min(date.fromisoformat(d) for d, _ in cashflows)
-    points = [((date.fromisoformat(d) - origin).days / 365.0, float(c)) for d, c in cashflows]
-
-    def npv(rate: float) -> float:
-        return sum(c / (1.0 + rate) ** t for t, c in points)
-
-    grid = [-0.99, -0.9, -0.75, -0.5, -0.25, -0.1, 0.0, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 100.0]
-    values = [npv(r) for r in grid]
-    for low, high, f_low, f_high in zip(grid, grid[1:], values, values[1:]):
-        if f_low == 0:
-            return low
-        if (f_low < 0) != (f_high < 0):
-            for _ in range(200):
-                mid = (low + high) / 2
-                f_mid = npv(mid)
-                if (f_mid < 0) == (f_low < 0):
-                    low, f_low = mid, f_mid
-                else:
-                    high = mid
-            return (low + high) / 2
-    return None
+    return finmath.xirr(cashflows)
 
 
 def _month_ends(start: str, end: str) -> list[str]:
-    result, current = [], date.fromisoformat(start)
-    last = date.fromisoformat(end)
-    while True:
-        next_month = (current.replace(day=1) + timedelta(days=32)).replace(day=1)
-        month_end = next_month - timedelta(days=1)
-        if month_end >= last:
-            break
-        if month_end > date.fromisoformat(start):
-            result.append(month_end.isoformat())
-        current = next_month
-    return result
+    return finmath.month_ends(start, end)
 
 
 def _annualize(total: Decimal | None, days: int) -> Decimal | None:
-    if total is None or days < 365 or total <= -1:
-        return None
-    return Decimal(str((1 + float(total)) ** (365.0 / days) - 1))
+    return finmath.annualize(total, days)
+
+
+def _linked(values: Mapping[str, Decimal | None], by_day: Mapping[str, Decimal | None], p0: str, p1: str,
+            warnings: list[str]) -> Decimal | None:
+    """Exact linked growth factor over (p0, p1] using the values on every flow date."""
+
+    chain, previous = Decimal(1), values.get(p0)
+    for day in sorted(d for d in by_day if p0 < d <= p1) + ([p1] if p1 not in by_day else []):
+        value, flow = values.get(day), by_day.get(day, _ZERO)
+        if value is None or flow is None or previous is None:
+            return None
+        if previous > 0:
+            chain *= (value - flow) / previous
+        elif value - flow != 0:
+            warnings.append(f"Value changed on {day} with no invested base; that change is excluded from TWR.")
+        previous = value
+    return chain
 
 
 def performance(ledger: Mapping[str, Any], start: str, end: str, currency: str, prices: PriceProvider, *,
@@ -231,18 +233,8 @@ def performance(ledger: Mapping[str, Any], start: str, end: str, currency: str, 
     v_start, v_end = values[start], values[end]
     twr: Decimal | None = None
     if method == "linked":
-        chain, previous, ok = Decimal(1), v_start, True
-        for day in sorted(d for d in by_day if d != start) + ([end] if end not in by_day else []):
-            value, flow = values.get(day), by_day.get(day, _ZERO)
-            if value is None or flow is None or previous is None:
-                ok = False
-                break
-            if previous > 0:
-                chain *= (value - flow) / previous
-            elif value - flow != 0:
-                warnings.append(f"Value changed on {day} with no invested base; that change is excluded from TWR.")
-            previous = value
-        twr = chain - 1 if ok else None
+        chain = _linked(values, by_day, start, end, warnings)
+        twr = None if chain is None else chain - 1
     else:
         boundaries = [start, *_month_ends(start, end), end]
         chain, ok = Decimal(1), True
@@ -258,17 +250,28 @@ def performance(ledger: Mapping[str, Any], start: str, end: str, currency: str, 
                             for f in inside), _ZERO)
             base = b0 + weighted
             if base <= 0:
+                # Modified Dietz has no base here (e.g. the month started empty and was funded
+                # inside it); link the exact sub-periods on the flow dates instead of dropping
+                # the month's change.
                 if b1 - b0 - net != 0:
-                    warnings.append(f"Period {p0}..{p1} has no invested base; its change is excluded from TWR.")
+                    linked = _linked(values, by_day, p0, p1, warnings)
+                    if linked is None:
+                        ok = False
+                        break
+                    chain *= linked
+                    warnings.append(f"Period {p0}..{p1} started with no invested base; it is linked on its flow dates instead of Modified Dietz.")
                 continue
             chain *= 1 + (b1 - b0 - net) / base
         twr = chain - 1 if ok else None
     irr = None
     if v_start is not None and v_end is not None and all(f["amount"] is not None for f in flows):
         cashflows = ([(start, -v_start)] if v_start else []) + [(f["date"], -f["amount"]) for f in flows] + [(end, v_end)]
-        irr = xirr(cashflows)
+        solved = finmath.xirr_solve(cashflows)
+        irr = solved.rate
         if irr is None:
-            warnings.append("Money-weighted return has no unique solution for these flows.")
+            warnings.append("Money-weighted return has no solution for these flows (no sign change).")
+        elif solved.warning:
+            warnings.append(solved.warning)
     days = (date.fromisoformat(end) - date.fromisoformat(start)).days
     net_flows = None if any(f["amount"] is None for f in flows) else sum((f["amount"] for f in flows), _ZERO)
     total_gain = None if None in (v_start, v_end, net_flows) else v_end - v_start - net_flows

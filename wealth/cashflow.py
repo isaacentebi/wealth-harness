@@ -23,6 +23,7 @@ import re
 from statistics import median, pstdev
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
+from .finmath import ESSENTIAL_RULE, add_months, essential_spending, month_keys
 from .ledger.derive import FxTable, _d, active_entries, envelope, replay
 from .ledger.model import fold, money, out
 
@@ -249,12 +250,7 @@ def remember_override(store: Any, client_id: str, entry_id: str, category: str, 
 # -- aggregation ------------------------------------------------------------
 
 def _months(start: str, end: str) -> list[str]:
-    months, current = [], date.fromisoformat(start).replace(day=1)
-    last = date.fromisoformat(end)
-    while current <= last:
-        months.append(current.strftime("%Y-%m"))
-        current = (current + timedelta(days=32)).replace(day=1)
-    return months
+    return month_keys(start, end)
 
 
 def _collect(ledger: Mapping[str, Any], start: str, end: str, currency: str, *, include_inferred: bool,
@@ -379,11 +375,7 @@ def recurring(ledger: Mapping[str, Any], *, as_of: str | None = None, include_in
             continue
         last = dates[-1]
         if cadence == "monthly":
-            following = (last.replace(day=1) + timedelta(days=32)).replace(day=1)
-            try:
-                next_expected = following.replace(day=last.day)
-            except ValueError:
-                next_expected = (following + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+            next_expected = add_months(last, 1)  # same day next month, clamped to its last day
         else:
             next_expected = last + timedelta(days=round(typical_gap))
         series.append({
@@ -455,7 +447,7 @@ def investable_surplus(ledger: Mapping[str, Any], start: str, end: str, currency
     warnings: list[str] = []
     essential_total = discretionary_total = _ZERO
     for month in spending["result"]["months"].values():
-        essential_total += Decimal(month["essential"]) + Decimal(month["unknown_essentiality"])
+        essential_total += essential_spending(Decimal(month["essential"]), Decimal(month["unknown_essentiality"]))
         discretionary_total += Decimal(month["discretionary"])
     essential = essential_total / months
     discretionary = discretionary_total / months
@@ -535,7 +527,7 @@ def investable_surplus(ledger: Mapping[str, Any], start: str, end: str, currency
         "savings_rate": ratio(savings_rate), "cash_savings_rate": ratio(cash_savings_rate),
     }, missing=missing, warnings=warnings + spending["warnings"] + income["warnings"], assumptions=[
         "Investable surplus uses average regular income and essential spending over the window; irregular income (aguinaldo, PTU, bonuses) is excluded and shown separately.",
-        "Uncategorized, cash-withdrawal and unknown-essentiality spending counts as essential.",
+        ESSENTIAL_RULE,
         f"The reserve gap is spread over {reserve_fill_months} months.",
         "Savings rate = (income - spending - loan interest) / income; cash savings rate also subtracts loan principal.",
         "This is a description of past cash flow, not advice to invest any amount.",
