@@ -239,19 +239,29 @@ def future_value(funded: float, monthly: float, months: int, annual_rate: float)
 
 
 def required_return(target: float, funded: float, monthly: float, months: int) -> dict:
-    """The constant annual rate that reaches ``target`` in ``months`` (bisection, to 1e-7)."""
+    """The constant annual rate that reaches ``target`` in ``months`` (bisection, to 1e-9).
+
+    A target already reached at a 0 % return is ``met`` with rate 0: no growth is
+    needed, and a negative "required" return is never reported.
+    """
     if months <= 0:
         reached = funded >= target
         return {"status": "reached" if reached else "due", "rate": None,
                 "shortfall": None if reached else round(target - funded, 2)}
+    if future_value(funded, monthly, months, 0.0) >= target:
+        return {"status": "met", "rate": 0.0,
+                "note": "reached without any return: the funded amount and contributions already cover the target"}
     if funded <= 0 and monthly <= 0:
         return {"status": "unfunded", "rate": None}
-    low, high = -0.99, 1.0
+    low, high = 0.0, 1.0
     if future_value(funded, monthly, months, high) < target:
-        return {"status": "unrealistic", "rate": None,
-                "note": "needs more than 100% a year: raise the contribution, extend the date or lower the target"}
-    if future_value(funded, monthly, months, low) >= target:
-        return {"status": "ready", "rate": low}
+        # A debt that compounds can make the value fall as the rate rises; scan for any rate that works.
+        grid = [i / 100 for i in range(1, 101)]
+        above = next((r for r in grid if future_value(funded, monthly, months, r) >= target), None)
+        if above is None:
+            return {"status": "unrealistic", "rate": None,
+                    "note": "needs more than 100% a year: raise the contribution, extend the date or lower the target"}
+        high = above
     for _ in range(200):
         mid = (low + high) / 2
         if future_value(funded, monthly, months, mid) >= target:
@@ -260,7 +270,7 @@ def required_return(target: float, funded: float, monthly: float, months: int) -
             low = mid
         if high - low < 1e-9:
             break
-    return {"status": "ready", "rate": round(high, 6)}
+    return {"status": "ready", "rate": round(high, 6) + 0.0}
 
 
 def _funded(goal: Mapping[str, Any], sit: Mapping[str, Any]) -> tuple[float | None, list[str], str | None]:

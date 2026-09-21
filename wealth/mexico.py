@@ -801,7 +801,7 @@ def foreign_securities(inputs: dict[str, Any]) -> dict[str, Any]:
     warnings: list[str] = []
     assumptions: list[str] = ["MXN cost uses the exchange rate at acquisition and MXN proceeds use the rate at sale; the FX effect is part of the taxable gain in MXN."]
     sale_rows: list[dict[str, Any]] = []
-    total_gain = Decimal(0)
+    total_gain = Decimal(0)  # progressive (Title IV Chapter IV) sales only
     sic_gain = Decimal(0)
     for index, sale in enumerate(sales):
         if not isinstance(sale, dict):
@@ -891,7 +891,11 @@ def foreign_securities(inputs: dict[str, Any]) -> dict[str, Any]:
         dividend_rows.append(row)
     missing.extend(m for m in params.missing if m not in missing)
     taxable_addition = max(total_gain, Decimal(0)) + total_div
-    estimate, estimate_missing = _incremental_isr(inputs, params, year, taxable_addition)
+    if taxable_addition > 0:
+        estimate, estimate_missing = _incremental_isr(inputs, params, year, taxable_addition)
+    else:  # nothing adds to progressive income: its change is zero whatever the person's income
+        estimate, estimate_missing = {"method": "no progressive income from these sales or dividends",
+                                      "isr_change_mxn": _money(Decimal(0)), "_change": Decimal(0)}, []
     missing.extend(m for m in estimate_missing if m not in missing)
     credit = None
     if estimate is not None and total_div > 0 and taxable_addition > 0:
@@ -906,20 +910,39 @@ def foreign_securities(inputs: dict[str, Any]) -> dict[str, Any]:
         "Whether the foreign withholding reduces the base of the additional 10% on foreign dividends is not settled here; the gross amount is used.",
     ])
     if total_gain < 0:
-        warnings.append("The net result on sales is a loss; it is not deducted from other income in this estimate.")
+        warnings.append("The net result on progressive (non-SIC) sales is a loss; it is not deducted from other income in this estimate.")
+    has_progressive = any(row["regime"] == "progressive" for row in sale_rows)
+    has_sic = any(row["regime"] == "article_129" for row in sale_rows)
+    article_129_tax = max(sic_gain, Decimal(0)) * Decimal("0.10")
+    dividend_additional = None if additional_rate is None else total_div * additional_rate
+    known_parts = {"article_129_tax_mxn": article_129_tax} if has_sic else {}
+    unknown_parts = []
+    if total_div > 0:
+        if dividend_additional is None:
+            unknown_parts.append("additional_10pct_dividend_tax_mxn")
+        else:
+            known_parts["additional_10pct_dividend_tax_mxn"] = dividend_additional
+    if estimate is None:
+        unknown_parts.append("progressive_isr_change_mxn")
+    else:
+        known_parts["progressive_isr_change_mxn"] = estimate["_change"]
+        if credit:
+            known_parts["foreign_tax_credit_mxn"] = -Decimal(credit["estimated_credit_mxn"])
     if sale_rows and any(row["regime"] == "article_129" for row in sale_rows):
         warnings.append("SIC-listed sales through a foreign broker: no withholding or constancia is issued; the gain must be computed (average cost, INPC update) and declared in the annual return. Article 129 losses offset only Article 129 gains.")
     result = {
         "tax_year": year, "currency": "MXN", "sales": sale_rows, "dividends": dividend_rows,
-        "totals": {"net_gain_or_loss_mxn": _money(total_gain),
-                   "article_129_net_gain_or_loss_mxn": _money(sic_gain),
-                   "article_129_tax_mxn": _money(max(sic_gain, Decimal(0)) * Decimal("0.10")), "dividends_gross_mxn": _money(total_div), "foreign_tax_withheld_mxn": _money(total_withheld),
-                   "additional_10pct_dividend_tax_mxn": None if additional_rate is None else _money(total_div * additional_rate)},
+        "totals": {"progressive_net_gain_or_loss_mxn": _money(total_gain) if has_progressive else None,
+                   "article_129_net_gain_or_loss_mxn": _money(sic_gain) if has_sic else None,
+                   "article_129_tax_mxn": _money(article_129_tax), "dividends_gross_mxn": _money(total_div), "foreign_tax_withheld_mxn": _money(total_withheld),
+                   "additional_10pct_dividend_tax_mxn": None if dividend_additional is None else _money(dividend_additional)},
         "progressive_isr_scenario": _public(estimate),
         "foreign_tax_credit": credit,
-        "net_estimated_mexican_tax_mxn": None if estimate is None or additional_rate is None else _money(
-            estimate["_change"] - (Decimal(credit["estimated_credit_mxn"]) if credit else Decimal(0)) + total_div * additional_rate
-            + max(sic_gain, Decimal(0)) * Decimal("0.10")),
+        # The whole estimate only when every part is known; the known part is always shown.
+        "net_estimated_mexican_tax_mxn": None if unknown_parts else _money(sum(known_parts.values(), Decimal(0))),
+        "known_tax_mxn": _money(sum(known_parts.values(), Decimal(0))),
+        "known_tax_components": {k: _money(v) for k, v in known_parts.items()},
+        "unknown_tax_components": unknown_parts,
         "flags": [CONSULT_FLAG],
         "execution_ready": False,
         **params.report(),
