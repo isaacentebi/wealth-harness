@@ -12,7 +12,14 @@ with `uv sync`; development checks use `uv sync --extra dev`.
 | statsmodels | Factor regressions |
 | yfinance | Explicit live market-data adapter |
 | openpyxl, pypdf | Spreadsheet and PDF ingestion |
-| pytest, scikit-learn (development) | Regression checks and method comparisons |
+| Pillow (optional `images` extra) | PNG views for text channels; SVG is written without it |
+| pytest, scikit-learn, fpdf2 (development) | Regression checks, method comparisons, generated PDF fixtures |
+
+External services are reached only through explicit adapters, with the
+Python standard library's HTTP client: the IBKR Flex Web Service, the Alpaca
+Trading API (read-only connector and person-confirmed orders), the Cuenca API,
+SEC EDGAR for 13F filings (with a `WEALTH_SEC_USER_AGENT` contact) and,
+optionally, OpenFIGI for CUSIP-to-ticker mapping.
 
 Graphiti, Mem0, Letta, skfolio, PyPortfolioOpt, Riskfolio-Lib and OpenBB are not
 integrated dependencies. Earlier candidate evaluations are in Git history.
