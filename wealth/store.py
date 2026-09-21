@@ -10,24 +10,47 @@ import hashlib
 import json
 import math
 import os
+import re
 import sqlite3
 import stat
 import threading
 import uuid
 from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
 
 SCHEMA_VERSION = 1
 _CONFIDENCES = frozenset({"confirmed", "reported", "inferred"})
-_SOURCE_KINDS = frozenset({"user", "document", "tool", "inference"})
+_SOURCE_KINDS = frozenset({"user", "document", "web", "tool", "inference"})
 _DECISION_STATUSES = frozenset({"accepted", "dismissed"})
-_FINANCIAL_KEYS = frozenset(
-    {"plan.resources", "goals", "portfolio.snapshot", "income.schedule", "household"}
+_TABLES = frozenset(
+    {"metadata", "clients", "facts", "batches", "decisions", "decision_events", "auxiliary"}
 )
-_FINANCIAL_PREFIXES = ("account.", "lot.", "tax.", "planning.", "research.", "analysis.")
+# Review horizons in days by key (exact) or prefix (ending in "."); the first match
+# wins. A fact without an explicit expires_on is due for review this long after
+# its observation. The horizon is a review deadline, not a prediction.
+REVIEW_DAYS: tuple[tuple[str, int], ...] = (
+    ("portfolio.snapshot", 30), ("household", 30), ("account.", 30), ("lot.", 30),
+    ("analysis.", 30), ("plan.resources", 90), ("income.schedule", 90),
+    ("planning.", 90), ("research.", 90), ("thesis.", 180),
+)
+DEFAULT_REVIEW_DAYS = 365  # client.profile, goals, preference.*, constraint.*, tax.*, other
+# Facts that set financial policy; document/web sources cannot establish them.
+_POLICY_KEYS = frozenset({"goals", "client.profile", "tax.profile", "monitor.rules"})
+_POLICY_PREFIXES = ("preference.", "constraint.")
+_SENSITIVE_FIELDS = frozenset({
+    "password", "passcode", "pin", "ssn", "social_security_number", "curp", "rfc",
+    "account_number", "routing_number", "clabe", "card_number", "cvv", "api_key",
+    "secret", "credential", "credentials", "token", "address", "street_address",
+})
+_SENSITIVE_PATTERNS = (
+    ("a US Social Security number", re.compile(r"\b\d{3}-\d{2}-\d{4}\b")),
+    ("a CURP", re.compile(r"\b[A-Z]{4}\d{6}[HM][A-Z]{5}[A-Z0-9]\d\b")),
+    ("an RFC", re.compile(r"\b[A-Z&Ñ]{3,4}\d{6}[A-Z0-9]{3}\b")),
+    ("an account or card number", re.compile(r"\b\d(?:[ -]?\d){11,18}\b")),
+)
 
 
 class StoreError(ValueError):
@@ -49,6 +72,13 @@ class ClientExistsError(StoreError):
 class StaleRevisionError(StoreError):
     """The expected revision is no longer current."""
 
+    def __init__(self, expected: int, current: int):
+        self.expected, self.current = expected, current
+        super().__init__(
+            f"stale revision: expected {expected}, current {current}; reload, "
+            f"reconcile, and retry with expected_revision={current}"
+        )
+
 
 class RequestConflictError(StoreError):
     """An idempotency key was reused for a different request."""
@@ -60,11 +90,6 @@ class DecisionNotFoundError(StoreError):
 
 class IneligibleEvidenceError(StoreError):
     """Evidence cannot support the requested decision operation."""
-
-
-# Descriptive compatibility aliases for callers that prefer category names.
-RevisionConflictError = StaleRevisionError
-IdempotencyConflictError = RequestConflictError
 
 
 def _utc_now() -> str:
@@ -132,8 +157,60 @@ def _json(value: Any) -> str:
     )
 
 
-def _is_financial_key(key: str) -> bool:
-    return key in _FINANCIAL_KEYS or key.startswith(_FINANCIAL_PREFIXES)
+def review_days(key: str) -> int:
+    for pattern, days in REVIEW_DAYS:
+        if key == pattern or (pattern.endswith(".") and key.startswith(pattern)):
+            return days
+    return DEFAULT_REVIEW_DAYS
+
+
+def is_stale(fact: Mapping[str, Any], today: date | None = None) -> bool:
+    expires = fact.get("expires_on")
+    return bool(expires) and expires < (today or _today()).isoformat()
+
+
+def _is_policy_key(key: str) -> bool:
+    return key in _POLICY_KEYS or key.startswith(_POLICY_PREFIXES)
+
+
+def _sensitive(value: Any, field: str) -> str | None:
+    if isinstance(value, str) and "://" not in value:
+        for label, pattern in _SENSITIVE_PATTERNS:
+            if pattern.search(value):
+                return f"{field} looks like {label}"
+    elif isinstance(value, list):
+        return next(filter(None, (_sensitive(v, f"{field}[{i}]") for i, v in enumerate(value))), None)
+    elif isinstance(value, dict):
+        for name, item in value.items():
+            if name.lower() in _SENSITIVE_FIELDS and item not in (None, ""):
+                return f"{field}.{name} is an identifier, address, or credential field"
+            found = _sensitive(item, f"{field}.{name}")
+            if found:
+                return found
+    return None
+
+
+def merge_patch(current: Any, patch: Any, field: str = "value") -> Any:
+    """RFC 7386 merge for objects; lists of objects with ``id`` merge by id."""
+
+    if isinstance(patch, dict):
+        merged = dict(current) if isinstance(current, dict) else {}
+        for name, item in patch.items():
+            if item is None:
+                merged.pop(name, None)
+            else:
+                merged[name] = merge_patch(merged.get(name), item, f"{field}.{name}")
+        return merged
+    if isinstance(patch, list) and isinstance(current, list):
+        if not all(isinstance(i, dict) and "id" in i for i in (*current, *patch)):
+            raise ValidationError(
+                f"merge of list {field} requires objects with an id; send the full list without merge"
+            )
+        merged = {item["id"]: item for item in current}
+        for item in patch:
+            merged[item["id"]] = merge_patch(merged.get(item["id"]), item, f"{field}[{item['id']}]")
+        return list(merged.values())
+    return patch
 
 
 class WealthStore:
@@ -214,6 +291,8 @@ class WealthStore:
                         f"unsupported schema version {row['value']}; "
                         f"expected {SCHEMA_VERSION}"
                     )
+                if existing_tables >= _TABLES:
+                    return
             elif existing_tables:
                 raise StoreError("existing database has no wealth schema version")
             self._db.executescript(
@@ -332,13 +411,10 @@ class WealthStore:
             raise ClientNotFoundError(f"client {client_id!r} does not exist")
         return row
 
-    def _check_revision(self, client_id: str, expected_revision: int) -> sqlite3.Row:
+    def _check_revision(self, client_id: str, expected_revision: int | None) -> sqlite3.Row:
         row = self._client_row(client_id)
-        if row["revision"] != expected_revision:
-            raise StaleRevisionError(
-                f"stale revision for client {client_id!r}: expected "
-                f"{expected_revision}, current {row['revision']}"
-            )
+        if expected_revision is not None and row["revision"] != expected_revision:
+            raise StaleRevisionError(expected_revision, row["revision"])
         return row
 
     def create_client(self, client_id: str, display_name: str) -> dict[str, Any]:
@@ -373,47 +449,67 @@ class WealthStore:
             "recorded_at": row["recorded_at"],
         }
 
-    def _decision_needs_review(
-        self, row: sqlite3.Row, client_revision: int, as_of: date | None = None
-    ) -> bool:
-        if row["input_revision"] != client_revision:
-            return True
-        evidence_ids = json.loads(row["evidence_ids_json"])
-        if not evidence_ids:
-            return True
-        placeholders = ",".join("?" for _ in evidence_ids)
-        evidence = self._db.execute(
-            f"SELECT id, key, confidence, expires_on, revision FROM facts "
-            f"WHERE client_id = ? AND id IN ({placeholders})",
-            (row["client_id"], *evidence_ids),
-        ).fetchall()
-        if len(evidence) != len(evidence_ids):
-            return True
-        latest = {
-            fact["key"]: fact["id"]
-            for fact in self._db.execute(
-                "SELECT f.key, f.id FROM facts f JOIN "
+    def _latest_ids(self, client_id: str) -> dict[str, tuple[str, int]]:
+        return {
+            row["key"]: (row["id"], row["revision"])
+            for row in self._db.execute(
+                "SELECT f.key, f.id, f.revision FROM facts f JOIN "
                 "(SELECT key, MAX(revision) revision FROM facts "
                 " WHERE client_id = ? GROUP BY key) latest "
                 "ON latest.key = f.key AND latest.revision = f.revision "
                 "WHERE f.client_id = ?",
-                (row["client_id"], row["client_id"]),
+                (client_id, client_id),
             )
         }
-        current_day = as_of or _today()
-        return any(
-            fact["confidence"] == "inferred"
-            or latest.get(fact["key"]) != fact["id"]
-            or (
-                fact["expires_on"] is not None
-                and date.fromisoformat(fact["expires_on"]) < current_day
+
+    def _evidence_problems(
+        self,
+        client_id: str,
+        evidence_ids: Sequence[str],
+        latest: Mapping[str, tuple[str, int]] | None = None,
+    ) -> list[str]:
+        """Name each cited fact that no longer supports a decision."""
+
+        if not evidence_ids:
+            return ["no evidence is cited"]
+        placeholders = ",".join("?" for _ in evidence_ids)
+        rows = {
+            row["id"]: row
+            for row in self._db.execute(
+                f"SELECT id, key, confidence, expires_on FROM facts "
+                f"WHERE client_id = ? AND id IN ({placeholders})",
+                (client_id, *evidence_ids),
             )
-            for fact in evidence
-        )
+        }
+        latest = self._latest_ids(client_id) if latest is None else latest
+        today = _today().isoformat()
+        problems = []
+        for evidence_id in evidence_ids:
+            row = rows.get(evidence_id)
+            if row is None:
+                problems.append(f"evidence {evidence_id} does not belong to this client")
+                continue
+            key = row["key"]
+            current_id, current_revision = latest.get(key, (None, None))
+            if current_id != evidence_id:
+                problems.append(
+                    f"{key} changed at revision {current_revision} (cited evidence {evidence_id})"
+                )
+            elif row["confidence"] == "inferred":
+                problems.append(f"{key} is inferred (evidence {evidence_id}); confirm it with the user")
+            elif row["expires_on"] and row["expires_on"] < today:
+                problems.append(
+                    f"{key} passed its review date {row['expires_on']} (evidence {evidence_id}); "
+                    "reconfirm it with the user"
+                )
+        return problems
 
     def _decision_from_row(
-        self, row: sqlite3.Row, client_revision: int
+        self, row: sqlite3.Row, latest: Mapping[str, tuple[str, int]] | None = None
     ) -> dict[str, Any]:
+        problems = self._evidence_problems(
+            row["client_id"], json.loads(row["evidence_ids_json"]), latest
+        )
         return {
             "id": row["id"],
             "title": row["title"],
@@ -422,7 +518,8 @@ class WealthStore:
             "evidence_ids": json.loads(row["evidence_ids_json"]),
             "alternatives": json.loads(row["alternatives_json"]),
             "status": row["status"],
-            "needs_review": self._decision_needs_review(row, client_revision),
+            "needs_review": bool(problems),
+            "review_reasons": problems,
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
@@ -459,6 +556,7 @@ class WealthStore:
                     "SELECT * FROM decisions WHERE client_id = ? ORDER BY created_at, id",
                     (client_id,),
                 ).fetchall()
+                latest = self._latest_ids(client_id) if decisions else {}
                 return {
                     "client": {
                         "id": client["id"],
@@ -466,84 +564,134 @@ class WealthStore:
                         "revision": client["revision"],
                     },
                     "facts": [self._fact_from_row(row) for row in facts],
-                    "decisions": [
-                        self._decision_from_row(row, client["revision"])
-                        for row in decisions
-                    ],
+                    "decisions": [self._decision_from_row(row, latest) for row in decisions],
                 }
 
-    def _normalize_fact(self, raw: Any) -> dict[str, Any]:
+    def _normalize_fact(self, raw: Any) -> tuple[dict[str, Any], list[str]]:
         if not isinstance(raw, Mapping):
             raise ValidationError("each fact must be an object")
         if any(not isinstance(field, str) for field in raw):
             raise ValidationError("fact field names must be strings")
-        allowed = {"key", "value", "source", "confidence", "expires_on"}
+        allowed = {"key", "value", "source", "confidence", "expires_on", "merge"}
         unknown = set(raw) - allowed
         if unknown:
-            raise ValidationError(f"unknown fact fields: {sorted(unknown)!r}")
+            raise ValidationError(f"unknown fact fields: {sorted(unknown)!r}; allowed {sorted(allowed)!r}")
         key = _required_text(raw.get("key"), "fact.key")
         if "value" not in raw:
-            raise ValidationError("fact.value is required")
+            raise ValidationError(f"fact {key!r} requires value")
         value = raw["value"]
-        _validate_json(value, "fact.value")
+        _validate_json(value, f"{key}.value")
+        merge = raw.get("merge", False)
+        if not isinstance(merge, bool):
+            raise ValidationError(f"{key}.merge must be true or false")
         source = raw.get("source")
-        if not isinstance(source, Mapping):
-            raise ValidationError("fact.source must be an object")
-        if any(not isinstance(field, str) for field in source):
-            raise ValidationError("source field names must be strings")
-        if set(source) != {"kind", "ref", "observed_on"}:
-            raise ValidationError("fact.source requires exactly kind, ref, and observed_on")
+        if not isinstance(source, Mapping) or set(source) != {"kind", "ref", "observed_on"}:
+            raise ValidationError(
+                f"{key}.source must be an object with exactly kind, ref, and observed_on"
+            )
         kind = source.get("kind")
         if not isinstance(kind, str) or kind not in _SOURCE_KINDS:
-            raise ValidationError(f"source.kind must be one of {sorted(_SOURCE_KINDS)!r}")
-        ref = _required_text(source.get("ref"), "source.ref")
-        observed = _iso_date(source.get("observed_on"), "source.observed_on")
+            raise ValidationError(f"{key}.source.kind must be one of {sorted(_SOURCE_KINDS)!r}")
+        ref = _required_text(source.get("ref"), f"{key}.source.ref")
+        if kind == "web" and not ref.startswith(("https://", "http://")):
+            raise ValidationError(f"{key}.source.ref must be the page URL for a web source")
+        observed = _iso_date(source.get("observed_on"), f"{key}.source.observed_on")
         if observed > _today():
-            raise ValidationError("source.observed_on must not be in the future")
+            raise ValidationError(f"{key}.source.observed_on must not be in the future")
+        if kind != "tool":
+            found = _sensitive(value, f"{key}.value")
+            if found:
+                raise ValidationError(
+                    f"{found}; do not store government IDs, account numbers, addresses, or credentials"
+                )
         confidence = raw.get("confidence", "reported")
         if not isinstance(confidence, str) or confidence not in _CONFIDENCES:
-            raise ValidationError(f"confidence must be one of {sorted(_CONFIDENCES)!r}")
+            raise ValidationError(f"{key}.confidence must be one of {sorted(_CONFIDENCES)!r}")
         if confidence == "confirmed" and kind != "user":
-            raise ValidationError("only a user source can carry confirmed confidence")
+            raise ValidationError(f"{key}: only a user source can carry confirmed confidence")
         if kind == "inference" and confidence != "inferred":
-            raise ValidationError("an inference source must carry inferred confidence")
+            raise ValidationError(f"{key}: an inference source must carry inferred confidence")
+        warnings = []
+        if kind in {"document", "web"} and _is_policy_key(key) and confidence != "inferred":
+            confidence = "inferred"
+            warnings.append(
+                f"{key} came from a {kind} source, so it was saved as inferred; ask the "
+                "user to confirm it, then save their answer with source.kind=user"
+            )
         expires_text = raw.get("expires_on")
-        expires = None
-        if expires_text is not None:
-            expires = _iso_date(expires_text, "fact.expires_on")
+        if expires_text is None:
+            expires = observed + timedelta(days=review_days(key))
+        else:
+            expires = _iso_date(expires_text, f"{key}.expires_on")
             if expires < observed:
-                raise ValidationError("fact.expires_on must not precede source.observed_on")
-        if _is_financial_key(key) and expires is None:
-            raise ValidationError(f"financial fact {key!r} requires expires_on")
+                raise ValidationError(f"{key}.expires_on must not precede source.observed_on")
+        if expires < _today():
+            warnings.append(
+                f"{key} was observed on {observed.isoformat()} and is already past its "
+                f"review date {expires.isoformat()}; reconfirm it with the user"
+            )
         return {
             "key": key,
             "value": value,
             "source": {"kind": kind, "ref": ref, "observed_on": observed.isoformat()},
             "confidence": confidence,
-            "expires_on": expires.isoformat() if expires is not None else None,
+            "expires_on": expires.isoformat(),
+            "merge": merge,
+        }, warnings
+
+    def _receipt(
+        self, client_id: str, revision: int, request_id: str | None, replayed: bool,
+        warnings: list[str],
+    ) -> dict[str, Any]:
+        client = self._client_row(client_id)
+        written = self._db.execute(
+            "SELECT id, key, confidence, expires_on, source_kind FROM facts "
+            "WHERE client_id = ? AND revision = ? ORDER BY key",
+            (client_id, revision),
+        ).fetchall()
+        return {
+            "client": {"id": client_id, "revision": client["revision"]},
+            "written": [
+                {"key": row["key"], "id": row["id"], "confidence": row["confidence"],
+                 "expires_on": row["expires_on"], "source_kind": row["source_kind"]}
+                for row in written
+            ],
+            "write_result": {
+                "request_id": request_id, "resulting_revision": revision, "replayed": replayed,
+            },
+            "warnings": warnings,
         }
 
     def remember(
         self,
         client_id: str,
         facts: Sequence[Mapping[str, Any]],
-        expected_revision: int,
+        expected_revision: int | None = None,
         request_id: str | None = None,
     ) -> dict[str, Any]:
+        """Write facts atomically and return a compact receipt.
+
+        Without ``expected_revision`` a write may add new keys or ``merge`` into
+        existing ones inside the write transaction; replacing an existing key
+        requires the revision the caller read.
+        """
+
         client_id = _required_text(client_id, "client_id")
-        expected_revision = _revision(expected_revision)
+        if expected_revision is not None:
+            expected_revision = _revision(expected_revision)
         if not isinstance(facts, list) or not facts:
             raise ValidationError("facts must be a nonempty list")
-        normalized = [self._normalize_fact(fact) for fact in facts]
+        normalized, warnings = [], []
+        for raw in facts:
+            fact, notes = self._normalize_fact(raw)
+            normalized.append(fact)
+            warnings.extend(notes)
         keys = [fact["key"] for fact in normalized]
         if len(keys) != len(set(keys)):
             raise ValidationError("a write cannot contain duplicate fact keys")
         if request_id is not None:
             request_id = _required_text(request_id, "request_id")
-        payload = {
-            "expected_revision": expected_revision,
-            "facts": normalized,
-        }
+        payload = {"expected_revision": expected_revision, "facts": normalized}
         payload_hash = hashlib.sha256(_json(payload).encode("utf-8")).hexdigest()
         now = _utc_now()
         with self._lock:
@@ -559,28 +707,49 @@ class WealthStore:
                     if prior is not None:
                         if prior["payload_hash"] != payload_hash:
                             raise RequestConflictError(
-                                f"request_id {request_id!r} was reused with a different payload"
+                                f"request_id {request_id!r} was reused with a different payload; "
+                                "use a new request_id for a new write"
                             )
+                        result = self._receipt(
+                            client_id, prior["resulting_revision"], request_id, True, []
+                        )
                         self._db.execute("COMMIT")
-                        result = self.snapshot(client_id)
-                        result["write_result"] = {
-                            "request_id": request_id,
-                            "resulting_revision": prior["resulting_revision"],
-                            "replayed": True,
-                        }
                         return result
-                if client["revision"] != expected_revision:
-                    raise StaleRevisionError(
-                        f"stale revision for client {client_id!r}: expected "
-                        f"{expected_revision}, current {client['revision']}"
+                current_revision = client["revision"]
+                if expected_revision is not None and current_revision != expected_revision:
+                    raise StaleRevisionError(expected_revision, current_revision)
+                current = {
+                    row["key"]: row
+                    for row in self._db.execute(
+                        f"SELECT f.* FROM facts f JOIN (SELECT key, MAX(revision) revision "
+                        f"FROM facts WHERE client_id = ? AND key IN ({','.join('?' for _ in keys)}) "
+                        f"GROUP BY key) latest ON latest.key = f.key AND latest.revision = f.revision "
+                        f"WHERE f.client_id = ?",
+                        (client_id, *keys, client_id),
                     )
-                new_revision = expected_revision + 1
-                changed = self._db.execute(
-                    "UPDATE clients SET revision = ? WHERE id = ? AND revision = ?",
-                    (new_revision, client_id, expected_revision),
+                }
+                for fact in normalized:
+                    prior_fact = current.get(fact["key"])
+                    if fact["merge"] and prior_fact is not None:
+                        fact["value"] = merge_patch(
+                            json.loads(prior_fact["value_json"]), fact["value"], fact["key"]
+                        )
+                        if prior_fact["confidence"] == "inferred" or is_stale(dict(prior_fact)):
+                            warnings.append(
+                                f"{fact['key']} was merged into an inferred or past-review value "
+                                f"observed on {prior_fact['observed_on']}; reconfirm the unchanged parts"
+                            )
+                    elif prior_fact is not None and expected_revision is None:
+                        raise ValidationError(
+                            f"{fact['key']} already has a value; send it with merge=true to "
+                            f"update fields, or pass expected_revision={current_revision} to replace it"
+                        )
+                    elif fact["merge"] and isinstance(fact["value"], dict):
+                        fact["value"] = merge_patch({}, fact["value"])
+                new_revision = current_revision + 1
+                self._db.execute(
+                    "UPDATE clients SET revision = ? WHERE id = ?", (new_revision, client_id)
                 )
-                if changed.rowcount != 1:
-                    raise StaleRevisionError(f"stale revision for client {client_id!r}")
                 for fact in normalized:
                     self._db.execute(
                         "INSERT INTO facts(id, client_id, key, value_json, source_kind, "
@@ -606,17 +775,12 @@ class WealthStore:
                         "resulting_revision, created_at) VALUES (?, ?, ?, ?, ?)",
                         (client_id, request_id, payload_hash, new_revision, now),
                     )
+                result = self._receipt(client_id, new_revision, request_id, False, warnings)
                 self._db.execute("COMMIT")
             except Exception:
                 if self._db.in_transaction:
                     self._db.execute("ROLLBACK")
                 raise
-        result = self.snapshot(client_id)
-        result["write_result"] = {
-            "request_id": request_id,
-            "resulting_revision": new_revision,
-            "replayed": False,
-        }
         return result
 
     def history(self, client_id: str, key: str) -> list[dict[str, Any]]:
@@ -632,48 +796,18 @@ class WealthStore:
             ).fetchall()
             return [self._fact_from_row(row) for row in rows]
 
-    def _eligible_evidence(
-        self, client_id: str, evidence_ids: Sequence[str]
-    ) -> list[sqlite3.Row]:
+    def _eligible_evidence(self, client_id: str, evidence_ids: Any) -> list[str]:
         if not isinstance(evidence_ids, list):
-            raise ValidationError("evidence_ids must be a nonempty list")
+            raise ValidationError("evidence_ids must be a nonempty list of fact ids")
         ids = [_required_text(value, "evidence_id") for value in evidence_ids]
         if not ids:
-            raise ValidationError("evidence_ids must be a nonempty list")
+            raise ValidationError("evidence_ids must be a nonempty list of fact ids")
         if len(ids) != len(set(ids)):
             raise ValidationError("evidence_ids cannot contain duplicates")
-        placeholders = ",".join("?" for _ in ids)
-        rows = self._db.execute(
-            f"SELECT * FROM facts WHERE client_id = ? AND id IN ({placeholders})",
-            (client_id, *ids),
-        ).fetchall()
-        by_id = {row["id"]: row for row in rows}
-        missing = [value for value in ids if value not in by_id]
-        if missing:
-            raise IneligibleEvidenceError(
-                "evidence must belong to the active client: " + ", ".join(missing)
-            )
-        latest = {
-            row["key"]: row["id"]
-            for row in self._db.execute(
-                "SELECT f.key, f.id FROM facts f JOIN "
-                "(SELECT key, MAX(revision) revision FROM facts "
-                " WHERE client_id = ? GROUP BY key) latest "
-                "ON latest.key = f.key AND latest.revision = f.revision "
-                "WHERE f.client_id = ?",
-                (client_id, client_id),
-            )
-        }
-        today = _today()
-        for evidence_id in ids:
-            row = by_id[evidence_id]
-            if latest.get(row["key"]) != row["id"]:
-                raise IneligibleEvidenceError(f"evidence {evidence_id!r} is not current")
-            if row["confidence"] == "inferred":
-                raise IneligibleEvidenceError(f"evidence {evidence_id!r} is inferred")
-            if row["expires_on"] and date.fromisoformat(row["expires_on"]) < today:
-                raise IneligibleEvidenceError(f"evidence {evidence_id!r} is expired")
-        return [by_id[value] for value in ids]
+        problems = self._evidence_problems(client_id, ids)
+        if problems:
+            raise IneligibleEvidenceError("ineligible evidence: " + "; ".join(problems))
+        return ids
 
     def save_decision(
         self,
@@ -699,8 +833,7 @@ class WealthStore:
             self._begin()
             try:
                 self._check_revision(client_id, expected_revision)
-                self._eligible_evidence(client_id, evidence_ids)
-                ids = list(evidence_ids)
+                ids = self._eligible_evidence(client_id, evidence_ids)
                 self._db.execute(
                     "INSERT INTO decisions(id, client_id, title, rationale, input_revision, "
                     "evidence_ids_json, alternatives_json, status, created_at, updated_at) "
@@ -727,29 +860,36 @@ class WealthStore:
                 if self._db.in_transaction:
                     self._db.execute("ROLLBACK")
                 raise
-        return next(
-            decision
-            for decision in self.snapshot(client_id)["decisions"]
-            if decision["id"] == decision_id
-        )
+            return self._decision(client_id, decision_id)
+
+    def _decision(self, client_id: str, decision_id: str) -> dict[str, Any]:
+        with self._read_transaction():
+            row = self._db.execute(
+                "SELECT * FROM decisions WHERE id = ? AND client_id = ?",
+                (decision_id, client_id),
+            ).fetchone()
+            return self._decision_from_row(row)
 
     def set_decision_status(
         self,
         client_id: str,
         decision_id: str,
         status: str,
-        expected_revision: int,
+        expected_revision: int | None = None,
     ) -> dict[str, Any]:
+        """Record a person's choice; only changed or expired cited evidence blocks it."""
+
         client_id = _required_text(client_id, "client_id")
         decision_id = _required_text(decision_id, "decision_id")
         if not isinstance(status, str) or status not in _DECISION_STATUSES:
             raise ValidationError("status must be 'accepted' or 'dismissed'")
-        expected_revision = _revision(expected_revision)
+        if expected_revision is not None:
+            expected_revision = _revision(expected_revision)
         now = _utc_now()
         with self._lock:
             self._begin()
             try:
-                client = self._check_revision(client_id, expected_revision)
+                self._check_revision(client_id, expected_revision)
                 row = self._db.execute(
                     "SELECT * FROM decisions WHERE id = ? AND client_id = ?",
                     (decision_id, client_id),
@@ -758,29 +898,21 @@ class WealthStore:
                     raise DecisionNotFoundError(
                         f"decision {decision_id!r} does not exist for this client"
                     )
-                if row["status"] == status:
-                    if status == "accepted":
-                        if self._decision_needs_review(row, client["revision"]):
-                            raise IneligibleEvidenceError(
-                                "a stale decision or one with ineligible evidence "
-                                "cannot be accepted"
-                            )
-                        self._eligible_evidence(
-                            client_id, json.loads(row["evidence_ids_json"])
-                        )
-                    self._db.execute("COMMIT")
-                elif row["status"] != "proposed":
+                if row["status"] not in {"proposed", status}:
                     raise ValidationError(
                         "a resolved decision cannot change status; create a new proposal"
                     )
-                elif status == "accepted":
-                    if self._decision_needs_review(row, client["revision"]):
-                        raise IneligibleEvidenceError(
-                            "a stale decision or one with ineligible evidence cannot be accepted"
-                        )
-                    self._eligible_evidence(
+                if status == "accepted":
+                    problems = self._evidence_problems(
                         client_id, json.loads(row["evidence_ids_json"])
                     )
+                    if problems:
+                        raise IneligibleEvidenceError(
+                            "cannot accept; cited evidence no longer supports it: "
+                            + "; ".join(problems)
+                            + ". Refresh the evidence and create a new proposal."
+                        )
+                if row["status"] == "proposed":
                     self._db.execute(
                         "UPDATE decisions SET status = ?, updated_at = ? "
                         "WHERE id = ? AND client_id = ? AND status = 'proposed'",
@@ -791,28 +923,12 @@ class WealthStore:
                         "VALUES (?, ?, ?)",
                         (decision_id, status, now),
                     )
-                    self._db.execute("COMMIT")
-                else:
-                    self._db.execute(
-                        "UPDATE decisions SET status = ?, updated_at = ? "
-                        "WHERE id = ? AND client_id = ? AND status = 'proposed'",
-                        (status, now, decision_id, client_id),
-                    )
-                    self._db.execute(
-                        "INSERT INTO decision_events(decision_id, status, recorded_at) "
-                        "VALUES (?, ?, ?)",
-                        (decision_id, status, now),
-                    )
-                    self._db.execute("COMMIT")
+                self._db.execute("COMMIT")
             except Exception:
                 if self._db.in_transaction:
                     self._db.execute("ROLLBACK")
                 raise
-        return next(
-            decision
-            for decision in self.snapshot(client_id)["decisions"]
-            if decision["id"] == decision_id
-        )
+            return self._decision(client_id, decision_id)
 
     def export_client(self, client_id: str) -> dict[str, Any]:
         client_id = _required_text(client_id, "client_id")
@@ -829,8 +945,9 @@ class WealthStore:
                     (client_id,),
                 ).fetchall()
                 decision_exports = []
+                latest = self._latest_ids(client_id) if decisions else {}
                 for row in decisions:
-                    decision = self._decision_from_row(row, client["revision"])
+                    decision = self._decision_from_row(row, latest)
                     decision["events"] = self._decision_events(row["id"])
                     decision_exports.append(decision)
                 return {
@@ -917,16 +1034,19 @@ class WealthStore:
 
 
 __all__ = [
+    "DEFAULT_REVIEW_DAYS",
+    "REVIEW_DAYS",
     "SCHEMA_VERSION",
     "ClientExistsError",
     "ClientNotFoundError",
     "DecisionNotFoundError",
-    "IdempotencyConflictError",
     "IneligibleEvidenceError",
     "RequestConflictError",
-    "RevisionConflictError",
     "StaleRevisionError",
     "StoreError",
     "ValidationError",
     "WealthStore",
+    "is_stale",
+    "merge_patch",
+    "review_days",
 ]

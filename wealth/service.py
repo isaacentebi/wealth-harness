@@ -5,9 +5,10 @@ import os
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 import importlib
+from inspect import signature
 import uuid
 
-from .store import WealthStore
+from .store import DEFAULT_REVIEW_DAYS, REVIEW_DAYS, WealthStore, is_stale
 from .workflows import prepare
 
 
@@ -40,17 +41,40 @@ def capabilities() -> dict:
         "execution": "Analysis and decision support only; no trading, transfers, or external messaging.",
         "tax_scope": "US federal taxable securities and Mexican Article 129 qualifying listed shares; explicit inputs and coverage required.",
         "monitoring": "Saved opt-in rules evaluated by the host or wealth watch. Unchanged checks stay quiet; no process starts automatically.",
-        "fact_contract": {
-            "fields": ["key", "value", "source", "confidence", "expires_on"],
-            "source": {"kind": "user|document|tool|inference", "ref": "actual source reference", "observed_on": "YYYY-MM-DD"},
-            "confidence": "confirmed (user source only)|reported|inferred",
-            "keys": ["client.profile", "household", "goals", "plan.resources", "constraint.*", "preference.*", "thesis.*", "research.<SYMBOL>", "planning.project", "planning.income", "planning.ladder", "tax.profile", "monitor.rules"],
-            "freshness": "Use explicit expiries for material financial state. Stale and inferred inputs are excluded from calculations.",
-            "review_policy": "For newly stated financial facts without a shorter supplied validity, use the provided default_review_on as a review deadline, not a prediction of continued accuracy. Do not extend old facts merely by recalling them.",
-            "default_review_on": (datetime.now(timezone.utc).date() + timedelta(days=30)).isoformat(),
-            "partial_values": "Incomplete canonical objects and goal entries may be remembered; omit unknown fields. Calculations remain unavailable until required fields are present. Never use zero for an unknown amount.",
-            "structured_updates": "Before replacing a structured value, fetch the complete current fact using wealth_client inspect inputs.key; merge without dropping other fields or goals.",
-        },
+        "fact_contract": fact_contract(),
+    }
+
+
+def fact_contract() -> dict:
+    today = datetime.now(timezone.utc).date()
+    return {
+        "fields": ["key", "value", "source", "confidence", "expires_on", "merge"],
+        "source": {"kind": "user|document|web|tool|inference", "ref": "actual source reference (URL for web)",
+                   "observed_on": "YYYY-MM-DD"},
+        "source_kinds": "user: only what the person said themselves in this conversation. document: a file or "
+                        "statement they supplied. web: a page you read (ref is its URL). tool: a Wealth result. "
+                        "inference: your own interpretation. Document/web facts for goals, profile, preferences, "
+                        "constraints or tax profile are saved as inferred until the person confirms them.",
+        "confidence": "confirmed: the person explicitly confirmed it | reported (default): the person stated it "
+                      "or a document shows it | inferred: an interpretation. Only a user source may be confirmed.",
+        "keys": ["client.profile", "household", "portfolio.snapshot", "goals", "plan.resources", "income.schedule",
+                 "constraint.*", "preference.*", "thesis.*", "research.<SYMBOL>", "planning.project",
+                 "planning.income", "planning.ladder", "tax.profile", "monitor.rules"],
+        "review_days": {**{pattern + ("*" if pattern.endswith(".") else ""): days for pattern, days in REVIEW_DAYS},
+                        "other keys": DEFAULT_REVIEW_DAYS},
+        "freshness": "Omit expires_on unless the source states a shorter validity; the store sets the review date "
+                     "from observed_on and review_days. Past-review facts stay visible but marked stale; reconfirm "
+                     "them with the person. Stale and inferred facts are excluded from calculations and decisions.",
+        "default_review_on": (today + timedelta(days=DEFAULT_REVIEW_DAYS)).isoformat(),
+        "writes": "Omit expected_revision to add new keys or to update existing ones with merge=true. Pass "
+                  "expected_revision (the client_revision you read) to replace an existing value wholesale.",
+        "merge": "merge=true applies value as a patch: object fields are updated, null removes a field, and "
+                 "lists of objects with id (such as goals) are updated by id without dropping other entries.",
+        "partial_values": "Incomplete canonical objects and goal entries may be remembered; omit unknown fields. "
+                          "Calculations remain unavailable until required fields are present. Never use zero for "
+                          "an unknown amount.",
+        "never_store": "Government IDs (SSN, RFC, CURP), account or card numbers, street addresses, passwords, "
+                       "tokens or other credentials.",
     }
 
 
@@ -59,17 +83,44 @@ class _Context(dict):
     def __init__(self, values, overridden=()):
         super().__init__(values)
         self.used = set()
+        self.requested = set()
         self.overridden = set(overridden)
 
+    def _track(self, key):
+        if key != "_evidence" and key not in self.overridden:
+            self.requested.add(key)
+            if key in self:
+                self.used.add(key)
+
     def get(self, key, default=None):
-        if key in self and key not in self.overridden and key != "_evidence":
-            self.used.add(key)
+        self._track(key)
         return super().get(key, default)
 
     def __getitem__(self, key):
-        if key in self and key not in self.overridden and key != "_evidence":
-            self.used.add(key)
+        self._track(key)
         return super().__getitem__(key)
+
+
+def _call(function, label: str, data: dict, **fixed):
+    """Call with named inputs, reporting missing or unknown fields by name."""
+    if not isinstance(data, dict):
+        raise ValueError(f"{label} inputs must be an object")
+    params = {name: p for name, p in signature(function).parameters.items() if name not in fixed}
+    unknown = sorted(set(data) - set(params))
+    missing = [name for name, p in params.items() if p.default is p.empty and name not in data]
+    if unknown or missing:
+        expected = ", ".join(name + ("" if p.default is p.empty else "?") for name, p in params.items())
+        problems = [f"missing {missing}" if missing else "", f"unknown {unknown}" if unknown else ""]
+        raise ValueError(f"{label} inputs: {'; '.join(filter(None, problems))}; expected {{{expected}}}")
+    return function(**fixed, **data)
+
+
+def freshness(facts: list[dict]) -> dict:
+    today = datetime.now(timezone.utc).date()
+    stale = [f["key"] for f in facts if is_stale(f, today)]
+    inferred = [f["key"] for f in facts if f["confidence"] == "inferred" and f["key"] not in stale]
+    return {"fresh_fact_keys": [f["key"] for f in facts if f["key"] not in {*stale, *inferred}],
+            "stale_fact_keys": stale, "inferred_fact_keys": inferred}
 
 
 class WealthService:
@@ -80,7 +131,7 @@ class WealthService:
         with WealthStore(self.db_path) as store:
             return store.create_client(client_id, display_name)
 
-    def remember(self, client_id: str, facts: list[dict], expected_revision: int,
+    def remember(self, client_id: str, facts: list[dict], expected_revision: int | None = None,
                  request_id: str | None = None) -> dict:
         with WealthStore(self.db_path) as store:
             return store.remember(client_id, facts, expected_revision, request_id)
@@ -104,19 +155,26 @@ class WealthService:
             "income": "goals income.schedule planning.income", "project": "goals planning.project",
             "ladder": "goals planning.ladder", "calendar": "income.schedule",
         }
-        result = self.recall(client_id, " ".join(filter(None, [query, routing.get(intent, intent)])))
-        result["available_tasks"] = list(TASK_MODULES) + ["plan", "calendar", "monitor"]
-        result["fact_contract"] = capabilities()["fact_contract"]
+        from .recall import recall
         with WealthStore(self.db_path) as store:
-            facts = store.snapshot(client_id)["facts"]
+            snapshot = store.snapshot(client_id)
+            result = recall(snapshot, " ".join(filter(None, [query, routing.get(intent, intent)])),
+                            embeddings=store.auxiliary(client_id, "embeddings"))
+        facts = snapshot["facts"]
+        result["available_tasks"] = list(TASK_MODULES) + ["plan", "calendar", "monitor"]
+        result["fact_contract"] = fact_contract()
         result["known_fact_keys"] = [f["key"] for f in facts[:50]]
         result["omitted_fact_keys"] = max(0, len(facts) - 50)
-        result["next_step"] = "Use run for calculations; inspect a fact by key if its value was omitted."
+        result.update(freshness(facts))
+        if result["stale_fact_keys"]:
+            result["reconfirm"] = ("Stale facts are past their review date: still visible, excluded from "
+                                   "calculations. Reconfirm them with the person before relying on them.")
+        result["next_step"] = "Use wealth_run for calculations; wealth_inspect a key if its value was omitted."
         return result
 
     def recall(self, client_id: str, query: str = "", limit: int = 12,
                query_embedding: list | None = None, embedding_model: str | None = None,
-               include_stale: bool = False) -> dict:
+               include_stale: bool = True) -> dict:
         from .recall import recall
         with WealthStore(self.db_path) as store:
             return recall(store.snapshot(client_id), query, limit=limit,
@@ -210,14 +268,21 @@ class WealthService:
                       evidence_ids=[f["id"] for f in consumed])
         report["excluded_evidence"] = [{"key": f["key"], "reason": "inferred" if f["confidence"] == "inferred" else "expired"}
                                        for f in snapshot["facts"] if f not in eligible]
+        if task in {"plan", "calendar"}:
+            relevant = set(keys)
+        else:
+            relevant = {f["key"] for f in snapshot["facts"]} if task == "monitor" else context.requested
+        for fact in snapshot["facts"]:
+            if fact["key"] in relevant and fact["key"] not in inputs and is_stale(fact):
+                report.setdefault("warnings", []).append(
+                    f"{fact['key']} is stale (observed {fact['source']['observed_on']}, review date "
+                    f"{fact['expires_on']} passed) and was not used; reconfirm it with the person.")
         if save_as:
             report["request_inputs"] = inputs
         if inputs:
             report.setdefault("assumptions", []).append("Explicit request inputs take precedence over remembered values; they are not saved unless requested.")
         if save_as and report.get("status") in {"ready", "partial"}:
-            value = report["result"].get("household") if task == "import" and save_as == "household" else report
-            if task != "import" and save_as == "household":
-                raise ValueError("only a validated import may be saved as household")
+            value = report["result"].get("household") if save_as == "household" else report
             if value is None:
                 raise ValueError("no validated value is available to save")
             derived_expiry = min([expires_on, *[f["expires_on"] for f in consumed if f.get("expires_on")]])
@@ -225,31 +290,43 @@ class WealthService:
                 saved = store.remember(client_id, [{"key": save_as, "value": value,
                     "source": {"kind": "tool", "ref": "wealth://" + task + "/" + uuid.uuid4().hex, "observed_on": today},
                     "confidence": "reported", "expires_on": derived_expiry}], snapshot["client"]["revision"])
-            report["saved"] = {"key": save_as, "client_revision": saved["client"]["revision"], "expires_on": derived_expiry}
+            report["saved"] = {"key": save_as, "client_revision": saved["write_result"]["resulting_revision"],
+                               "expires_on": derived_expiry}
         return report
 
     def client(self, action: str, client_id: str, inputs: dict | None = None) -> dict:
-        data = inputs or {}
-        operations = {"create": self.create, "inspect": self.inspect, "export": lambda **kw: self.inspect(detail="export", **kw),
+        """CLI client actions. MCP exposes create/index here and reads via wealth_inspect."""
+        operations = {"create": self.create, "inspect": self.inspect,
+                      "export": lambda client_id: self.inspect(client_id, detail="export"),
                       "forget": self.forget, "index": self.index}
         if action not in operations:
-            raise ValueError("client action must be create,inspect,export,forget,index")
-        return operations[action](client_id=client_id, **data)
+            raise ValueError(f"client action must be one of {', '.join(operations)}")
+        return _call(operations[action], f"client {action}", inputs or {}, client_id=client_id)
 
     def decision(self, action: str, client_id: str, inputs: dict) -> dict:
         if action == "propose":
-            return self.propose(client_id=client_id, **inputs)
+            return _call(self.propose, "decision propose", inputs, client_id=client_id)
         if action in {"accept", "dismiss"}:
-            return self.resolve(client_id=client_id, status="accepted" if action == "accept" else "dismissed", **inputs)
-        raise ValueError("decision action must be propose,accept,dismiss")
+            return _call(self.resolve, f"decision {action}", inputs, client_id=client_id,
+                         status="accepted" if action == "accept" else "dismissed")
+        raise ValueError("decision action must be propose, accept, or dismiss")
 
-    def inspect(self, client_id: str, detail: str = "current", key: str | None = None) -> dict:
+    def inspect(self, client_id: str, detail: str = "current", key: str | None = None,
+                keys: list[str] | None = None) -> dict:
+        if keys is not None and (not isinstance(keys, list) or not all(isinstance(k, str) for k in keys)):
+            raise ValueError("keys must be a list of fact keys")
+        wanted = set(keys or []) | ({key} if key else set())
         with WealthStore(self.db_path) as store:
             if detail == "current":
                 snapshot = store.snapshot(client_id)
-                if key:
-                    snapshot["facts"] = [f for f in snapshot["facts"] if f["key"] == key]
+                if wanted:
+                    snapshot["facts"] = [f for f in snapshot["facts"] if f["key"] in wanted]
                     snapshot["decisions"] = []
+                    absent = sorted(wanted - {f["key"] for f in snapshot["facts"]})
+                    if absent:
+                        snapshot["absent_keys"] = absent
+                for fact in snapshot["facts"]:
+                    fact["stale"] = is_stale(fact)
                 return snapshot
             if detail == "export":
                 return store.export_client(client_id)
@@ -264,7 +341,7 @@ class WealthService:
                                        evidence_ids, alternatives)
 
     def resolve(self, client_id: str, decision_id: str, status: str,
-                expected_revision: int) -> dict:
+                expected_revision: int | None = None) -> dict:
         with WealthStore(self.db_path) as store:
             return store.set_decision_status(client_id, decision_id, status, expected_revision)
 

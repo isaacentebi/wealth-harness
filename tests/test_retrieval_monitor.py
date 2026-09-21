@@ -145,9 +145,49 @@ def test_saved_calculation_cites_only_consulted_memory(tmp_path):
                   'source': {'kind': 'user', 'ref': 'fixture', 'observed_on': TODAY.isoformat()},
                   'expires_on': (TODAY + timedelta(days=1)).isoformat()})
     snapshot = service.remember('client', facts, 0)
-    unrelated = next(f['id'] for f in snapshot['facts'] if f['key'] == 'thesis.unrelated')
+    unrelated = next(f['id'] for f in snapshot['written'] if f['key'] == 'thesis.unrelated')
     report = service.run('plan', client_id='client', save_as='analysis.plan',
                          expires_on=(TODAY + timedelta(days=30)).isoformat())
     assert unrelated not in report['evidence_ids']
     assert report['saved']['expires_on'] != (TODAY + timedelta(days=1)).isoformat()
     assert report['evidence_ids']
+
+
+def test_expired_memory_stays_visible_as_stale_and_is_named_in_run(tmp_path, monkeypatch):
+    import wealth.recall as recall_module
+    import wealth.service as service_module
+    import wealth.store as store_module
+    from examples.returning_client import example_facts
+    from wealth.service import WealthService
+
+    service = WealthService(tmp_path / 'stale.sqlite3')
+    service.create('client', 'Client')
+    service.remember('client', [f for f in example_facts() if f['key'] in {'goals', 'plan.resources', 'client.profile'}], 0)
+    future = TODAY + timedelta(days=31)
+
+    class Later(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(future.year, future.month, future.day, tzinfo=tz)
+
+    monkeypatch.setattr(recall_module, 'datetime', Later)
+    monkeypatch.setattr(service_module, 'datetime', Later)
+    monkeypatch.setattr(store_module, '_today', lambda: future)
+    monkeypatch.setattr('wealth.workflows._today_utc', lambda: future)
+    opened = []
+    original = store_module.WealthStore.__init__
+    monkeypatch.setattr(service_module.WealthStore, '__init__',
+                        lambda self, path: (opened.append(path), original(self, path))[1])
+
+    context = service.context('client', intent='plan', query='house')
+    assert len(opened) == 1
+    assert set(context['stale_fact_keys']) == {'goals', 'plan.resources', 'client.profile'}
+    assert context['fresh_fact_keys'] == [] and 'Reconfirm' in context['reconfirm']
+    goals = next(m for m in context['matches'] if m.get('key') == 'goals')
+    assert goals['stale'] and not goals['eligible_for_calculation'] and 'reconfirm' in goals['reconfirm']
+
+    report = service.run('plan', client_id='client')
+    assert {m['key'] for m in report['missing'] if m['reason'] == 'stale'} >= {'goals', 'plan.resources'}
+    assert any(w.startswith('goals is stale') and 'reconfirm' in w for w in report['warnings'])
+    exposure = service.run('exposure', {}, 'client')
+    assert not any('goals is stale' in w for w in exposure.get('warnings', []))
