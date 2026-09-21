@@ -43,7 +43,7 @@ POLICY_TASKS = frozenset({"policy_draft", "policy_check"})
 TASKS = (*TASK_MODULES, *SERVICE_TASKS)
 # Tasks whose module reads the client's transaction ledger from context["ledger"].
 LEDGER_TASKS = frozenset({"ledger", "performance", "spending", "dca", "rebalance"})
-INGEST_ACTIONS = ("file", "extraction", "chat", "confirm", "confirm_duplicates", "diff")
+INGEST_ACTIONS = ("file", "extraction", "chat", "confirm", "confirm_duplicates", "diff", "connector", "connector_status")
 _KEEP_PROPOSALS = 20
 
 
@@ -62,7 +62,7 @@ def upload_dir(client_id: str, db_path: str | Path | None = None) -> Path:
 
 
 def capabilities() -> dict:
-    from .catalog import CATALOG
+    from .catalog import CATALOG, CONNECTORS
     return {
         "product": "wealth-harness", "release": "0.2.0", "tasks": CATALOG,
         "example_policy": "Catalog examples are fictional dated inputs, not current market evidence, recommended assumptions, or facts about this person. Missing fund constituents mean partial look-through coverage.",
@@ -75,6 +75,7 @@ def capabilities() -> dict:
                      "US estate exposure for non-residents. Not state tax, AFORE/IRA internals or filing positions.",
         "ingest": "wealth_ingest turns an uploaded statement, host extraction or chat facts into a reconciled "
                   "proposal. Nothing is saved until the person says yes and the host calls action=confirm.",
+        "connectors": CONNECTORS,
         "monitoring": "Saved opt-in rules evaluated by the host or wealth watch. Unchanged checks stay quiet; no process starts automatically.",
         "fact_contract": fact_contract(),
     }
@@ -558,7 +559,8 @@ class WealthService:
         """
         handlers = {"file": self._ingest_file, "extraction": self._ingest_extraction, "chat": self._ingest_chat,
                     "confirm": self._ingest_confirm, "confirm_duplicates": self._ingest_confirm_duplicates,
-                    "diff": self._ingest_diff}
+                    "diff": self._ingest_diff, "connector": self._ingest_connector,
+                    "connector_status": self._ingest_connector_status}
         if action not in handlers:
             raise ValueError(f"action must be one of {', '.join(INGEST_ACTIONS)}")
         return _call(handlers[action], f"ingest {action}", inputs or {}, client_id=client_id)
@@ -654,6 +656,7 @@ class WealthService:
     def _ingest_confirm(self, client_id: str, proposal_id: str, acknowledge_discrepancies: bool = False,
                         expires_on: str | None = None) -> dict:
         from . import ledger as ledger_module
+        from .connectors import batch_mapper
         from .ingest import proposal_to_facts
         from .ingest_posting import proposal_to_batch
         if not isinstance(acknowledge_discrepancies, bool):
@@ -678,7 +681,8 @@ class WealthService:
             before = situation_module.build(snapshot, store.ledger(client_id), today)
             revision = snapshot["client"]["revision"]
             saved = store.remember(client_id, facts, revision, packet["result"]["request_id"])
-            mapping = proposal_to_batch(proposal, batch_id=batch_id, ledger=store.ledger(client_id))
+            mapper = batch_mapper(proposal) or proposal_to_batch
+            mapping = mapper(proposal, batch_id=batch_id, ledger=store.ledger(client_id))
             receipt = ledger_module.post(store, client_id, mapping["batch"]) if mapping["batch"] else None
             after = situation_module.build(store.snapshot(client_id), store.ledger(client_id), today)
         ledger_view = _ledger_summary(receipt, mapping)
@@ -750,6 +754,52 @@ class WealthService:
                                       f"transactions; {len(remaining)} still held.",
                            "posted": receipt["posted"], "still_held": remaining},
                 "missing": [], "warnings": receipt.get("warnings", []), "sources": [], "assumptions": []}
+
+    def _ingest_connector(self, client_id: str, name: str, query_id: str | None = None, owner_id: str = "self",
+                          sic_listed: list | dict | None = None) -> dict:
+        """Pull a read-only connector (e.g. IBKR Flex) into a held proposal; confirm saves it, as for a file.
+
+        The credential is read by the connector from the OS keychain or its
+        environment variable; it is never an input, never stored and never shown.
+        """
+        from . import connectors
+        if not isinstance(name, str) or name not in connectors.names():
+            raise ValueError(f"name must be one of {', '.join(connectors.names())}")
+        if query_id is None:
+            raise ValueError(f"connector {name} needs query_id (the Activity Flex Query id from the IBKR portal)")
+        if sic_listed is not None and not isinstance(sic_listed, (list, dict)):
+            raise ValueError("sic_listed must be a list of symbols or {symbol: true|false}")
+        instance = connectors.connector(name, query_id=query_id, sic_listed=sic_listed)
+        state = self._ingest_state(client_id)
+        earlier = [(record.get("created_at", ""), record["proposal"]) for record in (state.get("confirmed") or {}).values()
+                   if (record["proposal"].get("result", {}).get("provenance") or {}).get("ref") == instance.ref]
+        previous = max(earlier, key=lambda item: item[0])[1] if earlier else None
+        proposal = instance.proposal(owner_id=owner_id, previous=previous)
+        shown = self._hold(client_id, proposal)
+        if previous is not None and "changes" in shown.get("result", {}):
+            shown["result"]["previous_proposal_id"] = previous["result"]["proposal_id"]
+        return shown
+
+    def _ingest_connector_status(self, client_id: str, name: str | None = None) -> dict:
+        """Which connectors have a credential available and when each last synced (never the credential)."""
+        from . import connectors
+        if name is not None and name not in connectors.names():
+            raise ValueError(f"name must be one of {', '.join(connectors.names())}")
+        state = self._ingest_state(client_id)
+        rows = []
+        for entry in connectors.status(name):
+            synced = []
+            for bucket in ("confirmed", "pending"):
+                for pid, record in (state.get(bucket) or {}).items():
+                    result = record["proposal"].get("result") or {}
+                    provenance = result.get("provenance") or {}
+                    if provenance.get("provider") == entry["name"]:
+                        synced.append({"proposal_id": pid, "as_of": result.get("as_of"), "confirmed": bucket == "confirmed",
+                                       "query_id": provenance.get("query_id"), "pulled_at": record.get("created_at")})
+            synced.sort(key=lambda item: item["pulled_at"] or "")
+            rows.append({**entry, "last_sync": synced[-1] if synced else None})
+        return {"status": "ready", "result": {"connectors": rows}, "missing": [], "warnings": [], "sources": [],
+                "assumptions": ["Connectors pull only when asked; nothing runs in the background."]}
 
     def _ingest_diff(self, client_id: str, proposal_id: str, previous_proposal_id: str | None = None) -> dict:
         from .ingest import diff_proposals

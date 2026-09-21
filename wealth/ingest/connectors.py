@@ -1,4 +1,4 @@
-"""Extension point for account aggregators.  No adapter ships with Wealth.
+"""Extension point for account connectors; wealth.connectors ships the IBKR Flex adapter.
 
 A connector pulls on demand (never in the background), takes credentials only
 from environment variables or the OS keychain (never SQLite, logs or model

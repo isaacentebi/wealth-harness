@@ -186,7 +186,7 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = True,
     @tool(annotations=WRITE)
     def wealth_ingest(
         client_id: str,
-        action: Literal["file", "extraction", "chat", "confirm", "confirm_duplicates", "diff"],
+        action: Literal["file", "extraction", "chat", "confirm", "confirm_duplicates", "diff", "connector", "connector_status"],
         inputs: dict[str, Any],
     ) -> dict[str, Any]:
         """Turn an upload or stated balances into a reconciled proposal; save only on the person's yes.
@@ -198,6 +198,8 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = True,
           Saves the stored proposal and posts it to the ledger.
         confirm_duplicates: proposal_id, entry_ids (held lines the person says are separate transactions).
         diff: proposal_id, previous_proposal_id? — changes since the last confirmed statement.
+        connector: name ("ibkr_flex"), query_id — fetch a read-only proposal; same confirm rule.
+        connector_status: name — whether a credential is configured and the last sync (never the secret).
         """
         return service.ingest(client_id=client_id, action=action, inputs=inputs)
 
