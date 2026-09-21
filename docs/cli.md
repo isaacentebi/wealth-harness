@@ -58,6 +58,36 @@ lines, and its closing figures become balance checks. Lines resembling another
 statement's are held until `confirm_duplicates`. The confirm result includes
 `statement_prices` for `run` task `ledger` view `household`.
 
+`confirm` is one transaction: the facts, the ledger lines and the proposal's
+state commit together or not at all, so a failed confirm can simply be retried,
+and a repeated or concurrent confirm of the same proposal returns the first
+receipt with `replayed: true`. Writes made meanwhile never conflict with it.
+
+A newer statement for an account already in the ledger is reconciled to it:
+after its own lines are posted, any cash or position the lines do not explain
+gets a labelled `Statement reconciliation` adjustment dated at the statement
+(cash as an opening-balance correction, extra units as an opening position
+without basis, missing units as an outgoing transfer, so no gain is invented).
+The receipt lists them in `result.ledger.adjustments`, and holdings the
+statement no longer lists in `result.reconciliation.missing_positions` (also
+shown on the proposal before confirming). An older statement only adds balance
+checks. Forgetting an `account.<id>` fact posts reversal entries for that
+account's ledger lines (append-only; the history stays), so the account leaves
+the brief, the net worth and `task=ledger` together.
+
+**Upload retention.** Raw statements hold RFC, CURP, CLABE and account numbers,
+so uploads are deleted (overwritten, then unlinked) once they are no longer
+needed: the file of a confirmed statement right after `confirm`, any other
+upload 30 days after it was saved (checked on every `ingest` call), and the
+client's whole upload directory when the client is deleted. Set
+`WEALTH_UPLOAD_RETENTION_DAYS` to change the 30 days (`0` turns age-based
+deletion off) and `WEALTH_KEEP_CONFIRMED_UPLOADS=1` to keep confirmed files.
+
+Amounts, balances and quantities must be below 10^15 in absolute value and rates
+within their documented range; a fact saved before these bounds that no reader
+can use is left out of the picture and listed in `invalid_facts` (situation and
+profile) so the person can remove it.
+
 ## Connectors
 
 `ingest action=connector` pulls a read-only account connector on demand and

@@ -1087,7 +1087,11 @@ def memory_view(sit: dict, snapshot: dict, language: str, missing: Iterable[str]
     heads = summaries(sit, language)
     items, conflicts, answered = [], [], set()
     records = [c for c in sit.get("contradictions") or [] if c.get("status", "pending") == "pending"]
-    for index, s in enumerate(sentences(sit, language) + _held_back(sit, snapshot, language)):
+    direct = sentences(sit, language)
+    # A stale statement account is worded by the situation itself; its held-back copy would repeat it.
+    worded = {(s["key"], s.get("ref")) for s in direct}
+    extra = [s for s in _held_back(sit, snapshot, language) if (s["key"], s.get("ref")) not in worded]
+    for index, s in enumerate(direct + extra):
         fact = facts.get(s["key"] or "")
         ref = s.get("ref")
         editable = not s.get("readonly")
@@ -1234,12 +1238,22 @@ def profile_view(service: Any, client_id: str, today: Any = None, language: str 
     ``language`` ("es"/"en", e.g. from ``?lang=``) builds the memory in that
     language only; without it both are included so the page can switch offline.
     """
+    from .service import usable_snapshot
+
     today = _today(today)
-    snapshot = _snapshot(service, client_id)
+    # A fact no reader can handle (e.g. an amount of 1e308 saved before numbers were bounded) is left
+    # out of every view and listed for the person to remove, instead of breaking the page.
+    snapshot, invalid = usable_snapshot(_snapshot(service, client_id))
     facts = _facts_by_key(snapshot)
     profile = _dict_value(facts.get("client.profile"))
     household = _dict_value(facts.get("household"))
     sit = _situation(service, client_id, snapshot, today)
+    seen_invalid = {item["key"] for item in invalid}
+    invalid += [item for item in sit.get("invalid_facts") or [] if item["key"] not in seen_invalid]
+    if invalid:
+        excluded = {item["key"] for item in invalid}
+        snapshot = {**snapshot, "facts": [f for f in snapshot["facts"] if f["key"] not in excluded]}
+        facts = _facts_by_key(snapshot)
     ov = overview(snapshot, today)
     if ov.get("status") == "empty":
         ov = situation_overview(sit)
@@ -1257,6 +1271,7 @@ def profile_view(service: Any, client_id: str, today: Any = None, language: str 
     memory: dict[str, Any] = {"language": _memory_lang(language) if language else saved}
     for lang in langs:
         memory[lang] = memory_view(sit, snapshot, lang, known["missing"])
+        memory[lang]["review"] = _invalid_items(invalid, lang) + memory[lang]["review"]
     return {
         "version": 2, "today": today.isoformat(),
         "client": {"display_name": snapshot["client"].get("display_name"),
@@ -1271,7 +1286,26 @@ def profile_view(service: Any, client_id: str, today: Any = None, language: str 
         "upcoming": upcoming(snapshot, today, labels=fact_labels(sit)),
         # The accepted investment policy (profile, sleeves with ranges, reserve, review), or None.
         "policy": policy_summary(current_policy(snapshot, today)),
+        # Saved facts left out of every number because they cannot be read; each can be removed.
+        "invalid_facts": invalid,
     }
+
+
+def _invalid_items(invalid: list[dict], language: str) -> list[dict]:
+    """Review cards for unreadable facts: named in the person's words, with a remove action."""
+    from .store import _label
+
+    items = []
+    for index, item in enumerate(invalid):
+        label = _label(item["key"], None, language)
+        text = (f"La cifra guardada de {label} no se puede usar (es demasiado grande o está mal escrita). "
+                "Elimínala y vuelve a escribirla." if language == "es" else
+                f"The saved figure for {label} can’t be used (it is too large or malformed). "
+                "Remove it and enter it again.")
+        items.append({"id": f"invalid-{index}", "topic": "about", "text": text, "emphasis": [], "key": item["key"],
+                      "origin": {"kind": "said"}, "since": None, "age_days": None, "unconfirmed": False,
+                      "stale": True, "invalid": True, "edit": None, "forget": {"field": None}, "confirm": False})
+    return items
 
 
 # ---------------------------------------------------------------- writes (returned, not performed)

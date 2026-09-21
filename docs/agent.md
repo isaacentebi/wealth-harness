@@ -28,7 +28,9 @@ next send; reloading during a response reattaches to it.
 
 Attachments (PDF, CSV, PNG, JPEG, WebP; up to 25 MB, five per message) can be
 added with the paperclip or by drag and drop. They are stored in `uploads/<client>/`
-next to the database, under server-generated names. The assistant is told each
+next to the database, under server-generated names, and deleted once a statement
+is confirmed, after 30 days otherwise, or when the client is deleted (see
+[cli.md](cli.md#ingestion) for the settings). The assistant is told each
 file's name, type and local path; reading their contents is not implemented yet.
 
 Onboarding begins with the person's financial situation. Rough figures and
