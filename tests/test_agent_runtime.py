@@ -257,3 +257,39 @@ def test_memory_chip_uses_store_receipt_when_available(monkeypatch, tmp_path):
     monkeypatch.setattr(agent, "_stream_process", lambda *args: _proc(stdout))
     events = list(agent.stream_turn("q", client_id="c", db_path=tmp_path / "w.sqlite3"))
     assert [e.data["keys"] for e in events if e.type == "memory"] == [["plan.resources"]]
+
+
+def test_deferred_memory_splits_the_instructions_and_limits_tools(monkeypatch):
+    conversation = agent.conversation_instructions().read_text()
+    memory = agent.memory_instructions().read_text()
+    assert "wealth_remember" not in conversation and "## Voice" in conversation
+    assert "never say\nthat something was or will be saved" in conversation
+    assert memory.startswith("You are the memory step") and "## Continuity" in memory and "## Voice" not in memory
+    commands = []
+
+    def fake(command, prompt, timeout, control=None, cwd=None):
+        commands.append((command, prompt))
+        yield ("line", json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "Done."}}))
+        yield ("line", json.dumps({"type": "turn.completed"}))
+        yield ("exit", 0, "")
+
+    monkeypatch.setattr(agent, "_stream_process", fake)
+    list(agent.stream_turn("hola", client_id="c", db_path="/tmp/w.sqlite3", defer_memory=True, ephemeral=True))
+    turn = " ".join(commands[-1][0])
+    assert "wealth_remember" not in turn.split("WEALTH_MCP_TOOLS=")[1].split()[0]
+    assert "conversation-" in turn
+
+
+def test_remember_exchange_reports_written_keys(monkeypatch):
+    def fake(command, prompt, timeout, control=None, cwd=None):
+        assert "<adviser>" in prompt and "web_search=\"disabled\"" in " ".join(command)
+        yield ("line", json.dumps({"type": "item.completed", "item": {
+            "type": "mcp_tool_call", "server": "wealth", "tool": "wealth_remember", "status": "completed",
+            "arguments": {"client_id": "c", "facts": [{"key": "income.salary"}]},
+            "result": {"structured_content": {"written": [{"key": "income.salary"}]}}}}))
+        yield ("line", json.dumps({"type": "turn.completed"}))
+        yield ("exit", 0, "")
+
+    monkeypatch.setattr(agent, "_stream_process", fake)
+    keys = agent.remember_exchange("gano 85 mil", "Te sobran 40 mil.", client_id="c", db_path="/tmp/w.sqlite3")
+    assert keys == ["income.salary"]
