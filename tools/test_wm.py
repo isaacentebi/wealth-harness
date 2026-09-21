@@ -116,11 +116,12 @@ def offline(monkeypatch):
 # --------------------------------------------------------------------------
 def test_analyze_shape_and_window(px):
     res = wm.analyze_frame(px, "SPY")
-    assert set(res) >= {"window", "window_start", "window_end", "n_days", "bench",
+    assert set(res) >= {"window", "n_days", "bench",
                         "rf_annual", "assets", "correlation", "clusters", "portfolio",
                         "warnings"}
-    assert res["window_start"] < res["window_end"]
-    assert res["window"] == {"start": res["window_start"], "end": res["window_end"],
+    assert not {"window_start", "window_end"} & set(res)  # one window object, no duplicates
+    assert res["window"]["start"] < res["window"]["end"]
+    assert res["window"] == {"start": res["window"]["start"], "end": res["window"]["end"],
                              "n_days": res["n_days"]}
     assert res["n_days"] == len(px) - 1
     for t, a in res["assets"].items():
@@ -163,7 +164,8 @@ def test_effective_bets_is_inverse_herfindahl():
     res = wm.analyze_frame(synthetic_prices(), "SPY",
                            {"DOUBLE": 0.5, "INDIE": 0.3, "BND": 0.2})
     p = res["portfolio"]
-    assert p["effective_bets"] == pytest.approx(1.0 / np.sum(w**2), abs=0.01)
+    assert p["weight_concentration_equivalent"] == pytest.approx(1.0 / np.sum(w**2), abs=0.01)
+    assert "effective_bets" not in p
     assert p["n_holdings"] == 3
     assert 0.0 < p["pca_first_pc_share"] <= 1.0
 
@@ -341,9 +343,10 @@ def test_correlation_break_is_found_at_the_flip_date():
     b = breaks[0]
     assert b["pair"] == ["A", "B"]
     assert b["max"] > 0.9 and b["min"] < -0.9
-    assert b["broke_change"] < -1.0
+    assert b["largest_change"] < -1.0
+    assert "broke_on" not in b
     flip_date = idx[flip]
-    broke = pd.Timestamp(b["broke_on"])
+    broke = pd.Timestamp(b["largest_change_date"])
     assert 0 <= (broke - flip_date).days <= 200  # detected just after the flip
 
 
@@ -531,7 +534,7 @@ def _grammatical(text):
 
 
 def test_lede_describes_observed_decline_not_beta_forecast():
-    text=_grammatical(wm.lede({'n_holdings':6,'effective_bets_corr':2.55,'beta':.714,'max_drawdown':-.2296},{'max_drawdown':-.2892},'the S&P 500'))
+    text=_grammatical(wm.lede({'n_holdings':6,'covariance_participation_ratio':2.55,'beta':.714,'max_drawdown':-.2296},{'max_drawdown':-.2892},'the S&P 500'))
     assert text=="Six holdings that behave like three. It moves at 0.71\u00d7 the market and its worst fall was \u221223% against the S&P 500's \u221229%."
     # every clause is past tense or present state; nothing promises a future move
     for word in ('will', 'expect', 'should', 'forecast', 'predict'):
@@ -539,15 +542,15 @@ def test_lede_describes_observed_decline_not_beta_forecast():
 
 
 def test_lede_without_a_bench_drops_the_comparison_and_stays_grammatical():
-    text=_grammatical(wm.lede({'n_holdings':6,'effective_bets_corr':2.55,'max_drawdown':-.2296},{},'the S&P 500'))
+    text=_grammatical(wm.lede({'n_holdings':6,'covariance_participation_ratio':2.55,'max_drawdown':-.2296},{},'the S&P 500'))
     assert text=='Six holdings that behave like three. Its worst fall was \u221223%.'
 
 
 @pytest.mark.parametrize("p", [
     {"n_holdings": 1},
-    {"n_holdings": 4, "effective_bets_corr": 2.0},
+    {"n_holdings": 4, "covariance_participation_ratio": 2.0},
     {"n_holdings": 4, "beta": 1.31},
-    {"n_holdings": 20, "effective_bets_corr": 11.5, "max_drawdown": -0.5},
+    {"n_holdings": 20, "covariance_participation_ratio": 11.5, "max_drawdown": -0.5},
     {"beta": 0.9, "max_drawdown": -0.1},
 ])
 def test_lede_degrades_one_clause_at_a_time(p):
@@ -1079,12 +1082,12 @@ def test_effective_bets_corr_counts_two_when_uncorrelated():
 def test_portfolio_reports_both_bet_numbers(px):
     res = wm.analyze_frame(px, "SPY", {"DOUBLE": 0.5, "TWIN": 0.5})
     p = res["portfolio"]
-    assert p["effective_bets"] == pytest.approx(2.0, abs=0.01)
-    assert 1.0 <= p["effective_bets_corr"] < 1.4  # DOUBLE and TWIN are one bet
+    assert p["weight_concentration_equivalent"] == pytest.approx(2.0, abs=0.01)
+    assert 1.0 <= p["covariance_participation_ratio"] < 1.4  # DOUBLE and TWIN are one bet
 
 
 def test_keys_render_the_four_v3_figures_without_overclaiming():
-    keys=wm._keys({'effective_bets':4.,'effective_bets_corr':1.8,'n_holdings':4},{},'the S&P 500',[{'members':['MU','NVDA'],'avg_corr':.8}])
+    keys=wm._keys({'weight_concentration_equivalent':4.,'covariance_participation_ratio':1.8,'n_holdings':4},{},'the S&P 500',[{'members':['MU','NVDA'],'avg_corr':.8}])
     for label in ('Worst fall','Separate bets','Moves with the market','Annual cost'):
         assert label in keys
     # a whole number out of the holding count, and the cluster named plainly

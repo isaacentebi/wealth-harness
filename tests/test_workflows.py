@@ -208,6 +208,43 @@ def test_exposure_aggregates_symbols_across_accounts_without_normalizing_unknown
     assert packet["calculations"]["concentration"]["effective_symbol_count"].startswith("1.923")
 
 
+def mixed_currency_portfolio(**extra):
+    return {
+        "currency": "USD", "scope": "all", "complete": True,
+        "positions": [
+            {"account_id": "a", "symbol": "VOO", "value": 100000, "currency": "USD", "asset_class": "equity"},
+            {"account_id": "b", "symbol": "7203.T", "value": 15000000, "currency": "JPY", "asset_class": "equity"},
+        ],
+        **extra,
+    }
+
+
+def test_exposure_never_sums_positions_across_currencies_without_fx():
+    packet = prepare(snapshot(fact("portfolio.snapshot", mixed_currency_portfolio())), "exposure", AS_OF)
+    assert packet["status"] == "partial"
+    calculations = packet["calculations"]
+    assert calculations["total_measured_value"] == {"currency": "USD", "amount": "100000"}
+    assert [row["symbol"] for row in calculations["symbol_allocation"]] == ["VOO"]
+    assert calculations["excluded_positions"][0]["value"] == {"currency": "JPY", "amount": "15000000"}
+    assert packet["missing"][0]["key"] == "portfolio.snapshot.fx"
+    assert packet["missing"][0]["reason"] == "fx_required"
+    assert "exchange rate" in packet["next_question"]
+
+
+def test_exposure_converts_foreign_positions_with_dated_sourced_fx():
+    fx = [{"from": "USD", "to": "JPY", "rate": "150", "as_of": "2026-09-18", "source": "WM/Reuters 4pm fix"}]
+    packet = prepare(snapshot(fact("portfolio.snapshot", mixed_currency_portfolio(fx=fx))), "exposure", AS_OF)
+    assert packet["status"] == "ready"
+    calculations = packet["calculations"]
+    assert calculations["total_measured_value"] == {"currency": "USD", "amount": "200000"}
+    assert {row["symbol"]: row["weight"] for row in calculations["symbol_allocation"]} == {"VOO": "0.5", "7203.T": "0.5"}
+    assert calculations["fx_applied"][0]["source"] == "WM/Reuters 4pm fix"
+    future = [{**fx[0], "as_of": "2026-09-30"}]
+    stale = prepare(snapshot(fact("portfolio.snapshot", mixed_currency_portfolio(fx=future))), "exposure", AS_OF)
+    assert stale["calculations"] == {}
+    assert "after the evaluation date" in stale["missing"][0]["detail"]
+
+
 def test_exposure_rejects_nonfinite_bool_negative_and_zero_total():
     for bad in (True, -1, "NaN", "Infinity"):
         portfolio = {"currency": "USD", "scope": "a", "complete": True, "positions": [{"account_id": "a", "symbol": "X", "value": bad}]}

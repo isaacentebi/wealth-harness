@@ -8,29 +8,22 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
-import re
 from typing import Any, Callable
+
+from ._common import currency as iso_currency
+from ._common import decimal_text, iso_date, money
 
 
 _INTENTS = {"overview", "plan", "exposure", "income", "research", "tax"}
 _CONTEXT_PREFIXES = ("client.", "preference.", "constraint.", "thesis.")
-_CURRENCY = re.compile(r"[A-Z]{3}")
 
 
 def _today_utc() -> date:
     return datetime.now(timezone.utc).date()
 
 
-def _date(value: Any, field: str) -> date:
-    if not isinstance(value, str):
-        raise ValueError(f"{field} must be an ISO date")
-    try:
-        parsed = date.fromisoformat(value)
-    except ValueError as exc:
-        raise ValueError(f"{field} must be an ISO date") from exc
-    if parsed.isoformat() != value:
-        raise ValueError(f"{field} must be an ISO date")
-    return parsed
+_date = iso_date
+_out = decimal_text
 
 
 def _decimal(value: Any, field: str) -> Decimal:
@@ -52,22 +45,11 @@ def _text(value: Any, field: str) -> str:
 
 
 def _currency(value: Any, field: str) -> str:
-    currency = _text(value, field)
-    if _CURRENCY.fullmatch(currency) is None:
-        raise ValueError(f"{field} must be three uppercase letters")
-    return currency
-
-
-def _out(number: Decimal) -> str:
-    """Stable, JSON-safe decimal representation without scientific notation."""
-    if number == 0:
-        return "0"
-    rendered = format(number.normalize(), "f")
-    return rendered.rstrip("0").rstrip(".") if "." in rendered else rendered
+    return iso_currency(_text(value, field), field)
 
 
 def _money(number: Decimal, currency: str) -> dict[str, str]:
-    return {"currency": currency, "amount": _out(number)}
+    return money(number, currency)
 
 
 def _missing(key: str, reason: str, detail: str) -> dict[str, str]:
@@ -85,6 +67,7 @@ def _question(missing: list[dict[str, str]]) -> str | None:
         "income.schedule": "What monthly cash is expected to be received, what outflows are committed, and what spending need should the calendar use?",
         "income.schedule.months": "Which months should the cash-flow calendar cover, and what cash is expected in each?",
         "portfolio.snapshot.total_value": "Does this portfolio scope have a positive measured value?",
+        "portfolio.snapshot.fx": "What dated, sourced exchange rate should convert the foreign-currency positions into the snapshot currency?",
         "tax.jurisdiction": "What tax jurisdiction applies?",
         "account.*": "Which accounts are relevant to the tax question?",
         "lot.*": "Do you have tax-lot cost basis and acquisition dates for the relevant holdings?",
@@ -420,10 +403,39 @@ def _plan(facts: dict[str, dict[str, Any]], packet: dict[str, Any], as_of: date 
     }
 
 
+def _fx_rates(value: dict[str, Any], as_of: date | None) -> dict[tuple[str, str], tuple[Decimal, dict[str, Any]]]:
+    """Explicit, dated, sourced FX rates declared inside the snapshot."""
+    raw = value.get("fx", [])
+    if not isinstance(raw, list):
+        raise ValueError("portfolio.snapshot.fx must be a list")
+    rates: dict[tuple[str, str], tuple[Decimal, dict[str, Any]]] = {}
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ValueError(f"fx[{index}] must be an object")
+        source_ccy = _currency(item.get("from"), f"fx[{index}].from")
+        target_ccy = _currency(item.get("to"), f"fx[{index}].to")
+        if source_ccy == target_ccy or (source_ccy, target_ccy) in rates:
+            raise ValueError(f"duplicate or identity FX pair: {source_ccy}/{target_ccy}")
+        rate = _decimal(item.get("rate"), f"fx[{index}].rate")
+        if rate == 0:
+            raise ValueError(f"fx[{index}].rate must be positive")
+        observed = _date(item.get("as_of"), f"fx[{index}].as_of")
+        if as_of is not None and observed > as_of:
+            raise ValueError(f"fx[{index}].as_of is after the evaluation date")
+        record = {"from": source_ccy, "to": target_ccy, "rate": _out(rate), "as_of": observed.isoformat(),
+                  "source": _text(item.get("source"), f"fx[{index}].source")}
+        rates[(source_ccy, target_ccy)] = (rate, record)
+        rates.setdefault((target_ccy, source_ccy), (Decimal(1) / rate, record))
+    return rates
+
+
 def _exposure(facts: dict[str, dict[str, Any]], packet: dict[str, Any]) -> None:
     fact = _require_fresh(facts, "portfolio.snapshot", packet)
     if fact is None:
         return
+    excluded: list[dict[str, Any]] = []
+    fx_used: dict[str, dict[str, Any]] = {}
+    undeclared_currency = 0
     try:
         value = fact["value"]
         if not isinstance(value, dict):
@@ -437,6 +449,7 @@ def _exposure(facts: dict[str, dict[str, Any]], packet: dict[str, Any]) -> None:
         positions = value.get("positions")
         if not isinstance(positions, list):
             raise ValueError("portfolio.snapshot.positions must be a list")
+        rates = _fx_rates(value, packet.get("_as_of"))
         symbols: dict[str, Decimal] = {}
         accounts: dict[str, Decimal] = {}
         classes: dict[str, Decimal] = {}
@@ -448,18 +461,40 @@ def _exposure(facts: dict[str, dict[str, Any]], packet: dict[str, Any]) -> None:
             account = _text(position.get("account_id"), f"positions[{index}].account_id")
             symbol = _text(position.get("symbol"), f"positions[{index}].symbol")
             amount = _decimal(position.get("value"), f"positions[{index}].value")
+            asset_class = position.get("asset_class")
+            klass = _text(asset_class, f"positions[{index}].asset_class") if asset_class is not None else None
+            if position.get("currency") is None:
+                undeclared_currency += 1
+            else:
+                position_currency = _currency(position["currency"], f"positions[{index}].currency")
+                if position_currency != currency:
+                    converted = rates.get((position_currency, currency))
+                    if converted is None:
+                        excluded.append({"index": index, "symbol": symbol, "account_id": account,
+                                         "value": _money(amount, position_currency),
+                                         "reason": f"no {position_currency}/{currency} rate in portfolio.snapshot.fx"})
+                        continue
+                    amount = amount * converted[0]
+                    fx_used[f"{position_currency}/{currency}"] = converted[1]
             total += amount
             symbols[symbol] = symbols.get(symbol, Decimal(0)) + amount
             accounts[account] = accounts.get(account, Decimal(0)) + amount
-            asset_class = position.get("asset_class")
-            if asset_class is not None:
-                klass = _text(asset_class, f"positions[{index}].asset_class")
+            if klass is not None:
                 classes[klass] = classes.get(klass, Decimal(0)) + amount
                 classified += amount
     except ValueError as exc:
         packet["missing"].append(_missing("portfolio.snapshot", "invalid", str(exc)))
         packet["warnings"].append("Exposure calculations were withheld because portfolio inputs are invalid.")
         return
+    for item in excluded:
+        packet["missing"].append(_missing(
+            "portfolio.snapshot.fx", "fx_required",
+            f"positions[{item['index']}] {item['symbol']} ({item['value']['currency']} {item['value']['amount']}) "
+            f"was excluded: {item['reason']}. Add a dated, sourced rate to include it."))
+    if excluded:
+        packet["warnings"].append(
+            f"{len(excluded)} foreign-currency position(s) were excluded from totals and weights because no FX rate "
+            f"into {currency} was supplied; nothing was summed across currencies.")
     if total == 0:
         packet["missing"].append(_missing("portfolio.snapshot.total_value", "invalid", "Portfolio value must be positive to compute weights."))
         return
@@ -493,7 +528,11 @@ def _exposure(facts: dict[str, dict[str, Any]], packet: dict[str, Any]) -> None:
         "limitations": [
             "Weights describe only the named scope.",
             "Values are grouped by supplied symbol labels; issuer identity, venue uniqueness and fund look-through are not verified.",
+            *([f"{undeclared_currency} position(s) declare no currency and are taken as denominated in the snapshot currency {currency}."]
+              if undeclared_currency else []),
         ],
+        "fx_applied": sorted(fx_used.values(), key=lambda item: (item["from"], item["to"])),
+        "excluded_positions": excluded,
     }
     if not complete:
         packet["warnings"].append("Portfolio coverage is incomplete within the named scope.")
@@ -673,6 +712,7 @@ def prepare(snapshot: Any, intent: str, as_of: date | str | None = None) -> dict
         packet["next_question"] = "What valid ISO date should be used for freshness checks?"
         return packet
 
+    packet["_as_of"] = effective_date
     facts = _select(snapshot, effective_date, packet)
     _context(facts, packet)
     _add_fact(packet, facts.get("goals"))
@@ -694,4 +734,5 @@ def prepare(snapshot: Any, intent: str, as_of: date | str | None = None) -> dict
     _set_status(packet, intent)
     packet["next_question"] = _question(packet["missing"])
     packet.pop("_excluded", None)
+    packet.pop("_as_of", None)
     return packet
