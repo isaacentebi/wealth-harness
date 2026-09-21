@@ -70,8 +70,11 @@ def _ratio(numerator: float | None, denominator: float | None) -> float | None:
 
 
 def _humanize(name: str) -> str:
-    text = re.sub(r"[._]+", " ", str(name)).strip()
-    return text[:1].upper() + text[1:] if text else str(name)
+    words = re.sub(r"[._]+", " ", str(name)).strip().split()
+    if not words:
+        return str(name)
+    words = [w.upper() if w.lower() in _ACRONYMS else w for w in words]
+    return " ".join([words[0][:1].upper() + words[0][1:], *words[1:]])
 
 
 def _stale(fact: dict, today: date) -> bool:
@@ -165,6 +168,8 @@ _FIELD_GROUP = {"income": "money_in", "spending": "money_out", "savings": "own",
                 "debts": "owe", "goals": "goals", "risk": "invest", "dependents": "about",
                 "tax_residence": "about", "currencies": "about"}
 _TOP_ITEMS = 3
+_PLANNING_FIELDS = {"available_capital", "cash_available", "reserve_months"}
+_ACRONYMS = {"esg", "etf", "fx", "usd", "mxn", "ira", "afore", "cetes", "ipc", "sp"}
 
 
 def _editor(value: Any) -> str | None:
@@ -220,20 +225,23 @@ def _entry(fact: dict, today: date, *, field: str | None = None, value: Any = No
     return entry
 
 
-def _headline(group: str, entries: list[dict], overview: dict | None) -> dict:
-    ov = overview or {}
-    if group == "own" and ov.get("known_assets") is not None:
-        return {"amount": ov["known_assets"], "currency": ov.get("currency")}
-    if group == "owe" and ov.get("known_liabilities") and not entries:
-        return {"amount": ov["known_liabilities"], "currency": ov.get("currency")}
+def _headline(group: str, entries: list[dict]) -> dict:
+    """A group total that always equals the sum of the rows it heads."""
+    if group == "goals":
+        return {"count": sum(1 for e in entries if e["editor"] == "goal")}
     if group in {"money_in", "money_out", "owe", "own"}:
         amounts = []
         for e in entries:
             v = e.get("value")
-            if e["editor"] == "amount" and isinstance(v, dict) and _num(v.get("amount")) is not None:
-                amounts.append((_num(v["amount"]), v.get("currency"), v.get("period")))
+            if e["editor"] == "amount" or e.get("derived"):
+                amount = _num(v.get("amount")) if isinstance(v, dict) else None
+                if amount is None:
+                    return {"count": len(entries)}  # an unknown row means no honest total
+                amounts.append((amount, v.get("currency"), v.get("period")))
             elif e["editor"] == "number" and e.get("currency"):
                 amounts.append((float(v), e["currency"], None))
+            else:
+                return {"count": len(entries)}
         if amounts and len({(c, p) for _, c, p in amounts}) == 1:
             _, currency, period = amounts[0]
             head = {"amount": round(sum(a for a, _, _ in amounts), 2), "currency": currency}
@@ -243,10 +251,31 @@ def _headline(group: str, entries: list[dict], overview: dict | None) -> dict:
     return {"count": len(entries)}
 
 
+def _household_rows(fact: dict, overview: dict, today: date) -> tuple[list[dict], list[dict]]:
+    """Accounts (assets) and liabilities from the statement, one row each, read-only."""
+    source = fact.get("source") if isinstance(fact.get("source"), dict) else {}
+    currency = overview.get("currency")
+
+    def row(kind: str, name: Any, amount: Any, index: int) -> dict:
+        entry = {"id": f"household#{kind}{index}", "key": "household", "field": None, "label": str(name),
+                 "value": {"amount": amount, "currency": currency}, "editor": None, "derived": True,
+                 "source": _source_label(source.get("kind")), "observed_on": source.get("observed_on")}
+        if overview.get("stale"):
+            entry["stale"] = True
+            entry["can_confirm"] = False
+        return entry
+
+    accounts = [row("account", r.get("name") or r.get("id"), r.get("value"), i)
+                for i, r in enumerate((overview.get("allocations") or {}).get("account") or [])]
+    debts = [row("debt", r.get("name"), r.get("value"), i) for i, r in enumerate(overview.get("liabilities") or [])]
+    return accounts, debts
+
+
 def memory_groups(snapshot: dict, today: date, overview: dict | None = None,
                   goals: dict | None = None, missing: Iterable[str] = ()) -> list[dict]:
     buckets: dict[str, list[dict]] = {group: [] for group in GROUPS}
     funding = {g["id"]: g for g in (goals or {}).get("items", [])}
+    ov = overview or {}
     for fact in snapshot["facts"]:
         value = fact.get("value")
         if value is None:  # a retracted fact
@@ -257,17 +286,22 @@ def memory_groups(snapshot: dict, today: date, overview: dict | None = None,
             for name, item in value.items():
                 if item is None or name in hidden:
                     continue
-                buckets[_KIND_GROUP[_field_kind(name)]].append(
-                    _entry(fact, today, field=name, value=item, label=_humanize(name)))
+                # Planning resources fund goals; they are not assets and must not sit beside holdings.
+                group = "goals" if key == "plan.resources" and name in _PLANNING_FIELDS \
+                    else _KIND_GROUP[_field_kind(name)]
+                buckets[group].append(_entry(fact, today, field=name, value=item, label=_humanize(name)))
         elif key == "goals" and isinstance(value, list):
             for index, goal in enumerate(value):
                 if not isinstance(goal, dict):
                     continue
                 goal_id = str(goal.get("id") or index)
                 entry = _entry(fact, today, field=goal_id, value=goal, label=str(goal.get("name") or goal_id))
-                plan = funding.get(goal_id) or {}
-                entry["funded_ratio"] = plan.get("funded_ratio")
+                entry["funded_ratio"] = (funding.get(goal_id) or {}).get("funded_ratio")
                 buckets["goals"].append(entry)
+        elif key == "household" and ov.get("status") in {"ready", "partial"}:
+            accounts, debts = _household_rows(fact, ov, today)
+            buckets["own"].extend(accounts)
+            buckets["owe"].extend(debts)
         else:
             kind = classify_key(key)
             if kind == "analysis":  # saved tool output, not a fact about the person
@@ -279,12 +313,14 @@ def memory_groups(snapshot: dict, today: date, overview: dict | None = None,
         missing_by_group.setdefault(_FIELD_GROUP[name], []).append(name)
     out = []
     for group in GROUPS:
-        entries = sorted(buckets[group], key=lambda e: (not e.get("stale"), e["label"].lower()))
-        from_household = group in {"own", "owe"} and bool((overview or {}).get(
-            "known_assets" if group == "own" else "known_liabilities"))
-        if not entries and not missing_by_group.get(group) and not from_household:
+        entries = buckets[group]
+        if group == "goals":  # goals first, then the resources that fund them
+            entries.sort(key=lambda e: (e["editor"] != "goal", not e.get("stale")))
+        elif not any(e.get("derived") for e in entries):  # statement rows keep value order
+            entries.sort(key=lambda e: (not e.get("stale"), e["label"].lower()))
+        if not entries and not missing_by_group.get(group):
             continue
-        out.append({"id": group, "headline": _headline(group, entries, overview), "count": len(entries),
+        out.append({"id": group, "headline": _headline(group, entries), "count": len(entries),
                     "entries": entries, "top": _TOP_ITEMS, "missing": missing_by_group.get(group, [])})
     return out
 
@@ -459,6 +495,14 @@ def overview(snapshot: dict, today: date) -> dict:
             bucket["value"] += value
             direct_total += value
     positions.sort(key=lambda row: -row["value"])
+    liabilities = []
+    for item in household.get("liabilities") or []:
+        if not isinstance(item, dict):
+            continue
+        native = _num(item.get("value"))
+        value = convert(native, item.get("currency")) if native is not None and item.get("currency") else None
+        liabilities.append({"name": item.get("name") or _humanize(item.get("id") or "debt"),
+                            "value": round(value, 2) if value is not None else None})
 
     currency_rows = [{"name": cur, "id": cur, "value": round(b["value"], 2), "weight": _ratio(b["value"], known_assets),
                       "native": {"amount": round(b["native"], 2), "currency": cur} if cur != currency else None}
@@ -492,6 +536,7 @@ def overview(snapshot: dict, today: date) -> dict:
             "account": _rows(exposures.get("account") or [], account_labels),
             "owner": _rows(exposures.get("person") or [], {k: str(v) for k, v in people.items()}),
         },
+        "liabilities": liabilities,
         "top_positions": positions[:5],
         "lookthrough": {
             "direct": round(direct_total, 2), "through_funds": round(through_funds_total, 2),

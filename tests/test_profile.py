@@ -207,7 +207,7 @@ def test_goals_unknowns_are_not_zero(tmp_path):
     assert goals["school"]["funded_ratio"] is None
     assert _goals(service, "mx")["plan_status"] == "incomplete"
     rows = next(g for g in profile_view(service, "mx")["memory"] if g["id"] == "goals")["entries"]
-    assert {r["field"]: r["funded_ratio"] for r in rows} == {"school": None, "house": None}
+    assert {r["field"]: r["funded_ratio"] for r in rows if r["editor"] == "goal"} == {"school": None, "house": None}
 
 
 def test_goal_funded_ratio_from_complete_plan(tmp_path):
@@ -230,7 +230,7 @@ def test_memory_is_grouped_trimmed_and_value_first(tmp_path):
     assert list(groups) == ["money_in", "money_out", "own", "owe", "goals", "invest", "about"]
     assert groups["money_in"]["headline"] == {"amount": 85000.0, "currency": "MXN"}
     assert groups["own"]["headline"] == {"amount": 666000.0, "currency": "MXN"}
-    assert groups["goals"]["headline"] == {"count": 2}
+    assert groups["goals"]["headline"] == {"count": 2}  # goals only, not their funding rows
     income = groups["money_in"]["entries"][0]
     # Only what the row renders: no review dates, confidence, ids or refs.
     assert set(income) <= {"id", "key", "field", "label", "value", "editor", "source", "observed_on",
@@ -239,9 +239,19 @@ def test_memory_is_grouped_trimmed_and_value_first(tmp_path):
     esg = next(e for e in groups["invest"]["entries"] if e["key"] == "preference.esg")
     assert esg["stale"] is True and esg["can_confirm"] is True
     assert groups["invest"]["entries"][0] is esg  # stale facts lead their group
-    household = next(e for e in groups["own"]["entries"] if e["key"] == "household")
-    assert household["value"] == {"type": "household", "accounts": 3, "positions": 4}
-    assert household["source"] == "document"
+    # What you own lists accounts only, and its total is the sum of those rows.
+    own = groups["own"]["entries"]
+    assert [e["label"] for e in own] == ["Retirement (Afore)", "US brokerage", "Brokerage MX"]
+    assert all(e["key"] == "household" and e["derived"] and e["source"] == "document" for e in own)
+    assert sum(e["value"]["amount"] for e in own) == groups["own"]["headline"]["amount"]
+    # What you owe shows the debt behind its total.
+    assert [(e["label"], e["value"]["amount"]) for e in groups["owe"]["entries"]] == [("Car", 80000.0)]
+    assert groups["owe"]["headline"] == {"amount": 80000.0, "currency": "MXN"}
+    # Planning resources sit with goals, after the goals, and never beside holdings.
+    goal_rows = groups["goals"]["entries"]
+    assert [e["editor"] for e in goal_rows[:2]] == ["goal", "goal"]
+    assert {e["field"] for e in goal_rows[2:]} == {"available_capital", "cash_available", "reserve_months"}
+    assert esg["label"] == "ESG"
     resources = {e["field"] for g in view["memory"] for e in g["entries"] if e["key"] == "plan.resources"}
     assert "reserve_outside_pool" not in resources and "currency" not in resources
     assert not any(e["key"] == "performance.history" for g in view["memory"] for e in g["entries"])
