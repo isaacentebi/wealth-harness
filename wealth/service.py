@@ -11,6 +11,7 @@ from inspect import signature
 import uuid
 
 from . import situation as situation_module
+from . import views as views_module
 from .situation.schema import SCHEMA
 from .store import DEFAULT_REVIEW_DAYS, REVIEW_DAYS, WealthStore, is_stale
 from .workflows import prepare
@@ -237,7 +238,8 @@ class WealthService:
                     "brief": situation_module.brief(sit, sit["profile"].get("language")),
                     "situation": {k: v for k, v in sit.items() if k not in {"meta", "evidence"}},
                     "missing_for_onboarding": situation_module.missing_for_onboarding(sit),
-                    "fact_contract": fact_contract()}
+                    "fact_contract": fact_contract(),
+                    "views": views_module.summaries(views_module.views_for("situation", sit))}
         if client_id is None:
             catalog = capabilities()
             if intent != "overview":
@@ -426,6 +428,8 @@ class WealthService:
                     "confidence": "reported", "expires_on": derived_expiry}], snapshot["client"]["revision"])
             report["saved"] = {"key": save_as, "client_revision": saved["write_result"]["resulting_revision"],
                                "expires_on": derived_expiry}
+        # Engine-drawn views of this result the answer may place with [[view:<id>]] (never saved with it).
+        report["views"] = views_module.summaries(views_module.views_for(task, report))
         return report
 
     def _debt_payoff(self, inputs: dict, snapshot: dict, ledger, today: str) -> dict:

@@ -26,9 +26,10 @@ from . import agent as _agent
 from . import onboarding as _onboarding
 from .agent import (
     AgentError, REASONING_LEVELS, TurnControl, TurnEvent, profile_state, remember_exchange, resolve_model,
-    situation_brief,
+    situation_brief, situation_views,
     run_turn, seed_demo, stream_turn,
 )
+from .views import placed_ids, png_available, render_png, render_svg
 from .service import WealthService, database_path, upload_dir
 from .profile import fact_action, fact_detail, form_facts, profile_view
 from .store import ClientExistsError, ClientNotFoundError, StaleRevisionError, StoreError
@@ -65,6 +66,7 @@ MAX_JSON_BYTES = 40_000
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_ATTACHMENTS = 5
 MEMORY_WAIT_SECONDS = 180
+MAX_TURN_VIEWS = 24
 UPLOAD_TYPES = {
     "application/pdf": ".pdf",
     "text/csv": ".csv",
@@ -77,6 +79,7 @@ _HISTORY_PATH = re.compile(r"^/api/profile/fact/([^/]{1,200})/history$")
 _CONTRADICTION_PATH = re.compile(r"^/api/profile/contradictions/([A-Za-z0-9_-]{1,80})$")
 _FACT_PATH = re.compile(r"^/api/facts/([^/]{1,200})$")
 _TURN_PATH = re.compile(r"^/api/turns/([0-9a-f]{16})(/events|/cancel)?$")
+_VIEW_PATH = re.compile(r"^/api/views/([a-z][a-z0-9_]{0,31}-[0-9a-f]{10})\.(svg|png)$")
 
 
 def friendly_name(client_id: str, display_name: str | None = None) -> str:
@@ -185,6 +188,7 @@ class Turn:
         self.status = "running"  # running | done | error | cancelled
         self.progress = ""
         self.memory: list[dict[str, str]] = []
+        self.views: dict[str, dict[str, Any]] = {}  # offered by results this turn; only placed ones reach the page
         self.answer: str | None = None
         self.error: dict[str, str] | None = None
         self.exception: BaseException | None = None
@@ -348,6 +352,7 @@ class Chat:
             # A substituted blocking turn (tests, local stubs) has no event stream.
             kwargs.pop("control", None)
             kwargs.pop("defer_memory", None)
+            kwargs.pop("views", None)
             yield TurnEvent("answer", run_turn(message, **kwargs))
             return
         yield from stream_turn(message, **kwargs)
@@ -393,6 +398,7 @@ class Chat:
         try:
             state = profile_state(self.db, self.client_id)
             brief, revision = situation_brief(self.db, self.client_id, turn.message, self.brief_revision)
+            offered = situation_views(self.db, self.client_id)
             history = [(m["role"], m["content"]) for m in self.messages]
             answer = None
             for event in self._events(
@@ -401,9 +407,13 @@ class Chat:
                 profile_empty=not any(state.values()), profile=state, brief=brief,
                 thread_id=self.thread_id, timezone_name=timezone_name,
                 attachments=[{k: a[k] for k in ("name", "type", "size", "path")} for a in turn.attachments],
-                control=turn.control, ephemeral=self.ephemeral, defer_memory=defer,
+                control=turn.control, ephemeral=self.ephemeral, defer_memory=defer, views=offered,
             ):
-                if event.type == "thread":
+                if event.type == "view":
+                    for spec in event.data.get("views", ()):
+                        if isinstance(spec, dict) and isinstance(spec.get("id"), str) and len(turn.views) < MAX_TURN_VIEWS:
+                            turn.views[spec["id"]] = spec
+                elif event.type == "thread":
                     self.thread_id = str(event.data.get("thread_id") or "") or self.thread_id
                 elif event.type == "progress" and event.text != turn.progress:
                     turn.progress = event.text
@@ -429,6 +439,11 @@ class Chat:
             reply = {"id": secrets.token_hex(6), "role": "assistant", "content": answer}
             if turn.memory:
                 reply["memory"] = list(turn.memory)
+            # Only views the answer placed travel to the page; the rest were working material.
+            placed = [turn.views[i] for i in placed_ids(answer, turn.views)]
+            if placed:
+                reply["views"] = placed
+                turn.emit("views", items=placed, message_id=reply["id"])
             # The reveal's request is Wealth's own; only the answer joins the conversation.
             self.messages = (self.messages + ([reply] if turn.internal else [user, reply]))[-100:]
             turn.answer = answer
@@ -487,6 +502,14 @@ class Chat:
             except (StoreError, sqlite3.Error, AttributeError, TypeError, IndexError):
                 pass
         return item
+
+    def view(self, view_id: str) -> dict[str, Any] | None:
+        """A view an answer in this conversation placed, newest first; None if there is none."""
+        for message in reversed(self.messages):
+            for spec in message.get("views") or ():
+                if spec.get("id") == view_id:
+                    return spec
+        return None
 
     def cancel(self, turn_id: str) -> bool:
         turn = self.turn
@@ -554,7 +577,8 @@ def create_server(chat, port=8765, host="127.0.0.1"):
         def respond(self, status, value, content_type="application/json"):
             data = json.dumps(value).encode() if content_type == "application/json" else value
             self.send_response(status)
-            self.send_header("Content-Type", content_type + "; charset=utf-8")
+            binary = content_type.startswith("image/") and not content_type.endswith("+xml")
+            self.send_header("Content-Type", content_type if binary else content_type + "; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
             for name, header in SECURITY_HEADERS:
                 self.send_header(name, header)
@@ -636,6 +660,11 @@ def create_server(chat, port=8765, host="127.0.0.1"):
                 fact = _FACT_PATH.match(url.path)
                 if fact:
                     return self.respond(200, fact_detail(WealthService(chat.db), chat.client_id, unquote(fact.group(1))))
+                view = _VIEW_PATH.match(url.path)
+                if view:
+                    if not self.authorized():
+                        return self.respond(403, {"error": "Reload to reconnect.", "kind": "forbidden"})
+                    return self.render_view(view.group(1), view.group(2), url.query)
                 match = _TURN_PATH.match(url.path)
                 if match and match.group(2) == "/events":
                     if not self.authorized():
@@ -644,6 +673,20 @@ def create_server(chat, port=8765, host="127.0.0.1"):
             except Exception as exc:  # noqa: BLE001
                 return self.handle_failure(exc)
             self.respond(404, {"error": "Not found."})
+
+        def render_view(self, view_id, extension, query):
+            """A placed view as an image for text channels: SVG always, PNG when Pillow is installed."""
+            spec = chat.view(view_id)
+            if spec is None:
+                return self.respond(404, {"error": "That view is no longer available.", "kind": "gone"})
+            lang = (parse_qs(query).get("lang") or ["es"])[0]
+            lang = lang if lang in ("es", "en") else "es"
+            if extension == "svg":
+                return self.respond(200, render_svg(spec, lang).encode(), "image/svg+xml")
+            png = render_png(spec, lang) if png_available() else None
+            if png is None:
+                return self.respond(501, _error_payload("unsupported", "PNG needs Pillow here; use the .svg address."))
+            return self.respond(200, png, "image/png")
 
         def stream(self, turn_id, query):
             turn = chat.turn

@@ -1,0 +1,1013 @@
+{
+ "spending_monthly": {
+  "task": "spending",
+  "envelope": {
+   "status": "partial",
+   "result": {
+    "currency": "MXN",
+    "start": "2026-01-01",
+    "end": "2026-03-31",
+    "months": {
+     "2026-01": {
+      "total": "12984.00",
+      "essential": "12600.00",
+      "discretionary": "384.00",
+      "unknown_essentiality": "0.00",
+      "fixed": "12299.00",
+      "variable": "685.00",
+      "by_category": {
+       "convenience": "85.00",
+       "groceries": "600.00",
+       "housing": "12000.00",
+       "subscriptions": "299.00"
+      }
+     },
+     "2026-02": {
+      "total": "18349.00",
+      "essential": "17950.00",
+      "discretionary": "399.00",
+      "unknown_essentiality": "0.00",
+      "fixed": "18099.00",
+      "variable": "250.00",
+      "by_category": {
+       "bank_fees": "100.00",
+       "education": "5000.00",
+       "housing": "12000.00",
+       "subscriptions": "299.00",
+       "transport": "150.00",
+       "utilities": "800.00"
+      }
+     },
+     "2026-03": {
+      "total": "14699.00",
+      "essential": "13100.00",
+      "discretionary": "599.00",
+      "unknown_essentiality": "1000.00",
+      "fixed": "12299.00",
+      "variable": "2400.00",
+      "by_category": {
+       "food_delivery": "300.00",
+       "groceries": "700.00",
+       "health": "400.00",
+       "housing": "12000.00",
+       "subscriptions": "299.00",
+       "uncategorized": "1000.00"
+      }
+     }
+    },
+    "total": "46032.00",
+    "monthly_average": "15344.00",
+    "by_status": {
+     "rule": "45032.00",
+     "uncategorized": "1000.00"
+    }
+   },
+   "missing": []
+  }
+ },
+ "spending_surplus": {
+  "task": "spending",
+  "envelope": {
+   "status": "needs_input",
+   "result": {
+    "currency": "MXN",
+    "start": "2026-01-01",
+    "end": "2026-03-31",
+    "months": 3,
+    "monthly": {
+     "regular_income": "30000.00",
+     "essential_spending": "14883.33",
+     "discretionary_spending": "460.67",
+     "debt_service": "1000.00",
+     "reserve_top_up": null,
+     "surplus_before_reserve": "14116.67",
+     "investable_surplus": null,
+     "after_discretionary": null
+    },
+    "reserve": {
+     "target": null,
+     "current": "20000.00",
+     "fill_months": 12
+    },
+    "irregular_income_in_window": "8000.00",
+    "savings_rate": "0.5252",
+    "cash_savings_rate": "0.4997"
+   },
+   "missing": [
+    {
+     "key": "plan.resources",
+     "reason": "missing",
+     "detail": "Reserve target unknown: remember plan.resources (monthly_essentials, reserve_months)."
+    }
+   ]
+  }
+ },
+ "spending_income": {
+  "task": "spending",
+  "envelope": {
+   "status": "ready",
+   "result": {
+    "currency": "MXN",
+    "start": "2026-01-01",
+    "end": "2026-03-31",
+    "months": {
+     "2026-01": {
+      "salary": "30000.00"
+     },
+     "2026-02": {
+      "salary": "30000.00"
+     },
+     "2026-03": {
+      "ptu": "8000.00",
+      "salary": "30000.00"
+     }
+    },
+    "regular_monthly_mean": "30000.00",
+    "regular_monthly_median": "30000.00",
+    "coefficient_of_variation": "0.0000",
+    "months_without_regular_income": 0,
+    "stability": "stable",
+    "irregular_total": "8000.00"
+   },
+   "missing": []
+  }
+ },
+ "spending_recurring": {
+  "task": "spending",
+  "envelope": {
+   "status": "ready",
+   "result": {
+    "series": [
+     {
+      "merchant": "netflix com",
+      "kind": "expense",
+      "account_id": "bank",
+      "currency": "MXN",
+      "cadence": "monthly",
+      "typical_amount": "299.00",
+      "occurrences": 3,
+      "first": "2026-01-20",
+      "last": "2026-03-20",
+      "next_expected": "2026-04-20",
+      "category": "subscriptions",
+      "entry_ids": [
+       "nfx01",
+       "nfx02",
+       "nfx03"
+      ]
+     },
+     {
+      "merchant": "renta depto roma",
+      "kind": "expense",
+      "account_id": "bank",
+      "currency": "MXN",
+      "cadence": "monthly",
+      "typical_amount": "12000.00",
+      "occurrences": 3,
+      "first": "2026-01-01",
+      "last": "2026-03-01",
+      "next_expected": "2026-04-01",
+      "category": "housing",
+      "entry_ids": [
+       "rent01",
+       "rent02",
+       "rent03"
+      ]
+     },
+     {
+      "merchant": "pago de nomina",
+      "kind": "income",
+      "account_id": "bank",
+      "currency": "MXN",
+      "cadence": "monthly",
+      "typical_amount": "30000.00",
+      "occurrences": 3,
+      "first": "2026-01-15",
+      "last": "2026-03-15",
+      "next_expected": "2026-04-15",
+      "category": "salary",
+      "entry_ids": [
+       "sal01",
+       "sal02",
+       "sal03"
+      ]
+     }
+    ]
+   },
+   "missing": []
+  }
+ },
+ "dca_backtest": {
+  "task": "dca",
+  "envelope": {
+   "status": "ready",
+   "result": {
+    "historical": true,
+    "label": "Historical backtest over the supplied prices: it describes what would have happened, not what will happen. Fractional units, no taxes, uninvested cash earns nothing unless cash_rate is given.",
+    "plan_id": "core",
+    "currency": "MXN",
+    "start": "2026-01-15",
+    "end": "2026-03-16",
+    "installments": 3,
+    "legs": [
+     {
+      "instrument_id": "VOO-SIC",
+      "installments": 3,
+      "invested": "15000.00",
+      "dca_units": "154.16666667",
+      "lump_units": "150",
+      "dca_average_price": "97.30",
+      "lump_price": "100",
+      "end_price": "120",
+      "buys": [
+       {
+        "due": "2026-01-15",
+        "executed": "2026-01-15",
+        "price": "100"
+       },
+       {
+        "due": "2026-02-15",
+        "executed": "2026-02-16",
+        "price": "80"
+       },
+       {
+        "due": "2026-03-15",
+        "executed": "2026-03-16",
+        "price": "120"
+       }
+      ]
+     }
+    ],
+    "invested": "15000.00",
+    "dca_end_value": "18500.00",
+    "lump_sum_end_value": "18000.00",
+    "dca_return": "0.233333",
+    "lump_sum_return": "0.200000",
+    "dca_minus_lump_sum": "500.00",
+    "dca_xirr": "10.496738",
+    "lump_sum_xirr": "2.031698",
+    "cash_interest": "0.00"
+   },
+   "missing": []
+  }
+ },
+ "dca_schedule": {
+  "task": "dca",
+  "envelope": {
+   "status": "ready",
+   "result": {
+    "plan": {
+     "id": "core",
+     "currency": "MXN",
+     "cadence": "monthly",
+     "start_date": "2026-01-15",
+     "account_id": "gbm",
+     "tolerance_days": 5,
+     "amount_tolerance": "0.05",
+     "source_account_id": "bank",
+     "day_of_month": 15,
+     "legs": [
+      {
+       "instrument_id": "VOO-SIC",
+       "amount": "5000"
+      }
+     ]
+    },
+    "due_dates": [
+     "2026-01-15",
+     "2026-02-15",
+     "2026-03-15",
+     "2026-04-15",
+     "2026-05-15",
+     "2026-06-15"
+    ]
+   },
+   "missing": []
+  }
+ },
+ "dca_suggest": {
+  "task": "dca",
+  "envelope": {
+   "status": "ready",
+   "result": {
+    "currency": "MXN",
+    "monthly_surplus": "12116.67",
+    "range": {
+     "low": "6000.00",
+     "high": "9600.00"
+    },
+    "split": {
+     "NAFTRAC": {
+      "low": "2400.00",
+      "high": "3840.00"
+     },
+     "VOO-SIC": {
+      "low": "3600.00",
+      "high": "5760.00"
+     }
+    },
+    "shares_of_surplus": [
+     "0.5",
+     "0.8"
+    ]
+   },
+   "missing": []
+  }
+ },
+ "dca_adherence": {
+  "task": "dca",
+  "envelope": {
+   "status": "ready",
+   "result": {
+    "plan_id": "core",
+    "as_of": "2026-03-31",
+    "currency": "MXN",
+    "installments": [
+     {
+      "instrument_id": "VOO-SIC",
+      "due": "2026-01-15",
+      "planned": "5000.00",
+      "invested": "5000.00",
+      "state": "on_time",
+      "late": false,
+      "over_plan": false,
+      "window": [
+       "2026-01-10",
+       "2026-02-09"
+      ],
+      "open": false,
+      "buy_ids": [
+       "b1"
+      ]
+     },
+     {
+      "instrument_id": "VOO-SIC",
+      "due": "2026-02-15",
+      "planned": "5000.00",
+      "invested": "5000.00",
+      "state": "on_time",
+      "late": false,
+      "over_plan": false,
+      "window": [
+       "2026-02-10",
+       "2026-03-09"
+      ],
+      "open": false,
+      "buy_ids": [
+       "b2"
+      ]
+     },
+     {
+      "instrument_id": "VOO-SIC",
+      "due": "2026-03-15",
+      "planned": "5000.00",
+      "invested": "0.00",
+      "state": "skipped",
+      "late": false,
+      "over_plan": false,
+      "window": [
+       "2026-03-10",
+       "2026-04-09"
+      ],
+      "open": true,
+      "buy_ids": []
+     }
+    ],
+    "counts": {
+     "on_time": 2,
+     "skipped": 1
+    },
+    "on_time_rate": "0.6667",
+    "planned_to_date": "15000.00",
+    "invested_to_date": "10000.00",
+    "cumulative_variance": "-5000.00",
+    "next_due": "2026-04-15"
+   },
+   "missing": []
+  }
+ },
+ "performance": {
+  "task": "performance",
+  "envelope": {
+   "status": "ready",
+   "result": {
+    "scope": [
+     "brk"
+    ],
+    "currency": "USD",
+    "start": "2024-12-31",
+    "end": "2026-01-01",
+    "method": "linked",
+    "start_value": "0.00",
+    "end_value": "2400.00",
+    "twr": {
+     "period": "0.200000",
+     "annualized": "0.199402"
+    },
+    "xirr_annual": "-0.056721",
+    "decomposition": {
+     "contributions": "2500.00",
+     "withdrawals": "0.00",
+     "net_flows": "2500.00",
+     "total_gain": "-100.00",
+     "investment_income": "0.00",
+     "fees_and_withholding": "0.00",
+     "price_and_fx_change": "-100.00"
+    },
+    "flows": [
+     {
+      "date": "2025-01-01",
+      "entry_id": "d1",
+      "kind": "deposit",
+      "amount": "1000.00"
+     },
+     {
+      "date": "2025-07-02",
+      "entry_id": "d2",
+      "kind": "deposit",
+      "amount": "1500.00"
+     }
+    ],
+    "benchmark": null
+   },
+   "missing": []
+  }
+ },
+ "project": {
+  "task": "project",
+  "envelope": {
+   "status": "ready",
+   "result": {
+    "currency": "USD",
+    "horizon": {
+     "as_of": "2026-01-01",
+     "end_date": "2031-01-01"
+    },
+    "simulations": 50,
+    "return_model": {
+     "description": "lognormal nominal annual returns with arithmetic mean 0.06 and volatility 0.15",
+     "basis": "nominal"
+    },
+    "all_withdrawals_fulfilled_probability_percent": 100.0,
+    "positive_terminal_wealth_probability_percent": 100.0,
+    "terminal_wealth_percentiles": {
+     "p10": {
+      "currency": "USD",
+      "amount": 935.11
+     },
+     "p50": {
+      "currency": "USD",
+      "amount": 1352.05
+     },
+     "p90": {
+      "currency": "USD",
+      "amount": 1904.89
+     }
+    },
+    "real_terminal_wealth_percentiles": {
+     "p10": {
+      "currency": "USD",
+      "amount": 935.11
+     },
+     "p50": {
+      "currency": "USD",
+      "amount": 1352.05
+     },
+     "p90": {
+      "currency": "USD",
+      "amount": 1904.89
+     }
+    },
+    "real_value_basis": "2026-01-01 money, deflated at 0.0 annual inflation",
+    "hard_goal_funded_probability_percent": {}
+   },
+   "missing": []
+  }
+ },
+ "income": {
+  "task": "income",
+  "envelope": {
+   "status": "ready",
+   "result": {
+    "currency": "USD",
+    "spending_timing": "end",
+    "return_model": {
+     "description": "iid bootstrap of 3 nominal annual returns",
+     "basis": "nominal"
+    },
+    "strategies": {
+     "dividend_cash": {
+      "portfolio_dividend_yield": 0.05,
+      "probability_of_any_income_deficit_percent": 0.0,
+      "mean_cumulative_deficit": {
+       "currency": "USD",
+       "amount": 0.0
+      },
+      "mean_sales": {
+       "currency": "USD",
+       "amount": 177.55
+      },
+      "mean_dividends_used": {
+       "currency": "USD",
+       "amount": 323.52
+      },
+      "mean_taxes_paid": {
+       "currency": "USD",
+       "amount": 155.82
+      },
+      "terminal_wealth_percentiles": {
+       "p10": {
+        "currency": "USD",
+        "amount": 209.53
+       },
+       "p50": {
+        "currency": "USD",
+        "amount": 741.93
+       },
+       "p90": {
+        "currency": "USD",
+        "amount": 2750.58
+       }
+      },
+      "terminal_wealth_after_liquidation_tax_percentiles": {
+       "p10": {
+        "currency": "USD",
+        "amount": 209.53
+       },
+       "p50": {
+        "currency": "USD",
+        "amount": 741.84
+       },
+       "p90": {
+        "currency": "USD",
+        "amount": 2492.04
+       }
+      },
+      "real_terminal_wealth_percentiles": null
+     },
+     "total_return_sales": {
+      "portfolio_dividend_yield": 0.0,
+      "probability_of_any_income_deficit_percent": 0.0,
+      "mean_cumulative_deficit": {
+       "currency": "USD",
+       "amount": 0.0
+      },
+      "mean_sales": {
+       "currency": "USD",
+       "amount": 520.01
+      },
+      "mean_dividends_used": {
+       "currency": "USD",
+       "amount": 0.0
+      },
+      "mean_taxes_paid": {
+       "currency": "USD",
+       "amount": 20.01
+      },
+      "terminal_wealth_percentiles": {
+       "p10": {
+        "currency": "USD",
+        "amount": 290.63
+       },
+       "p50": {
+        "currency": "USD",
+        "amount": 892.91
+       },
+       "p90": {
+        "currency": "USD",
+        "amount": 3149.07
+       }
+      },
+      "terminal_wealth_after_liquidation_tax_percentiles": {
+       "p10": {
+        "currency": "USD",
+        "amount": 290.63
+       },
+       "p50": {
+        "currency": "USD",
+        "amount": 846.75
+       },
+       "p90": {
+        "currency": "USD",
+        "amount": 2783.17
+       }
+      },
+      "real_terminal_wealth_percentiles": null
+     }
+    },
+    "sequence_risk": {
+     "median_terminal_wealth_with_low_returns_first": {
+      "currency": "USD",
+      "amount": 483.83
+     },
+     "median_terminal_wealth_with_high_returns_first": {
+      "currency": "USD",
+      "amount": 1135.62
+     },
+     "method": "The same simulated annual returns are reordered low-first and high-first while withdrawals continue (total-return strategy)."
+    },
+    "strategy_comparison": "Both portfolios earn the same pre-tax total return and differ only in dividend yield: dividends are taxed when paid; share sales realize gains against average cost basis and are grossed up for tax."
+   },
+   "missing": []
+  }
+ },
+ "stress": {
+  "task": "stress",
+  "envelope": {
+   "status": "ready",
+   "result": {
+    "currency": "USD",
+    "scope": "request weights",
+    "weights": {
+     "AAA": 0.8,
+     "BBB": 0.2
+    },
+    "scenarios": [
+     {
+      "name": "manual equity shock",
+      "kind": "explicit_shock",
+      "asset_returns": {
+       "AAA": -0.1,
+       "BBB": 0.02
+      },
+      "portfolio_return": -0.07600000000000001
+     },
+     {
+      "name": "fixture month",
+      "kind": "historical_window",
+      "window": {
+       "requested_start": "2024-02-01",
+       "requested_end": "2024-02-29",
+       "observed_start": "2024-02-01",
+       "observed_end": "2024-02-29",
+       "n_prices": 21
+      },
+      "asset_returns": {
+       "AAA": 0.02118142680498636,
+       "BBB": -0.009615093994471469
+      },
+      "portfolio_return": 0.015022122645094796
+     }
+    ],
+    "input_complete": true
+   },
+   "missing": []
+  }
+ },
+ "lot_selection": {
+  "task": "tax",
+  "envelope": {
+   "status": "ready",
+   "result": {
+    "jurisdiction": "US federal taxable securities",
+    "mode": "lot_selection",
+    "currency": "USD",
+    "sale_date": "2026-03-20",
+    "review_status": "screened",
+    "provisional_reasons": [],
+    "execution_ready": false,
+    "target": {
+     "instrument_id": "X",
+     "account_id": null,
+     "quantity": "100",
+     "price": "10.00",
+     "price_as_of": "2026-03-20"
+    },
+    "methods": {
+     "fifo": {
+      "lots": [
+       {
+        "lot_id": "A",
+        "quantity": "100",
+        "acquired_on": "2024-01-02",
+        "basis": "500.00",
+        "proceeds": "1000.00",
+        "gain_or_loss": "500.00",
+        "recognized_gain_or_loss": "500.00",
+        "character": "long_term",
+        "wash_sale_disallowed_loss": "0.00"
+       }
+      ],
+      "proceeds": "1000.00",
+      "realized": {
+       "short_term": "0.00",
+       "long_term": "500.00"
+      },
+      "wash_sale_disallowed_loss": "0.00",
+      "incremental_tax": "75.00",
+      "carryforward_after": {
+       "short_term": "0.00",
+       "long_term": "0.00"
+      }
+     },
+     "lifo": {
+      "lots": [
+       {
+        "lot_id": "B",
+        "quantity": "100",
+        "acquired_on": "2025-12-01",
+        "basis": "1500.00",
+        "proceeds": "1000.00",
+        "gain_or_loss": "-500.00",
+        "recognized_gain_or_loss": "-500.00",
+        "character": "short_term",
+        "wash_sale_disallowed_loss": "0.00"
+       }
+      ],
+      "proceeds": "1000.00",
+      "realized": {
+       "short_term": "-500.00",
+       "long_term": "0.00"
+      },
+      "wash_sale_disallowed_loss": "0.00",
+      "incremental_tax": "-110.00",
+      "carryforward_after": {
+       "short_term": "0.00",
+       "long_term": "0.00"
+      }
+     },
+     "hifo": {
+      "lots": [
+       {
+        "lot_id": "B",
+        "quantity": "100",
+        "acquired_on": "2025-12-01",
+        "basis": "1500.00",
+        "proceeds": "1000.00",
+        "gain_or_loss": "-500.00",
+        "recognized_gain_or_loss": "-500.00",
+        "character": "short_term",
+        "wash_sale_disallowed_loss": "0.00"
+       }
+      ],
+      "proceeds": "1000.00",
+      "realized": {
+       "short_term": "-500.00",
+       "long_term": "0.00"
+      },
+      "wash_sale_disallowed_loss": "0.00",
+      "incremental_tax": "-110.00",
+      "carryforward_after": {
+       "short_term": "0.00",
+       "long_term": "0.00"
+      }
+     },
+     "specific_id": {
+      "lots": [
+       {
+        "lot_id": "C",
+        "quantity": "100",
+        "acquired_on": "2025-06-01",
+        "basis": "900.00",
+        "proceeds": "1000.00",
+        "gain_or_loss": "100.00",
+        "recognized_gain_or_loss": "100.00",
+        "character": "short_term",
+        "wash_sale_disallowed_loss": "0.00"
+       }
+      ],
+      "proceeds": "1000.00",
+      "realized": {
+       "short_term": "100.00",
+       "long_term": "0.00"
+      },
+      "wash_sale_disallowed_loss": "0.00",
+      "incremental_tax": "22.00",
+      "carryforward_after": {
+       "short_term": "0.00",
+       "long_term": "0.00"
+      }
+     },
+     "tax_min": {
+      "lots": [
+       {
+        "lot_id": "B",
+        "quantity": "100",
+        "acquired_on": "2025-12-01",
+        "basis": "1500.00",
+        "proceeds": "1000.00",
+        "gain_or_loss": "-500.00",
+        "recognized_gain_or_loss": "-500.00",
+        "character": "short_term",
+        "wash_sale_disallowed_loss": "0.00"
+       }
+      ],
+      "proceeds": "1000.00",
+      "realized": {
+       "short_term": "-500.00",
+       "long_term": "0.00"
+      },
+      "wash_sale_disallowed_loss": "0.00",
+      "incremental_tax": "-110.00",
+      "carryforward_after": {
+       "short_term": "0.00",
+       "long_term": "0.00"
+      }
+     }
+    },
+    "ranking_by_incremental_tax": [
+     "lifo",
+     "hifo",
+     "tax_min",
+     "specific_id",
+     "fifo"
+    ],
+    "lowest_tax_method": "lifo",
+    "tax_min_search": {
+     "candidates_evaluated": 3,
+     "exhaustive_vertex_search": true,
+     "objective": "minimise current-year incremental federal tax (wash sales applied); ties prefer larger remaining carryforward",
+     "optimality": "exact over all solutions with at most one partially sold lot; a bracket or loss-limit kink inside a lot can make a two-partial-lot split marginally better"
+    },
+    "note": "Specific identification requires adequate identification to the broker by settlement (Treas. Reg. 1.1012-1(c)); a comparison is not an instruction.",
+    "scope": "Federal capital-gain scenario only; excludes AMT, 25%/28% gain classes, credits, phase-outs and state tax unless a state marginal rate is supplied."
+   },
+   "missing": []
+  }
+ },
+ "tax_rebalance": {
+  "task": "tax",
+  "envelope": {
+   "status": "ready",
+   "result": {
+    "jurisdiction": "US federal taxable securities",
+    "mode": "rebalance",
+    "currency": "USD",
+    "sale_date": "2026-03-20",
+    "review_status": "screened",
+    "provisional_reasons": [],
+    "execution_ready": false,
+    "included_scenario_gain_or_loss": {
+     "short_term": "-5000.00",
+     "long_term": "-2000.00"
+    },
+    "wash_sale": {
+     "disallowed_loss": "0.00",
+     "permanently_disallowed_loss": "0.00",
+     "replacement_basis_adjustments": [],
+     "linked_purchases": []
+    },
+    "netting": {
+     "before_scenario": {
+      "net_short_term": "0.00",
+      "net_long_term": "0.00",
+      "ordinary_income_loss_deduction": "0.00",
+      "short_term_carryforward": "0.00",
+      "long_term_carryforward": "0.00"
+     },
+     "after_scenario": {
+      "net_short_term": "-5000.00",
+      "net_long_term": "-2000.00",
+      "ordinary_income_loss_deduction": "3000.00",
+      "short_term_carryforward": "2000.00",
+      "long_term_carryforward": "2000.00"
+     }
+    },
+    "incremental_tax_estimate": {
+     "currency": "USD",
+     "before_scenario": "16712.00",
+     "after_scenario": "16052.00",
+     "incremental_tax": "-660.00",
+     "method": "federal bracket engine: ordinary brackets, 0/15/20% preferential brackets stacked on ordinary taxable income, and NIIT; negative incremental tax is an estimated reduction, not guaranteed savings",
+     "tax_year": 2026,
+     "filing_status": "single",
+     "parameters_source": {
+      "title": "IRS Rev. Proc. 2025-32, sections 4.01 and 4.03 (2026 inflation adjustments, post P.L. 119-21)",
+      "url": "https://www.irs.gov/pub/irs-drop/rp-25-32.pdf",
+      "checked_on": "2026-09-21"
+     },
+     "components": {
+      "before_scenario": {
+       "taxable_income": "100000.00",
+       "ordinary_taxable_income": "100000.00",
+       "preferential_income": "0.00",
+       "preferential_at_0": "0.00",
+       "preferential_at_15": "0.00",
+       "preferential_at_20": "0.00",
+       "regular_tax": "16712.00",
+       "ordinary_tax": "16712.00",
+       "preferential_tax": "0.00",
+       "niit": "0.00",
+       "magi": "100000.00",
+       "net_investment_income": "0.00",
+       "total_tax": "16712.00"
+      },
+      "after_scenario": {
+       "taxable_income": "97000.00",
+       "ordinary_taxable_income": "97000.00",
+       "preferential_income": "0.00",
+       "preferential_at_0": "0.00",
+       "preferential_at_15": "0.00",
+       "preferential_at_20": "0.00",
+       "regular_tax": "16052.00",
+       "ordinary_tax": "16052.00",
+       "preferential_tax": "0.00",
+       "niit": "0.00",
+       "magi": "97000.00",
+       "net_investment_income": "0.00",
+       "total_tax": "16052.00"
+      }
+     },
+     "marginal_rates_before_scenario": {
+      "short_term_gain": "0.22",
+      "long_term_gain": "0.15",
+      "short_term_loss": "0.22",
+      "long_term_loss": "0.22"
+     }
+    },
+    "scope": "Federal capital-gain scenario only; excludes AMT, 25%/28% gain classes, credits, phase-outs and state tax unless a state marginal rate is supplied."
+   },
+   "missing": []
+  }
+ },
+ "debt_payoff": {
+  "task": "debt_payoff",
+  "envelope": {
+   "status": "ready",
+   "result": {
+    "currency": "MXN",
+    "monthly_amount": 10000,
+    "minimum_payments": 3000,
+    "avalanche": {
+     "status": "ready",
+     "months": 7,
+     "date": "2027-04",
+     "interest": 2384.05,
+     "order": [
+      "car"
+     ],
+     "payoff": [
+      {
+       "id": "car",
+       "months": 7,
+       "date": "2027-04"
+      }
+     ]
+    },
+    "chosen": {
+     "status": "ready",
+     "months": 7,
+     "date": "2027-04",
+     "interest": 2384.05,
+     "order": [
+      "car"
+     ],
+     "payoff": [
+      {
+       "id": "car",
+       "months": 7,
+       "date": "2027-04"
+      }
+     ],
+     "label": "snowball"
+    },
+    "interest_saved_by_avalanche": 0,
+    "minimums_only": [
+     {
+      "id": "car",
+      "status": "ready",
+      "months": 23,
+      "date": "2028-08",
+      "interest": 6986.04
+     }
+    ]
+   },
+   "missing": [],
+   "evaluated_at": "2026-09-21T19:24:52.269856+00:00"
+  }
+ },
+ "situation": {
+  "task": "situation",
+  "envelope": {
+   "as_of": "2026-09-21",
+   "currency": "MXN",
+   "net_worth": {
+    "currency": "MXN",
+    "currency_basis": "currency of the country of residence",
+    "total": 290000,
+    "assets": 350000,
+    "liquid": 350000,
+    "illiquid": 0,
+    "liabilities": 60000,
+    "by_currency": {
+     "MXN": 290000
+    },
+    "unconverted": [],
+    "unvalued_accounts": [],
+    "complete": true
+   },
+   "cash_flow": {
+    "currency": "MXN",
+    "income": 85000,
+    "spending": 45000,
+    "spending_basis": "total",
+    "spending_source": "stated",
+    "debt_payments": 3000,
+    "debt_payments_known": 3000,
+    "debt_payments_unknown": [],
+    "surplus": 37000,
+    "complete": true
+   }
+  }
+ }
+}

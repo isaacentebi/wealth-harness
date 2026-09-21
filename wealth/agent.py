@@ -27,6 +27,7 @@ import time
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from . import views as _views
 from .behavior import INSTRUCTIONS_PATH, ONBOARDING_WELCOME
 from .service import WealthService, database_path
 from .store import (
@@ -110,7 +111,8 @@ class TurnEvent:
     """A display-safe event from a running turn.
 
     type is ``thread`` (data.thread_id), ``progress`` (text is a human step),
-    ``memory`` (data.keys were written), ``notice`` or ``answer`` (text).
+    ``memory`` (data.keys were written), ``view`` (data.views: engine-drawn
+    view specs a result offered), ``notice`` or ``answer`` (text).
     """
 
     type: str
@@ -321,6 +323,15 @@ def situation_brief(db_path: str | Path, client_id: str, user_prompt: str = "",
     return situation.brief(sit, language), sit["revision"]
 
 
+def situation_views(db_path: str | Path, client_id: str) -> list[dict[str, Any]]:
+    """Engine-drawn views of the saved picture (net worth, a typical month) the answer may place."""
+
+    try:
+        return _views.views_for("situation", WealthService(db_path).situation(client_id))
+    except (StoreError, ClientNotFoundError, OSError, ValueError, KeyError, TypeError):
+        return []
+
+
 def build_prompt(
     user_prompt: str,
     client_id: str,
@@ -334,6 +345,7 @@ def build_prompt(
     attachments: Sequence[Mapping[str, Any]] = (),
     resumed: bool = False,
     now: datetime | None = None,
+    views: Sequence[Mapping[str, Any]] = (),
 ) -> str:
     """Per-turn context only; standing policy lives in instructions.md."""
 
@@ -350,6 +362,10 @@ def build_prompt(
     if brief is not None:
         # The saved picture, built deterministically from memory: numbers and open threads, no advice.
         sections.append("<situation>\n" + _escape(brief) + "\n</situation>")
+    if views:
+        listed = "\n".join(f"- {_escape(s['id'])} ({_escape(s['kind'])}): {_escape(s['title'])}"
+                           for s in _views.summaries(views))
+        sections.append("<views>\nViews of the saved picture you may place:\n" + listed + "\n</views>")
     if attachments:
         described = []
         for item in attachments:
@@ -549,6 +565,26 @@ def _remembered_keys(item: Mapping[str, Any]) -> list[str]:
     return list(dict.fromkeys(keys))
 
 
+def _result_views(item: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """View specs for a completed wealth_run (or situation context) call, rebuilt from its result."""
+
+    if item.get("status") not in (None, "completed") or item.get("error"):
+        return []
+    result = item.get("result")
+    if isinstance(result, dict) and (result.get("isError") or result.get("is_error")):
+        return []
+    structured = _structured_result(result)
+    if not isinstance(structured, dict) or structured.get("error"):
+        return []
+    tool = item.get("tool") or item.get("name")
+    arguments = _arguments(item)
+    if tool == "wealth_run":
+        return _views.views_for(str(arguments.get("task") or structured.get("task") or ""), structured)
+    if tool == "wealth_context" and arguments.get("intent") == "situation":
+        return _views.views_for("situation", structured)
+    return []
+
+
 class _TurnParser:
     """Incremental parser for the Codex JSONL event stream."""
 
@@ -613,6 +649,10 @@ class _TurnParser:
                     keys = _remembered_keys(item) if tool == "wealth_remember" else _ingested_keys(item)
                     if keys:
                         out.append(TurnEvent("memory", data={"keys": keys}))
+                elif event_type == "item.completed" and tool in {"wealth_run", "wealth_context"}:
+                    specs = _result_views(item)
+                    if specs:
+                        out.append(TurnEvent("view", data={"views": specs}))
         if event_type in {"error", "turn.failed"}:
             text = _message(event.get("error")) or _message(event)
             summary = " ".join((text or "Codex turn failed.").split())[:500]
@@ -953,8 +993,11 @@ def stream_turn(
     control: TurnControl | None = None,
     ephemeral: bool = False,
     defer_memory: bool = False,
+    views: Sequence[Mapping[str, Any]] = (),
 ) -> Iterator[TurnEvent]:
-    """Run one turn, yielding progress, memory and thread events, then the answer.
+    """Run one turn, yielding progress, memory, view and thread events, then the answer.
+
+    ``views`` are view specs offered up front (the saved picture); results add more.
 
     With ``defer_memory`` the turn cannot write facts; call ``remember_exchange``
     after showing the answer.
@@ -967,6 +1010,9 @@ def stream_turn(
     """
 
     history = list(history)
+    views = [dict(v) for v in views]
+    if views:
+        yield TurnEvent("view", data={"views": views})
     attempts: list[str | None] = [thread_id] if thread_id and not ephemeral else []
     attempts.append(None)
     for resume in attempts:
@@ -979,7 +1025,7 @@ def stream_turn(
         prompt = build_prompt(
             user_prompt, client_id, history, profile_empty=profile_empty, profile=profile, brief=brief,
             web_search=web_search, timezone_name=timezone_name, attachments=attachments,
-            resumed=resume is not None,
+            resumed=resume is not None, views=views,
         )
         parser = _TurnParser()
         return_code, stderr = -1, ""
