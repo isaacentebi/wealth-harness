@@ -235,6 +235,7 @@
     .order .typed { display: block; margin-top: 16px; font-size: 14px; color: var(--ink-soft); }
     .order .typed input { display: block; width: min(100%, 16rem); min-height: 44px; margin-top: 8px; padding: 0 12px; border: 0; border-radius: 8px; box-shadow: inset 0 0 0 1px var(--hairline); background: var(--canvas); font: 500 16px/1 var(--mono); letter-spacing: .06em; text-transform: uppercase; }
     .order .typed input:focus-visible { outline: 1.5px solid var(--ink); outline-offset: -1.5px; }
+    .order .moved { color: var(--ink); font-weight: 600; }   /* a figure re-priced since the card was shown */
     .order .problem { margin: 12px 0 0; color: var(--ink); font-size: 14px; line-height: 20px; }
     .order .problem:empty { display: none; }
     .order .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; margin-top: 20px; }
@@ -296,8 +297,9 @@
       display: flex; justify-content: space-between; margin: 6px 76px 0 0;
       color: var(--muted); font: 400 12px/16px var(--mono);
     }
+    .view .series-plot .ref { position: absolute; left: 0; right: 0; border-top: 1px dashed var(--muted); }
     .view .series-legend { margin: 10px 0 0; color: var(--muted); font: 400 12px/16px var(--mono); }
-    .view .series-legend::before { content: ""; display: inline-block; width: 16px; margin: 0 8px 4px 0; border-top: 1px solid var(--muted); }
+    .view .series-legend::before { content: ""; display: inline-block; width: 16px; margin: 0 8px 4px 0; border-top: 1px dashed var(--muted); }
 
     .view .band-at { margin: 8px 0 0; color: var(--muted); font: 400 12px/16px var(--mono); }
     .view .band-scale { position: relative; height: 64px; margin: 4px 0 0; }
@@ -1026,7 +1028,7 @@
           place: 'Place orders', cancel: 'Cancel', cancelOpen: 'Cancel open orders', placing: 'Placing…',
           override: 'Place anyway: I am overriding my investment policy', typed: 'Type LIVE to place your first live orders',
           tax: 'Estimated tax', cost: 'Estimated cost', expired: 'This ticket expired. Ask for a new one.',
-          discarded: 'Cancelled. Nothing was sent.', stopped: 'Not placed',
+          discarded: 'Cancelled. Nothing was sent.', stopped: 'Not placed', priceMoved: 'The price moved; review and confirm again.',
           states: { proposed: '', sent: 'Sent', partial: 'Partly filled', filled: 'Filled', rejected: 'Rejected',
                     failed: 'Not sent', canceled: 'Cancelled', expired: 'Expired', unknown: 'Unconfirmed' },
           notes: {
@@ -1117,7 +1119,7 @@
           place: 'Enviar órdenes', cancel: 'Cancelar', cancelOpen: 'Cancelar órdenes abiertas', placing: 'Enviando…',
           override: 'Enviar de todos modos: decido no seguir mi política de inversión', typed: 'Escribe EN VIVO para enviar tus primeras órdenes reales',
           tax: 'Impuesto estimado', cost: 'Costo estimado', expired: 'Este ticket venció. Pide uno nuevo.',
-          discarded: 'Cancelado. No se envió nada.', stopped: 'No enviada',
+          discarded: 'Cancelado. No se envió nada.', stopped: 'No enviada', priceMoved: 'El precio cambió; revisa y confirma de nuevo.',
           states: { proposed: '', sent: 'Enviada', partial: 'Ejecutada en parte', filled: 'Ejecutada', rejected: 'Rechazada',
                     failed: 'No enviada', canceled: 'Cancelada', expired: 'Vencida', unknown: 'Sin confirmar' },
           notes: {
@@ -1779,12 +1781,17 @@
           s.append(l);
         };
         line(0, 1000, 1000, 1000, 'var(--hairline)');
-        if (ref !== null) line(0, Y(ref), 1000, Y(ref), 'var(--hairline)');
         const path = document.createElementNS(SVG_NS, 'polyline');
         path.setAttribute('points', ys.map((v, i) => `${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' '));
         [['fill', 'none'], ['stroke', 'var(--ink)'], ['stroke-width', '2'], ['stroke-linejoin', 'round'], ['stroke-linecap', 'round'], ['vector-effect', 'non-scaling-stroke']].forEach(([k, v]) => path.setAttribute(k, v));
         s.append(path);
         plot.append(s);
+        // The reference (what was contributed, the average price paid) is the dashed rule the legend names.
+        if (ref !== null) {
+          const rule = el('span', 'ref');
+          rule.style.top = `${(Y(ref) / 10).toFixed(2)}%`;
+          plot.append(rule);
+        }
         const lastY = Y(ys[ys.length - 1]) / 10;
         const mark = el('span', data.current ? 'mark live' : 'mark');
         mark.style.left = '100%'; mark.style.top = `${lastY.toFixed(2)}%`;
@@ -1953,14 +1960,20 @@
       return String(note.message || '');
     }
 
-    function orderLine(line) {
+    // ``moved`` names the figures re-priced since the card was shown (limit, qty, amount); they are set in weight.
+    function orderLine(line, moved = []) {
       const O = T.orders;
       const row = el('div', 'line');
       const dt = el('dt', '', `${line.side === 'sell' ? O.sell : O.buy} ${line.symbol}`);
+      const figure = (text, changed) => changed ? el('span', 'moved', text) : document.createTextNode(text);
       const qty = line.qty !== undefined ? orderQty(line.qty) : '—';
-      const price = line.type === 'market' ? O.market : `${O.limit} ${orderUsd(line.limit_price)}`;
-      dt.append(el('span', 'sub', [`${qty} ${O.shares}`, price].join(' · ')));  // the card's head already names the account
-      const dd = el('dd', '', orderUsd(line.estimated_amount));
+      const sub = el('span', 'sub');
+      sub.append(figure(qty, moved.includes('order_qty')), ` ${O.shares} · `);
+      if (line.type === 'market') sub.append(O.market);
+      else sub.append(`${O.limit} `, figure(orderUsd(line.limit_price), moved.includes('limit_price')));
+      dt.append(sub);  // the card's head already names the account
+      const dd = el('dd');
+      dd.append(figure(orderUsd(line.estimated_amount), moved.includes('estimated_amount')));
       const state = O.states[line.state] || '';
       if (state) {
         const tag = el('span', WORKING.has(line.state) ? 'state working' : 'state', state);
@@ -1981,14 +1994,20 @@
       box.append(mode);
       const net = Number(ticket.total && ticket.total.amount);
       const receive = Number.isFinite(net) && net < 0;
-      const total = el('p', 'total', orderUsd(ticket.total && ticket.total.amount !== null ? Math.abs(net) : null));
       const pending = ticket.status === 'pending';
+      const total = el('p', 'total', orderUsd(ticket.total && ticket.total.amount !== null ? Math.abs(net) : null));
       box.append(total, el('p', 'caption', pending ? (receive ? O.receive : O.total) : O.settledTotal));
+      // A re-price since the card was shown is not a note: the changed figures stand out and one line says why.
+      const movedBy = new Map();
+      (ticket.notices || []).forEach(n => {
+        if (n.code !== 'price_moved' || !pending) return;
+        movedBy.set(n.line, [...(movedBy.get(n.line) || []), ...((n.params || {}).fields || [])]);
+      });
       const list = el('dl');
-      (ticket.lines || []).forEach(line => list.append(orderLine(line)));
+      (ticket.lines || []).forEach(line => list.append(orderLine(line, movedBy.get(line.index) || [])));
       box.append(list);
 
-      const notes = (ticket.notices || []).filter(n => n.status !== 'pass');
+      const notes = (ticket.notices || []).filter(n => n.status !== 'pass' && n.code !== 'price_moved');
       if (notes.length && ticket.status === 'pending') {
         const ul = el('ul', 'notes');
         const seen = new Set();
@@ -2010,6 +2029,7 @@
       if (ticket.status === 'pending') {
         const problem = el('p', 'problem');
         problem.setAttribute('role', 'status');
+        if (movedBy.size) problem.textContent = O.priceMoved;
         let agree = null, typed = null;
         if (ticket.needs_override) {
           const label = el('label', 'agree');
@@ -2095,10 +2115,11 @@
         const response = await api(`/api/orders/${encodeURIComponent(target)}/${action}`, options);
         data = await response.json().catch(() => ({}));
         if (!response.ok) {
+          // A re-priced card comes back with its new lines and the place button; the card itself says why.
           if (data.ticket) showOrder(data.ticket);
           const node = data.ticket && orderCards.get(data.ticket.id);
           const problem = (node && node.querySelector('.problem')) || ui.problem;
-          if (problem) problem.textContent = data.error || T.errors.other;
+          if (problem) problem.textContent = data.kind === 'price_moved' ? T.orders.priceMoved : (data.error || T.errors.other);
           if (!data.ticket && ui.place) { ui.place.disabled = false; ui.place.textContent = T.orders.place; }
           if (ui.cancel) ui.cancel.disabled = false;
           return;
@@ -3479,6 +3500,27 @@
       });
     }
 
+    // The value to set in weight. The server's span is a hint; the figure it lands on is what gets bold, whole:
+    // an offset that falls inside "1.8" or "$48,000" (a stale index, another language's text) still bolds the value.
+    function hoyEmphasis(title, span) {
+      let [a, b] = Array.isArray(span) ? span.map(Number) : [0, 0];
+      if (!(b > a && a >= 0 && b <= title.length)) return null;
+      const at = i => (i >= 0 && i < title.length ? title[i] : ' ');
+      const digit = i => /\d/.test(at(i));
+      const inNumber = i => digit(i) || (/[.,]/.test(at(i)) && digit(i - 1) && digit(i + 1));
+      const word = i => /[\p{L}\p{N}]/u.test(at(i));
+      while (a < b && /\s/.test(at(a))) a += 1;
+      while (b > a && /\s/.test(at(b - 1))) b -= 1;
+      // A start inside a number backs up to its first digit; a start inside a word skips to the next word.
+      if (inNumber(a) && inNumber(a - 1)) { while (inNumber(a - 1)) a -= 1; }
+      else if (word(a - 1) && word(a)) { while (a < b && word(a)) a += 1; while (a < b && /\s/.test(at(a))) a += 1; }
+      if (/[$€£]/.test(at(a - 1))) a -= 1;
+      // An end inside a number or a word runs to its last character; a percent sign belongs to its number.
+      if ((inNumber(b - 1) && inNumber(b)) || (word(b - 1) && word(b))) { while (inNumber(b) || word(b)) b += 1; }
+      if (at(b) === '%') b += 1;
+      return a < b ? [a, b] : null;
+    }
+
     function hoyLine(item, index) {
       const title = String((item.title || {})[LANG] || '');
       const ask = String((item.next_step || {})[LANG] || '');
@@ -3489,8 +3531,8 @@
       mark.setAttribute('aria-hidden', 'true');
       const words = el('span', 'hoy-text');
       const text = el('span', 'hoy-title');
-      const [a, b] = ((item.emphasis || {})[LANG] || [])[0] || [0, 0];
-      if (b > a && b <= title.length) text.append(title.slice(0, a), el('b', '', title.slice(a, b)), title.slice(b));
+      const span = hoyEmphasis(title, ((item.emphasis || {})[LANG] || [])[0]);
+      if (span) text.append(title.slice(0, span[0]), el('b', '', title.slice(span[0], span[1])), title.slice(span[1]));
       else text.textContent = title;
       words.append(text);
       const due = hoyDue(item);

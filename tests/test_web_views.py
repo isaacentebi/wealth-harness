@@ -227,3 +227,18 @@ def test_page_view_strings_exist_in_both_languages():
     for block in blocks:
         used = set(re.findall(r"\bS\.(\w+)", PAGE[PAGE.index("function allocationView"):PAGE.index("const VIEW_KINDS")]))
         assert used <= set(re.findall(r"(\w+):", block)), used - set(re.findall(r"(\w+):", block))
+
+
+def test_series_reference_is_drawn_as_the_dashed_rule_the_legend_names():
+    series = PAGE[PAGE.index("function seriesView("):PAGE.index("function comparisonView(")]
+    # The legend and the rule share one condition, so neither appears without the other.
+    assert series.count("if (ref !== null) {") == 1 and "el('span', 'ref')" in series
+    assert "if (data.reference && ref !== null) body.append(el('p', 'series-legend'" in series
+    css = PAGE[PAGE.index("/* Engine-drawn views"):PAGE.index("/* Multi-column tables stay typographic")]
+    assert ".view .series-plot .ref { position: absolute; left: 0; right: 0; border-top: 1px dashed var(--muted); }" in css
+    assert "border-top: 1px dashed var(--muted); }" in css.split(".view .series-legend::before")[1].split("\n")[0]
+    # No other view carries a legend without a plot behind it.
+    for name in ("allocationView", "ticketView", "comparisonView", "payoffView"):
+        body = PAGE[PAGE.index(f"function {name}("):]
+        body = body[:body.index("\n    }\n")]
+        assert "legend" not in body

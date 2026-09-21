@@ -21,6 +21,7 @@ from . import finmath
 from .policy import current as current_policy, summary as policy_summary
 from .situation import build as build_situation, sentences, summaries
 from .situation.model import goal_name
+from .situation.text import _clean_symbol
 
 FORM_FIELDS = ("income", "spending", "savings", "investments", "debts", "dependents",
                "tax_residence", "currencies", "goals", "risk")
@@ -1231,7 +1232,8 @@ def _plain_amount(value: Any) -> tuple[Any, Any] | None:
     return None
 
 
-def _money_words(amount: float, currency: str, reporting: str | None) -> str:
+def _amount_words(amount: float, currency: str, reporting: str | None) -> str:
+    """"$150,000" in the reporting currency, "$8,000 USD" otherwise (the contradiction card's two figures)."""
     whole = round(amount) if abs(amount) >= 1000 else amount
     text = f"${whole:,.0f}" if float(whole).is_integer() else f"${whole:,.2f}"
     return text + (f" {currency}" if currency != reporting else "")
@@ -1246,7 +1248,7 @@ def _record_card(record: dict, language: str, facts: dict) -> dict | None:
     es = language == "es"
     where = _WHERE[language].get(((record.get("sources") or {}).get("proposed") or {}).get("kind"),
                                  "otra fuente" if es else "another source")
-    a, b = _money_words(*mine, mine[1]), _money_words(*theirs, mine[1])
+    a, b = _amount_words(*mine, mine[1]), _amount_words(*theirs, mine[1])
     head = f"Me dijiste que {topic} es de " if es else f"You told me {topic} is "
     mid = f"; {where} dice "
     if not es:
@@ -2400,6 +2402,19 @@ def _asset_class(raw: Any, instrument: Any = None) -> str:
     return _ASSET_CLASS.get(str(raw or "").strip().lower(), "unclassified")
 
 
+# Government paper as people say it: "S UDIBONO 351122" -> "Udibono 2035", "BI CETES 261015" -> "Cetes 2026",
+# "M BONO 291201" -> "Bono 2029". Tickers (VOO, NAFTRAC) pass through untouched.
+_GOV_SERIES = re.compile(r"^[A-Z]{1,2}\s+(?=(?:UDIBONO|BONO|CETES|BONDES[A-Z]?)\b)")
+_GOV_MATURITY = re.compile(r"\b(CETES|BONDES[A-Z]?)\s+(\d{2})\d{4}\b")
+
+
+def _instrument_label(symbol: Any) -> str:
+    text = _GOV_SERIES.sub("", str(symbol or "").strip())
+    text = _GOV_MATURITY.sub(lambda m: f"{m.group(1)} 20{m.group(2)}", text)
+    text = re.sub(r"\bBONDES([A-Z])?\b", lambda m: "Bondes" + (f" {m.group(1)}" if m.group(1) else ""), text)
+    return _clean_symbol(text)
+
+
 def _holding_rows(sit: dict, facts: dict[str, dict]) -> list[dict]:
     """Every counted asset as {class, currency, native, value, venue, domicile, underlying}, in the reporting currency.
 
@@ -2493,13 +2508,13 @@ def _allocation(sit: dict, facts: dict[str, dict]) -> dict:
     for row in rows:
         if row["class"] == "cash" or not row["underlying"]:
             continue
-        group = groups.setdefault(row["underlying"], {"name": row["underlying"], "value": 0.0, "symbols": []})
+        group = groups.setdefault(row["underlying"], {"name": _instrument_label(row["underlying"]), "value": 0.0, "symbols": []})
         group["value"] += row["value"]
-        symbol = str(row["symbol"] or row["underlying"])
+        symbol = _instrument_label(row["symbol"] or row["underlying"])
         if symbol not in group["symbols"]:
             group["symbols"].append(symbol)
     top = sorted(groups.values(), key=lambda g: (-g["value"], g["name"]))[:PICTURE_TOP]
-    overlaps = [{"name": g["underlying"], "symbols": [str(s) for s in g["symbols"]], "value": _r(g["value"]),
+    overlaps = [{"name": _instrument_label(g["underlying"]), "symbols": [_instrument_label(s) for s in g["symbols"]], "value": _r(g["value"]),
                  "weight": round(_num(g["value"]) / total, 4)}
                 for g in (sit.get("holdings") or {}).get("overlaps") or [] if _num(g.get("value")) is not None]
     profile = sit.get("profile") or {}
