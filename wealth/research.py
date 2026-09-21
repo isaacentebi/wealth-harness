@@ -16,6 +16,10 @@ import math
 from typing import Any
 from urllib.parse import urlparse
 
+from .household import (
+    current_funds, fx_converter, lookthrough, normalize_symbol, ownership_shares, validate_household,
+)
+
 
 TASKS = ("research", "value")
 
@@ -27,6 +31,7 @@ TASK_SCHEMAS: dict[str, dict[str, Any]] = {
             "entity_type": "company|fund (default company)",
             "instrument_id": "optional canonical instrument id used for household matching",
             "max_fund_age_days": "optional household look-through freshness limit, default 90",
+            "max_fx_age_days": "optional household FX freshness limit for reporting-currency link totals, default 7",
             "live_fetch": "boolean, default false; opts in to Yahoo/yfinance",
             "sources": [{
                 "id": "unique string", "title": "string", "url": "https URL",
@@ -36,7 +41,8 @@ TASK_SCHEMAS: dict[str, dict[str, Any]] = {
             "business_facts": [{"label": "string", "value": "JSON value", "source_ids": ["source id"]}],
             "fund_facts": [{"label": "string", "value": "JSON value", "source_ids": ["source id"]}],
             "statements": [{
-                "period_end": "ISO date", "currency": "ISO-like 3-letter code",
+                "period_end": "ISO date", "period_type": "FY|Q|TTM (required for growth, ROE/ROA and leverage)",
+                "currency": "ISO-like 3-letter code",
                 "source_ids": ["source id"], "metrics": "mapping of metric names to finite numbers",
             }],
             "fund_holdings": [{"symbol": "string", "name": "optional", "weight": "decimal fraction", "source_ids": ["source id"]}],
@@ -53,7 +59,13 @@ TASK_SCHEMAS: dict[str, dict[str, Any]] = {
             "dcf_fcff": ["name", "currency", "valuation_date", "forecast", "discount_rate", "terminal_growth", "net_debt", "shares_outstanding", "source_ids"],
             "multiples": ["name", "currency", "valuation_date", "basis", "metric_name", "metric_value", "multiple", "shares_outstanding", "source_ids"],
         },
-        "notes": "DCF forecast entries are {period, free_cash_flow}; rates are decimal annual effective rates and cash flows occur at period end. Enterprise-value multiples also require net_debt.",
+        "optional": {
+            "dcf_fcff": ["first_period_end + stub_fcf_basis (full_period|remaining_stub)", "mid_year_convention"],
+            "enterprise bridge": ["minority_interest", "preferred_equity", "lease_liabilities or leases_included_in_net_debt=true", "non_operating_assets"],
+            "dilution": ["options: [{count, strike}] (treasury stock method at the implied value)", "rsus"],
+            "price": ["current_price with current_price_currency"],
+        },
+        "notes": "DCF forecast entries are {period, free_cash_flow}; rates are decimal annual effective rates; without first_period_end cash flows occur at whole-year period ends. Enterprise-value multiples also require net_debt. Non-positive multiple metrics are reported as not meaningful.",
     },
 }
 
@@ -66,6 +78,7 @@ _SOURCE_DEFAULT_AGE = {
     "other": 365,
 }
 _CURRENCY_LEN = 3
+_HOUSEHOLD_MAX_AGE_DAYS = 31
 
 
 def _today() -> date:
@@ -225,30 +238,52 @@ def _ratio(numerator: Decimal | None, denominator: Decimal | None) -> str | None
     return _out(numerator / denominator)
 
 
-def _statement_metrics(raw: Any, known: set[str], as_of: date) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+_PERIOD_TYPES = ("FY", "TTM", "Q")
+_PERIOD_PRIORITY = {"TTM": 0, "FY": 1, "Q": 2}
+_ANNUALISATION = {"FY": (Decimal(1), "none (annual period)"), "TTM": (Decimal(1), "none (trailing twelve months)"), "Q": (Decimal(4), "quarterly flow x 4")}
+
+
+def _statement_metrics(raw: Any, known: set[str], as_of: date) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]], list[str]]:
+    """Normalise statements and calculate like-for-like metrics.
+
+    ``period_type`` (FY, Q or TTM) states the length of the flow period.  Flow
+    ratios against balances (ROE, ROA, net debt/EBITDA) are annualised from it
+    and growth compares a period with the same type ending about one year
+    earlier.  Without a period type those metrics are reported as gaps.
+    """
     periods: list[dict[str, Any]] = []
-    seen: set[date] = set()
+    seen: set[tuple[date, str | None]] = set()
     for index, item in enumerate(_list(raw, "statements")):
         statement = _mapping(item, f"statements[{index}]")
         period_end = _iso_date(statement.get("period_end"), f"statements[{index}].period_end")
         if period_end > as_of:
             raise ValueError(f"statements[{index}].period_end cannot be after packet as_of")
-        if period_end in seen:
-            raise ValueError(f"duplicate statement period {period_end.isoformat()}")
-        seen.add(period_end)
+        period_type = statement.get("period_type")
+        if period_type is not None:
+            period_type = _text(period_type, f"statements[{index}].period_type").upper()
+            if period_type not in _PERIOD_TYPES:
+                raise ValueError(f"statements[{index}].period_type must be FY, Q or TTM")
+        key = (period_end, period_type)
+        if key in seen:
+            raise ValueError(f"duplicate statement period {period_end.isoformat()} {period_type or ''}".rstrip())
+        seen.add(key)
         currency = _currency(statement.get("currency"), f"statements[{index}].currency")
         source_ids = _source_ids(statement.get("source_ids"), f"statements[{index}].source_ids", known)
         metric_input = _mapping(statement.get("metrics"), f"statements[{index}].metrics")
         metrics = {str(key): _number(value, f"statements[{index}].metrics.{key}") for key, value in metric_input.items()}
-        periods.append({"period_end": period_end, "currency": currency, "source_ids": source_ids, "metrics": metrics})
-    periods.sort(key=lambda item: item["period_end"], reverse=True)
+        periods.append({"period_end": period_end, "period_type": period_type, "currency": currency, "source_ids": source_ids, "metrics": metrics})
+    periods.sort(key=lambda item: (-item["period_end"].toordinal(), _PERIOD_PRIORITY.get(item["period_type"], 9)))
     if len({item["currency"] for item in periods}) > 1:
         raise ValueError("statement periods require one currency; implicit FX is unsupported")
 
     calculated: dict[str, dict[str, Any]] = {}
+    gaps: list[str] = []
     if not periods:
-        return periods, calculated
-    latest = periods[0]["metrics"]
+        return periods, calculated, gaps
+    current = periods[0]
+    latest = current["metrics"]
+    period_type = current["period_type"]
+    stamp = {"period_end": current["period_end"].isoformat(), "period_type": period_type, "source_ids": current["source_ids"]}
     revenue = _metric(latest, "revenue")
     gross_profit = _metric(latest, "gross_profit")
     operating_income = _metric(latest, "operating_income", "ebit")
@@ -266,35 +301,52 @@ def _statement_metrics(raw: Any, known: set[str], as_of: date) -> tuple[list[dic
         "gross_margin": _ratio(gross_profit, revenue),
         "operating_margin": _ratio(operating_income, revenue),
         "net_margin": _ratio(net_income, revenue),
-        "return_on_assets": _ratio(net_income, assets),
-        "return_on_equity": _ratio(net_income, equity),
         "current_ratio": _ratio(current_assets, current_liabilities),
     }.items():
         if value is not None:
-            calculated[name] = {"value": value, "unit": "ratio", "period_end": periods[0]["period_end"].isoformat(), "source_ids": periods[0]["source_ids"]}
+            calculated[name] = {"value": value, "unit": "ratio", **stamp}
+    factor, annualisation = _ANNUALISATION.get(period_type, (None, None))
+    for name, numerator, denominator in (("return_on_assets", net_income, assets), ("return_on_equity", net_income, equity)):
+        if numerator is None or denominator in {None, Decimal(0)}:
+            continue
+        if factor is None:
+            gaps.append(f"{name}: period_type is unknown, so the net income flow cannot be annualised.")
+            continue
+        calculated[name] = {"value": _out(numerator * factor / denominator), "unit": "annualised ratio", "annualisation": annualisation,
+                            "denominator": "period-end balance", **stamp}
     if debt is not None and cash is not None:
         net_debt = debt - cash
-        calculated["net_debt"] = {"value": _out(net_debt), "unit": periods[0]["currency"], "period_end": periods[0]["period_end"].isoformat(), "source_ids": periods[0]["source_ids"]}
-        leverage = _ratio(net_debt, ebitda)
-        if leverage is not None:
-            calculated["net_debt_to_ebitda"] = {"value": leverage, "unit": "multiple", "period_end": periods[0]["period_end"].isoformat(), "source_ids": periods[0]["source_ids"]}
+        calculated["net_debt"] = {"value": _out(net_debt), "unit": current["currency"], **stamp}
+        if ebitda not in {None, Decimal(0)}:
+            if factor is None:
+                gaps.append("net_debt_to_ebitda: period_type is unknown, so EBITDA cannot be annualised.")
+            else:
+                calculated["net_debt_to_ebitda"] = {"value": _out(net_debt / (ebitda * factor)), "unit": "multiple", "annualisation": annualisation, **stamp}
     if cfo is not None and capex is not None:
         calculated["free_cash_flow_proxy"] = {
-            "value": _out(cfo - abs(capex)), "unit": periods[0]["currency"],
-            "period_end": periods[0]["period_end"].isoformat(),
-            "formula": "operating_cash_flow - abs(capital_expenditure)",
-            "source_ids": periods[0]["source_ids"],
+            "value": _out(cfo - abs(capex)), "unit": current["currency"],
+            "formula": "operating_cash_flow - abs(capital_expenditure)", **stamp,
         }
-    if len(periods) > 1:
-        prior_revenue = _metric(periods[1]["metrics"], "revenue")
-        if revenue is not None and prior_revenue not in {None, Decimal(0)}:
-            calculated["revenue_growth"] = {
-                "value": _out(revenue / prior_revenue - 1), "unit": "ratio",
-                "period_end": periods[0]["period_end"].isoformat(),
-                "comparison_period_end": periods[1]["period_end"].isoformat(),
-                "source_ids": list(dict.fromkeys(periods[0]["source_ids"] + periods[1]["source_ids"])),
-            }
-    return periods, calculated
+    if revenue is not None and len(periods) > 1:
+        if period_type is None:
+            gaps.append("revenue_growth: period_type is unknown, so no like-for-like comparison period can be chosen.")
+        else:
+            comparable = next((
+                item for item in periods[1:]
+                if item["period_type"] == period_type and 350 <= (current["period_end"] - item["period_end"]).days <= 380
+                and _metric(item["metrics"], "revenue") not in {None, Decimal(0)}
+            ), None)
+            if comparable is None:
+                gaps.append(f"revenue_growth: no {period_type} period ending about one year before {current['period_end'].isoformat()} was supplied.")
+            else:
+                calculated["revenue_growth"] = {
+                    "value": _out(revenue / _metric(comparable["metrics"], "revenue") - 1), "unit": "ratio",
+                    "comparison": f"year-over-year, like-for-like {period_type}",
+                    **stamp,
+                    "comparison_period_end": comparable["period_end"].isoformat(),
+                    "source_ids": list(dict.fromkeys(current["source_ids"] + comparable["source_ids"])),
+                }
+    return periods, calculated, gaps
 
 
 def _normalize_thesis(raw: Any, known: set[str]) -> dict[str, list[dict[str, Any]]]:
@@ -319,8 +371,16 @@ def _household_links(
     instrument_id: str | None,
     context: dict[str, Any],
     max_fund_age_days: int,
+    as_of: date,
+    max_fx_age_days: int = 7,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Link direct and look-through household exposure to the researched asset."""
+    """Link direct and look-through household exposure to the researched asset.
+
+    Uses the same look-through as :func:`wealth.household.lookthrough`:
+    unreported fund weight, funds without current holdings and cycles are
+    returned as explicit unknown exposure.  Freshness is judged at the research
+    ``as_of`` and values are totalled in the household reporting currency.
+    """
     household = context.get("household")
     if not isinstance(household, dict):
         return [], {
@@ -328,146 +388,99 @@ def _household_links(
             "warnings": ["No eligible household fact was available; household exposure is unknown."],
         }
     try:
-        household_as_of = _iso_date(household.get("as_of"), "household.as_of")
-    except ValueError:
+        checked = validate_household(household)
+    except ValueError as exc:
         return [], {
-            "status": "partial", "lookthrough_complete": False,
-            "warnings": ["Household as_of is missing or invalid; fund look-through freshness is unknown."],
+            "status": "unavailable", "lookthrough_complete": False,
+            "warnings": [f"Household failed validation ({exc}); household exposure is unknown."],
         }
-
-    links: list[dict[str, Any]] = []
-    warnings: list[str] = []
-    complete = bool(household.get("complete", False))
-    unknown_sections = household.get("unknown_sections", [])
-    if not isinstance(unknown_sections, list):
-        unknown_sections = ["unknown_sections"]
-    if not complete:
+    data = checked["household"]
+    warnings: list[str] = list(checked["warnings"])
+    household_as_of = _iso_date(data["as_of"], "household.as_of")
+    if household_as_of > as_of:
+        return [], {
+            "status": "unavailable", "lookthrough_complete": False,
+            "warnings": [f"Household as_of {data['as_of']} is after the research as_of {as_of.isoformat()}; point-in-time exposure is unknown."],
+        }
+    household_age = (as_of - household_as_of).days
+    if household_age > _HOUSEHOLD_MAX_AGE_DAYS:
+        warnings.append(f"Household snapshot is stale ({household_age} days before {as_of.isoformat()}); exposure may have changed.")
+    if not data["complete"]:
         warnings.append("Household is marked incomplete; absence of a matching exposure is not conclusive.")
-    if {"positions", "fund_holdings"} & set(unknown_sections):
+    if {"positions", "fund_holdings"} & set(data["unknown_sections"]):
         warnings.append("Household positions or fund holdings are unknown; look-through exposure may be missing.")
 
-    target_ids = {symbol.upper()}
+    targets = {normalize_symbol(symbol)}
     if instrument_id is not None:
-        target_ids.add(instrument_id.upper())
+        targets |= {normalize_symbol(instrument_id), instrument_id.strip().upper()}
+    targets.discard(None)
 
-    def matches(item: dict[str, Any]) -> bool:
-        return any(
-            isinstance(item.get(field), str) and item[field].upper() in target_ids
-            for field in ("instrument_id", "symbol")
-        )
+    def matches(identifier: str, metadata: dict[str, Any]) -> bool:
+        return normalize_symbol(identifier) in targets or identifier.upper() in targets or normalize_symbol(metadata.get("symbol")) in targets
 
-    fresh_funds: dict[str, dict[str, Any]] = {}
-    stale_funds: set[str] = set()
-    raw_funds = household.get("fund_holdings", [])
-    if not isinstance(raw_funds, list):
-        raw_funds = []
-        warnings.append("Household fund_holdings is malformed; look-through exposure is unknown.")
-    for index, fund in enumerate(raw_funds):
-        if not isinstance(fund, dict) or not isinstance(fund.get("instrument_id"), str):
-            warnings.append(f"Ignored malformed household fund holdings at index {index}.")
-            continue
-        fund_id = fund["instrument_id"]
-        try:
-            fund_as_of = _iso_date(fund.get("as_of"), f"household.fund_holdings[{index}].as_of")
-        except ValueError:
-            warnings.append(f"Fund holdings for {fund_id} have no valid as_of; look-through excluded.")
-            stale_funds.add(fund_id)
-            continue
-        age = (household_as_of - fund_as_of).days
-        if age < 0:
-            warnings.append(f"Fund holdings for {fund_id} are after household.as_of; look-through excluded.")
-            stale_funds.add(fund_id)
-        elif age > max_fund_age_days:
-            warnings.append(f"Fund holdings for {fund_id} are stale ({fund_as_of.isoformat()}); look-through excluded.")
-            stale_funds.add(fund_id)
-        elif not isinstance(fund.get("holdings"), list):
-            warnings.append(f"Fund holdings for {fund_id} are malformed; look-through excluded.")
-        else:
-            fresh_funds[fund_id] = fund
-
-    def walk(
-        current_id: str,
-        metadata: dict[str, Any],
-        weight: Decimal,
-        path: tuple[str, ...],
-    ) -> list[tuple[Decimal, tuple[str, ...]]]:
-        current_path = path + (current_id,)
-        if matches(metadata):
-            return [(weight, current_path)]
-        if current_id in path:
-            warnings.append(f"Fund holdings cycle at {' -> '.join(current_path)}; affected exposure is unknown.")
-            return []
-        if current_id in stale_funds:
-            return []
-        fund = fresh_funds.get(current_id)
-        if fund is None:
-            if str(metadata.get("asset_class", "")).lower() in {"fund", "etf", "mutual fund"}:
-                warnings.append(f"No current fund holdings supplied for {current_id}; indirect exposure through it is unknown.")
-            return []
-        found: list[tuple[Decimal, tuple[str, ...]]] = []
-        total = Decimal(0)
-        for child_index, child in enumerate(fund["holdings"]):
-            if not isinstance(child, dict) or not isinstance(child.get("instrument_id"), str):
-                warnings.append(f"Ignored malformed constituent {child_index} in fund {current_id}; affected weight is unknown.")
-                continue
-            try:
-                child_weight = _number(child.get("weight"), f"household fund {current_id} holding weight", nonnegative=True)
-            except ValueError:
-                warnings.append(f"Ignored invalid constituent weight in fund {current_id}; affected weight is unknown.")
-                continue
-            total += child_weight
-            found.extend(walk(child["instrument_id"], child, weight * child_weight, current_path))
-        if total < 1:
-            warnings.append(f"Fund {current_id} has {_out(Decimal(1) - total)} residual unreported weight; exposure in that residual is unknown.")
-        if total > 1:
-            warnings.append(f"Fund {current_id} constituent weights exceed 1; look-through results may be unreliable.")
-        return found
-
-    accounts = {item.get("id"): item for item in household.get("accounts", []) if isinstance(item, dict)}
-    positions = household.get("positions", [])
-    if not isinstance(positions, list):
-        positions = []
-        warnings.append("Household positions is malformed; household exposure is unknown.")
-    for position in positions:
-        if not isinstance(position, dict):
-            continue
-        account = accounts.get(position.get("account_id"), {})
-        position_instrument = position.get("instrument_id")
-        if not isinstance(position_instrument, str):
-            warnings.append(f"Position {position.get('id', 'unknown')} has no instrument_id; look-through excluded.")
-            continue
-        try:
-            position_value = _number(position.get("value"), f"household position {position.get('id')} value", nonnegative=True)
-        except ValueError:
-            warnings.append(f"Position {position.get('id', 'unknown')} has no valid value; weighted exposure is unknown.")
-            continue
-        if matches(position):
-            found = [(Decimal(1), (position_instrument,))]
-        elif position_instrument in stale_funds:
-            found = []
-        else:
-            looks_like_fund = str(position.get("asset_class", "")).lower() in {"fund", "etf", "mutual fund"}
-            if looks_like_fund and position_instrument not in fresh_funds:
-                warnings.append(f"No current fund holdings supplied for {position_instrument}; indirect exposure through it is unknown.")
-                found = []
-            else:
-                found = walk(position_instrument, position, Decimal(1), ())
-        for weight, path in found:
-            direct = weight == 1 and len(path) == 1
-            links.append({key: value for key, value in {
-                "position_id": position.get("id"), "account_id": position.get("account_id"),
-                "owner_id": account.get("owner_id"),
-                "exposure_type": "direct" if direct else "fund_lookthrough",
-                "path": list(path), "weight": _out(weight),
-                "weighted_value": _out(position_value * weight), "currency": position.get("currency"),
-                "quantity": position.get("quantity") if direct else None,
-            }.items() if value is not None})
+    fresh_funds, stale_funds = current_funds(data, as_of, max_fund_age_days, warnings)
+    fx = fx_converter(data, as_of, max_fx_age_days, warnings)
+    reporting = data["currency"]
+    accounts = {item["id"]: item for item in data["accounts"]}
+    links: list[dict[str, Any]] = []
+    unknown: list[dict[str, Any]] = []
+    totals = {"direct": Decimal(0), "fund_lookthrough": Decimal(0), "unknown_lookthrough": Decimal(0)}
+    excluded_for_fx = 0
+    for position in data["positions"]:
+        account = accounts[position["account_id"]]
+        position_value = _number(position["value"], f"household position {position['id']} value", nonnegative=True)
+        reporting_value = fx.convert(position_value, position["currency"], reporting, f"position {position['id']} from link totals")
+        if reporting_value is None:
+            excluded_for_fx += 1
+        shares, _ = ownership_shares(account)
+        for leaf in lookthrough(position["instrument_id"], position, fresh_funds, opaque=stale_funds, stop=matches):
+            weighted = position_value * leaf.weight
+            weighted_reporting = reporting_value * leaf.weight if reporting_value is not None else None
+            if leaf.kind == "match":
+                direct = len(leaf.path) == 1
+                if weighted_reporting is not None:
+                    totals["direct" if direct else "fund_lookthrough"] += weighted_reporting
+                links.append({key: value for key, value in {
+                    "position_id": position["id"], "account_id": position["account_id"],
+                    "owner_id": account["owner_id"],
+                    "attribution": [{"person_id": person, "share": _out(share)} for person, share in shares],
+                    "exposure_type": "direct" if direct else "fund_lookthrough",
+                    "matched_on": "normalized symbol/instrument_id",
+                    "path": list(leaf.path), "weight": _out(leaf.weight),
+                    "weighted_value": _out(weighted), "currency": position["currency"],
+                    "weighted_value_reporting": _out(weighted_reporting) if weighted_reporting is not None else None,
+                    "quantity": position["quantity"] if direct else None,
+                }.items() if value is not None})
+            elif leaf.unknown:
+                if weighted_reporting is not None:
+                    totals["unknown_lookthrough"] += weighted_reporting
+                if leaf.kind == "residual":
+                    warnings.append(f"Fund {leaf.path[-1]} has {_out(leaf.weight)} residual unreported weight; exposure in that residual is unknown.")
+                elif leaf.kind == "opaque_fund":
+                    if leaf.instrument_id not in stale_funds:
+                        warnings.append(f"No current fund holdings supplied for {leaf.instrument_id}; indirect exposure through it is unknown.")
+                else:
+                    warnings.append(f"Fund holdings cycle at {' -> '.join(leaf.path)}; affected exposure is unknown.")
+                unknown.append({
+                    "position_id": position["id"], "kind": leaf.kind, "path": list(leaf.path), "weight": _out(leaf.weight),
+                    "value_reporting": _out(weighted_reporting) if weighted_reporting is not None else None,
+                })
     deduped_warnings = list(dict.fromkeys(warnings))
-    coverage_complete = complete and not deduped_warnings and not ({"positions", "fund_holdings"} & set(unknown_sections))
+    coverage_complete = data["complete"] and not deduped_warnings and not ({"positions", "fund_holdings"} & set(data["unknown_sections"]))
     return links, {
         "status": "complete" if coverage_complete else "partial",
-        "lookthrough_complete": coverage_complete,
+        "lookthrough_complete": not unknown,
         "max_fund_age_days": max_fund_age_days,
+        "evaluated_at": as_of.isoformat(),
+        "reporting_currency": reporting,
+        "totals_reporting": {
+            "direct_value": _out(totals["direct"]),
+            "fund_lookthrough_value": _out(totals["fund_lookthrough"]),
+            "total_linked_value": _out(totals["direct"] + totals["fund_lookthrough"]),
+            "unknown_lookthrough_value": _out(totals["unknown_lookthrough"]),
+            "positions_excluded_for_fx": excluded_for_fx,
+        },
+        "unknown_exposure": unknown,
         "warnings": deduped_warnings,
     }
 
@@ -565,7 +578,12 @@ def _df_value(frame: Any, row_names: tuple[str, ...], period: Any) -> Any:
     return None
 
 
-def _fetch_yfinance(symbol: str, entity_type: str, as_of: date) -> dict[str, Any]:
+def _fetch_yfinance(symbol: str, entity_type: str, retrieved_on: date) -> dict[str, Any]:
+    """Fetch current Yahoo data, stamped with the date it was retrieved.
+
+    Yahoo returns current data only, so the stamp is the retrieval date (and
+    the quote's own market time for price), never a requested historical date.
+    """
     try:
         import yfinance as yf  # type: ignore
     except ImportError as exc:
@@ -578,14 +596,19 @@ def _fetch_yfinance(symbol: str, entity_type: str, as_of: date) -> dict[str, Any
         "id": source_id,
         "title": f"Yahoo Finance aggregator data for {symbol}",
         "url": f"https://finance.yahoo.com/quote/{symbol}/",
-        "as_of": as_of.isoformat(), "kind": "market", "provider": "Yahoo via yfinance",
-        "max_age_days": 3,
+        "as_of": retrieved_on.isoformat(), "kind": "market", "provider": "Yahoo via yfinance",
+        "max_age_days": 3, "retrieved_on": retrieved_on.isoformat(),
     }
+    market_time = info.get("regularMarketTime")
+    price_date = retrieved_on
+    if isinstance(market_time, (int, float)) and not isinstance(market_time, bool) and math.isfinite(market_time):
+        price_date = min(retrieved_on, datetime.fromtimestamp(market_time, timezone.utc).date())
     business_facts = []
     for label, key in (("name", "longName"), ("quote_type", "quoteType"), ("sector", "sector"), ("industry", "industry"), ("website", "website"), ("market_cap", "marketCap"), ("enterprise_value", "enterpriseValue"), ("price", "currentPrice")):
         value = _safe_plain(info.get(key))
         if value is not None:
-            business_facts.append({"label": label, "value": value, "source_ids": [source_id], "as_of": as_of.isoformat()})
+            fact_date = price_date if label == "price" else retrieved_on
+            business_facts.append({"label": label, "value": value, "source_ids": [source_id], "as_of": fact_date.isoformat()})
 
     result: dict[str, Any] = {"sources": [source], "business_facts": business_facts}
     if entity_type == "fund":
@@ -596,14 +619,14 @@ def _fetch_yfinance(symbol: str, entity_type: str, as_of: date) -> dict[str, Any
             for label, attr in (("description", "description"), ("fund_overview", "fund_overview"), ("asset_classes", "asset_classes"), ("sector_weightings", "sector_weightings")):
                 value = _safe_plain(getattr(funds, attr, None))
                 if value is not None:
-                    fund_facts.append({"label": label, "value": value, "source_ids": [source_id], "as_of": as_of.isoformat()})
+                    fund_facts.append({"label": label, "value": value, "source_ids": [source_id], "as_of": retrieved_on.isoformat()})
             operations = getattr(funds, "fund_operations", None)
             if operations is not None and hasattr(operations, "columns") and len(operations.columns):
                 fund_column = symbol if symbol in operations.columns else operations.columns[0]
                 for operation_name in operations.index:
                     value = _safe_plain(operations.loc[operation_name, fund_column])
                     if value is not None:
-                        fund_facts.append({"label": str(operation_name), "value": value, "source_ids": [source_id], "as_of": as_of.isoformat()})
+                        fund_facts.append({"label": str(operation_name), "value": value, "source_ids": [source_id], "as_of": retrieved_on.isoformat()})
             top = getattr(funds, "top_holdings", None)
             if top is not None and hasattr(top, "iterrows"):
                 for holding_symbol, row in top.iterrows():
@@ -649,7 +672,7 @@ def _fetch_yfinance(symbol: str, entity_type: str, as_of: date) -> dict[str, Any
             continue
         metrics = {name: value for name, (frame, rows) in mappings.items() if (value := _df_value(frame, rows, period)) is not None}
         if metrics:
-            statements.append({"period_end": period_date.isoformat(), "currency": currency, "source_ids": [source_id], "metrics": metrics})
+            statements.append({"period_end": period_date.isoformat(), "period_type": "FY", "currency": currency, "source_ids": [source_id], "metrics": metrics})
     result["statements"] = statements
     return result
 
@@ -659,8 +682,15 @@ def _merge_live(inputs: dict[str, Any], packet: dict[str, Any], symbol: str, ent
         return dict(inputs)
     if inputs.get("live_fetch") is not True:
         raise ValueError("live_fetch must be a boolean")
+    retrieved_on = _today()
+    if as_of < retrieved_on:
+        packet["missing"].append(_missing(
+            "live_fetch", "not_point_in_time",
+            f"Yahoo/yfinance returns current data retrieved on {retrieved_on.isoformat()}; it cannot evidence a packet dated {as_of.isoformat()}. Supply dated sources instead.",
+        ))
+        return dict(inputs)
     try:
-        live = _fetch_yfinance(symbol, entity_type, as_of)
+        live = _fetch_yfinance(symbol, entity_type, retrieved_on)
     except RuntimeError as exc:
         packet["missing"].append(_missing("live_fetch", "provider_unavailable", str(exc)))
         return dict(inputs)
@@ -687,7 +717,10 @@ def _research(inputs: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]
     fund_age = _number(inputs.get("max_fund_age_days", 90), "max_fund_age_days", nonnegative=True)
     if fund_age != fund_age.to_integral_value():
         raise ValueError("max_fund_age_days must be an integer")
-    household_links, household_coverage = _household_links(symbol, instrument_id, context, int(fund_age))
+    fx_age = _number(inputs.get("max_fx_age_days", 7), "max_fx_age_days", nonnegative=True)
+    if fx_age != fx_age.to_integral_value():
+        raise ValueError("max_fx_age_days must be an integer")
+    household_links, household_coverage = _household_links(symbol, instrument_id, context, int(fund_age), as_of, int(fx_age))
     merged = _merge_live(inputs, packet, symbol, entity_type, as_of)
     raw_sources = merged.get("sources")
     if raw_sources is None:
@@ -696,7 +729,8 @@ def _research(inputs: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]
     known = _normalize_sources(raw_sources, as_of, packet)
     business = _normalize_facts(merged.get("business_facts", []), "business_facts", known, as_of)
     fund_facts = _normalize_facts(merged.get("fund_facts", []), "fund_facts", known, as_of)
-    periods, metrics = _statement_metrics(merged.get("statements", []), known, as_of)
+    periods, metrics, metric_gaps = _statement_metrics(merged.get("statements", []), known, as_of)
+    packet["warnings"].extend(metric_gaps)
 
     previous = _previous_case(symbol, context)
     thesis_raw = merged.get("thesis_evidence")
@@ -712,8 +746,8 @@ def _research(inputs: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]
     result: dict[str, Any] = {
         "symbol": symbol, "entity_type": entity_type, "as_of": as_of.isoformat(),
         "business_facts": business, "fund_facts": fund_facts,
-        "statement_periods": [{"period_end": item["period_end"].isoformat(), "currency": item["currency"], "source_ids": item["source_ids"], "metrics": {key: _out(value) for key, value in item["metrics"].items()}} for item in periods],
-        "financial_metrics": metrics, "thesis_evidence": thesis,
+        "statement_periods": [{"period_end": item["period_end"].isoformat(), "period_type": item["period_type"], "currency": item["currency"], "source_ids": item["source_ids"], "metrics": {key: _out(value) for key, value in item["metrics"].items()}} for item in periods],
+        "financial_metrics": metrics, "financial_metric_gaps": metric_gaps, "thesis_evidence": thesis,
         "remembered_thesis": remembered_thesis,
         "household_links": household_links,
         "household_link_coverage": household_coverage,
@@ -738,33 +772,150 @@ def _research(inputs: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]
         "current_source_count": sum(source["freshness"] == "current" for source in packet["sources"]),
         "stale_source_count": sum(source["freshness"] == "stale" for source in packet["sources"]),
     }
-    if "household" in context and household_coverage["status"] == "partial":
+    if "household" in context and household_coverage["status"] != "complete":
         packet["warnings"].extend(
             f"Household coverage: {warning}" for warning in household_coverage["warnings"]
         )
     packet["result"] = result
     if not packet["sources"] or not result.get("business_facts") and entity_type == "company" or not result.get("fund_facts") and entity_type == "fund":
         packet["status"] = "needs_input"
-    elif packet["missing"] or ("household" in context and household_coverage["status"] == "partial"):
+    elif packet["missing"] or ("household" in context and household_coverage["status"] != "complete"):
         packet["status"] = "partial"
     else:
         packet["status"] = "ready"
     return packet
 
 
-def _dcf_scenario(raw: dict[str, Any], index: int, known: set[str]) -> dict[str, Any]:
+_BRIDGE_DEDUCTIONS = ("minority_interest", "preferred_equity", "lease_liabilities")
+_TERMINAL_SHARE_WARNING = Decimal("0.75")
+
+
+def _equity_bridge(raw: dict[str, Any], prefix: str, enterprise_value: Decimal) -> tuple[Decimal, dict[str, str], list[str]]:
+    """Enterprise value to equity value with every claim explicit."""
+    net_debt = _number(raw.get("net_debt"), f"{prefix}.net_debt")
+    leases_in_net_debt = raw.get("leases_included_in_net_debt")
+    if leases_in_net_debt is not None and not isinstance(leases_in_net_debt, bool):
+        raise ValueError(f"{prefix}.leases_included_in_net_debt must be a boolean")
+    if leases_in_net_debt is True and "lease_liabilities" in raw:
+        raise ValueError(f"{prefix}.lease_liabilities would double count leases already included in net_debt")
+    bridge = {"enterprise_value": _out(enterprise_value), "less_net_debt": _out(net_debt)}
+    not_supplied: list[str] = []
+    equity = enterprise_value - net_debt
+    for key in _BRIDGE_DEDUCTIONS:
+        if key == "lease_liabilities" and leases_in_net_debt is True:
+            bridge["lease_liabilities"] = "included in net_debt"
+            continue
+        if key in raw:
+            amount = _number(raw[key], f"{prefix}.{key}", nonnegative=True)
+            equity -= amount
+            bridge[f"less_{key}"] = _out(amount)
+        else:
+            not_supplied.append(key)
+    if "non_operating_assets" in raw:
+        amount = _number(raw["non_operating_assets"], f"{prefix}.non_operating_assets", nonnegative=True)
+        equity += amount
+        bridge["plus_non_operating_assets"] = _out(amount)
+    else:
+        not_supplied.append("non_operating_assets")
+    bridge["equity_value"] = _out(equity)
+    return equity, bridge, not_supplied
+
+
+def _per_share(raw: dict[str, Any], prefix: str, equity: Decimal) -> tuple[dict[str, str], list[str]]:
+    """Per-share value on diluted shares (treasury stock method at the implied value)."""
+    basic = _number(raw.get("shares_outstanding"), f"{prefix}.shares_outstanding", positive=True)
+    options = []
+    for index, item in enumerate(_list(raw.get("options", []), f"{prefix}.options")):
+        option = _mapping(item, f"{prefix}.options[{index}]")
+        options.append((
+            _number(option.get("count"), f"{prefix}.options[{index}].count", nonnegative=True),
+            _number(option.get("strike"), f"{prefix}.options[{index}].strike", nonnegative=True),
+        ))
+    rsus = _number(raw.get("rsus", 0), f"{prefix}.rsus", nonnegative=True)
+    not_supplied = [] if ("options" in raw or "rsus" in raw) else ["dilutive_securities"]
+    diluted = basic
+    method = "basic shares; no dilutive securities supplied" if not_supplied else "treasury stock method at the implied value per share"
+    if equity > 0 and (options or rsus):
+        price = equity / (basic + rsus)
+        for _ in range(200):
+            diluted = basic + rsus + sum((count * (1 - strike / price) for count, strike in options if strike < price), Decimal(0))
+            updated = equity / diluted
+            converged = abs(updated - price) <= abs(price) * Decimal("1e-12")
+            price = updated
+            if converged:
+                break
+    elif equity <= 0 and (options or rsus):
+        diluted = basic + rsus
+        method = "non-positive equity: options treated as out of the money; RSUs added"
+    return {
+        "shares_outstanding": _out(basic), "diluted_shares": _out(diluted), "dilution_method": method,
+        "implied_value_per_share": _out(equity / diluted),
+    }, not_supplied
+
+
+def _price_comparison(raw: dict[str, Any], prefix: str, currency: str, per_share: Decimal, warnings: list[str]) -> dict[str, str]:
+    if "current_price" not in raw:
+        return {}
+    current_price = _number(raw["current_price"], f"{prefix}.current_price", positive=True)
+    result = {"current_price": _out(current_price)}
+    price_currency = raw.get("current_price_currency")
+    if price_currency is None:
+        warnings.append(f"{prefix}: current_price_currency is not stated; upside/downside is not calculated (a listing currency can differ from the reporting currency).")
+        return result
+    price_currency = _currency(price_currency, f"{prefix}.current_price_currency")
+    result["current_price_currency"] = price_currency
+    if price_currency != currency:
+        warnings.append(f"{prefix}: current_price is in {price_currency} but the scenario is in {currency}; no implicit FX is applied, so upside/downside is not calculated.")
+        return result
+    result["upside_downside"] = _out(per_share / current_price - 1)
+    return result
+
+
+def _discount_schedule(raw: dict[str, Any], prefix: str, valuation_date: date, periods: int) -> tuple[list[Decimal], Decimal, Decimal, dict[str, Any]]:
+    """Return per-period discount exponents (years), the terminal exponent, the
+    period-1 cash-flow scale, and a description of the timing convention."""
+    mid_year = raw.get("mid_year_convention", False)
+    if not isinstance(mid_year, bool):
+        raise ValueError(f"{prefix}.mid_year_convention must be a boolean")
+    stub = Decimal(1)
+    first_scale = Decimal(1)
+    timing: dict[str, Any] = {"mid_year_convention": mid_year}
+    if raw.get("first_period_end") is not None:
+        first_end = _iso_date(raw["first_period_end"], f"{prefix}.first_period_end")
+        days = (first_end - valuation_date).days
+        if not 0 < days <= 366:
+            raise ValueError(f"{prefix}.first_period_end must fall within one year after valuation_date")
+        basis = raw.get("stub_fcf_basis")
+        if basis not in {"full_period", "remaining_stub"}:
+            raise ValueError(f"{prefix}.stub_fcf_basis must say whether period 1 free_cash_flow is full_period (prorated here) or remaining_stub")
+        stub = Decimal(days) / Decimal(365)
+        first_scale = stub if basis == "full_period" else Decimal(1)
+        timing.update(first_period_end=first_end.isoformat(), stub_fraction=_out(stub.quantize(Decimal("0.000001"))), stub_fcf_basis=basis)
+    exponents = []
+    for period in range(1, periods + 1):
+        end = stub + (period - 1)
+        start = end - (stub if period == 1 else Decimal(1))
+        exponents.append((start + end) / 2 if mid_year else end)
+    horizon = stub + (periods - 1)
+    terminal = horizon - Decimal("0.5") if mid_year else horizon
+    timing["convention"] = (
+        "mid-period discounting; Gordon terminal value discounted half a year before the horizon because it capitalises flows received through each year"
+        if mid_year else "end-of-period discounting"
+    )
+    return exponents, terminal, first_scale, timing
+
+
+def _dcf_scenario(raw: dict[str, Any], index: int, known: set[str], warnings: list[str]) -> dict[str, Any]:
     prefix = f"scenarios[{index}]"
     name = _text(raw.get("name"), f"{prefix}.name")
     currency = _currency(raw.get("currency"), f"{prefix}.currency")
     valuation_date = _iso_date(raw.get("valuation_date"), f"{prefix}.valuation_date")
     discount = _number(raw.get("discount_rate"), f"{prefix}.discount_rate")
     growth = _number(raw.get("terminal_growth"), f"{prefix}.terminal_growth")
-    if discount <= growth:
-        raise ValueError(f"{prefix}.discount_rate must exceed terminal_growth")
     if discount <= Decimal("-1") or growth <= Decimal("-1"):
         raise ValueError(f"{prefix} rates must exceed -1")
-    net_debt = _number(raw.get("net_debt"), f"{prefix}.net_debt")
-    shares = _number(raw.get("shares_outstanding"), f"{prefix}.shares_outstanding", positive=True)
+    if growth >= discount:
+        raise ValueError(f"{prefix}.discount_rate must exceed terminal_growth; a perpetuity growing at or above the discount rate has no finite value")
     forecast_raw = _list(raw.get("forecast"), f"{prefix}.forecast")
     if not forecast_raw:
         raise ValueError(f"{prefix}.forecast must contain at least one period")
@@ -778,31 +929,48 @@ def _dcf_scenario(raw: dict[str, Any], index: int, known: set[str]) -> dict[str,
     forecasts.sort()
     if [period for period, _ in forecasts] != list(range(1, len(forecasts) + 1)):
         raise ValueError(f"{prefix}.forecast periods must be consecutive from 1")
-    pv_forecast = sum((cash / ((Decimal(1) + discount) ** period) for period, cash in forecasts), Decimal(0))
-    last_period, last_cash = forecasts[-1]
+    exponents, terminal_exponent, first_scale, timing = _discount_schedule(raw, prefix, valuation_date, len(forecasts))
+    one_plus = Decimal(1) + discount
+    pv_forecast = Decimal(0)
+    for (period, cash), exponent in zip(forecasts, exponents):
+        pv_forecast += (cash * first_scale if period == 1 else cash) / (one_plus ** exponent)
+    last_cash = forecasts[-1][1]
     terminal_value = last_cash * (Decimal(1) + growth) / (discount - growth)
-    pv_terminal = terminal_value / ((Decimal(1) + discount) ** last_period)
+    pv_terminal = terminal_value / (one_plus ** terminal_exponent)
     enterprise_value = pv_forecast + pv_terminal
-    equity_value = enterprise_value - net_debt
-    per_share = equity_value / shares
+    equity_value, bridge, not_supplied = _equity_bridge(raw, prefix, enterprise_value)
+    shares, dilution_gaps = _per_share(raw, prefix, equity_value)
+    not_supplied.extend(dilution_gaps)
+    terminal_share = pv_terminal / enterprise_value if enterprise_value > 0 else None
+    if terminal_share is None:
+        warnings.append(f"{prefix} ({name}): enterprise value is not positive; terminal-value share is undefined.")
+    elif terminal_share > _TERMINAL_SHARE_WARNING:
+        warnings.append(
+            f"{prefix} ({name}): terminal value is {_out((terminal_share * 100).quantize(Decimal('0.1')))}% of enterprise value; "
+            "the result is dominated by the perpetuity assumptions."
+        )
+    if discount - growth < Decimal("0.01"):
+        warnings.append(f"{prefix} ({name}): discount rate exceeds terminal growth by less than one percentage point; value is highly sensitive to both.")
+    if not_supplied:
+        warnings.append(f"{prefix} ({name}): bridge items not supplied and therefore excluded: {', '.join(not_supplied)}.")
     result = {
-        "name": name, "kind": "dcf_fcff", "currency": currency, "valuation_date": valuation_date.isoformat(),
-        "basis": "enterprise_value", "rate_convention": "decimal annual effective; end-of-period FCFF",
+        "name": name, "kind": "dcf_fcff", "status": "calculated", "currency": currency, "valuation_date": valuation_date.isoformat(),
+        "basis": "enterprise_value", "rate_convention": "decimal annual effective", "timing": timing,
         "discount_rate": _out(discount), "terminal_growth": _out(growth),
         "forecast_present_value": _out(pv_forecast), "terminal_value_at_horizon": _out(terminal_value),
-        "terminal_value_present_value": _out(pv_terminal), "enterprise_value": _out(enterprise_value),
-        "net_debt": _out(net_debt), "equity_value": _out(equity_value),
-        "shares_outstanding": _out(shares), "implied_value_per_share": _out(per_share),
+        "terminal_value_present_value": _out(pv_terminal),
+        "terminal_value_share_of_enterprise_value": _out(terminal_share) if terminal_share is not None else None,
+        "enterprise_value": _out(enterprise_value),
+        "net_debt": bridge["less_net_debt"], "equity_bridge": bridge, "bridge_items_not_supplied": not_supplied,
+        "equity_value": _out(equity_value), **shares,
         "source_ids": _source_ids(raw.get("source_ids"), f"{prefix}.source_ids", known),
         "interpretation": "scenario, not prediction",
     }
-    if "current_price" in raw:
-        current_price = _number(raw["current_price"], f"{prefix}.current_price", positive=True)
-        result.update({"current_price": _out(current_price), "upside_downside": _out(per_share / current_price - 1)})
+    result.update(_price_comparison(raw, prefix, currency, equity_value / Decimal(shares["diluted_shares"]), warnings))
     return result
 
 
-def _multiple_scenario(raw: dict[str, Any], index: int, known: set[str]) -> dict[str, Any]:
+def _multiple_scenario(raw: dict[str, Any], index: int, known: set[str], warnings: list[str]) -> dict[str, Any]:
     prefix = f"scenarios[{index}]"
     name = _text(raw.get("name"), f"{prefix}.name")
     currency = _currency(raw.get("currency"), f"{prefix}.currency")
@@ -812,33 +980,33 @@ def _multiple_scenario(raw: dict[str, Any], index: int, known: set[str]) -> dict
         raise ValueError(f"{prefix}.basis must be enterprise_value or equity_value")
     metric_name = _text(raw.get("metric_name"), f"{prefix}.metric_name")
     metric_value = _number(raw.get("metric_value"), f"{prefix}.metric_value")
-    multiple = _number(raw.get("multiple"), f"{prefix}.multiple", nonnegative=True)
-    shares = _number(raw.get("shares_outstanding"), f"{prefix}.shares_outstanding", positive=True)
-    reference_value = metric_value * multiple
-    if basis == "enterprise_value":
-        net_debt = _number(raw.get("net_debt"), f"{prefix}.net_debt")
-        enterprise_value = reference_value
-        equity_value = enterprise_value - net_debt
-    else:
-        if "net_debt" in raw:
-            raise ValueError(f"{prefix}.net_debt is not used with an equity_value multiple")
-        net_debt = None
-        enterprise_value = None
-        equity_value = reference_value
-    per_share = equity_value / shares
-    result = {
+    multiple = _number(raw.get("multiple"), f"{prefix}.multiple", positive=True)
+    source_ids = _source_ids(raw.get("source_ids"), f"{prefix}.source_ids", known)
+    base = {
         "name": name, "kind": "multiples", "currency": currency, "valuation_date": valuation_date.isoformat(),
         "basis": basis, "metric_name": metric_name, "metric_value": _out(metric_value), "multiple": _out(multiple),
-        "equity_value": _out(equity_value), "shares_outstanding": _out(shares),
-        "implied_value_per_share": _out(per_share),
-        "source_ids": _source_ids(raw.get("source_ids"), f"{prefix}.source_ids", known),
-        "interpretation": "scenario, not prediction",
+        "source_ids": source_ids, "interpretation": "scenario, not prediction",
     }
-    if enterprise_value is not None:
-        result.update({"enterprise_value": _out(enterprise_value), "net_debt": _out(net_debt)})
-    if "current_price" in raw:
-        current_price = _number(raw["current_price"], f"{prefix}.current_price", positive=True)
-        result.update({"current_price": _out(current_price), "upside_downside": _out(per_share / current_price - 1)})
+    if metric_value <= 0:
+        return {
+            **base, "status": "not_meaningful", "equity_value": None, "implied_value_per_share": None,
+            "reason": f"A multiple of a non-positive {metric_name} has no valuation meaning; use a different metric or an explicit cash-flow scenario.",
+        }
+    reference_value = metric_value * multiple
+    if basis == "enterprise_value":
+        equity_value, bridge, not_supplied = _equity_bridge(raw, prefix, reference_value)
+        extra = {"enterprise_value": _out(reference_value), "net_debt": bridge["less_net_debt"], "equity_bridge": bridge}
+    else:
+        stray = [key for key in ("net_debt", *_BRIDGE_DEDUCTIONS, "non_operating_assets") if key in raw]
+        if stray:
+            raise ValueError(f"{prefix}.{stray[0]} is not used with an equity_value multiple")
+        equity_value, not_supplied, extra = reference_value, [], {}
+    shares, dilution_gaps = _per_share(raw, prefix, equity_value)
+    not_supplied.extend(dilution_gaps)
+    if not_supplied:
+        warnings.append(f"{prefix} ({name}): bridge items not supplied and therefore excluded: {', '.join(not_supplied)}.")
+    result = {**base, "status": "calculated", **extra, "bridge_items_not_supplied": not_supplied, "equity_value": _out(equity_value), **shares}
+    result.update(_price_comparison(raw, prefix, currency, equity_value / Decimal(shares["diluted_shares"]), warnings))
     return result
 
 
@@ -865,14 +1033,18 @@ def _value(inputs: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
         scenario = _mapping(item, f"scenarios[{index}]")
         kind = scenario.get("kind")
         if kind == "dcf_fcff":
-            calculated = _dcf_scenario(scenario, index, known)
+            calculated = _dcf_scenario(scenario, index, known, packet["warnings"])
         elif kind == "multiples":
-            calculated = _multiple_scenario(scenario, index, known)
+            calculated = _multiple_scenario(scenario, index, known, packet["warnings"])
         else:
             raise ValueError(f"scenarios[{index}].kind must be dcf_fcff or multiples")
         if calculated["name"] in names:
             raise ValueError(f"duplicate scenario name {calculated['name']}")
         names.add(calculated["name"])
+        if calculated["valuation_date"] > as_of.isoformat():
+            packet["warnings"].append(f"scenarios[{index}].valuation_date is after the packet as_of.")
+        if calculated["status"] == "not_meaningful":
+            packet["missing"].append(_missing(f"scenarios.{calculated['name']}", "not_meaningful", calculated["reason"]))
         scenarios.append(calculated)
     if not scenarios:
         packet["missing"].append(_missing("scenarios", "empty", "Provide at least one valuation scenario."))
