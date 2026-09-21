@@ -36,6 +36,7 @@ TASK_MODULES = {
     "mx_calendar": "mexico", "estate": "estate",
     "ledger": "ledger", "performance": "ledger", "spending": "cashflow", "dca": "dca",
     "rebalance": "rebalance", "asset_location": "rebalance",
+    "retirement_mx": "retirement", "retirement_us": "retirement", "retirement_readiness": "retirement",
 }
 # Tasks answered by the service itself rather than one module.
 SERVICE_TASKS = ("plan", "calendar", "monitor", "debt_payoff", "policy_draft", "policy_check", "today", "weekly",
@@ -79,7 +80,8 @@ def capabilities() -> dict:
         "execution": "Analysis and decision support only; no trading, transfers, or external messaging.",
         "tax_scope": "US federal (2025/2026 brackets, LTCG stacking, NIIT, lots, wash sales, harvesting); Mexico "
                      "(Art. 129 BMV/SIC, real interest, deductions/PPR, foreign securities outside the SIC, calendar); "
-                     "US estate exposure for non-residents. Not state tax, AFORE/IRA internals or filing positions.",
+                     "US estate exposure for non-residents; retirement (IMSS Ley 73/97 and AFORE, Modalidad 40, Social "
+                     "Security claim ages, 2026 contribution limits, RMDs, withdrawal order). Not state tax or filing positions.",
         "ingest": "wealth_ingest turns an uploaded statement, host extraction or chat facts into a reconciled "
                   "proposal. Nothing is saved until the person says yes and the host calls action=confirm.",
         "connectors": CONNECTORS,
@@ -272,6 +274,9 @@ class WealthService:
             "policy_check": "policy constraint goals reserve",
             "rebalance": "household account tax goals reserve constraint", "asset_location": "household account tax",
             "today": "reserve goals income spending policy thread", "weekly": "reserve goals income spending",
+            "retirement_mx": "client.profile income account goals retire afore",
+            "retirement_us": "client.profile income account goals retire tax",
+            "retirement_readiness": "client.profile goals income account plan.resources retire",
         }
         from .recall import recall
         with WealthStore(self.db_path) as store:
