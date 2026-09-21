@@ -31,7 +31,8 @@ from .agent import (
 )
 from .views import placed_ids, png_available, render_png, render_svg
 from .service import WealthService, database_path, upload_dir
-from .profile import fact_action, fact_detail, form_facts, profile_view
+from .profile import (connections_view, export_payload, fact_action, fact_detail, form_facts, profile_view,
+                      review_view, today_view)
 from .store import (ClientExistsError, ClientNotFoundError, ContradictionNotFoundError, DecisionNotFoundError,
                     IneligibleEvidenceError, RequestConflictError, StaleRevisionError, StoreError, ValidationError)
 from .store import WealthStore
@@ -120,6 +121,7 @@ _HISTORY_PATH = re.compile(r"^/api/profile/fact/([^/]{1,200})/history$")
 _CONTRADICTION_PATH = re.compile(r"^/api/profile/contradictions/([A-Za-z0-9_-]{1,80})$")
 _FACT_PATH = re.compile(r"^/api/facts/([^/]{1,200})$")
 _TURN_PATH = re.compile(r"^/api/turns/([0-9a-f]{16})(/events|/cancel)?$")
+SURFACE_GETS = frozenset({"/review", "/api/today", "/api/review", "/api/connections", "/api/export"})
 _VIEW_PATH = re.compile(r"^/api/views/([a-z][a-z0-9_]{0,31}-[0-9a-f]{10})\.(svg|png)$")
 # Order tickets: confirm takes a ticket id; cancel takes a ticket id (discard) or an Alpaca order id.
 _ORDER_PATH = re.compile(r"^/api/orders/([A-Za-z0-9-]{1,64})/(confirm|cancel)$")
@@ -711,6 +713,8 @@ def create_server(chat, port=8765, host="127.0.0.1"):
                     lang = (parse_qs(url.query).get("lang") or [None])[0]
                     return self.respond(200, profile_view(WealthService(chat.db), chat.client_id,
                                                           language=lang if lang in {"en", "es"} else None))
+                if url.path in SURFACE_GETS:
+                    return self.surface_get(url)
                 if url.path == "/api/profile/contradictions":
                     return self.respond(200, WealthService(chat.db).contradictions(chat.client_id))
                 history = _HISTORY_PATH.match(url.path)
@@ -811,6 +815,8 @@ def create_server(chat, port=8765, host="127.0.0.1"):
                     service.resolve_contradiction(chat.client_id, resolve.group(1), body["choice"],
                                                   valid_from=body.get("valid_from"))
                     return self.respond(200, {"profile": profile_view(service, chat.client_id)})
+                if path == "/api/today":
+                    return self.respond(200, self.today(self.read_json()))
                 if path == "/api/profile/form":
                     return self.profile_write(self.read_json(), form=True)
                 fact = _FACT_PATH.match(path)
@@ -850,6 +856,43 @@ def create_server(chat, port=8765, host="127.0.0.1"):
             except _tickets.ConfirmError as exc:
                 return self.respond(exc.status, {"error": str(exc), "kind": exc.kind, "ticket": exc.ticket})
             return self.respond(200, {"ticket": ticket})
+
+        # ---- today lines, quarterly review, connections and export (read views; acks are the only write)
+
+        def today(self, body=None):
+            query = parse_qs(urlsplit(self.path).query)
+            zone = _valid_timezone((query.get("tz") or [None])[0] or (body or {}).get("timezone"))
+            action = item = None
+            if body is not None:
+                chosen = [name for name in ("dismiss", "snooze", "restore") if name in body]
+                if len(chosen) != 1 or not isinstance(body[chosen[0]], str):
+                    raise ValueError("Send one of dismiss, snooze or restore with an item id.")
+                action, item = chosen[0], body[chosen[0]]
+            return today_view(WealthService(chat.db), chat.client_id, action=action, item_id=item, timezone_name=zone)
+
+        def surface_get(self, url):
+            if url.path == "/review":
+                return self.respond(200, Path(__file__).with_name("review.html").read_bytes(), "text/html")
+            if not self.authorized():
+                return self.respond(403, {"error": "Reload to reconnect.", "kind": "forbidden"})
+            service = WealthService(chat.db)
+            if url.path == "/api/today":
+                return self.respond(200, self.today())
+            if url.path == "/api/review":
+                period = (parse_qs(url.query).get("period") or [None])[0]
+                return self.respond(200, review_view(service, chat.client_id, period,
+                                                     inputs=getattr(chat, "review_inputs", None)))
+            if url.path == "/api/connections":
+                return self.respond(200, connections_view(service, chat.client_id))
+            data = json.dumps(export_payload(service, chat.client_id), default=str, indent=1).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Disposition", 'attachment; filename="wealth-export.json"')
+            self.send_header("Content-Length", str(len(data)))
+            for name, header in SECURITY_HEADERS:
+                self.send_header(name, header)
+            self.end_headers()
+            self.wfile.write(data)
 
         def profile_write(self, body, *, key=None, form=False):
             service = WealthService(chat.db)

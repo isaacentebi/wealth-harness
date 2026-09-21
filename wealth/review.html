@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="referrer" content="no-referrer">
+  <title>Quarterly review · Wealth</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500&display=swap">
+  <style>
+    /* Dot tokens. Light only. The page is a letter: one reading column, ruled tickets, ink marks. */
+    :root {
+      --canvas: #FBF8F2;
+      --surface: #FFFCF7;
+      --vermilion: #C84335;
+      --pressed: #A9372E;
+      --ink: #2B2522;
+      --ink-2: #4A413C;
+      --muted: #6E625B;
+      --hairline: #D9CEC6;
+      --sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --mono: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+      color-scheme: light;
+    }
+    * { box-sizing: border-box; }
+    html { background: var(--canvas); }
+    body {
+      margin: 0; background: var(--canvas); color: var(--ink);
+      font: 400 15px/24px var(--sans); -webkit-font-smoothing: antialiased; font-variant-numeric: tabular-nums;
+    }
+    button { font: inherit; color: inherit; }
+    a { color: inherit; }
+    :focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; border-radius: 4px; }
+    .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+    .mono { font-family: var(--mono); }
+
+    .page { width: min(760px, 100%); margin: 0 auto; padding: 8px 24px 96px; }
+    .top { display: flex; align-items: center; justify-content: space-between; min-height: 56px; }
+    .back { display: inline-flex; align-items: center; min-height: 44px; font-weight: 500; text-decoration: none; color: var(--ink-2); }
+    .back:hover { color: var(--ink); }
+    .lang { display: flex; }
+    .lang button { min-width: 44px; min-height: 44px; border: 0; background: none; cursor: pointer; font: 500 13px var(--mono); color: var(--muted); }
+    .lang button[aria-pressed="true"] { color: var(--ink); text-decoration: underline; text-decoration-color: var(--vermilion); text-underline-offset: 6px; text-decoration-thickness: 2px; }
+
+    /* ------------------------------------------------ letterhead */
+    .origin { margin: 32px 0 0; font: 400 12px/16px var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+    h1 { margin: 8px 0 0; font: 700 44px/48px var(--sans); letter-spacing: -.045em; }
+    h1 .dot { color: var(--vermilion); }
+    .controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0 24px; margin-top: 16px; padding-bottom: 8px; border-bottom: 1.5px solid var(--ink); }
+    .quarters { display: flex; flex-wrap: wrap; margin-left: -8px; }
+    .quarters a {
+      display: inline-flex; align-items: center; min-height: 44px; padding: 0 8px; text-decoration: none;
+      font: 400 13px var(--mono); color: var(--muted);
+    }
+    .quarters a:hover { color: var(--ink); }
+    .quarters a[aria-current="page"] { color: var(--ink); font-weight: 500; text-decoration: underline; text-decoration-color: var(--vermilion); text-underline-offset: 6px; text-decoration-thickness: 2px; }
+    .txt {
+      display: inline-flex; align-items: center; min-height: 44px; padding: 0; border: 0; background: none; cursor: pointer;
+      font: 500 15px var(--sans); color: var(--ink); text-decoration: underline; text-decoration-color: var(--hairline);
+      text-underline-offset: 4px; text-decoration-thickness: 1px;
+    }
+    .txt:hover { text-decoration-color: currentColor; }
+    .txt.act { color: var(--vermilion); text-decoration-color: color-mix(in srgb, var(--vermilion) 35%, transparent); }
+    .txt.act:hover { color: var(--pressed); }
+
+    /* ------------------------------------------------ the letter */
+    .letter { margin-top: 32px; }
+    .salute { margin: 0 0 8px; font: 400 20px/28px var(--sans); letter-spacing: -.015em; }
+    .letter p.body { margin: 0; font: 400 20px/30px var(--sans); letter-spacing: -.015em; text-wrap: pretty; max-width: 34em; }
+    .letter p.body + p.body { margin-top: 12px; }
+
+    section.part { position: relative; margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--hairline); break-inside: avoid; }
+    .num { position: absolute; left: -72px; top: 18px; font: 400 12px/20px var(--mono); color: var(--muted); }
+    .part h2 { margin: 0 0 12px; font: 600 17px/24px var(--sans); letter-spacing: -.01em; }
+    .note { margin: 8px 0 0; font-size: 13px; line-height: 20px; color: var(--muted); }
+    .quiet { color: var(--muted); }
+
+    /* ruled rows (the ticket primitive) */
+    .ticket { margin: 0; }
+    .row { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; min-height: 48px; padding: 12px 0; border-top: 1px solid var(--hairline); }
+    .row:first-child { border-top: 0; }
+    .row dt, .row .k { min-width: 0; color: var(--ink-2); }
+    .row dd { margin: 0; text-align: right; white-space: nowrap; }
+    .row .sub { display: block; font: 400 12px/16px var(--mono); color: var(--muted); margin-top: 2px; }
+    .v { font: 400 15px/24px var(--mono); white-space: nowrap; }
+    .row.total { border-top: 1.5px solid var(--ink); }
+    .row.total dt, .row.total .v { color: var(--ink); font-weight: 600; }
+    .row.total .v { font-weight: 500; }
+    .sign { display: inline-block; margin-right: 6px; color: var(--muted); font-family: var(--mono); }
+
+    /* allocation against the policy ranges: an ink bar and two band ticks */
+    .sleeve { padding: 12px 0; border-top: 1px solid var(--hairline); }
+    .sleeve:first-child { border-top: 0; }
+    .sleeve .line { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+    .sleeve .name { color: var(--ink-2); min-width: 0; }
+    .track { position: relative; height: 16px; margin-top: 6px; }
+    .track::before { content: ""; position: absolute; left: 0; right: 0; top: 7px; border-top: 1px solid var(--hairline); }
+    .bar { position: absolute; left: 0; top: 5px; height: 5px; min-width: 2px; background: var(--ink); print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+    .tick { position: absolute; top: 0; width: 1.5px; height: 16px; margin-left: -.75px; background: var(--muted); print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+    .sleeve .sub { font: 400 12px/16px var(--mono); color: var(--muted); margin-top: 2px; }
+    .sleeve .out { color: var(--ink); font-weight: 500; }
+
+    /* cash flow: this quarter against the one before */
+    table.flow { width: 100%; border-collapse: collapse; }
+    table.flow th, table.flow td { padding: 12px 0; border-top: 1px solid var(--hairline); text-align: right; font-weight: 400; vertical-align: baseline; }
+    table.flow thead th { border-top: 0; padding-top: 0; font: 400 12px/16px var(--mono); color: var(--muted); }
+    table.flow tbody th { text-align: left; color: var(--ink-2); }
+    table.flow td { font: 400 15px/24px var(--mono); white-space: nowrap; padding-left: 16px; }
+    table.flow td.prior { color: var(--muted); }
+    table.flow tr.total th, table.flow tr.total td { border-top: 1.5px solid var(--ink); color: var(--ink); }
+    table.flow tr.total th { font-weight: 600; }
+    table.flow tr.total td:not(.prior) { font-weight: 500; }
+
+    .item { padding: 12px 0; border-top: 1px solid var(--hairline); }
+    .item:first-child { border-top: 0; }
+    .item .line { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+    .item .what { min-width: 0; overflow-wrap: anywhere; }
+    .item .sub { font: 400 12px/18px var(--mono); color: var(--muted); margin-top: 2px; }
+    .fill { position: relative; height: 5px; margin-top: 8px; background: none; }
+    .fill::before { content: ""; position: absolute; left: 0; right: 0; top: 2px; border-top: 1px solid var(--hairline); }
+    .fill span { position: absolute; left: 0; top: 0; height: 5px; min-width: 2px; background: var(--ink); print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+
+    /* next quarter: the letter's close */
+    ol.next { list-style: none; margin: 0; padding: 0; counter-reset: n; }
+    ol.next li { display: grid; grid-template-columns: 32px minmax(0, 1fr); gap: 0 8px; padding: 16px 0; border-top: 1px solid var(--hairline); }
+    ol.next li:first-child { border-top: 0; padding-top: 4px; }
+    ol.next .n { font: 500 15px/28px var(--mono); color: var(--muted); }
+    ol.next .title { margin: 0; font: 600 20px/28px var(--sans); letter-spacing: -.015em; text-wrap: pretty; }
+    ol.next .value { margin-top: 2px; font: 400 13px/20px var(--mono); color: var(--ink-2); }
+    ol.next .txt { margin-top: 4px; }
+
+    .empty { margin-top: 40px; font: 400 20px/30px var(--sans); max-width: 30em; }
+    .printed { display: none; }
+
+    @media (min-width: 1000px) {
+      .page { padding-top: 16px; }
+    }
+    @media (max-width: 999px) { .num { display: none; } }
+    @media (max-width: 420px) {
+      h1 { font-size: 36px; line-height: 40px; }
+      .letter p.body, .salute { font-size: 18px; line-height: 28px; }
+      ol.next .title { font-size: 18px; line-height: 26px; }
+      ol.next li { grid-template-columns: 24px minmax(0, 1fr); }
+    }
+
+    /* ------------------------------------------------ paper: A4 and Letter share these margins */
+    @page { margin: 16mm 15mm 18mm; }
+    @media print {
+      html, body { background: #fff; }
+      body { font-size: 10.5pt; line-height: 1.5; }
+      .page { width: auto; max-width: 180mm; padding: 0; margin: 0 auto; }
+      .top, .controls .quarters, .controls .txt, .talk, .num { display: none !important; }
+      .controls { border-bottom-width: 1.5pt; min-height: 0; padding-bottom: 4pt; }
+      .origin { margin-top: 0; }
+      h1 { font-size: 26pt; line-height: 1.1; }
+      .letter { margin-top: 14pt; }
+      .letter p.body, .salute { font-size: 12.5pt; line-height: 1.45; }
+      section.part { margin-top: 16pt; padding-top: 8pt; break-inside: avoid; page-break-inside: avoid; }
+      .part h2 { font-size: 12pt; margin-bottom: 4pt; break-after: avoid; }
+      .row, .sleeve, .item, ol.next li { min-height: 0; padding: 5pt 0; }
+      table.flow th, table.flow td { padding: 5pt 0 5pt 8pt; }
+      table.flow th { padding-left: 0; }
+      .v, table.flow td { font-size: 10pt; }
+      ol.next .title { font-size: 12.5pt; }
+      .printed { display: block; margin-top: 18pt; font: 400 8pt/1.4 var(--mono); color: var(--muted); }
+      a { text-decoration: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="top">
+      <a class="back" id="back" href="/profile">← You</a>
+      <div class="lang" role="group" id="lang" aria-label="Language">
+        <button type="button" data-lang="en" aria-pressed="false">EN</button>
+        <button type="button" data-lang="es" aria-pressed="false">ES</button>
+      </div>
+    </div>
+    <main id="root" aria-busy="true"></main>
+  </div>
+  <script>
+  (() => {
+    'use strict';
+    const I18N = {
+      en: {
+        title: 'Quarterly review', you: '← You', q: 'Q{n} {y}', origin: 'Quarterly review · {a} – {b}',
+        pdf: 'Download PDF', quarters: 'Quarters', loadError: 'The review could not be loaded.',
+        empty: 'There is no completed quarter with statements yet. Upload one and the first review appears after the quarter closes.',
+        upload: 'Upload a statement',
+        s_net_worth: 'Net worth', s_performance: 'Performance', s_allocation: 'Allocation against your policy',
+        s_cash_flow: 'Cash flow', s_goals: 'Goals', s_decisions: 'Decisions this quarter', s_dca: 'Recurring investing',
+        s_taxes: 'Taxes, estimated', s_fees: 'Fees', s_next: 'Two decisions for next quarter',
+        portfolio: 'Your portfolio', twr: 'time-weighted', benchmark: 'Benchmark', difference: 'Difference: {v}',
+        points: '{v} pts', range: 'Range {a}–{b}', outside: 'outside its range', target: 'target {v}',
+        income: 'Income', spending: 'Spending', net: 'Saved', rate: 'Savings rate',
+        st_on_track: 'On track', st_behind: 'Behind', st_funded: 'Funded', st_unknown: '—',
+        funded: '{p} of {t} · {d}',
+        noDecisions: 'No decisions were recorded this quarter.', openBefore: '{n} still open from before.',
+        d_accepted: 'Accepted', d_proposed: 'Proposed', d_dismissed: 'Dismissed',
+        trades: n => `${n} ${n === 1 ? 'trade' : 'trades'} since`, invested: '{v} invested',
+        onTime: '{a} of {b} on time', ofPlanned: '{a} of {b}', missed: 'missed {d}', noPlans: 'No recurring plan is saved.',
+        taxPeriod: 'This quarter', taxYtd: 'Year to date', j_MX: 'Mexico', j_US: 'United States',
+        paid: 'Paid this quarter', annual: 'Annual cost', bps: '{a}–{b} bp a year', bp1: '{a} bp a year',
+        talk: 'Talk about this', noNext: 'Nothing stands out for next quarter.',
+        printed: 'Prepared {d} by Wealth from your statements and saved picture. Estimates, not tax advice.',
+        ac_cash: 'Cash', ac_equity: 'Equity', ac_fixed_income: 'Fixed income', ac_fund: 'Funds', ac_unknown: 'Unclassified'
+      },
+      es: {
+        title: 'Revisión trimestral', you: '← Yo', q: 'T{n} {y}', origin: 'Revisión trimestral · {a} – {b}',
+        pdf: 'Descargar PDF', quarters: 'Trimestres', loadError: 'No se pudo cargar la revisión.',
+        empty: 'Aún no hay un trimestre cerrado con estados de cuenta. Sube uno y la primera revisión aparece al cerrar el trimestre.',
+        upload: 'Subir un estado de cuenta',
+        s_net_worth: 'Patrimonio', s_performance: 'Rendimiento', s_allocation: 'Asignación contra tu política',
+        s_cash_flow: 'Flujo de efectivo', s_goals: 'Metas', s_decisions: 'Decisiones del trimestre', s_dca: 'Inversión periódica',
+        s_taxes: 'Impuestos estimados', s_fees: 'Comisiones', s_next: 'Dos decisiones para el próximo trimestre',
+        portfolio: 'Tu portafolio', twr: 'ponderado por tiempo', benchmark: 'Referencia', difference: 'Diferencia: {v}',
+        points: '{v} pts', range: 'Rango {a}–{b}', outside: 'fuera de rango', target: 'meta {v}',
+        income: 'Ingresos', spending: 'Gastos', net: 'Ahorro', rate: 'Tasa de ahorro',
+        st_on_track: 'En camino', st_behind: 'Atrasada', st_funded: 'Cumplida', st_unknown: '—',
+        funded: '{p} de {t} · {d}',
+        noDecisions: 'No se registraron decisiones este trimestre.', openBefore: '{n} siguen abiertas desde antes.',
+        d_accepted: 'Aceptada', d_proposed: 'Propuesta', d_dismissed: 'Descartada',
+        trades: n => `${n} ${n === 1 ? 'operación' : 'operaciones'} desde el`, invested: '{v} invertidos',
+        onTime: '{a} de {b} a tiempo', ofPlanned: '{a} de {b}', missed: 'faltó {d}', noPlans: 'No hay un plan periódico guardado.',
+        taxPeriod: 'Este trimestre', taxYtd: 'En lo que va del año', j_MX: 'México', j_US: 'Estados Unidos',
+        paid: 'Pagadas este trimestre', annual: 'Costo anual', bps: '{a}–{b} pb al año', bp1: '{a} pb al año',
+        talk: 'Hablar de esto', noNext: 'Nada destaca para el próximo trimestre.',
+        printed: 'Preparado el {d} por Wealth con tus estados de cuenta y tu panorama guardado. Son estimaciones, no asesoría fiscal.',
+        ac_cash: 'Efectivo', ac_equity: 'Acciones', ac_fixed_income: 'Renta fija', ac_fund: 'Fondos', ac_unknown: 'Sin clasificar'
+      }
+    };
+    const root = document.getElementById('root');
+    let lang = 'en', locale = 'en-US', token = '', data = null;
+    let period = (() => { try { const p = new URLSearchParams(location.search).get('period'); return /^\d{4}-Q[1-4]$/.test(p || '') ? p : null; } catch (_) { return null; } })();
+
+    // ------------------------------------------------------------ helpers (DOM only; never innerHTML)
+    function t(key, vars) {
+      const text = (I18N[lang] && I18N[lang][key]) ?? I18N.en[key] ?? key;
+      return vars && typeof text === 'string' ? text.replace(/\{(\w+)\}/g, (_, k) => String(vars[k] ?? '')) : text;
+    }
+    function h(tag, props, ...kids) {
+      const el = document.createElement(tag);
+      for (const [k, v] of Object.entries(props || {})) {
+        if (v === null || v === undefined || v === false) continue;
+        if (k === 'class') el.className = v;
+        else if (k === 'text') el.textContent = v;
+        else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+        else if (k === 'style') Object.assign(el.style, v);
+        else el.setAttribute(k, v === true ? '' : String(v));
+      }
+      for (const kid of kids.flat(Infinity)) {
+        if (kid === null || kid === undefined || kid === false || kid === '') continue;
+        el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+      }
+      return el;
+    }
+    const L = value => typeof value === 'string' ? value : value && typeof value === 'object' ? String(value[lang] || value.en || '') : '';
+    const n = raw => { if (raw === null || raw === undefined || raw === '' || typeof raw === 'boolean') return null; const x = Number(raw); return Number.isFinite(x) ? x : null; };
+    const minus = text => text.replace(/-(?=\D?\d|\p{Sc})/u, '−');
+    const ISO = /^\d{4}-\d{2}(-\d{2})?$/;
+    function date(iso, style = 'medium') {
+      if (typeof iso !== 'string' || !ISO.test(iso)) return '—';
+      const [y, m, d] = iso.split('-').map(Number);
+      const opts = style === 'month' || !d ? { month: 'short', year: 'numeric' } : { day: 'numeric', month: 'short', year: 'numeric' };
+      return new Intl.DateTimeFormat(locale, { ...opts, timeZone: 'UTC' }).format(new Date(Date.UTC(y, m - 1, d || 15, 12))).replace('.', '');
+    }
+    // The same value primitives the chat's views draw: {t, v, cur}; v null is unknown and reads "—".
+    function V(value, opts = {}) {
+      if (!value || typeof value !== 'object') return '—';
+      if (value.t === 'date') return date(value.v, opts.style);
+      if (value.t === 'range') {
+        const a = V({ t: 'money', v: value.lo, cur: value.cur }), b = V({ t: 'money', v: value.hi, cur: value.cur });
+        return a === '—' || b === '—' ? '—' : a === b ? a : `${a}–${b}`;
+      }
+      const x = n(value.v);
+      if (x === null) return '—';
+      if (value.t === 'money') {
+        const places = Math.abs(x) >= 100 || Number.isInteger(x) ? 0 : 2;
+        return minus(new Intl.NumberFormat(locale, { style: 'currency', currency: value.cur || 'MXN', currencyDisplay: 'narrowSymbol', minimumFractionDigits: places, maximumFractionDigits: places, signDisplay: opts.signed ? 'exceptZero' : 'auto' }).format(x));
+      }
+      if (value.t === 'ratio') return minus(new Intl.NumberFormat(locale, { style: 'percent', minimumFractionDigits: opts.places === 'auto' ? 0 : opts.places ?? 1, maximumFractionDigits: opts.places === 'auto' ? 2 : opts.places ?? 1, signDisplay: opts.signed ? 'exceptZero' : 'auto' }).format(x));
+      return minus(new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(x));
+    }
+    const quarterName = label => { const m = /^(\d{4})-Q([1-4])$/.exec(label || ''); return m ? t('q', { n: m[2], y: m[1] }) : ''; };
+    const note = value => value ? h('p', { class: 'note', text: '— ' + L(value) }) : null;
+    function part(no, key, ...kids) {
+      return h('section', { class: 'part', 'aria-labelledby': 'h-' + key },
+        h('span', { class: 'num', 'aria-hidden': 'true', text: String(no).padStart(2, '0') }),
+        h('h2', { id: 'h-' + key, text: t('s_' + key) }), kids);
+    }
+    function row(label, value, { sub, total, sign } = {}) {
+      return h('div', { class: 'row' + (total ? ' total' : '') },
+        h('dt', {}, label, sub ? h('span', { class: 'sub', text: sub }) : null),
+        h('dd', {}, sign && value !== '—' ? h('span', { class: 'sign', 'aria-hidden': 'true', text: sign }) : null, h('span', { class: 'v', text: value })));
+    }
+    // "Talk about this": the chat opens with the prompt in the composer, not sent (the person sends it).
+    function handoff(text, send) {
+      try { sessionStorage.setItem('wealth.handoff', JSON.stringify({ text, send: !!send, lang })); } catch (_) { /* the chat still opens */ }
+      location.href = '/';
+    }
+
+    // ------------------------------------------------------------ sections
+    function netWorth(s) {
+      const rows = s.rows.map((r, i) => row(L(r.label), V(r.value), { sub: r.date ? V(r.date) : null, sign: i ? '+' : null }));
+      return [h('dl', { class: 'ticket' }, rows, row(L(s.total.label), V(s.total.value), { sub: s.total.date ? V(s.total.date) : null, total: true, sign: '=' })), note(s.note)];
+    }
+    function performance(s) {
+      const diff = n(s.difference?.v);
+      return [h('dl', { class: 'ticket' },
+          row(t('portfolio'), V(s.portfolio), { sub: t('twr') }),
+          row(s.benchmark?.name || t('benchmark'), V(s.benchmark?.value), { sub: t('benchmark') })),
+        diff !== null ? h('p', { class: 'note mono', text: t('difference', { v: t('points', { v: minus(new Intl.NumberFormat(locale, { maximumFractionDigits: 1, signDisplay: 'exceptZero' }).format(diff * 100)) }) }) }) : null,
+        note(s.note)];
+    }
+    function allocation(s) {
+      const sleeves = s.sleeves || [];
+      const top = Math.min(1, Math.max(0.1, ...sleeves.map(x => Math.max(n(x.weight?.v) ?? 0, n(x.max?.v) ?? 0))) * 1.15);
+      const at = v => `${Math.min(100, (v / top) * 100).toFixed(2)}%`;
+      return [h('div', {}, sleeves.map(x => {
+        const w = n(x.weight?.v), lo = n(x.min?.v), hi = n(x.max?.v);
+        const name = x.name && x.name !== x.id ? x.name : (I18N[lang]['ac_' + x.id] || x.name || x.id);
+        const sub = lo !== null && hi !== null ? [t('range', { a: V(x.min, { places: 'auto' }), b: V(x.max, { places: 'auto' }) }), x.outside ? h('span', { class: 'out', text: ' · ' + t('outside') }) : null] : null;
+        return h('div', { class: 'sleeve' },
+          h('div', { class: 'line' }, h('span', { class: 'name', text: name }), h('span', { class: 'v', text: V(x.weight) })),
+          h('div', { class: 'track', 'aria-hidden': 'true' },
+            w !== null ? h('span', { class: 'bar', style: { width: at(w) } }) : null,
+            lo !== null ? h('span', { class: 'tick', style: { left: at(lo) } }) : null,
+            hi !== null ? h('span', { class: 'tick', style: { left: at(hi) } }) : null),
+          sub ? h('div', { class: 'sub' }, sub) : null);
+      })), note(s.note)];
+    }
+    function cashFlow(s, prev) {
+      const cur = s.current || {}, pri = s.prior || {};
+      const tr = (key, field, total) => h('tr', { class: total ? 'total' : null },
+        h('th', { scope: 'row', text: t(key) }), h('td', { text: V(cur[field], { places: 0 }) }), h('td', { class: 'prior', text: V(pri[field], { places: 0 }) }));
+      return [h('table', { class: 'flow' },
+          h('thead', {}, h('tr', {}, h('th', {}, h('span', { class: 'sr', text: t('s_cash_flow') })), h('th', { scope: 'col', text: quarterName(data.period) }), h('th', { scope: 'col', text: quarterName(prev) }))),
+          h('tbody', {}, tr('income', 'income'), tr('spending', 'spending'), tr('net', 'net'), tr('rate', 'savings_rate', true))),
+        note(s.note)];
+    }
+    function goals(s) {
+      if (!(s.items || []).length) return note(s.note);
+      return [h('div', {}, s.items.map(g => {
+        const p = n(g.funded?.v);
+        return h('div', { class: 'item' },
+          h('div', { class: 'line' }, h('span', { class: 'what', text: g.name }), h('span', { class: 'v', text: t('st_' + g.status) })),
+          h('div', { class: 'fill', 'aria-hidden': 'true' }, p !== null ? h('span', { style: { width: `${Math.max(0, Math.min(1, p)) * 100}%` } }) : null),
+          h('div', { class: 'sub', text: t('funded', { p: V(g.funded), t: V(g.target), d: V(g.by, { style: 'month' }) }) }));
+      })), note(s.note)];
+    }
+    function decisions(s) {
+      const items = s.items || [];
+      return [items.length ? h('div', {}, items.map(d => {
+        const trades = n(d.trades?.v);
+        const bits = [t('d_' + d.status) || d.status, V(d.on),
+          trades !== null ? `${t('trades')(trades)} ${V(d.on)}` : null,
+          n(d.invested?.v) !== null ? t('invested', { v: V(d.invested) }) : null].filter(Boolean);
+        return h('div', { class: 'item' }, h('div', { class: 'what', text: d.what }), h('div', { class: 'sub', text: bits.join(' · ') }));
+      })) : h('p', { class: 'quiet', style: { margin: 0 }, text: t('noDecisions') }),
+        s.open_before ? h('p', { class: 'note', text: t('openBefore', { n: s.open_before }) }) : null, note(s.note)];
+    }
+    function dca(s) {
+      const items = s.items || [];
+      if (!items.length) return [h('p', { class: 'quiet', style: { margin: 0 }, text: t('noPlans') }), note(s.note)];
+      return [h('div', {}, items.map(p => h('div', { class: 'item' },
+        h('div', { class: 'line' }, h('span', { class: 'what', text: p.name }), h('span', { class: 'v', text: t('onTime', { a: V(p.on_time), b: V(p.installments) }) })),
+        h('div', { class: 'sub', text: [t('ofPlanned', { a: V(p.invested), b: V(p.planned) }), ...(p.missed || []).map(d => t('missed', { d: V(d) }))].join(' · ') })))),
+        note(s.note)];
+    }
+    function taxes(s) {
+      const where = s.jurisdiction ? (I18N[lang]['j_' + s.jurisdiction] || s.jurisdiction) : null;
+      return [h('dl', { class: 'ticket' }, row(t('taxPeriod'), V(s.period), { sub: where }), row(t('taxYtd'), V(s.ytd))), note(s.note)];
+    }
+    function fees(s) {
+      const lo = n(s.bps?.lo), hi = n(s.bps?.hi);
+      const fmt = x => new Intl.NumberFormat(locale, { maximumFractionDigits: 0 }).format(x);
+      const bps = lo === null ? null : hi === null || Math.round(lo) === Math.round(hi) ? t('bp1', { a: fmt(lo) }) : t('bps', { a: fmt(lo), b: fmt(hi) });
+      return [h('dl', { class: 'ticket' }, row(t('paid'), V(s.paid)), row(t('annual'), V(s.annual), { sub: bps })), note(s.note)];
+    }
+    function next(s) {
+      const items = s.items || [];
+      if (!items.length) return h('p', { class: 'quiet', style: { margin: 0 }, text: t('noNext') });
+      return h('ol', { class: 'next' }, items.map((x, i) => h('li', {},
+        h('span', { class: 'n', text: String(i + 1) }),
+        h('div', {},
+          h('p', { class: 'title', text: L(x.title) }),
+          n(x.value?.v) !== null ? h('div', { class: 'value', text: V(x.value) }) : null,
+          h('button', { class: 'txt act talk', type: 'button', text: t('talk') + ' →', onclick: () => handoff(L(x.prompt), false) })))));
+    }
+
+    // ------------------------------------------------------------ page
+    function render() {
+      document.title = `${t('title')} · Wealth`;
+      document.getElementById('back').textContent = t('you');
+      if (!data) return;
+      const quarters = data.quarters || [];
+      const header = [
+        h('p', { class: 'origin', text: t('origin', { a: date(data.start), b: date(data.end) }) }),
+        h('h1', {}, quarterName(data.period), h('span', { class: 'dot', text: '.' })),
+        h('div', { class: 'controls' },
+          quarters.length > 1 ? h('nav', { class: 'quarters', 'aria-label': t('quarters') }, quarters.slice(0, 6).map(q =>
+            h('a', { href: '/review?period=' + q, 'aria-current': q === data.period ? 'page' : null, text: quarterName(q),
+              onclick: e => { e.preventDefault(); if (q !== data.period) { period = q; history.replaceState(null, '', '/review?period=' + q); load(); } } }))) : h('span'),
+          data.sections ? h('button', { class: 'txt', type: 'button', text: t('pdf'), onclick: () => window.print() }) : null)];
+      if (!data.sections) {
+        root.replaceChildren(...header, h('p', { class: 'empty', text: t('empty') }),
+          h('a', { class: 'txt act', href: '/', text: t('upload') }));
+        return;
+      }
+      const s = data.sections;
+      const prev = (() => { const m = /^(\d{4})-Q([1-4])$/.exec(data.period); if (!m) return ''; const q = +m[2], y = +m[1]; return q === 1 ? `${y - 1}-Q4` : `${y}-Q${q - 1}`; })();
+      const letter = data.letter || {};
+      const narrative = letter.narrative && letter.narrative[lang];
+      const sentences = narrative ? [narrative] : ((letter.summary || {})[lang] || []);
+      root.replaceChildren(...header,
+        h('div', { class: 'letter', 'data-slot': 'narrative' },
+          data.name ? h('p', { class: 'salute', text: lang === 'es' ? `${data.name}:` : `${data.name},` }) : null,
+          sentences.map(text => h('p', { class: 'body', text }))),
+        part(1, 'net_worth', netWorth(s.net_worth)),
+        part(2, 'performance', performance(s.performance)),
+        part(3, 'allocation', allocation(s.allocation)),
+        part(4, 'cash_flow', cashFlow(s.cash_flow, prev)),
+        part(5, 'goals', goals(s.goals)),
+        part(6, 'decisions', decisions(s.decisions)),
+        part(7, 'dca', dca(s.dca)),
+        part(8, 'taxes', taxes(s.taxes)),
+        part(9, 'fees', fees(s.fees)),
+        part(10, 'next', next(s.next_quarter)),
+        h('p', { class: 'printed', text: t('printed', { d: date(data.today) }) }));
+    }
+
+    async function load() {
+      root.setAttribute('aria-busy', 'true');
+      try {
+        if (!token) {
+          const state = await fetch('/api/state', { credentials: 'same-origin', cache: 'no-store' }).then(r => r.ok ? r.json() : {}).catch(() => ({}));
+          token = String(state.csrf_token || '');
+        }
+        const response = await fetch('/api/review' + (period ? '?period=' + encodeURIComponent(period) : ''),
+          { credentials: 'same-origin', cache: 'no-store', headers: { 'X-Wealth-Token': token } });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(body.error || t('loadError'));
+        data = body;
+        period = data.period;
+        render();
+      } catch (error) {
+        root.replaceChildren(h('p', { class: 'empty', text: error instanceof Error && error.message ? error.message : t('loadError') }));
+      } finally { root.setAttribute('aria-busy', 'false'); }
+    }
+
+    function setLang(next, persist) {
+      lang = next === 'es' ? 'es' : 'en';
+      locale = lang === 'es' ? 'es-MX' : 'en-US';
+      document.documentElement.lang = lang === 'es' ? 'es-MX' : 'en';
+      if (persist) { try { localStorage.setItem('wealth.lang', lang); } catch (_) { /* optional */ } }
+      document.querySelectorAll('#lang button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.lang === lang)));
+      render();
+    }
+    document.querySelectorAll('#lang button').forEach(b => b.addEventListener('click', () => setLang(b.dataset.lang, true)));
+    let stored = null;
+    try { stored = localStorage.getItem('wealth.lang'); } catch (_) { /* optional */ }
+    let asked = null;
+    try { asked = new URLSearchParams(location.search).get('lang'); } catch (_) { /* optional */ }
+    setLang(asked || stored || ((navigator.language || '').toLowerCase().startsWith('es') ? 'es' : 'en'), false);
+    load();
+  })();
+  </script>
+</body>
+</html>
