@@ -1183,7 +1183,11 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
                "approximate": bool(item.get("approximate")), "legacy": bool(item.get("legacy")),
                "liquid": (item.get("kind") or "").lower() not in _ILLIQUID_TYPES, "counted": True, "value": None,
                "balance_unknown": amount is None}
-        covered = item["key"] not in keeping and (_covered(institution, statements) or (not institution and has_statement))
+        # A stated balance without an institution is only assumed to be the statement's account when it is a
+        # sized, liquid brokerage-like holding; an AFORE, retirement plan or unknown balance is never folded in.
+        unnamed_match = (not institution and has_statement and amount is not None
+                         and (item.get("kind") or "").lower() not in _ILLIQUID_TYPES)
+        covered = item["key"] not in keeping and (_covered(institution, statements) or unnamed_match)
         if covered:
             row["counted"] = False
             matching = [a for a in accounts if a["source"] != "ledger" and not a["stale"] and not a.get("superseded_by")
@@ -1244,6 +1248,7 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
         "total": num(liquid + illiquid - owed) if (any_assets or liabilities) and currency and not unknown_balances
         else None,
         "unknown_balances": unknown_balances,
+        "known_total": num(liquid + illiquid - owed) if unknown_balances and currency else None,
         "assets": num(liquid + illiquid) if any_assets else None, "liquid": num(liquid) if any_assets else None,
         "illiquid": num(illiquid) if any_assets else None, "liabilities": num(owed),
         "by_currency": {c: num(v) for c, v in sorted(by_currency.items())},

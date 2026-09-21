@@ -319,3 +319,30 @@ def test_statement_insight_names_holdings_that_changed_since_saved():
     change = next(i for i in situation.statement_insights(result, before) if i["kind"] == "position_change")
     assert change["symbol"] == "VOO" and change["saved"]["quantity"] == 7 and change["statement"]["quantity"] == 5
     assert "fewer" in change["text"]
+
+
+def test_unknown_balances_are_never_zero_and_never_folded_into_a_statement(tmp_path):
+    service = _client(tmp_path, {
+        "income.salary": {"amount": 85000, "currency": "MXN", "frequency": "monthly", "net": True},
+        "spending.monthly": {"total": 45000, "currency": "MXN"},
+        "cash.nu": {"currency": "MXN", "balance_unknown": True, "name": "Nu / banco", "liquid": True},
+        "investment.afore": {"currency": "MXN", "balance_unknown": True, "name": "AFORE", "kind": "afore"},
+        "investment.brokerage": {"amount": 200000, "currency": "MXN", "name": "GBM", "kind": "brokerage"},
+    })
+    sit = service.situation("ana")
+    assert sit["net_worth"]["total"] is None and set(sit["net_worth"]["unknown_balances"]) >= {"Nu / banco", "AFORE"}
+    assert sit["reserve"]["months"] is None  # liquid money of unknown size: the reserve is unknown, not empty
+    brief = situation.brief(sit, "es")
+    assert "no son cero" in brief and "Patrimonio neto 0" not in brief
+    texts = [s["text"] for s in situation.sentences(sit, "es")]
+    assert any("aún no sé" in t for t in texts)
+    # A statement arrives: the AFORE (no institution, unknown balance) is not treated as covered by it.
+    path = upload_dir("ana", service.db_path) / "gbm.pdf"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(fixtures.gbm_multicurrency())
+    proposal = service.ingest("ana", "file", {"path": "gbm.pdf"})
+    service.ingest("ana", "confirm", {"proposal_id": proposal["result"]["proposal_id"], "acknowledge_discrepancies": True})
+    after = service.situation("ana")
+    afore = next(r for r in after["investments"] if r["key"] == "investment.afore")
+    assert afore["counted"] and afore["balance_unknown"]
+    situation.brief(after, "es")  # renders without error

@@ -68,7 +68,7 @@ def _month_year(iso: str | None, lang: str) -> str:
 _B = {
     "es": {"empty": "Situación: sin datos guardados (primera conversación).", "head": "Situación al {d} ({c})",
            "nw": "Patrimonio neto {t} = líquido {l} + ilíquido {i} − deudas {o}", "nw_none": "Patrimonio neto: desconocido",
-           "nw_unknown": "Patrimonio neto: desconocido; saldos sin dar en {x} (no son cero; pregúntalos); deudas {o}",
+           "nw_unknown": "Patrimonio neto sin contar {x}: {k} (esos saldos no son cero; pregúntalos); deudas {o}",
            "unconv": "sin convertir {x}", "unvalued": "sin valuar {x}",
            "flow": "Mes: ingreso {i}{net} − gasto {s} ({src}) − deudas {d} = excedente {x}", "net": " neto",
            "src_stated": "declarado", "src_ledger": "movimientos {n} meses", "essential_only": ", solo esenciales; el excedente aún cubre otros gastos", "without": " (sin pago de {x})",
@@ -89,7 +89,7 @@ _B = {
            "u_reserve_target": "meta de reserva", "u_goal_amount": "monto de «{g}»"},
     "en": {"empty": "Situation: nothing saved yet (first conversation).", "head": "Situation on {d} ({c})",
            "nw": "Net worth {t} = liquid {l} + illiquid {i} − debts {o}", "nw_none": "Net worth: unknown",
-           "nw_unknown": "Net worth: unknown; balances not given at {x} (not zero; ask for them); debts {o}",
+           "nw_unknown": "Net worth excluding {x}: {k} (those balances are not zero; ask for them); debts {o}",
            "unconv": "unconverted {x}", "unvalued": "unvalued {x}",
            "flow": "Month: income {i}{net} − spending {s} ({src}) − debt payments {d} = surplus {x}", "net": " net",
            "src_stated": "stated", "src_ledger": "{n} months of transactions", "essential_only": ", essentials only; the surplus still covers other spending", "without": " (excludes {x} payment)",
@@ -149,7 +149,8 @@ def brief(sit: Mapping[str, Any], language: str | None = None) -> str:
             extra.append(t["unvalued"].format(x=", ".join(nw["unvalued_accounts"])))
         lines.append((1, line + ("; " + "; ".join(extra) if extra else "")))
     else:
-        lines.append((1, t["nw_unknown"].format(x=", ".join(nw["unknown_balances"]), o=fmt(nw["liabilities"] or 0))
+        lines.append((1, t["nw_unknown"].format(x=", ".join(nw["unknown_balances"]), k=fmt(nw.get("known_total")),
+                                                o=fmt(nw["liabilities"] or 0))
                       if nw.get("unknown_balances") else t["nw_none"]))
     if flow["income"] is not None or flow["spending"] is not None:
         src = sit["spending"]["source"]
@@ -215,7 +216,7 @@ def brief(sit: Mapping[str, Any], language: str | None = None) -> str:
     if holdings["top"] and holdings["top"][0]["weight"] is not None:
         top = holdings["top"][0]
         symbols = [s for s in top["symbols"] if s != top["underlying"]]
-        line = t["top"].format(u=top["underlying"], w=pct(round(Decimal(str(top["weight"])), 2)), s=", ".join(symbols))
+        line = t["top"].format(u=_clean_symbol(top["underlying"]), w=pct(round(Decimal(str(top["weight"])), 2)), s=", ".join(symbols))
         investing.append(line.replace(" ()", ""))
     if investing:
         lines.append((7, t["inv"].format(x="; ".join(investing[:4]))))
@@ -228,7 +229,7 @@ def brief(sit: Mapping[str, Any], language: str | None = None) -> str:
         # The saved holdings themselves, so the adviser never asks what is already known.
         lines.append((7, t["pos"].format(x="; ".join(positions))))
     for diff in sit["differences"][:1]:
-        if diff.get("statement"):
+        if diff.get("statement") and diff.get("stated"):
             lines.append((8, t["diff"].format(inst=diff["institution"] or "", s=f"{fmt(diff['stated']['amount'])} {diff['stated']['currency']}",
                                               x=_native(diff["statement"]), d=diff.get("as_of") or "?")))
     for index, thread in enumerate(sit["threads"]["open"]):
@@ -434,6 +435,11 @@ def sentences(sit: Mapping[str, Any], language: str | None = None) -> list[dict]
                 a=_amount(stated["essential"], stated["currency"], code(stated["currency"])))
 
     for row in sit["cash"]:
+        if row.get("balance_unknown") or row.get("amount") is None:
+            label = row.get("institution") or row.get("name") or row["id"]
+            add("own", row["key"], (f"Tienes dinero en {label}; aún no sé cuánto." if es else
+                                    f"You have money at {label}; I don't know how much yet."), ref=_item_ref(row, "cash"))
+            continue
         approx = about(row["approximate"])
         amount = _amount(row["amount"], row["currency"], code(row["currency"]))
         where = (f" en {row['institution']}" if es else f" at {row['institution']}") if row.get("institution") else ""
@@ -471,10 +477,15 @@ def sentences(sit: Mapping[str, Any], language: str | None = None) -> list[dict]
             continue
         approx = about(item["approximate"])
         where = (f" en {item['institution']}" if es else f" at {item['institution']}") if item.get("institution") else ""
+        if item.get("balance_unknown") or item.get("amount") is None:
+            label = item.get("name") or item.get("institution") or item["id"]
+            add("own", item["key"], (f"Tienes {label}; aún no sé el saldo." if es else f"You have {label}; I don't know the balance yet."),
+                ref=_item_ref(item, "investments"))
+            continue
         add("own", item["key"], (f"Tienes {approx}{{a}} invertidos{where}." if es else f"You have {approx}{{a}} invested{where}."),
             ref=_item_ref(item, "investments"), a=_amount(item["amount"], item["currency"], code(item["currency"])))
     for diff in sit["differences"]:
-        if not diff.get("statement"):
+        if not diff.get("statement") or not diff.get("stated"):
             continue
         approx = about(diff.get("stated_approximate"))
         if diff.get("statement_value") is not None and diff.get("currency"):
