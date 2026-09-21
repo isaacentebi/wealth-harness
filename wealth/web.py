@@ -62,20 +62,6 @@ UPLOAD_TYPES = {
 _UPLOAD_ID = re.compile(r"^[0-9a-f]{32}$")
 _FACT_PATH = re.compile(r"^/api/facts/([^/]{1,200})$")
 _TURN_PATH = re.compile(r"^/api/turns/([0-9a-f]{16})(/events|/cancel)?$")
-_MEMORY_LABELS = {
-    "client.profile": "Profile", "goals": "Goals", "plan.resources": "Planning resources",
-    "household": "Holdings", "portfolio.snapshot": "Portfolio", "income.schedule": "Income schedule",
-}
-
-
-def memory_label(key: str) -> str:
-    if key in _MEMORY_LABELS:
-        return _MEMORY_LABELS[key]
-    head, _, tail = key.partition(".")
-    if head in {"preference", "constraint"} and tail:
-        return f"{head.capitalize()}: {tail.replace('_', ' ').replace('-', ' ')}"
-    words = re.sub(r"[._-]+", " ", key).strip()
-    return words[:1].upper() + words[1:] if words else key
 
 
 def friendly_name(client_id: str, display_name: str | None = None) -> str:
@@ -182,7 +168,7 @@ class Turn:
         self.started = time.time()
         self.status = "running"  # running | done | error | cancelled
         self.progress = ""
-        self.memory: list[str] = []
+        self.memory: list[dict[str, str]] = []
         self.answer: str | None = None
         self.error: dict[str, str] | None = None
         self.exception: BaseException | None = None
@@ -333,11 +319,11 @@ class Chat:
                     turn.progress = event.text
                     turn.emit("progress", text=event.text)
                 elif event.type == "memory":
-                    labels = [memory_label(str(k)) for k in event.data.get("keys", ())]
-                    new = [label for label in labels if label not in turn.memory]
+                    known = {item["key"] for item in turn.memory}
+                    new = [self._memory_item(str(k)) for k in event.data.get("keys", ()) if str(k) not in known]
                     turn.memory.extend(new)
                     if new:
-                        turn.emit("memory", labels=list(turn.memory))
+                        turn.emit("memory", items=list(turn.memory))
                 elif event.type == "answer":
                     answer = event.text
                     if event.data.get("thread_id"):
@@ -373,6 +359,20 @@ class Chat:
         turn.exception = exc
         turn.error = {"kind": kind, "message": ERROR_TEXT.get(kind, ERROR_TEXT["other"]), "detail": detail or ""}
         turn.emit("error", **turn.error)
+
+    def _memory_item(self, key: str) -> dict[str, str]:
+        """A display item for a saved key; the page words it in the reader's language."""
+        item = {"key": key}
+        if key.startswith("account."):
+            try:
+                facts = WealthService(self.db).inspect(self.client_id, keys=[key]).get("facts") or []
+                value = facts[0]["value"] if facts else {}
+                institution = ((value or {}).get("account") or {}).get("institution")
+                if institution:
+                    item["institution"] = str(institution)
+            except (StoreError, sqlite3.Error, AttributeError, TypeError, IndexError):
+                pass
+        return item
 
     def cancel(self, turn_id: str) -> bool:
         turn = self.turn

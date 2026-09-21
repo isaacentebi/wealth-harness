@@ -81,8 +81,8 @@ def test_sse_stream_carries_progress_memory_and_answer(tmp_path, monkeypatch):
         events = _events(base, turn["id"], state["csrf_token"])
         types = [e["type"] for e in events]
         assert types == ["progress", "memory", "answer", "done"]
-        assert events[1]["labels"] == ["Goals", "Preference: style"]
-        assert events[2]["message"]["memory"] == ["Goals", "Preference: style"]
+        assert [i["key"] for i in events[1]["items"]] == ["goals", "preference.style"]
+        assert [i["key"] for i in events[2]["message"]["memory"]] == ["goals", "preference.style"]
         # Replaying from an offset resumes after a reload.
         assert [e["type"] for e in _events(base, turn["id"], state["csrf_token"] )][-1] == "done"
         after = json.load(urlopen(base + "/api/state", timeout=5))
@@ -241,11 +241,9 @@ def test_page_never_injects_html_from_model_text():
     assert "fonts.googleapis.com" in page and "Roboto+Mono" in page
 
 
-def test_friendly_names_and_memory_labels():
+def test_friendly_names():
     assert web.friendly_name("my-profile") == "My profile"
     assert web.friendly_name("fictional-demo", "Fictional Wealth Demo") == "Fictional Wealth Demo"
-    assert web.memory_label("plan.resources") == "Planning resources"
-    assert web.memory_label("constraint.no_leverage") == "Constraint: no leverage"
 
 
 def _page() -> str:
