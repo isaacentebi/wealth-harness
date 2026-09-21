@@ -306,11 +306,18 @@
       const rows = s.rows.map((r, i) => row(L(r.label), V(r.value), { sub: r.date ? V(r.date) : null, sign: i ? '+' : null }));
       return [h('dl', { class: 'ticket' }, rows, row(L(s.total.label), V(s.total.value), { sub: s.total.date ? V(s.total.date) : null, total: true, sign: '=' })), note(s.note)];
     }
+    // The benchmark is drawn from its parts (weight + index name, both in the page language), never from a free-text name.
+    function composition(parts) {
+      // Each part stays on one line ("35% CETES 364 días"); the parts wrap between each other.
+      return (parts || []).map(p => `${V(p.weight, { places: 'auto' })} ${L(p.index)}`.replace(/ /g, '\u00a0'))
+        .filter(x => !x.startsWith('—')).join(' + ') || null;
+    }
     function performance(s) {
       const diff = n(s.difference?.v);
+      const b = s.benchmark || {};
       return [h('dl', { class: 'ticket' },
           row(t('portfolio'), V(s.portfolio), { sub: t('twr') }),
-          row(s.benchmark?.name || t('benchmark'), V(s.benchmark?.value), { sub: t('benchmark') })),
+          row(L(b.label) || t('benchmark'), V(b.value), { sub: composition(b.parts) })),
         diff !== null ? h('p', { class: 'note mono', text: t('difference', { v: t('points', { v: minus(new Intl.NumberFormat(locale, { maximumFractionDigits: 1, signDisplay: 'exceptZero' }).format(diff * 100)) }) }) }) : null,
         note(s.note)];
     }
@@ -320,7 +327,7 @@
       const at = v => `${Math.min(100, (v / top) * 100).toFixed(2)}%`;
       return [h('div', {}, sleeves.map(x => {
         const w = n(x.weight?.v), lo = n(x.min?.v), hi = n(x.max?.v);
-        const name = x.name && x.name !== x.id ? x.name : (I18N[lang]['ac_' + x.id] || x.name || x.id);
+        const name = L(x.name) || I18N[lang]['ac_' + x.id] || x.id;
         const sub = lo !== null && hi !== null ? [t('range', { a: V(x.min, { places: 'auto' }), b: V(x.max, { places: 'auto' }) }), x.outside ? h('span', { class: 'out', text: ' · ' + t('outside') }) : null] : null;
         return h('div', { class: 'sleeve' },
           h('div', { class: 'line' }, h('span', { class: 'name', text: name }), h('span', { class: 'v', text: V(x.weight) })),
@@ -365,7 +372,7 @@
       const items = s.items || [];
       if (!items.length) return [h('p', { class: 'quiet', style: { margin: 0 }, text: t('noPlans') }), note(s.note)];
       return [h('div', {}, items.map(p => h('div', { class: 'item' },
-        h('div', { class: 'line' }, h('span', { class: 'what', text: p.name }), h('span', { class: 'v', text: t('onTime', { a: V(p.on_time), b: V(p.installments) }) })),
+        h('div', { class: 'line' }, h('span', { class: 'what', text: L(p.name) }), h('span', { class: 'v', text: t('onTime', { a: V(p.on_time), b: V(p.installments) }) })),
         h('div', { class: 'sub', text: [t('ofPlanned', { a: V(p.invested), b: V(p.planned) }), ...(p.missed || []).map(d => t('missed', { d: V(d) }))].join(' · ') })))),
         note(s.note)];
     }

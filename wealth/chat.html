@@ -895,6 +895,7 @@
     .hoy { margin: 0 0 4px; }
     .hoy ul { list-style: none; margin: 0; padding: 0; }
     .hoy li { display: flex; align-items: center; min-height: 44px; }
+    .hoy li[hidden] { display: none; }
     .dock:has(.send.stopping) .hoy { visibility: hidden; }
     .app:has(.messages .setup) .hoy { display: none; }
     .hoy-go {
@@ -906,23 +907,40 @@
     .hoy-mark { flex: none; width: 7px; height: 7px; border-radius: 50%; }
     .hoy-mark.act { background: var(--ink); }
     .hoy-mark.consider { border: 1px solid var(--ink-soft); }
+    .hoy-text { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; }
     .hoy-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .hoy-title b { font-weight: 600; color: var(--ink); }
-    .hoy-due { flex: none; font: 400 12px/20px var(--mono); color: var(--muted); }
-    .hoy-later, .hoy-x {
+    .hoy-due { flex: none; font: 400 12px/20px var(--mono); color: var(--muted); white-space: nowrap; }
+    .hoy-later, .hoy-x, .hoy-more, .hoy-acts button, .hoy-rest {
       flex: none; min-height: 44px; border: 0; background: none; color: var(--muted); padding: 0 8px;
       font: 400 13px/20px var(--sans);
     }
     .hoy-x { width: 44px; margin-right: -12px; padding: 0; display: grid; place-items: center; }
-    .hoy-later:hover, .hoy-x:hover { color: var(--ink); }
-    /* With a mouse the two quiet controls appear on the line being pointed at or focused; touch always shows them. */
+    .hoy-later:hover, .hoy-x:hover, .hoy-more:hover, .hoy-acts button:hover, .hoy-rest:hover { color: var(--ink); }
+    .hoy-more, .hoy-acts, .hoy-rest { display: none; }
+    /* With a mouse the two quiet controls appear on the line being pointed at or focused. */
     @media (hover: hover) and (pointer: fine) {
       .hoy li:not(:hover):not(:focus-within) :is(.hoy-later, .hoy-x) { opacity: 0; }
     }
-    @media (max-width: 560px) {
-      .hoy-title { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-      .hoy-go { gap: 10px; padding: 4px 0; }
-      .hoy-later { padding: 0 4px 0 8px; }
+    /* Touch and narrow screens: the whole line is the title (up to two lines, the value never cut) and its date;
+       one quiet "⋯" holds Later and Dismiss in a row that opens under the line. */
+    @media (hover: none), (pointer: coarse), (max-width: 560px) {
+      .hoy li { display: grid; grid-template-columns: minmax(0, 1fr) 44px; align-items: start; }
+      .hoy-later, .hoy-x { display: none; }
+      .hoy-go { align-items: flex-start; padding: 12px 0; }
+      .hoy-mark { margin-top: 6.5px; }
+      .hoy-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; text-wrap: pretty; }
+      .hoy-title { display: inline; overflow: visible; white-space: normal; }
+      .hoy-due { display: inline-block; margin-left: 8px; font-size: 12px; }
+      .hoy-more {
+        display: grid; place-items: center; width: 44px; height: 44px; padding: 0; margin-right: -12px;
+        font: 400 18px/1 var(--sans); letter-spacing: 0;
+      }
+      .hoy-more[aria-expanded="true"] { color: var(--ink); }
+      .hoy li.open .hoy-acts { display: flex; }
+      .hoy-acts { grid-column: 1 / -1; gap: 16px; margin: -8px 0 4px 19px; }
+      .hoy-acts button { padding: 0; font-size: 14px; color: var(--ink-soft); }
+      .hoy-rest { display: block; padding: 0 0 0 19px; font-size: 14px; text-align: left; }
     }
   </style>
 </head>
@@ -3457,13 +3475,18 @@
     // ------------------------------------------------------------------ today (Hoy) and hand-offs from other pages
 
     // At most three dated lines above the composer. Tapping one asks its next step; × dismisses it until its
-    // trigger changes; "Later" hides it for seven days. Strings live here so the chrome table stays untouched.
+    // trigger changes; "Later" hides it for seven days. With a mouse those two appear on hover; on touch they sit
+    // behind one "⋯" per line. Strings live here so the chrome table stays untouched.
     const HOY = {
-      en: { region: 'Today', later: 'Later', laterLabel: title => `Remind me in 7 days: ${title}`,
-        dismiss: title => `Dismiss: ${title}`, today: 'today', tomorrow: 'tomorrow', failed: 'That could not be saved. Try again.' },
-      es: { region: 'Hoy', later: 'Más tarde', laterLabel: title => `Recordármelo en 7 días: ${title}`,
-        dismiss: title => `Descartar: ${title}`, today: 'hoy', tomorrow: 'mañana', failed: 'No se pudo guardar. Intenta de nuevo.' }
+      en: { region: 'Today', later: 'Later', laterLabel: title => `Remind me in 7 days: ${title}`, dismissText: 'Dismiss',
+        dismiss: title => `Dismiss: ${title}`, more: title => `Options: ${title}`, rest: n => `${n} more`,
+        today: 'today', tomorrow: 'tomorrow', failed: 'That could not be saved. Try again.' },
+      es: { region: 'Hoy', later: 'Más tarde', laterLabel: title => `Recordármelo en 7 días: ${title}`, dismissText: 'Descartar',
+        dismiss: title => `Descartar: ${title}`, more: title => `Opciones: ${title}`, rest: n => `${n} más`,
+        today: 'hoy', tomorrow: 'mañana', failed: 'No se pudo guardar. Intenta de nuevo.' }
     }[LANG];
+    const hoyTouch = window.matchMedia('(hover: none), (pointer: coarse), (max-width: 560px)');
+    const HOY_SHARE = 0.3;  // the lines never take more than about 30% of the screen on touch
     let hoyNode = null;
 
     function hoyDue(item) {
@@ -3474,7 +3497,17 @@
       try { return new Intl.DateTimeFormat(localeOf(LANG), { day: 'numeric', month: 'short', timeZone: 'UTC' }).format(new Date(Date.UTC(y, m - 1, d, 12))).replace('.', ''); } catch (_) { return null; }
     }
 
-    function hoyLine(item) {
+    function hoyClose(except) {
+      if (!hoyNode) return;
+      hoyNode.querySelectorAll('li.open').forEach(li => {
+        if (li === except) return;
+        li.classList.remove('open');
+        const more = li.querySelector('.hoy-more');
+        if (more) more.setAttribute('aria-expanded', 'false');
+      });
+    }
+
+    function hoyLine(item, index) {
       const title = String((item.title || {})[LANG] || '');
       const ask = String((item.next_step || {})[LANG] || '');
       const line = el('li');
@@ -3482,14 +3515,16 @@
       go.type = 'button';
       const mark = el('span', `hoy-mark ${['act', 'consider'].includes(item.severity) ? item.severity : ''}`);
       mark.setAttribute('aria-hidden', 'true');
+      const words = el('span', 'hoy-text');
       const text = el('span', 'hoy-title');
       const [a, b] = ((item.emphasis || {})[LANG] || [])[0] || [0, 0];
       if (b > a && b <= title.length) text.append(title.slice(0, a), el('b', '', title.slice(a, b)), title.slice(b));
       else text.textContent = title;
-      text.title = title;
-      go.append(mark, text);
+      words.append(text);
       const due = hoyDue(item);
-      if (due) { const time = el('time', 'hoy-due', due); time.dateTime = String(item.due); go.append(time); }
+      if (due) { const time = el('time', 'hoy-due', due); time.dateTime = String(item.due); words.append(time); }
+      words.title = title;
+      go.append(mark, words);
       go.addEventListener('click', () => { if (!busy && ask) submit(ask); });
       const later = el('button', 'hoy-later', HOY.later);
       later.type = 'button';
@@ -3500,7 +3535,33 @@
       x.setAttribute('aria-label', HOY.dismiss(title));
       x.append(svg('M7 7l10 10M17 7 7 17', 14));
       x.addEventListener('click', () => hoyAck('dismiss', item.id, line));
-      line.append(go, later, x);
+      // Touch: one quiet "⋯" opens Later and Dismiss in a row under this line (one line open at a time).
+      const more = el('button', 'hoy-more', '⋯');
+      more.type = 'button';
+      more.setAttribute('aria-label', HOY.more(title));
+      more.setAttribute('aria-expanded', 'false');
+      const acts = el('div', 'hoy-acts');
+      acts.id = `hoy-acts-${index}`;
+      more.setAttribute('aria-controls', acts.id);
+      const snooze = el('button', '', HOY.later);
+      snooze.type = 'button';
+      snooze.setAttribute('aria-label', HOY.laterLabel(title));
+      snooze.addEventListener('click', () => hoyAck('snooze', item.id, line));
+      const drop = el('button', '', HOY.dismissText);
+      drop.type = 'button';
+      drop.setAttribute('aria-label', HOY.dismiss(title));
+      drop.addEventListener('click', () => hoyAck('dismiss', item.id, line));
+      acts.append(snooze, drop);
+      more.addEventListener('click', () => {
+        const open = !line.classList.contains('open');
+        hoyClose(line);
+        line.classList.toggle('open', open);
+        more.setAttribute('aria-expanded', String(open));
+      });
+      line.addEventListener('keydown', event => {
+        if (event.key === 'Escape' && line.classList.contains('open')) { event.preventDefault(); hoyClose(); more.focus(); }
+      });
+      line.append(go, later, x, more, acts);
       return line;
     }
 
@@ -3513,8 +3574,20 @@
         form.before(hoyNode);
       }
       const list = el('ul');
-      shown.forEach(item => list.append(hoyLine(item)));
+      const lines = shown.map((item, i) => hoyLine(item, i));
+      list.append(...lines);
       hoyNode.replaceChildren(list);
+      // On touch the lines stay under ~30% of the screen: past that, two show and the rest wait behind "n more".
+      if (hoyTouch.matches && lines.length > 2 && hoyNode.getBoundingClientRect().height > window.innerHeight * HOY_SHARE) {
+        const hidden = lines.slice(2);
+        hidden.forEach(li => { li.hidden = true; });
+        const rest = el('li');
+        const button = el('button', 'hoy-rest', HOY.rest(hidden.length));
+        button.type = 'button';
+        button.addEventListener('click', () => { hidden.forEach(li => { li.hidden = false; }); rest.remove(); hidden[0].querySelector('.hoy-go').focus(); });
+        rest.append(button);
+        list.append(rest);
+      }
     }
 
     async function hoyAck(action, id, line) {

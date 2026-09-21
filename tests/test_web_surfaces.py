@@ -209,6 +209,67 @@ def test_review_payload_sections_use_view_values_and_unknown_is_null(tmp_path):
         assert views._value_ok(spec_values)
 
 
+def test_review_names_read_in_the_page_language_and_never_show_fixture_notes(tmp_path):
+    service = _seed(tmp_path / "w.sqlite3")
+    rich = profile.review_view(service, "ana", "2026-Q2", today=TODAY, inputs=REVIEW_EXTRA)
+    sections = rich["sections"]
+    names = {s["id"]: s["name"] for s in sections["allocation"]["sleeves"]}
+    assert names["global_equity"] == {"en": "Global equity", "es": "Renta variable global"}
+    assert names["mx_fixed_income"] == {"en": "Mexican government fixed income", "es": "Deuda gubernamental mexicana"}
+    assert names["cash"] == {"en": "Cash (MXN)", "es": "Efectivo (MXN)"}
+    # The benchmark is structured (weights + index names), never the engine's free-text label.
+    bench = sections["performance"]["benchmark"]
+    assert "name" not in bench and bench["label"]["es"] == "Referencia de tu política"
+    assert [p["weight"]["v"] for p in bench["parts"]] == [0.6, 0.35, 0.05]
+    assert [p["index"]["es"] for p in bench["parts"]] == ["MSCI ACWI en MXN", "CETES 364 días", "CETES 28 días"]
+    assert "fictional" not in json.dumps(sections, ensure_ascii=False)
+    # A recurring plan reads by what it buys and how often, not by its id.
+    assert sections["dca"]["items"][0]["name"] == {"en": "S&P 500 monthly", "es": "S&P 500 mensual"}
+    assert "sp500" not in json.dumps(sections, ensure_ascii=False)
+    # Only free text (no structured spec): a short generic label, no parts.
+    plain = profile.review_view(service, "ana", "2026-Q2", today=TODAY,
+                                inputs={k: v for k, v in REVIEW_EXTRA.items() if k != "benchmarks"})
+    bench = plain["sections"]["performance"]["benchmark"]
+    assert bench["parts"] == [] and bench["label"]["es"] == "Referencia de tu política"
+
+
+def test_review_labels_read_both_ways_and_keep_the_persons_own_words():
+    assert profile._label("Renta variable global") == {"en": "Global equity", "es": "Renta variable global"}
+    assert profile._label(None, "fixed_income") == {"en": "Fixed income", "es": "Renta fija"}
+    assert profile._label("Mi colchón", "cash") == {"en": "Mi colchón", "es": "Mi colchón"}
+    assert profile._index_label("Global aggregate bonds in MXN (fictional levels)") == {
+        "en": "Global aggregate bonds in MXN", "es": "Bonos globales agregados en MXN"}
+    assert profile._index_label("ips.cash") is None
+    named = profile._plan_names({"plans": [{"id": "p", "name": "Ahorro niños", "cadence": "monthly", "legs": []}]}, [])
+    assert named == {"p": {"en": "Ahorro niños", "es": "Ahorro niños"}}
+    weekly = profile._plan_names([{"id": "q", "cadence": "weekly", "legs": [{"instrument_id": "X1"}]}],
+                                 [{"id": "X1", "underlying_symbol": "CNDX"}])
+    assert weekly == {"q": {"en": "Nasdaq-100 weekly", "es": "Nasdaq-100 semanal"}}
+
+
+def test_review_page_draws_names_from_the_payload_language():
+    _, script = _script("review.html")
+    assert "L(x.name)" in script and "L(p.name)" in script and "L(b.label)" in script
+    assert "benchmark?.name" not in script and "composition(b.parts)" in script
+
+
+def test_chat_today_lines_fold_their_actions_behind_one_control_on_touch():
+    page = (ROOT / "chat.html").read_text()
+    block = page[page.index("// ------------------------------------------------------------------ today (Hoy)"):
+                 page.index("// ------------------------------------------------------------------ start")]
+    touch = "(hover: none), (pointer: coarse), (max-width: 560px)"
+    assert f"@media {touch}" in page and f"window.matchMedia('{touch}')" in block
+    css = page[page.index(f"@media {touch}"):page.index("</style>")]
+    assert ".hoy-later, .hoy-x { display: none; }" in css  # on touch the line is the title and its date
+    assert "-webkit-line-clamp: 2" in css and "text-overflow: ellipsis" not in css
+    assert "width: 44px; height: 44px" in css  # the "⋯" target
+    assert ".hoy li[hidden] { display: none; }" in page
+    assert "'aria-expanded'" in block and "'Escape'" in block
+    assert "HOY_SHARE = 0.3" in block and "más`" in block
+    # Desktop keeps the hover-revealed pair.
+    assert ".hoy li:not(:hover):not(:focus-within) :is(.hoy-later, .hoy-x) { opacity: 0; }" in page
+
+
 def test_review_needs_a_ledger_and_an_ended_quarter(tmp_path):
     service = WealthService(tmp_path / "w.sqlite3")
     service.create("new", "New")

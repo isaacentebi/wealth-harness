@@ -1750,7 +1750,126 @@ _NEXT = {
 }
 
 
-def _next_item(candidate: dict, currency: str | None) -> dict:
+# Engine and policy names arrive in English (or in the words the person used); the page shows each in its own
+# language.  Pairs read both ways, so a sleeve saved in Spanish still reads in English on the en page.
+_LABEL_PAIRS = (
+    ("Global equity", "Renta variable global"), ("US equity", "Renta variable de EE. UU."),
+    ("Mexican equity", "Renta variable mexicana"), ("International equity", "Renta variable internacional"),
+    ("Emerging markets equity", "Renta variable de mercados emergentes"), ("Equity", "Renta variable"),
+    ("Mexican government fixed income", "Deuda gubernamental mexicana"),
+    ("Mexican fixed income", "Renta fija mexicana"), ("Global fixed income", "Renta fija global"),
+    ("US fixed income", "Renta fija de EE. UU."), ("Fixed income", "Renta fija"), ("Bonds", "Bonos"),
+    ("Cash (MXN)", "Efectivo (MXN)"), ("Cash (USD)", "Efectivo (USD)"), ("Cash", "Efectivo"),
+    ("Real estate", "Bienes raíces"), ("Gold", "Oro"), ("Commodities", "Materias primas"),
+    ("Funds", "Fondos"), ("Unclassified", "Sin clasificar"),
+)
+_REVIEW_LABELS = {text.casefold(): pair for pair in _LABEL_PAIRS for text in pair}
+_ASSET_LABELS = {"cash": ("Cash", "Efectivo"), "equity": ("Equity", "Renta variable"),
+                 "fixed_income": ("Fixed income", "Renta fija"), "fund": ("Funds", "Fondos"),
+                 "real_estate": ("Real estate", "Bienes raíces"), "unknown": ("Unclassified", "Sin clasificar"),
+                 "unclassified": ("Unclassified", "Sin clasificar")}
+# Instruments a recurring plan buys, named by the index they track (the plan's human name when it has none).
+_TRACKS = {**dict.fromkeys(("CSPX", "CSPXN", "VOO", "IVV", "SPY", "VUSA", "VUAA", "SXR8", "IVVPESO"), "S&P 500"),
+           **dict.fromkeys(("CNDX", "EQQQ", "QQQ", "QQQM"), "Nasdaq-100"),
+           **dict.fromkeys(("VWRA", "VWRL", "VT", "ACWI", "SSAC"), "MSCI ACWI"),
+           **dict.fromkeys(("VTI", "ITOT"), "US total market"), **dict.fromkeys(("NAFTRAC",), "S&P/BMV IPC")}
+_CADENCE = {"weekly": ("{x} weekly", "{x} semanal"), "biweekly": ("{x} fortnightly", "{x} quincenal"),
+            "monthly": ("{x} monthly", "{x} mensual"), "quarterly": ("{x} quarterly", "{x} trimestral")}
+# Fixture and provenance notes some inputs carry in a name, e.g. "(fictional levels)": never shown.
+_ANNOTATION = re.compile(r"\s*\((?:[^)]*\b(?:fictional|ficticio|ficticia|example|ejemplo|levels|niveles|demo|test|sample)\b[^)]*)\)",
+                         re.I)
+_INDEX_WORDS = ((r"\b(\d+) days\b", r"\1 días"), (r"\bin (MXN|USD|EUR)\b", r"en \1"),
+                (r"^Global aggregate bonds\b", "Bonos globales agregados"), (r"\bequity index\b", "índice accionario"),
+                (r"\bbond index\b", "índice de bonos"), (r"^US total market\b", "Mercado total de EE. UU."))
+
+
+def _both(text: str) -> dict:
+    return {"en": text, "es": text}
+
+
+def _label(name: Any, asset: Any = None) -> dict:
+    """A sleeve or asset-class name in both languages; a name only the person uses is shown as they wrote it."""
+    text = str(name or "").strip()
+    pair = _REVIEW_LABELS.get(text.casefold()) or _ASSET_LABELS.get((text or str(asset or "")).casefold())
+    if pair:
+        return {"en": pair[0], "es": pair[1]}
+    return _both(_humanize(text) if re.fullmatch(r"[a-z0-9_.]+", text) else text)
+
+
+def _index_label(name: Any) -> dict | None:
+    """An index name without fixture notes, with its few common words in the page language."""
+    text = _ANNOTATION.sub("", str(name or "")).strip()
+    if not text or re.fullmatch(r"(ips|reference_60_40)\.[\w.]+", text):
+        return None
+    es = text
+    for pattern, repl in _INDEX_WORDS:
+        es = re.sub(pattern, repl, es)
+    en = text
+    for pattern, repl in ((r"\b(\d+) días\b", r"\1 days"), (r"\ben (MXN|USD|EUR)\b", r"in \1")):
+        en = re.sub(pattern, repl, en)
+    return {"en": en, "es": es}
+
+
+def _benchmark(chosen_key: str | None, sleeves: list[dict], specs: Any) -> tuple[dict | None, list[dict]]:
+    """The benchmark as a label plus its parts [{weight, index}], from the policy weights and the index specs.
+
+    With no structured spec (only the engine's free-text name) the parts are empty and the label is generic.
+    """
+    from . import views as V
+
+    if chosen_key is None:
+        return None, []
+    specs = specs if isinstance(specs, dict) else {}
+    parts: list[dict] = []
+    if chosen_key == "ips_benchmark":
+        label = {"en": "Your policy benchmark", "es": "Referencia de tu política"}
+        ips_specs = specs.get("ips") if isinstance(specs.get("ips"), dict) else {}
+        for sleeve in sleeves:
+            if not sleeve.get("target"):
+                continue
+            index = _index_label((ips_specs.get(sleeve.get("sleeve")) or {}).get("name"))
+            if index is None:
+                return label, []
+            parts.append({"weight": V.ratio(sleeve["target"]), "index": index})
+    else:
+        label = {"en": "Global 60/40 reference", "es": "Referencia global 60/40"}
+        ref = specs.get("reference_60_40") if isinstance(specs.get("reference_60_40"), dict) else {}
+        for weight, leg in (("0.6", "equity"), ("0.4", "bonds")):
+            index = _index_label((ref.get(leg) or {}).get("name"))
+            if index is None:
+                return label, []
+            parts.append({"weight": V.ratio(weight), "index": index})
+    return label, parts
+
+
+def _plan_names(plans: Any, instruments: Iterable[dict]) -> dict[str, dict]:
+    """{plan_id: {en, es}}: the plan's own name, else what it buys and how often ("S&P 500 mensual")."""
+    underlying = {str(i.get("id")): str(i.get("underlying_symbol") or i.get("symbol") or i.get("id"))
+                  for i in instruments or [] if isinstance(i, dict) and i.get("id")}
+    rows = plans.get("plans") if isinstance(plans, dict) else plans if isinstance(plans, list) else [plans]
+    names: dict[str, dict] = {}
+    for plan in rows or []:
+        if not isinstance(plan, dict) or not plan.get("id"):
+            continue
+        if str(plan.get("name") or "").strip():
+            names[str(plan["id"])] = _both(str(plan["name"]).strip()[:80])
+            continue
+        tracked = []
+        for leg in plan.get("legs") or []:
+            iid = str((leg or {}).get("instrument_id") or "")
+            what = _TRACKS.get(iid.upper()) or _TRACKS.get(underlying.get(iid, "").upper()) or iid
+            if what and what not in tracked:
+                tracked.append(what)
+        if not tracked:
+            continue
+        what = " + ".join(tracked[:3])
+        what_es = re.sub(r"^US total market$", "Mercado total de EE. UU.", what)
+        en, es = _CADENCE.get(plan.get("cadence"), ("{x}", "{x}"))
+        names[str(plan["id"])] = {"en": en.format(x=what), "es": es.format(x=what_es)}
+    return names
+
+
+def _next_item(candidate: dict, currency: str | None, plan_names: dict[str, dict] | None = None) -> dict:
     from . import views as V
 
     kind = candidate.get("kind")
@@ -1762,12 +1881,15 @@ def _next_item(candidate: dict, currency: str | None) -> dict:
     if kind == "dca" and not name:
         found = re.search(r"up the (.+?) plan", str(candidate.get("title") or ""))
         name = found.group(1) if found else ""
+    names = (plan_names or {}).get(name) if kind == "dca" else None
+    names = names or {"en": name or "—", "es": name or "—"}
     (title_en, title_es), (ask_en, ask_es) = _NEXT.get(kind, ((str(candidate.get("title") or ""),) * 2,
                                                                ("Let's talk about: {t}", "Hablemos de: {t}")))
-    words = {"v": _money_words(candidate.get("value")) or "—", "name": name or "—", "t": candidate.get("title") or ""}
-    return {"kind": kind, "title": {"en": title_en.format(**words), "es": title_es.format(**words)},
+    words = {"v": _money_words(candidate.get("value")) or "—", "t": candidate.get("title") or ""}
+    en, es = {**words, "name": names["en"]}, {**words, "name": names["es"]}
+    return {"kind": kind, "title": {"en": title_en.format(**en), "es": title_es.format(**es)},
             "value": V.money(candidate.get("value"), currency),
-            "prompt": {"en": ask_en.format(**words), "es": ask_es.format(**words)}}
+            "prompt": {"en": ask_en.format(**en), "es": ask_es.format(**es)}}
 
 
 def _review_summary(narrative: dict, label: str) -> dict:
@@ -1863,17 +1985,21 @@ def review_view(service: Any, client_id: str, period: str | None = None, today: 
     total = pf.get("total") or {}
     bench = (pf.get("benchmarks") or {}).get("ips_benchmark") or {}
     ref = (pf.get("benchmarks") or {}).get("global_60_40") or {}
-    chosen = bench if bench.get("period_return") is not None else ref
+    chosen_key = ("ips_benchmark" if bench.get("period_return") is not None else
+                  "global_60_40" if ref.get("period_return") is not None or not bench else "ips_benchmark")
+    chosen = bench if chosen_key == "ips_benchmark" else ref
+    bench_label, bench_parts = _benchmark(chosen_key, (sec["allocation"]["data"] or {}).get("sleeves") or [],
+                                          (inputs or {}).get("benchmarks"))
     performance_view = {
         "portfolio": V.ratio(total.get("twr_period")), "xirr": V.ratio(total.get("xirr_annual")),
-        "benchmark": {"name": str(chosen.get("name") or "")[:120] or None, "value": V.ratio(chosen.get("period_return"))},
+        "benchmark": {"label": bench_label, "parts": bench_parts, "value": V.ratio(chosen.get("period_return"))},
         "difference": V.ratio(chosen.get("excess_twr")),
         "note": (_note(sec["performance"]["missing"]) if total.get("twr_period") is None else
                  _note([], "benchmark") if chosen.get("period_return") is None else None)}
 
     al = sec["allocation"]["data"]
     priced = al.get("portfolio_value") is not None  # weights of a partly priced portfolio would mislead
-    sleeves = [{"name": str(s.get("name") or s.get("sleeve") or ""), "id": s.get("sleeve"),
+    sleeves = [{"name": _label(s.get("name") or s.get("sleeve"), s.get("sleeve")), "id": s.get("sleeve"),
                 "weight": V.ratio(s.get("weight") if priced else None), "min": V.ratio(s.get("min")), "max": V.ratio(s.get("max")),
                 "target": V.ratio(s.get("target")), "outside": priced and bool(s.get("outside_band"))}
                for s in al.get("sleeves") or []]
@@ -1908,7 +2034,11 @@ def review_view(service: Any, client_id: str, period: str | None = None, today: 
                            for d in dc.get("decisions") or []],
                  "open_before": len(dc.get("still_open_from_before") or []), "note": None}
 
-    dca = {"items": [{"name": str(p.get("plan_id") or ""), "on_time": V.count((p.get("counts") or {}).get("on_time")),
+    plan_names = _plan_names((inputs or {}).get("dca_plans") or (_facts_by_key(_snapshot(service, client_id))
+                                                                     .get("planning.dca") or {}).get("value"),
+                             ledger.get("instruments") or [])
+    dca = {"items": [{"name": plan_names.get(str(p.get("plan_id") or "")) or _both(_humanize(str(p.get("plan_id") or ""))),
+                      "on_time": V.count((p.get("counts") or {}).get("on_time")),
                       "installments": V.count(p.get("installments")), "rate": V.ratio(p.get("on_time_rate")),
                       "invested": V.money(p.get("invested"), p.get("currency") or cur),
                       "planned": V.money(p.get("planned"), p.get("currency") or cur),
@@ -1932,7 +2062,7 @@ def review_view(service: Any, client_id: str, period: str | None = None, today: 
             "note": None if annual.get("complete") and annual.get("low") is not None else _note([], "floor")}
 
     nq = sec["next_quarter"]["data"]
-    next_quarter = {"items": [_next_item(c, cur) for c in (nq.get("two_decisions") or [])[:2]], "note": None}
+    next_quarter = {"items": [_next_item(c, cur, plan_names) for c in (nq.get("two_decisions") or [])[:2]], "note": None}
 
     ticket_spec = {"id": "review-" + "0" * 10, "kind": "ticket", "title": L("Net worth", "Patrimonio"),
                    "data": {"rows": [{k: v for k, v in r.items() if k != "date"} for r in ticket_rows],
