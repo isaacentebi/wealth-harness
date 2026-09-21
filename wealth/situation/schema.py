@@ -29,7 +29,7 @@ DROP_REACTIONS = ("sell", "hold", "buy_more")
 EXPERIENCE = ("none", "some", "experienced")
 ONBOARDING_STEPS = ("name", "language", "residence", "tax_residence", "birth_year", "dependents", "income",
                     "spending", "cash", "debts", "investments", "goals", "risk")
-STEP_STATUSES = ("done", "skipped", "pending")
+STEP_STATUSES = ("done", "skipped", "pending", "unsure")  # unsure: answered "not sure"; stays unknown
 
 SCHEMA: dict[str, dict[str, str]] = {
     "client.profile": {
@@ -86,7 +86,7 @@ SCHEMA: dict[str, dict[str, str]] = {
     },
     "preference.risk": {"drop_reaction?": "|".join(DROP_REACTIONS) + " after a 20% fall",
                         "experience?": "|".join(EXPERIENCE)},
-    "onboarding": {"steps": "{" + "|".join(ONBOARDING_STEPS) + ": done|skipped|pending}",
+    "onboarding": {"steps": "{" + "|".join(ONBOARDING_STEPS) + ": done|skipped|pending|unsure}",
                    "started_at": "ISO date-time", "completed_at?": "ISO date-time"},
 }
 """Human-readable contract, returned in ``fact_contract`` and by ``wealth_context``."""
@@ -389,7 +389,7 @@ def _onboarding(value: dict, key: str) -> None:
     _object(value, key, {"steps", "started_at", "completed_at"})
     steps = value.get("steps")
     if not isinstance(steps, dict):
-        _fail(f"{key}.steps", "must map step names to done|skipped|pending")
+        _fail(f"{key}.steps", "must map step names to done|skipped|pending|unsure")
     for step, status in steps.items():
         if step not in ONBOARDING_STEPS:
             _fail(f"{key}.steps.{step}", f"is not a step; steps are {'|'.join(ONBOARDING_STEPS)}")

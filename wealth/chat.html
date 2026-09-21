@@ -440,6 +440,184 @@
     .privacy summary:hover { color: var(--ink); }
     .privacy p { margin: 0 0 8px; max-width: 34rem; }
 
+    /* ---------- setup: one question per card, inline in the conversation ---------- */
+
+    .setup { display: flex; flex-direction: column; gap: 8px; animation: arrive .24s cubic-bezier(.2, .7, .2, 1); }
+    .setup[hidden] { display: none; }
+    .setup .done-list { margin: 0; padding: 0; list-style: none; }
+    .setup .done-list:empty { display: none; }
+
+    /* An answered card: one quiet line, the whole row a 44px button that reopens it. */
+    .answered {
+      display: flex;
+      align-items: baseline;
+      gap: 16px;
+      width: 100%;
+      min-height: 44px;
+      padding: 10px 0;
+      border: 0;
+      border-bottom: 1px solid var(--hairline);
+      background: transparent;
+      color: var(--ink-soft);
+      font-size: 15px;
+      line-height: 24px;
+      text-align: left;
+      font-variant-numeric: tabular-nums;
+    }
+    .answered .summary { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+    .answered .edit { flex: none; color: var(--muted); font-size: 13px; }
+    .answered:hover { color: var(--ink); }
+    .answered:hover .edit { color: var(--ink); text-decoration: underline; text-decoration-color: var(--hairline); text-underline-offset: 4px; }
+    .answered:focus-visible { outline-offset: -2px; }
+
+    /* The running picture: numbers so far, settled ink on quiet text. */
+    .picture {
+      margin: 8px 0 0;
+      color: var(--ink);
+      font: 500 13px/20px var(--mono);
+      font-variant-numeric: tabular-nums;
+      letter-spacing: -.01em;
+      text-wrap: pretty;
+    }
+    .picture:empty { display: none; }
+
+    .card { margin: 16px 0 0; padding: 0; border: 0; }
+    .card.paused { opacity: .35; }
+    .done-list .card { margin: 16px 0 24px; }
+    .card .origin {
+      margin: 0 0 8px;
+      color: var(--muted);
+      font: 500 11px/16px var(--mono);
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      font-variant-numeric: tabular-nums;
+    }
+    .card .prompt {
+      margin: 0 0 24px;
+      max-width: 34rem;
+      font: 600 24px/32px var(--sans);
+      letter-spacing: -.015em;
+      text-wrap: balance;
+    }
+    .card .prompt:focus { outline: none; }
+    .card .fields { display: flex; flex-direction: column; gap: 24px; }
+    .card .field { margin: 0; padding: 0; border: 0; min-width: 0; }
+    .card .field[hidden] { display: none; }
+    .card .label {
+      display: block;
+      margin: 0 0 8px;
+      padding: 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 20px;
+    }
+
+    .card input[type="text"], .card input[inputmode] {
+      width: 100%;
+      min-height: 48px;
+      padding: 0 16px;
+      border: 0;
+      border-radius: 8px;
+      outline: 1px solid var(--hairline);
+      outline-offset: -1px;
+      background: var(--surface);
+      color: var(--ink);
+      font-size: 17px;
+    }
+    .card input:focus-visible { outline: 1.5px solid var(--ink); outline-offset: -1.5px; border-radius: 8px; }
+    .card input::placeholder { color: var(--muted); opacity: 1; }
+    .card input[aria-invalid="true"] { outline: 1.5px solid var(--vermilion); outline-offset: -1.5px; }
+    .card .year input { width: 8.5rem; font-variant-numeric: tabular-nums; }
+
+    /* Amount: the value is the largest thing on the card; the currency is a quiet toggle beside it. */
+    .money { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .money .box { position: relative; flex: 1; min-width: 0; max-width: 20rem; }
+    .money .box input { padding-left: 32px; font: 500 24px/1 var(--sans); font-variant-numeric: tabular-nums; min-height: 56px; }
+    .money .box .sign { position: absolute; left: 16px; top: 50%; transform: translateY(-50%); color: var(--muted); font: 500 20px/1 var(--sans); pointer-events: none; }
+    .money.small .box input { min-height: 48px; font-size: 17px; }
+    .money.small .box .sign { font-size: 17px; }
+    .percent { position: relative; max-width: 8.5rem; }
+    .percent input { padding-right: 32px; font-variant-numeric: tabular-nums; }
+    .percent .sign { position: absolute; right: 16px; top: 50%; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
+    .currency { display: inline-flex; flex: none; }
+    .currency button {
+      min-width: 44px;
+      min-height: 44px;
+      padding: 0 8px;
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      font: 500 13px/1 var(--mono);
+    }
+    .currency button[aria-pressed="true"] { color: var(--ink); text-decoration: underline; text-decoration-thickness: 1.5px; text-underline-offset: 8px; }
+    .currency button:hover { color: var(--ink); }
+
+    .choices { display: flex; flex-wrap: wrap; gap: 8px; }
+    .choice {
+      min-height: 44px;
+      padding: 0 16px;
+      border: 0;
+      border-radius: 8px;
+      outline: 1px solid var(--hairline);
+      outline-offset: -1px;
+      background: var(--surface);
+      color: var(--ink);
+      font-size: 15px;
+      font-weight: 500;
+    }
+    .choice:hover { outline-color: var(--ink-soft); }
+    .choice[aria-pressed="true"] { outline: 1.5px solid var(--ink); outline-offset: -1.5px; background: var(--blush); }
+    .choice:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+    .card .hint { margin: 8px 0 0; color: var(--muted); font-size: 13px; }
+
+    /* A chosen item opens its own small ruled block: amount, or "I'll upload it". */
+    .items { display: flex; flex-direction: column; margin-top: 16px; }
+    .items:empty { display: none; }
+    .item { display: flex; flex-direction: column; gap: 12px; padding: 16px 0; border-top: 1px solid var(--hairline); }
+    .item:last-child { border-bottom: 1px solid var(--hairline); }
+    .item .name { margin: 0; font-size: 15px; font-weight: 600; }
+    .item .row { display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: flex-end; }
+    .item .row > div { min-width: 0; flex: 1 1 12rem; }
+    .item .row > div.narrow { flex: 0 1 8.5rem; }
+    .item .row[hidden] { display: none; }
+    .item .later { align-self: flex-start; margin-left: -8px; }
+    .item .later[aria-pressed="true"] { color: var(--ink); }
+
+    .card .files { margin-top: 0; }
+    .card .files:empty { display: none; }
+
+    .card .problem { margin: 16px 0 0; color: var(--ink); font-size: 14px; line-height: 20px; }
+    .card .problem:empty { display: none; }
+
+    .card .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; margin-top: 32px; }
+    .primary {
+      min-height: 48px;
+      padding: 0 24px;
+      border: 0;
+      border-radius: 8px;
+      background: var(--vermilion);
+      color: var(--surface);
+      font-size: 16px;
+      font-weight: 600;
+    }
+    .primary:hover:not(:disabled), .primary:active:not(:disabled) { background: var(--pressed); }
+    .primary:disabled { background: transparent; box-shadow: inset 0 0 0 1px var(--hairline); color: var(--muted); cursor: default; }
+    .primary:focus-visible { outline-offset: 3px; border-radius: 8px; }
+    .card .actions .text-control { margin: 0 -8px; }
+    .card .actions .text-control:last-child { margin-right: -8px; }
+
+    .setup .privacy { margin-top: 32px; }
+
+    /* Resume: one row, not the whole flow. */
+    .starter.resume { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+    .starter.resume .meta { color: var(--muted); font: 400 12px/1 var(--mono); white-space: nowrap; }
+
+    .reveal-ticket { margin: 0; }
+    .reveal-ticket .ticket { margin: 0; }
+    .reveal-ticket .row.sub { border-top: 0; padding-top: 0; margin-top: -4px; }
+    .reveal-ticket .row.sub dt, .reveal-ticket .row.sub dd { color: var(--muted); font-size: 13px; line-height: 20px; }
+    .card .field:has(> .files:empty) { display: none; }
+
     /* ---------- composer ---------- */
 
     .dock { padding: 8px 0 max(16px, env(safe-area-inset-bottom)); background: var(--canvas); }
@@ -664,7 +842,22 @@
           forbidden: 'This page lost its session. Reload to reconnect.',
           other: 'Something went wrong.'
         },
-        steps: {}, starters: {}
+        steps: {}, starters: {},
+        setup: {
+          region: 'Setup', step: (i, n) => `${i} of ${n}`, stepLabel: (i, n) => `Question ${i} of ${n}`,
+          next: 'Continue', confirm: 'Yes, that’s right', finish: 'Done', skip: 'Skip', unsure: 'Not sure', cancel: 'Cancel', save: 'Save',
+          upload: 'Upload a statement', uploadMany: 'Upload statements', later: 'I’ll upload it',
+          laterOn: 'Statement to upload', edit: 'Change', editLabel: text => `Change: ${text}`,
+          resume: 'Continue setup', remaining: n => `${n} ${n === 1 ? 'question' : 'questions'}`,
+          placeholder: 'Answer here, or ask me anything…',
+          need: 'Answer the question, or choose Skip.', needAmount: 'Enter an amount, or choose Not sure.',
+          needName: 'Enter the name you want me to use.', needChoice: 'Choose one.', needYear: 'Enter a four-digit year.',
+          needBalance: 'Enter what you owe.', invalid: 'Check the answer and try again.',
+          picture: 'Your picture', netWorth: 'Net worth', liquid: 'Liquid', surplus: 'Left each month',
+          short: 'Short each month', reserve: 'Reserve', months: m => `${m} ${m === 1 ? 'month' : 'months'}`,
+          paidOff: 'Paid off', revealRetry: 'Show me my picture',
+          debts: { card: 'Credit card', auto: 'Car loan', mortgage: 'Mortgage', personal: 'Personal loan', student: 'Student loan', other: 'Loan' }
+        }
       },
       es: {
         message: 'Mensaje', placeholder: 'Pídeme algo…', attach: 'Adjuntar un archivo (PDF, CSV o imagen)',
@@ -736,10 +929,27 @@
           'Upload a statement': ['Subir un estado de cuenta', ''],
           'Where does my money go each month?': ['¿En qué se me va el dinero cada mes?', '¿En qué se me va el dinero cada mes y cuánto podría invertir?'],
           'Should I invest in something?': ['¿Debería invertir en algo?', 'Estoy pensando invertir en ']
+        },
+        setup: {
+          region: 'Configuración', step: (i, n) => `${i} de ${n}`, stepLabel: (i, n) => `Pregunta ${i} de ${n}`,
+          next: 'Continuar', confirm: 'Sí, es correcto', finish: 'Listo', skip: 'Omitir', unsure: 'No estoy seguro', cancel: 'Cancelar', save: 'Guardar',
+          upload: 'Subir un estado de cuenta', uploadMany: 'Subir estados de cuenta', later: 'Lo subo después',
+          laterOn: 'Estado de cuenta por subir', edit: 'Cambiar', editLabel: text => `Cambiar: ${text}`,
+          resume: 'Continuar configuración', remaining: n => `${n} ${n === 1 ? 'pregunta' : 'preguntas'}`,
+          placeholder: 'Responde aquí o pregúntame algo…',
+          need: 'Responde la pregunta o elige Omitir.', needAmount: 'Escribe una cantidad o elige No estoy seguro.',
+          needName: 'Escribe cómo quieres que te llame.', needChoice: 'Elige una opción.', needYear: 'Escribe un año de cuatro dígitos.',
+          needBalance: 'Escribe cuánto debes.', invalid: 'Revisa la respuesta e intenta de nuevo.',
+          picture: 'Tu panorama', netWorth: 'Patrimonio neto', liquid: 'Líquido', surplus: 'Te queda al mes',
+          short: 'Te falta al mes', reserve: 'Reserva', months: m => `${m} ${m === 1 ? 'mes' : 'meses'}`,
+          paidOff: 'La liquidas en', revealRetry: 'Muéstrame mi panorama',
+          debts: { card: 'Tarjeta de crédito', auto: 'Crédito de auto', mortgage: 'Hipoteca', personal: 'Préstamo personal', student: 'Crédito educativo', other: 'Préstamo' }
         }
       }
     };
-    const LANG = /^es\b/i.test(navigator.language || '') ? 'es' : 'en';
+    // The browser's language, unless the address asks for one (?lang=es or ?lang=en).
+    const askedLang = (() => { try { return new URLSearchParams(location.search).get('lang'); } catch (_) { return null; } })();
+    const LANG = askedLang === 'es' || askedLang === 'en' ? askedLang : /^es\b/i.test(navigator.language || '') ? 'es' : 'en';
     const T = STRINGS[LANG];
     const stepText = (text, lang = LANG) => STRINGS[lang].steps[text] || text;
 
@@ -1506,16 +1716,23 @@
     function renderIntro(state) {
       const box = el('section', 'intro');
       box.setAttribute('aria-label', T.welcome);
-      // One dominant text: the first-run welcome in the reader's language, or a short question on later visits.
-      const welcome = state.welcome && typeof state.welcome === 'object' ? (state.welcome[LANG] || state.welcome.en) : state.welcome;
-      if (welcome) {
-        box.append(el('h2', 'welcome', String(welcome)));
-      } else {
-        const title = el('h2', 'greeting', T.returning);
-        box.append(title);
-      }
+      // One dominant text: a short question. A new profile never lands here; it starts with the setup cards.
+      box.append(el('h2', 'greeting', T.returning));
+      const onboarding = state.onboarding || {};
       const starters = Array.isArray(state.starters) ? state.starters.slice(0, 3) : [];
-      if (starters.length) {
+      if (onboarding.active && onboarding.card) {
+        // Returning with setup unfinished: one row, not the whole flow.
+        const rows = el('ul', 'starters');
+        const row = el('li');
+        const button = el('button', 'starter resume');
+        button.type = 'button';
+        button.append(el('span', '', S.resume));
+        if (onboarding.remaining) button.append(el('span', 'meta', S.remaining(onboarding.remaining)));
+        button.addEventListener('click', () => startSetup(onboarding));
+        row.append(button);
+        rows.append(row);
+        box.append(rows);
+      } else if (starters.length) {
         const rows = el('ul', 'starters');
         starters.forEach(item => {
           const [label, prompt] = T.starters[item.label] || [String(item.label || item.prompt), String(item.prompt)];
@@ -1535,20 +1752,643 @@
         });
         box.append(rows);
       }
-      const privacy = el('details', 'privacy');
-      privacy.append(el('summary', '', T.privacy));
-      const web = state.capabilities && state.capabilities.web_search === true;
-      privacy.append(el('p', '', `${T.privacyText} ${web ? T.webOn : T.webOff}`));
-      box.append(privacy);
+      box.append(privacyNote(state));
       messages.append(box);
     }
 
     const removeIntro = () => { const intro = messages.querySelector('.intro'); if (intro) intro.remove(); };
 
+    // ------------------------------------------------------------------ setup (deterministic onboarding)
+
+    // One question per card inside the conversation. Answers go to /api/onboarding; each one collapses into a
+    // one-line summary that reopens the card, and the running picture line updates as numbers land.
+    const S = T.setup;
+    const setup = { node: null, list: null, picture: null, card: null, active: false, busy: false };
+    let cardSeq = 0;
+
+    const locale = LANG === 'es' ? 'es-MX' : 'en-US';
+    const grouped = n => new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(n);
+    function money(amount, currency) {
+      if (amount === null || amount === undefined) return '';
+      try {
+        return new Intl.NumberFormat(locale, { style: 'currency', currency: currency || 'MXN', currencyDisplay: 'narrowSymbol', maximumFractionDigits: 0 }).format(amount);
+      } catch (_) { return `${grouped(amount)} ${currency || ''}`.trim(); }
+    }
+    const plainNumber = text => {
+      const t = String(text || '').trim();
+      if (/^\d{1,3}(,\d{3})+(\.\d+)?$/.test(t)) return Number(t.replace(/,/g, ''));
+      if (/^\d+(\.\d+)?$/.test(t)) return Number(t);
+      return null;
+    };
+
+    function ensureSetup() {
+      if (setup.node && messages.contains(setup.node)) return setup.node;
+      const node = el('section', 'setup');
+      node.setAttribute('aria-label', S.region);
+      setup.list = el('ul', 'done-list');
+      setup.picture = el('p', 'picture');
+      setup.picture.setAttribute('aria-live', 'polite');
+      node.append(setup.list, setup.picture);
+      messages.append(node);
+      setup.node = node;
+      return node;
+    }
+
+    function setPicture(picture) {
+      if (!setup.picture) return;
+      const line = picture && typeof picture.line === 'string' ? picture.line : '';
+      if (setup.picture.textContent !== line) setup.picture.textContent = line;
+    }
+
+    function setSetupActive(active) {
+      setup.active = active;
+      input.placeholder = active ? S.placeholder : T.placeholder;
+    }
+
+    // ---- fields: each returns { node, get(), set(value), check() -> message | '' }
+
+    function labelFor(text, forId) {
+      const label = el('label', 'label', text);
+      if (forId) label.htmlFor = forId;
+      return label;
+    }
+
+    function textField(spec) {
+      const wrap = el('div', 'field');
+      const id = `f${cardSeq}-${spec.name}`;
+      const field = el('input');
+      field.type = 'text'; field.id = id; field.maxLength = spec.max || 80;
+      if (spec.autocomplete) field.autocomplete = spec.autocomplete;
+      field.setAttribute('autocapitalize', 'words');
+      wrap.append(labelFor(spec.label, id), field);
+      return {
+        node: wrap, focus: field,
+        get: () => field.value.trim() || null,
+        set: v => { field.value = v == null ? '' : String(v); },
+        check: () => spec.required && !field.value.trim() ? (spec.name === 'name' ? S.needName : S.need) : ''
+      };
+    }
+
+    function yearField(spec) {
+      const wrap = el('div', 'field year');
+      const id = `f${cardSeq}-${spec.name}`;
+      const field = el('input');
+      field.type = 'text'; field.id = id; field.maxLength = 4;
+      field.setAttribute('inputmode', 'numeric'); field.setAttribute('pattern', '[0-9]*');
+      field.placeholder = LANG === 'es' ? 'AAAA' : 'YYYY';
+      field.addEventListener('input', () => { field.value = field.value.replace(/\D/g, '').slice(0, 4); field.removeAttribute('aria-invalid'); });
+      wrap.append(labelFor(spec.label, id), field);
+      return {
+        node: wrap, focus: field,
+        get: () => field.value ? Number(field.value) : null,
+        set: v => { field.value = v == null ? '' : String(v); },
+        check: () => {
+          const v = field.value;
+          const bad = v && (v.length !== 4 || (spec.min && +v < spec.min) || (spec.max && +v > spec.max));
+          if (bad) field.setAttribute('aria-invalid', 'true');
+          return bad ? S.needYear : '';
+        }
+      };
+    }
+
+    function percentField(spec) {
+      const wrap = el('div', 'field narrow');
+      const id = `f${cardSeq}-${spec.name}-${Math.random().toString(36).slice(2, 7)}`;
+      const box = el('div', 'percent');
+      const field = el('input');
+      field.type = 'text'; field.id = id; field.maxLength = 6;
+      field.setAttribute('inputmode', 'decimal');
+      const sign = el('span', 'sign', '%'); sign.setAttribute('aria-hidden', 'true');
+      box.append(field, sign);
+      wrap.append(labelFor(spec.label, id), box);
+      return {
+        node: wrap, focus: field,
+        get: () => field.value.trim() || null,
+        set: v => { field.value = v == null ? '' : String(v); },
+        check: () => ''
+      };
+    }
+
+    function amountField(spec, small = false) {
+      const wrap = el('div', 'field');
+      const id = `f${cardSeq}-${spec.name}-${Math.random().toString(36).slice(2, 7)}`;
+      const row = el('div', small ? 'money small' : 'money');
+      const box = el('div', 'box');
+      const field = el('input');
+      field.type = 'text'; field.id = id; field.maxLength = 24; field.autocomplete = 'off';
+      field.setAttribute('inputmode', 'decimal');
+      const sign = el('span', 'sign', '$'); sign.setAttribute('aria-hidden', 'true');
+      box.append(sign, field);
+      row.append(box);
+      let currency = spec.currency || 'MXN';
+      const toggles = [];
+      const currencies = Array.isArray(spec.currencies) && spec.currencies.length > 1 ? spec.currencies : [];
+      if (currencies.length) {
+        const group = el('div', 'currency');
+        group.setAttribute('role', 'group');
+        group.setAttribute('aria-label', LANG === 'es' ? 'Moneda' : 'Currency');
+        currencies.forEach(code => {
+          const b = el('button', '', code);
+          b.type = 'button';
+          b.setAttribute('aria-pressed', String(code === currency));
+          b.addEventListener('click', () => { currency = code; toggles.forEach(t => t.setAttribute('aria-pressed', String(t.textContent === code))); });
+          toggles.push(b); group.append(b);
+        });
+        row.append(group);
+      }
+      field.addEventListener('blur', () => { const n = plainNumber(field.value); if (n !== null) field.value = grouped(n); });
+      field.addEventListener('input', () => field.removeAttribute('aria-invalid'));
+      wrap.append(labelFor(spec.label || '', id), row);
+      if (!spec.label) wrap.querySelector('label').classList.add('sr-only');
+      return {
+        node: wrap, focus: field,
+        get: () => field.value.trim() ? { amount: field.value.trim(), currency } : null,
+        set: v => {
+          if (!v) return;
+          const amount = typeof v === 'object' ? v.amount : v;
+          if (typeof v === 'object' && v.currency) { currency = v.currency; toggles.forEach(t => t.setAttribute('aria-pressed', String(t.textContent === currency))); }
+          field.value = amount == null ? '' : (typeof amount === 'number' ? grouped(amount) : String(amount));
+        },
+        check: () => {
+          if (!spec.required || field.value.trim()) return '';
+          field.setAttribute('aria-invalid', 'true');
+          return spec.name === 'balance' ? S.needBalance : S.needAmount;
+        }
+      };
+    }
+
+    function subField(spec) {
+      if (spec.type === 'amount') return amountField(spec, true);
+      if (spec.type === 'percent') return percentField(spec);
+      if (spec.type === 'year') return yearField(spec);
+      return textField(spec);
+    }
+
+    function chipsField(spec, onChange) {
+      const wrap = el('fieldset', 'field');
+      const legend = el('legend', 'label', spec.label || '');
+      if (!spec.label) legend.classList.add('sr-only');
+      wrap.append(legend);
+      const row = el('div', 'choices');
+      const items = el('div', 'items');
+      const chosen = [];                          // option ids, in the order they were picked
+      const blocks = new Map();                   // option id -> { node, fields, later }
+      const buttons = new Map();
+      const withItems = (spec.options || []).some(o => Array.isArray(o.fields));
+      const single = (spec.max || 1) === 1;
+
+      function itemBlock(option) {
+        const node = el('div', 'item');
+        node.append(el('p', 'name', option.label));
+        const line = el('div', 'row');
+        const fields = option.fields.map(f => { const made = subField(f); made.spec = f; made.node.classList.toggle('narrow', f.type === 'percent'); line.append(made.node); return made; });
+        node.append(line);
+        let later = false, laterButton = null;
+        if (option.upload) {
+          laterButton = el('button', 'text-control later', S.later);
+          laterButton.type = 'button';
+          laterButton.setAttribute('aria-pressed', 'false');
+          laterButton.addEventListener('click', () => {
+            later = !later;
+            laterButton.setAttribute('aria-pressed', String(later));
+            laterButton.textContent = later ? S.laterOn : S.later;
+            line.hidden = later;
+          });
+          node.append(laterButton);
+        }
+        return { node, fields, isLater: () => later };
+      }
+
+      function sync() {
+        buttons.forEach((b, id) => b.setAttribute('aria-pressed', String(chosen.includes(id))));
+        if (withItems) {
+          chosen.forEach(id => {
+            const option = spec.options.find(o => o.id === id);
+            if (option && option.fields && !blocks.has(id)) blocks.set(id, itemBlock(option));
+          });
+          [...blocks.keys()].forEach(id => { if (!chosen.includes(id)) { blocks.get(id).node.remove(); blocks.delete(id); } });
+          chosen.forEach(id => { if (blocks.has(id)) items.append(blocks.get(id).node); });
+        }
+        if (onChange) onChange();
+      }
+
+      (spec.options || []).forEach(option => {
+        const b = el('button', 'choice', option.label);
+        b.type = 'button';
+        b.addEventListener('click', () => {
+          const at = chosen.indexOf(option.id);
+          if (at >= 0) chosen.splice(at, 1);
+          else {
+            if (single) chosen.length = 0;
+            if (option.exclusive) chosen.length = 0;
+            else {
+              spec.options.filter(o => o.exclusive).forEach(o => { const i = chosen.indexOf(o.id); if (i >= 0) chosen.splice(i, 1); });
+              if (spec.max && chosen.length >= spec.max) chosen.shift();
+            }
+            chosen.push(option.id);
+            const block = blocks.get(option.id);
+            sync();
+            const opened = blocks.get(option.id);
+            if (opened && !block && opened.fields[0]) opened.fields[0].focus.focus();
+            return;
+          }
+          sync();
+        });
+        buttons.set(option.id, b);
+        row.append(b);
+      });
+      wrap.append(row);
+      if (spec.hint) wrap.append(el('p', 'hint', spec.hint));
+      if (withItems) wrap.append(items);
+
+      return {
+        node: wrap, focus: row.querySelector('button'),
+        chosen: () => chosen.slice(),
+        get: () => {
+          if (withItems) {
+            if (!chosen.length) return null;
+            const out = {};
+            chosen.forEach(id => {
+              const block = blocks.get(id);
+              const detail = {};
+              if (block) {
+                if (block.isLater()) detail.upload = true;
+                else block.fields.forEach(f => { const v = f.get(); if (v !== null) detail[f.spec.name] = v; });
+              }
+              out[id] = detail;
+            });
+            return out;
+          }
+          if (single) return chosen[0] || null;
+          return chosen.length ? chosen.slice() : null;
+        },
+        set: v => {
+          if (v == null) return;
+          chosen.length = 0;
+          if (typeof v === 'string') chosen.push(v);
+          else if (Array.isArray(v)) chosen.push(...v);
+          else if (typeof v === 'object') chosen.push(...Object.keys(v));
+          sync();
+          if (withItems && typeof v === 'object' && !Array.isArray(v)) {
+            Object.entries(v).forEach(([id, detail]) => {
+              const block = blocks.get(id);
+              if (block && detail) block.fields.forEach(f => f.set(detail[f.spec.name]));
+            });
+          }
+        },
+        check: () => {
+          if (spec.required && !chosen.length) return S.needChoice;
+          for (const id of chosen) {
+            const block = blocks.get(id);
+            if (!block || block.isLater()) continue;
+            for (const f of block.fields) { const problem = f.check(); if (problem) { f.focus.focus(); return problem; } }
+          }
+          return '';
+        }
+      };
+    }
+
+    // ---- files for the statements card: the same upload endpoint as the composer
+
+    async function uploadFile(file) {
+      const type = typeFor(file);
+      if (!type) throw Object.assign(new Error(T.badType), { short: T.badType });
+      if (file.size > uploadLimit) throw Object.assign(new Error(T.tooBig), { short: T.tooBig });
+      if (!file.size) throw Object.assign(new Error(T.empty), { short: T.empty });
+      const response = await api('/api/upload', { method: 'POST', body: file, headers: { 'Content-Type': type, 'X-Filename': encodeURIComponent(file.name) } });
+      return (await json(response)).upload;
+    }
+
+    function pickFiles(onFiles) {
+      const picker = el('input');
+      picker.type = 'file'; picker.multiple = true; picker.accept = fileInput.accept; picker.hidden = true;
+      picker.addEventListener('change', () => { onFiles(Array.from(picker.files || [])); picker.remove(); });
+      document.body.append(picker);
+      picker.click();
+    }
+
+    // ---- the card
+
+    function renderCard(card, options = {}) {
+      cardSeq += 1;
+      const form = el('form', 'card');
+      form.noValidate = true;
+      form.dataset.step = card.step;
+      const promptId = `prompt-${cardSeq}`;
+      form.setAttribute('aria-labelledby', promptId);
+      if (card.index && card.total && !options.editing) {
+        const origin = el('p', 'origin', S.step(card.index, card.total));
+        origin.setAttribute('aria-label', S.stepLabel(card.index, card.total));
+        form.append(origin);
+      }
+      const prompt = el('h2', 'prompt', card.prompt);
+      prompt.id = promptId; prompt.tabIndex = -1;
+      form.append(prompt);
+
+      const fields = el('div', 'fields');
+      const made = [];
+      const byName = {};
+      let files = [];
+      const refreshWhen = () => made.forEach(f => {
+        if (!f.spec.when) return;
+        const [key, value] = Object.entries(f.spec.when)[0];
+        const current = byName[key] && byName[key].get();
+        f.node.hidden = current !== value;
+      });
+      (card.fields || []).forEach(spec => {
+        let f;
+        if (spec.type === 'chips') f = chipsField(spec, refreshWhen);
+        else if (spec.type === 'amount') f = amountField(spec);
+        else if (spec.type === 'year') f = yearField(spec);
+        else if (spec.type === 'upload') {
+          const box = el('div', 'field');
+          const chips = el('div', 'attachments files');
+          box.append(chips);
+          f = { node: box, get: () => files.map(x => x.id), set: () => {}, check: () => '', chips };
+        }
+        else f = textField(spec);
+        f.spec = spec;
+        made.push(f); byName[spec.name] = f;
+        fields.append(f.node);
+      });
+      form.append(fields);
+      if (card.prefill) Object.entries(card.prefill).forEach(([name, value]) => { if (byName[name]) byName[name].set(value); });
+      refreshWhen();
+
+      const problem = el('p', 'problem');
+      problem.setAttribute('role', 'alert');
+      form.append(problem);
+
+      const actions = el('div', 'actions');
+      const isUploadCard = (card.fields || []).some(f => f.type === 'upload');
+      const primary = el('button', 'primary', isUploadCard ? S.uploadMany : options.editing ? S.save : card.confirm ? S.confirm : S.next);
+      primary.type = isUploadCard ? 'button' : 'submit';
+      actions.append(primary);
+      const textButton = (label, handler) => { const b = el('button', 'text-control', label); b.type = 'button'; b.addEventListener('click', handler); actions.append(b); return b; };
+
+      const send = async payload => {
+        if (setup.busy) return;
+        setup.busy = true; primary.disabled = true; problem.textContent = '';
+        try {
+          const data = await json(await api('/api/onboarding', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(Object.assign({ step: card.step, lang: LANG }, payload))
+          }));
+          answered(form, data, options);
+        } catch (err) {
+          problem.textContent = err.kind === 'invalid' ? (LANG === 'en' && err.message ? err.message : S.invalid) : errorText(err);
+          primary.disabled = false;
+        } finally { setup.busy = false; }
+      };
+
+      if (isUploadCard) {
+        const upload = () => pickFiles(async list => {
+          const target = byName.uploads;
+          for (const file of list.slice(0, 5 - files.length)) {
+            const chip = attachmentChips([{ name: file.name, size: file.size }]).firstChild;
+            chip.querySelector('.meta') && (chip.querySelector('.meta').textContent = T.uploading);
+            target.chips.append(chip);
+            try {
+              const meta = await uploadFile(file);
+              files.push(meta);
+              chip.querySelector('.meta').textContent = formatSize(meta.size);
+            } catch (err) {
+              chip.classList.add('error');
+              chip.querySelector('.meta').textContent = err.short || T.uploadFailed;
+            }
+          }
+          if (files.length) { primary.textContent = S.finish; primary.type = 'submit'; primary.onclick = null; }
+        });
+        primary.onclick = upload;
+      }
+
+      const collect = () => {
+        const out = {};
+        made.forEach(f => { if (!f.node.hidden) { const v = f.get(); if (v !== null && v !== undefined) out[f.spec.name] = v; } });
+        return out;
+      };
+      const initial = JSON.stringify(collect());   // the prefill as these fields read it back
+
+      form.addEventListener('submit', event => {
+        event.preventDefault();
+        for (const f of made) {
+          if (f.node.hidden) continue;
+          const message = f.check();
+          if (message) { problem.textContent = message; return; }
+        }
+        const answer = collect();
+        if (isUploadCard) { send({ answer: { uploads: files.map(x => x.id) } }); return; }
+        if (card.confirm && JSON.stringify(answer) === initial) { send({ answer: { confirm: true } }); return; }
+        if (!Object.keys(answer).length) { problem.textContent = S.need; return; }
+        send({ answer });
+      });
+
+      if (options.editing) {
+        // Changing an earlier answer: save or leave it as it was.
+        textButton(S.cancel, () => closeEdit(options.row));
+        form.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); closeEdit(options.row); } });
+        form.append(actions);
+        form._focus = () => { const first = made.find(f => !f.node.hidden && f.focus); (first && !coarse.matches ? first.focus : prompt).focus({ preventScroll: true }); };
+        return form;
+      }
+      if (card.unsure) textButton(S.unsure, () => send({ answer: { unsure: true } }));
+      if (card.upload && !isUploadCard) {
+        textButton(S.upload, () => {
+          // Statements are the fast path: the file goes through the composer's upload and ingest flow.
+          // The picker opens inside the click (browsers require it); the item stays unknown until the statement lands.
+          fileInput.click();
+          send({ answer: { unsure: true } });
+        });
+      }
+      textButton(S.skip, () => send({ skip: true }));
+      form.append(actions);
+      form._focus = () => { const first = made.find(f => !f.node.hidden && f.focus); (first && !coarse.matches ? first.focus : prompt).focus({ preventScroll: true }); };
+      return form;
+    }
+
+    function summaryRow(step, text) {
+      const li = el('li');
+      li.dataset.step = step;
+      const b = el('button', 'answered');
+      b.type = 'button';
+      b.setAttribute('aria-label', S.editLabel(text));
+      b.append(el('span', 'summary', text), el('span', 'edit', S.edit));
+      b.addEventListener('click', () => editStep(step, li));
+      li.append(b);
+      return li;
+    }
+
+    async function editStep(step, row) {
+      if (setup.busy) return;
+      try {
+        const data = await json(await api(`/api/onboarding?step=${encodeURIComponent(step)}&lang=${LANG}`));
+        if (!data.card) return;
+        const form = renderCard(data.card, { editing: true, row });
+        row._summary = [...row.childNodes];
+        row.replaceChildren(form);
+        pauseOpenCard(true);
+        form._focus();
+      } catch (err) { live.textContent = errorText(err); }
+    }
+
+    // One primary per screen: while an earlier answer is being changed, the open card waits, quiet and inert.
+    function pauseOpenCard(paused) {
+      if (!setup.card) return;
+      setup.card.inert = paused;
+      setup.card.classList.toggle('paused', paused);
+    }
+
+    function closeEdit(row) {
+      if (row && row._summary) {
+        row.replaceChildren(...row._summary);
+        const button = row.querySelector('button');
+        if (button) button.focus();
+      }
+      if (!setup.list.querySelector('.card')) pauseOpenCard(false);
+    }
+
+    function showCard(card) {
+      ensureSetup();
+      if (setup.card) setup.card.remove();
+      setup.card = null;
+      if (!card) return;
+      const form = renderCard(card);
+      setup.node.insertBefore(form, setup.node.querySelector(':scope > .privacy'));
+      setup.card = form;
+      return form;
+    }
+
+    function privacyNote(state) {
+      const privacy = el('details', 'privacy');
+      privacy.append(el('summary', '', T.privacy));
+      const web = state.capabilities && state.capabilities.web_search === true;
+      privacy.append(el('p', '', `${T.privacyText} ${web ? T.webOn : T.webOff}`));
+      return privacy;
+    }
+
+    function answered(form, data, options) {
+      const summary = data.answered && data.answered.summary;
+      const step = data.answered && data.answered.step;
+      if (options.editing && options.row) {
+        const row = summaryRow(step, summary);
+        options.row.replaceWith(row);
+        row.querySelector('button').focus();
+        if (!setup.list.querySelector('.card')) pauseOpenCard(false);
+      } else {
+        form.remove();
+        if (setup.card === form) setup.card = null;
+        const existing = setup.list.querySelector(`li[data-step="${step}"]`);
+        const row = summaryRow(step, summary);
+        if (existing) existing.replaceWith(row); else setup.list.append(row);
+      }
+      live.textContent = summary || '';
+      setPicture(data.picture);
+      if (data.card) {
+        if (!options.editing || !setup.card || setup.card.dataset.step !== data.card.step) {
+          const next = showCard(data.card);
+          if (next && !options.editing) { next._focus(); follow(true); }
+        }
+      } else {
+        if (setup.card) { setup.card.remove(); setup.card = null; }
+        setSetupActive(false);
+        if (data.complete && !options.editing) reveal(data);
+      }
+    }
+
+    // ---- reveal: the whole picture, deterministic, then the first synthesis from the model
+
+    function pictureTicket(picture) {
+      const rows = [];
+      const cur = picture.currency;
+      if (picture.net_worth !== null && picture.net_worth !== undefined) rows.push([S.netWorth, money(picture.net_worth, cur), true]);
+      if (picture.liquid !== null && picture.liquid !== undefined && picture.debt) rows.push([S.liquid, money(picture.liquid, cur)]);
+      if (picture.surplus !== null && picture.surplus !== undefined) rows.push([picture.surplus >= 0 ? S.surplus : S.short, money(Math.abs(picture.surplus), cur)]);
+      if (picture.reserve_months !== null && picture.reserve_months !== undefined) rows.push([S.reserve, S.months(Number(picture.reserve_months.toFixed ? picture.reserve_months.toFixed(1) : picture.reserve_months))]);
+      (picture.debts || []).forEach(d => {
+        rows.push([S.debts[d.kind] || S.debts.other, money(d.balance, d.currency)]);
+        if (d.payoff) rows.push([S.paidOff, new Intl.DateTimeFormat(locale, { month: 'short', year: 'numeric' }).format(new Date(`${d.payoff}-15T12:00:00`)), false, true]);
+      });
+      if (!rows.length) return null;
+      const box = el('section', 'ticket');
+      box.setAttribute('aria-label', S.picture);
+      const list = el('dl');
+      const caption = el('div', 'row caption');
+      caption.append(el('span', '', S.picture));
+      list.append(caption);
+      rows.forEach(([name, value, , sub]) => {
+        const line = el('div', sub ? 'row sub' : 'row');
+        line.append(el('dt', '', name), el('dd', 'num', value));
+        list.append(line);
+      });
+      box.append(list);
+      return box;
+    }
+
+    function reveal(data) {
+      const article = el('article', 'message assistant reveal-ticket');
+      article.setAttribute('aria-label', S.picture);
+      const ticketNode = pictureTicket(data.picture || {});
+      if (ticketNode) article.append(ticketNode);
+      messages.append(article);
+      if (setup.picture) setup.picture.textContent = '';
+      const note = setup.node && setup.node.querySelector(':scope > .privacy');
+      if (note) note.remove();
+      follow(true);
+      if (data.reveal && data.reveal.id) trackReveal(data.reveal, article);
+    }
+
+    function trackReveal(summary, anchor) {
+      const record = { id: summary.id, message: '', attachments: [], userNode: anchor, after: 0, lang: LANG, internal: true };
+      current = record;
+      setBusy(true);
+      record.pendingNode = pendingMessage(summary.progress || '', LANG);
+      follow(true);
+      track(record);
+    }
+
+    // ---- entry points
+
+    function startSetup(onboarding, state) {
+      if (!onboarding || !onboarding.active || !onboarding.card) return;
+      removeIntro();
+      ensureSetup();
+      // First run: the data-handling note stays one tap away under the card.
+      if (state && onboarding.card.index === 1 && !setup.node.querySelector(':scope > .privacy')) setup.node.append(privacyNote(state));
+      setSetupActive(true);
+      setPicture(onboarding.picture);
+      const form = showCard(onboarding.card);
+      if (form) form._focus();
+    }
+
+    // Typing while a card is open answers it when the text reads as an answer; a real question goes to the model.
+    async function answerByText(text) {
+      if (!setup.active || !setup.card || setup.busy) return false;
+      const form = setup.card;
+      setup.busy = true;
+      try {
+        const data = await json(await api('/api/onboarding', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ step: form.dataset.step, text, lang: LANG })
+        }));
+        if (data.needs_model) return false;
+        setup.busy = false;
+        answered(form, data, {});
+        return true;
+      } catch (_) {
+        return false;
+      } finally { setup.busy = false; }
+    }
+
+    // After a model turn during setup, the open card follows the conversation to its end.
+    function setupFollowsTurn() {
+      if (!setup.active || !setup.node) return;
+      messages.append(setup.node);
+    }
+
     // ------------------------------------------------------------------ network
 
     async function refreshToken() {
-      const response = await fetch('/api/state', { credentials: 'same-origin', cache: 'no-store' });
+      const response = await fetch(`/api/state?lang=${LANG}`, { credentials: 'same-origin', cache: 'no-store' });
       const state = await response.json().catch(() => ({}));
       if (response.ok && state.csrf_token) token = String(state.csrf_token);
       return state;
@@ -1635,8 +2475,12 @@
       clearPending(turn.pendingNode);
       if (current === turn) current = null;
       setBusy(false);
+      setupFollowsTurn();
       if (!coarse.matches && (document.activeElement === document.body || document.activeElement === send)) input.focus();
     }
+
+    // A failed reveal is retried as the person's own short request; anything else re-sends what they wrote.
+    const retryFor = turn => turn.internal ? () => submit(S.revealRetry) : () => submit(turn.message, turn.attachments, turn.userNode);
 
     function handle(turn, event) {
       turn.after = Math.max(turn.after || 0, event.seq || 0);
@@ -1656,7 +2500,7 @@
         clearPending(turn.pendingNode);
         turn.pendingNode = null;
         turn.failed = true;
-        showError(turn.userNode, event, () => submit(turn.message, turn.attachments, turn.userNode));
+        showError(turn.userNode, event, retryFor(turn));
       } else if (event.type === 'done') {
         finish(turn);
       }
@@ -1677,7 +2521,7 @@
       }
       if (current === turn) {
         clearPending(turn.pendingNode);
-        showError(turn.userNode, { kind: 'gone', message: T.errors.gone }, () => submit(turn.message, turn.attachments, turn.userNode));
+        showError(turn.userNode, { kind: 'gone', message: T.errors.gone }, retryFor(turn));
         finish(turn);
       }
     }
@@ -1711,6 +2555,11 @@
       const message = String(text || '').trim();
       const files = attachments || pendingUploads.filter(u => u.state === 'ready').map(u => u.meta);
       if (busy || (!message && !files.length)) return;
+      if (!attachments && !existingNode && !files.length && setup.active && setup.card) {
+        // During setup a typed reply answers the open card when it reads as one; anything else is a real turn.
+        input.value = ''; resize();
+        if (await answerByText(message)) return;
+      }
       removeIntro();
       const userNode = existingNode || userMessage(message || T.attachedOnly, files);
       const alert = userNode.querySelector('.alert');
@@ -1835,7 +2684,10 @@
         const state = await json(await api('/api/reset', { method: 'POST' }));
         pendingUploads = []; renderTray();
         messages.replaceChildren();
-        renderIntro(state);
+        setup.node = null; setup.card = null; setSetupActive(false);
+        const onboarding = state.onboarding || {};
+        if (onboarding.active && onboarding.mode === 'flow') startSetup(onboarding, state);
+        else renderIntro(state);
         input.value = ''; resize();
         if (!coarse.matches) input.focus();
       } catch (err) {
@@ -1880,7 +2732,9 @@
       revealProfile();
 
       const history = Array.isArray(state.messages) ? state.messages : [];
-      if (!history.length && !(state.turn && state.turn.message)) renderIntro(state);
+      const onboarding = state.onboarding || {};
+      const flow = onboarding.active && onboarding.mode === 'flow';
+      if (!history.length && !(state.turn && (state.turn.message || state.turn.internal)) && !flow) renderIntro(state);
       let spoken = LANG;
       history.forEach(item => {
         if (!item || typeof item.content !== 'string') return;
@@ -1892,11 +2746,14 @@
       attachButton.disabled = false;
       newChat.disabled = false;
 
+      if (flow) startSetup(onboarding, state);
+
       const turn = state.turn;
-      if (turn && turn.message) {
-        const node = userMessage(turn.message, turn.attachments || []);
-        const record = { id: turn.id, message: turn.message, attachments: turn.attachments || [], userNode: node, after: 0, elapsed: turn.elapsed, lang: languageOf(turn.message) };
-        const retry = () => submit(record.message, record.attachments, node);
+      if (turn && (turn.message || turn.internal)) {
+        // The reveal's request is Wealth's own and never shows as the person's words.
+        const node = turn.internal ? messages.appendChild(el('div')) : userMessage(turn.message, turn.attachments || []);
+        const record = { id: turn.id, message: turn.message, attachments: turn.attachments || [], userNode: node, after: 0, elapsed: turn.elapsed, lang: turn.internal ? LANG : languageOf(turn.message), internal: !!turn.internal };
+        const retry = retryFor(record);
         if (turn.status === 'running') {
           current = record;
           setBusy(true);
@@ -1909,7 +2766,7 @@
       }
       resize();
       follow(true);
-      if (!coarse.matches && !busy) input.focus();
+      if (!coarse.matches && !busy && !flow) input.focus();
     }
 
     initialize();

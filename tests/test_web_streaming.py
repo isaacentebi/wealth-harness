@@ -74,8 +74,9 @@ def test_sse_stream_carries_progress_memory_and_answer(tmp_path, monkeypatch):
     with serving(chat) as (base, _):
         state = json.load(urlopen(base + "/api/state", timeout=5))
         assert state["display_name"] == "Personal"
-        assert len(state["starters"]) == 3
-        assert "I can help" not in state["welcome"]
+        # A brand-new profile gets the first setup card instead of a welcome and starters.
+        assert state["starters"] == [] and state["onboarding"]["card"]["step"] == "identity"
+        assert "welcome" not in state
         body = json.dumps({"message": "hi", "reasoning": "medium", "timezone": "America/Mexico_City"}).encode()
         turn = json.load(_post(base, "/api/turns", state["csrf_token"], body))["turn"]
         events = _events(base, turn["id"], state["csrf_token"])
@@ -176,8 +177,8 @@ def test_reset_clears_conversation_but_not_memory(tmp_path, monkeypatch):
     with serving(chat) as (base, _):
         state = json.load(_post(base, "/api/reset", chat.token))
     assert state["messages"] == [] and chat.thread_id is None
-    assert state["welcome"] == ""  # returning client: no onboarding welcome
-    assert len(state["starters"]) == 3
+    # Setup is still open, so the page offers it instead of starters; memory survives the reset.
+    assert state["onboarding"]["active"] and state["starters"] == []
     assert web.WealthService(chat.db).inspect("personal")["facts"]
 
 

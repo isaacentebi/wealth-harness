@@ -226,6 +226,10 @@ def brief(sit: Mapping[str, Any], language: str | None = None) -> str:
         lines.append((11, t["stale"].format(x=", ".join(sit["stale"][:6]))))
     if sit["inferred"]:
         lines.append((12, t["inferred"].format(x=", ".join(sit["inferred"][:6]))))
+    from ..onboarding import brief_line  # lazy: onboarding imports this package's schema
+    setup = brief_line(sit)
+    if setup:
+        lines.append((3, setup))
     if sit.get("changes"):
         lines.append((13, t["changes"].format(r=sit.get("changes_since"), x=", ".join(c["key"] for c in sit["changes"][:6]))))
     while len(lines) > BRIEF_MAX_LINES:

@@ -23,11 +23,11 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import agent as _agent
+from . import onboarding as _onboarding
 from .agent import (
     AgentError, REASONING_LEVELS, TurnControl, TurnEvent, profile_state, resolve_model, situation_brief,
     run_turn, seed_demo, stream_turn,
 )
-from .behavior import ONBOARDING_WELCOME, ONBOARDING_WELCOME_ES
 from .service import WealthService, database_path, upload_dir
 from .profile import fact_action, fact_detail, form_facts, profile_view
 from .store import ClientExistsError, ClientNotFoundError, StaleRevisionError, StoreError
@@ -48,6 +48,17 @@ ERROR_TEXT = {
     "storage": "Local memory couldn’t be read. Check the database path and disk, then retry.",
     "other": "Something went wrong while answering. Any facts already saved remain in memory.",
 }
+REVEAL_REQUEST = (
+    "Setup just finished. This request comes from Wealth, not the person. Write the first synthesis from the "
+    "<situation> brief: one short paragraph on where they stand (net worth, what is left each month, reserve in "
+    "months, debts and when they are paid off, whatever is known) and a single next step. Write it in {language}. "
+    "Do not ask any setup question again and do not list what is unknown; call a tool only if the paragraph needs "
+    "a number the brief does not have."
+)
+REVEAL_STATEMENTS = (
+    " The person attached statements during setup: read them first with wealth_ingest and follow the upload "
+    "flow (insights, total and date, ask to save), then give the synthesis."
+)
 MAX_MESSAGE_CHARS = 12_000
 MAX_JSON_BYTES = 40_000
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
@@ -161,10 +172,11 @@ class Uploads:
 
 
 class Turn:
-    def __init__(self, message: str, attachments: list[dict[str, Any]]):
+    def __init__(self, message: str, attachments: list[dict[str, Any]], internal: bool = False):
         self.id = secrets.token_hex(8)
         self.message = message
         self.attachments = attachments
+        self.internal = internal  # a request from Wealth itself (the reveal): never shown as the person's words
         self.started = time.time()
         self.status = "running"  # running | done | error | cancelled
         self.progress = ""
@@ -202,7 +214,8 @@ class Turn:
             return self._cond.wait_for(lambda: self.finished, timeout)
 
     def summary(self) -> dict[str, Any]:
-        return {"id": self.id, "status": self.status, "message": self.message,
+        return {"id": self.id, "status": self.status, "message": "" if self.internal else self.message,
+                "internal": self.internal,
                 "attachments": [_public_attachment(a) for a in self.attachments],
                 "progress": self.progress, "memory": list(self.memory), "error": self.error,
                 "elapsed": round(time.time() - self.started, 1), "last_event": len(self.events)}
@@ -235,16 +248,78 @@ class Chat:
                 pass
         snapshot = service.inspect(client_id)
         self.display_name = friendly_name(client_id, (snapshot.get("client") or {}).get("display_name"))
-        self.welcome = ONBOARDING_WELCOME if not snapshot.get("facts") else ""
+        # A brand-new profile gets the setup cards inline; a returning one gets a single "Continue setup" row.
+        # Once the person answers a card in this session, a reload keeps showing the cards.
+        self.onboarding_live = not snapshot.get("facts")
 
-    def state(self):
+    # ------------------------------------------------------------------ onboarding
+
+    def onboarding(self, language: str | None = None, step: str | None = None) -> dict[str, Any]:
+        """The current card (or the named one, prefilled, to edit an answer) and the running picture."""
+        sit = WealthService(self.db).situation(self.client_id)
+        card = _onboarding.card(sit, step, language) if step else _onboarding.next_step(sit, language)
+        return {"card": card, "picture": _onboarding.picture(sit, language)}
+
+    def onboarding_state(self, language: str | None = None) -> dict[str, Any]:
+        sit = WealthService(self.db).situation(self.client_id)
+        card = _onboarding.next_step(sit, language)
+        if card is None:
+            return {"active": False, "card": None}
+        progress = _onboarding.progress(sit)
+        remaining = len(progress["pending"]) + (0 if progress["completed"] else 1)  # + the statements offer
+        return {"active": True, "mode": "flow" if self.onboarding_live else "resume", "card": card,
+                "picture": _onboarding.picture(sit, language), "remaining": remaining}
+
+    def answer_onboarding(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Write one answer (or a skip, or typed text) and start the reveal when setup completes."""
+        step, language = body.get("step"), body.get("lang")
+        if not isinstance(step, str) or step not in _onboarding.BY_ID:
+            raise ValueError("Choose a setup step.")
+        if language is not None and language not in ("es", "en"):
+            raise ValueError("lang must be es or en.")
+        service = WealthService(self.db)
+        skip = body.get("skip") is True
+        answer = body.get("answer")
+        if isinstance(body.get("text"), str):
+            text = body["text"].strip()
+            if not text or len(text) > MAX_MESSAGE_CHARS:
+                raise ValueError("Enter a message of 1–12,000 characters.")
+            card = _onboarding.card(service.situation(self.client_id), step, language)
+            parsed = _onboarding.parse_free_text(card, text)
+            if parsed["status"] != "parsed":
+                # The hook for the model: for now the page sends the text as an ordinary turn.
+                return {"needs_model": True, "reason": parsed.get("reason")}
+            answer = parsed["answer"]
+        uploads: list[str] = []
+        if step == "statements" and isinstance(answer, dict):
+            uploads = answer.get("uploads") or []
+            if not isinstance(uploads, list) or len(uploads) > MAX_ATTACHMENTS or \
+                    any(self.uploads.get(u) is None for u in uploads):
+                raise ValueError("An attachment is no longer available. Attach it again.")
+        result = _onboarding.apply(service, self.client_id, step, answer, skip=skip, language=language)
+        self.onboarding_live = True
+        reveal = None
+        if result.pop("completed_now"):
+            sit = service.situation(self.client_id)
+            lang = language or sit["profile"].get("language") or "es"
+            request = REVEAL_REQUEST.format(language="Mexican Spanish" if lang == "es" else "English")
+            if uploads:
+                request += REVEAL_STATEMENTS
+            try:
+                reveal = self.start(request, attachments=uploads, internal=True).summary()
+            except BlockingIOError:
+                reveal = None  # a turn is running; the person can still ask for the synthesis
+        return {**result, "reveal": reveal}
+
+    def state(self, language: str | None = None):
         turn = self.turn
+        onboarding = self.onboarding_state(language if language in ("es", "en") else None)
         return {"client_id": self.client_id, "display_name": self.display_name,
                 "model": resolve_model(self.model),
                 "reasoning": self.reasoning, "reasoning_levels": list(REASONING_LEVELS),
                 "csrf_token": self.token, "messages": list(self.messages),
-                "welcome": {"en": ONBOARDING_WELCOME, "es": ONBOARDING_WELCOME_ES} if self.welcome else "",
-                "starters": list(STARTERS) if not self.messages else [],
+                "onboarding": onboarding,
+                "starters": list(STARTERS) if not self.messages and not onboarding["active"] else [],
                 "turn": turn.summary() if turn and turn.status in {"running", "error", "cancelled"} else None,
                 "uploads": {"max_bytes": MAX_UPLOAD_BYTES, "types": list(UPLOAD_TYPES),
                             "max_files": MAX_ATTACHMENTS},
@@ -260,8 +335,6 @@ class Chat:
             self.thread_id = None
             self.brief_revision = None
             self.turn = None
-            facts = WealthService(self.db).inspect(self.client_id).get("facts")
-            self.welcome = ONBOARDING_WELCOME if not facts else ""
         finally:
             self.lock.release()
 
@@ -273,7 +346,7 @@ class Chat:
             return
         yield from stream_turn(message, **kwargs)
 
-    def start(self, message, reasoning=None, attachments=(), timezone_name=None) -> Turn:
+    def start(self, message, reasoning=None, attachments=(), timezone_name=None, internal=False) -> Turn:
         reasoning = self.reasoning if reasoning is None else reasoning
         if reasoning not in REASONING_LEVELS:
             raise ValueError("reasoning must be low, medium, or high")
@@ -289,7 +362,7 @@ class Chat:
             raise BlockingIOError("A response is already in progress. Please wait.")
         try:
             self.reasoning = reasoning
-            turn = Turn(message, files)
+            turn = Turn(message, files, internal)
             self.turn = turn
             worker = threading.Thread(target=self._work, args=(turn, reasoning, _valid_timezone(timezone_name)),
                                       daemon=True, name=f"wealth-turn-{turn.id}")
@@ -305,8 +378,6 @@ class Chat:
             state = profile_state(self.db, self.client_id)
             brief, revision = situation_brief(self.db, self.client_id, turn.message, self.brief_revision)
             history = [(m["role"], m["content"]) for m in self.messages]
-            if self.welcome:
-                history.insert(0, ("assistant", self.welcome))
             answer = None
             for event in self._events(
                 turn.message, client_id=self.client_id, db_path=self.db, model=self.model,
@@ -342,9 +413,10 @@ class Chat:
             reply = {"id": secrets.token_hex(6), "role": "assistant", "content": answer}
             if turn.memory:
                 reply["memory"] = list(turn.memory)
-            self.messages = (self.messages + [user, reply])[-100:]
+            # The reveal's request is Wealth's own; only the answer joins the conversation.
+            self.messages = (self.messages + ([reply] if turn.internal else [user, reply]))[-100:]
             turn.answer = answer
-            turn.emit("answer", user=user, message=reply)
+            turn.emit("answer", user=None if turn.internal else user, message=reply)
             status = "done"
         except AgentError as exc:
             status = "cancelled" if exc.kind == "cancelled" else "error"
@@ -503,7 +575,15 @@ def create_server(chat, port=8765, host="127.0.0.1"):
                 if url.path == "/":
                     return self.respond(200, Path(__file__).with_name("chat.html").read_bytes(), "text/html")
                 if url.path == "/api/state":
-                    return self.respond(200, chat.state())
+                    lang = (parse_qs(url.query).get("lang") or [None])[0]
+                    return self.respond(200, chat.state(lang))
+                if url.path == "/api/onboarding":
+                    if not self.authorized():
+                        return self.respond(403, {"error": "Reload to reconnect.", "kind": "forbidden"})
+                    query = parse_qs(url.query)
+                    lang = (query.get("lang") or [None])[0]
+                    step = (query.get("step") or [None])[0]
+                    return self.respond(200, chat.onboarding(lang if lang in ("es", "en") else None, step))
                 if url.path == "/profile":
                     return self.respond(200, Path(__file__).with_name("profile.html").read_bytes(), "text/html")
                 if url.path == "/api/profile":
@@ -564,6 +644,8 @@ def create_server(chat, port=8765, host="127.0.0.1"):
                 if path == "/api/turns":
                     turn = chat.start(**self.turn_request(self.read_json()))
                     return self.respond(202, {"turn": turn.summary()})
+                if path == "/api/onboarding":
+                    return self.respond(200, chat.answer_onboarding(self.read_json()))
                 if path == "/api/reset":
                     chat.reset()
                     return self.respond(200, chat.state())
