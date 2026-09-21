@@ -29,7 +29,9 @@ DROP_REACTIONS = ("sell", "hold", "buy_more")
 EXPERIENCE = ("none", "some", "experienced")
 ONBOARDING_STEPS = ("name", "language", "residence", "tax_residence", "birth_year", "dependents", "income",
                     "spending", "cash", "debts", "investments", "goals", "risk")
-STEP_STATUSES = ("done", "skipped", "pending", "unsure")  # unsure: answered "not sure"; stays unknown
+STEP_STATUSES = ("done", "skipped", "pending", "unsure")
+IPS_PROFILES = ("conservative", "balanced", "growth")
+IPS_CADENCES = ("annual", "semiannual", "quarterly")  # unsure: answered "not sure"; stays unknown
 
 SCHEMA: dict[str, dict[str, str]] = {
     "client.profile": {
@@ -88,6 +90,20 @@ SCHEMA: dict[str, dict[str, str]] = {
                         "experience?": "|".join(EXPERIENCE)},
     "onboarding": {"steps": "{" + "|".join(ONBOARDING_STEPS) + ": done|skipped|pending|unsure}",
                    "started_at": "ISO date-time", "completed_at?": "ISO date-time"},
+    "policy.ips": {
+        "note": "written only when the person accepts an IPS decision (policy_draft propose=true, then "
+                "wealth_decision accept); never written directly",
+        "version": "integer, 1 for the first accepted policy", "decision_id": "the accepted decision",
+        "accepted_on": "YYYY-MM-DD", "supersedes?": "decision id of the policy it replaced",
+        "as_of": "YYYY-MM-DD", "currency": "ISO 4217",
+        "allocation": "{model: " + "|".join(IPS_PROFILES) + ", sleeves: [{id, name, target, min, max}]} "
+                      "(targets sum to 1, min <= target <= max)",
+        "constraints": "{concentration: {limit}, leverage: {allowed}, exclusions, estate_situs, tax, other}",
+        "rebalancing": "{absolute_band, relative_band}", "review": "{cadence: " + "|".join(IPS_CADENCES) + ", next_review}",
+        "objectives?": "list", "risk?": "{ability, willingness, profile}", "liquidity?": "{reserve, near_goals}",
+        "buckets?": "list", "return_requirement?": "{value, goal_id}", "residence?": "object",
+        "missing?": "list", "evidence?": "{fact key: fact id}",
+    },
 }
 """Human-readable contract, returned in ``fact_contract`` and by ``wealth_context``."""
 
@@ -398,7 +414,80 @@ def _onboarding(value: dict, key: str) -> None:
     _timestamp(value.get("completed_at"), f"{key}.completed_at")
 
 
+_IPS_FIELDS = {"version", "decision_id", "accepted_on", "supersedes", "as_of", "currency", "residence", "objectives",
+               "return_requirement", "risk", "liquidity", "buckets", "allocation", "constraints", "rebalancing",
+               "review", "missing", "evidence"}
+
+
+def _share(value: Any, path: str) -> float:
+    _number(value, path)
+    if value > 1:
+        _fail(path, f"is a share between 0 and 1, not {value!r}")
+    return float(value)
+
+
+def _policy_ips(value: dict, key: str) -> None:
+    _object(value, key, _IPS_FIELDS)
+    version = value.get("version")
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        _fail(f"{key}.version", "must be a whole number from 1")
+    _text(value.get("decision_id"), f"{key}.decision_id", required=True, limit=64)
+    _text(value.get("supersedes"), f"{key}.supersedes", limit=64)
+    _iso_date(value.get("accepted_on"), f"{key}.accepted_on", required=True)
+    _iso_date(value.get("as_of"), f"{key}.as_of", required=True)
+    _currency(value.get("currency"), f"{key}.currency")
+    allocation = value.get("allocation")
+    if not isinstance(allocation, dict):
+        _fail(f"{key}.allocation", "must be {model, sleeves}")
+    _enum(allocation.get("model"), f"{key}.allocation.model", IPS_PROFILES, required=True)
+    sleeves = allocation.get("sleeves")
+    if not isinstance(sleeves, list) or not sleeves:
+        _fail(f"{key}.allocation.sleeves", "must be a nonempty list of {id, name, target, min, max}")
+    total, seen = 0.0, set()
+    for index, sleeve in enumerate(sleeves):
+        path = f"{key}.allocation.sleeves[{index}]"
+        if not isinstance(sleeve, dict):
+            _fail(path, "must be an object")
+        if not isinstance(sleeve.get("id"), str) or not _ID.match(sleeve["id"]) or sleeve["id"] in seen:
+            _fail(f"{path}.id", "must be a unique lowercase slug")
+        seen.add(sleeve["id"])
+        _text(sleeve.get("name"), f"{path}.name", required=True, limit=80)
+        low, target, high = (_share(sleeve.get(n), f"{path}.{n}") for n in ("min", "target", "max"))
+        if not low <= target <= high:
+            _fail(path, "needs min <= target <= max")
+        total += target
+    if abs(total - 1) > 0.001:
+        _fail(f"{key}.allocation.sleeves", f"targets must sum to 1 (they sum to {total:g})")
+    constraints = value.get("constraints")
+    if not isinstance(constraints, dict):
+        _fail(f"{key}.constraints", "must be an object")
+    limit = (constraints.get("concentration") or {}).get("limit")
+    if limit is not None and _share(limit, f"{key}.constraints.concentration.limit") <= 0:
+        _fail(f"{key}.constraints.concentration.limit", "must be above 0")
+    leverage = constraints.get("leverage") or {}
+    _bool(leverage.get("allowed"), f"{key}.constraints.leverage.allowed")
+    rebalancing = value.get("rebalancing")
+    if not isinstance(rebalancing, dict):
+        _fail(f"{key}.rebalancing", "must be {absolute_band, relative_band}")
+    for name in ("absolute_band", "relative_band"):
+        if _share(rebalancing.get(name), f"{key}.rebalancing.{name}") <= 0:
+            _fail(f"{key}.rebalancing.{name}", "must be above 0")
+    review = value.get("review")
+    if not isinstance(review, dict):
+        _fail(f"{key}.review", "must be {cadence, next_review}")
+    _enum(review.get("cadence"), f"{key}.review.cadence", IPS_CADENCES, required=True)
+    _iso_date(review.get("next_review"), f"{key}.review.next_review")
+    for name in ("objectives", "buckets", "missing"):
+        if value.get(name) is not None and not isinstance(value[name], list):
+            _fail(f"{key}.{name}", "must be a list")
+    for name in ("risk", "liquidity", "return_requirement", "residence", "evidence"):
+        if value.get(name) is not None and not isinstance(value[name], dict):
+            _fail(f"{key}.{name}", "must be an object")
+
+
 def _validator(key: str) -> Callable[[Any, str], None] | None:
+    if key == "policy.ips":
+        return _policy_ips
     if key == "client.profile":
         return _profile
     if key == "spending.monthly":

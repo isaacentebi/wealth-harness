@@ -36,7 +36,9 @@ TASK_MODULES = {
     "ledger": "ledger", "performance": "ledger", "spending": "cashflow", "dca": "dca",
 }
 # Tasks answered by the service itself rather than one module.
-SERVICE_TASKS = ("plan", "calendar", "monitor", "debt_payoff")
+SERVICE_TASKS = ("plan", "calendar", "monitor", "debt_payoff", "policy_draft", "policy_check")
+# Investment policy tasks (wealth/policy.py) read the canonical picture, so the service runs them.
+POLICY_TASKS = frozenset({"policy_draft", "policy_check"})
 TASKS = (*TASK_MODULES, *SERVICE_TASKS)
 # Tasks whose module reads the client's transaction ledger from context["ledger"].
 LEDGER_TASKS = frozenset({"ledger", "performance", "spending", "dca"})
@@ -102,6 +104,7 @@ def fact_contract() -> dict:
                       "or a document shows it | inferred: an interpretation. Only a user source may be confirmed.",
         "keys": ["client.profile", "income.<id>", "spending.monthly", "cash.<id>", "liability.<id>",
                  "investment.<id>", "goals", "reserve", "thread.<id>", "preference.*", "constraint.*", "onboarding",
+                 "policy.ips (written by accepting an IPS decision)",
                  "thesis.*", "research.<SYMBOL>", "planning.project", "planning.income", "planning.ladder",
                  "planning.dca", "tax.profile", "monitor.rules", "account.<id> (statements, via wealth_ingest)"],
         "schema": SCHEMA,
@@ -255,6 +258,8 @@ class WealthService:
             "ledger": "account household", "performance": "account household",
             "mx_holdings": "household tax", "mx_interest": "tax", "mx_deductions": "tax",
             "mx_foreign": "household tax", "mx_calendar": "tax", "estate": "household tax",
+            "policy_draft": "goals reserve preference constraint client.profile policy",
+            "policy_check": "policy constraint goals reserve",
         }
         from .recall import recall
         with WealthStore(self.db_path) as store:
@@ -319,7 +324,8 @@ class WealthService:
         if client_id:
             with WealthStore(self.db_path) as store:
                 snapshot = store.snapshot(client_id)
-                if (task in LEDGER_TASKS or task in {"plan", "calendar", "debt_payoff"}) and "ledger" not in inputs:
+                if (task in LEDGER_TASKS or task in {"plan", "calendar", "debt_payoff"} or task in POLICY_TASKS) \
+                        and "ledger" not in inputs:
                     ledger = store.ledger(client_id)
         eligible = [f for f in snapshot["facts"] if f["confidence"] != "inferred"
                     and (not f.get("expires_on") or f["expires_on"] >= today)]
@@ -336,6 +342,9 @@ class WealthService:
         derived_evidence: list[str] = []
         if task == "debt_payoff":
             report = self._debt_payoff(inputs, snapshot, ledger, today)
+            derived_evidence = report.pop("_evidence", [])
+        elif task in POLICY_TASKS:
+            report = self._policy(task, inputs, client_id, snapshot, ledger, today)
             derived_evidence = report.pop("_evidence", [])
         elif task in {"plan", "calendar"}:
             # Direct inputs may supply the same canonical facts without requiring a profile.
@@ -387,8 +396,8 @@ class WealthService:
         else:
             module = importlib.import_module("." + TASK_MODULES[task], __package__)
             report = module.run(task, inputs, context)
-        if task in {"plan", "calendar", "debt_payoff"}:
-            used_ids = set(packet["evidence_ids"] if task != "debt_payoff" else []) | set(derived_evidence)
+        if task in {"plan", "calendar", "debt_payoff"} or task in POLICY_TASKS:
+            used_ids = set(packet["evidence_ids"] if task in {"plan", "calendar"} else []) | set(derived_evidence)
             consumed = [f for f in eligible if f["id"] in used_ids and f["key"] not in inputs]
         elif task == "monitor":
             consumed = eligible  # rules may inspect all facts and decision freshness
@@ -402,6 +411,9 @@ class WealthService:
                                        for f in snapshot["facts"] if f not in eligible]
         if task == "debt_payoff":
             relevant = {f["key"] for f in snapshot["facts"] if f["key"].startswith("liability.")}
+        elif task in POLICY_TASKS:
+            from .policy import POLICY_FACT_KEYS
+            relevant = {f["key"] for f in snapshot["facts"] if f["key"].startswith(POLICY_FACT_KEYS)}
         elif task in {"plan", "calendar"}:
             relevant = set(keys)
         else:
@@ -450,6 +462,22 @@ class WealthService:
         report = situation_module.debt_payoff(liabilities, inputs["monthly_amount"], inputs.get("currency"),
                                               inputs.get("order"), as_of)
         report["_evidence"] = sorted(set(evidence))
+        return report
+
+    def _policy(self, task: str, inputs: dict, client_id: str | None, snapshot: dict, ledger, today: str) -> dict:
+        """policy_draft / policy_check; ``propose=true`` records the draft as a decision for the person."""
+        from . import policy
+        propose = inputs.get("propose", False)
+        if not isinstance(propose, bool):
+            raise ValueError("propose must be true or false")
+        if propose and not client_id:
+            raise ValueError("propose=true needs client_id: the draft becomes the person's decision")
+        if propose and "facts" in inputs:
+            raise ValueError("propose=true drafts from the saved picture; leave out facts")
+        report = policy.run_task(task, inputs, snapshot, ledger, today)
+        if propose:
+            with WealthStore(self.db_path) as store:
+                report["decision"] = policy.propose(store, client_id, report, snapshot["client"]["revision"])
         return report
 
     def client(self, action: str, client_id: str, inputs: dict | None = None) -> dict:
@@ -505,7 +533,13 @@ class WealthService:
     def resolve(self, client_id: str, decision_id: str, status: str,
                 expected_revision: int | None = None) -> dict:
         with WealthStore(self.db_path) as store:
-            return store.set_decision_status(client_id, decision_id, status, expected_revision)
+            decision = store.set_decision_status(client_id, decision_id, status, expected_revision)
+            if status == "accepted":
+                from .policy import on_accepted
+                stored = on_accepted(store, client_id, decision)  # an accepted IPS becomes policy.ips
+                if stored:
+                    decision["policy"] = stored
+            return decision
 
     def forget(self, client_id: str, confirm_client_id: str) -> dict:
         with WealthStore(self.db_path) as store:

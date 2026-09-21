@@ -17,6 +17,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Iterable
 
+from .policy import current as current_policy, summary as policy_summary
 from .situation import build as build_situation, sentences, summaries
 from .situation.model import goal_name
 
@@ -1313,6 +1314,8 @@ def profile_view(service: Any, client_id: str, today: Any = None, language: str 
         "memory": memory,
         "completeness": known,
         "upcoming": upcoming(snapshot, today, labels=fact_labels(sit)),
+        # The accepted investment policy (profile, sleeves with ranges, reserve, review), or None.
+        "policy": policy_summary(current_policy(snapshot, today)),
     }
 
 

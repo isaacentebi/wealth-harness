@@ -380,6 +380,51 @@ CATALOG: dict[str, dict[str, Any]] = {
                                {"id": "cspx", "type": "non_us_domiciled_fund", "value_usd": 400000}],
                     "estimated_deductions_usd": 0},
     },
+    "policy_draft": {
+        "purpose": "Draft the person's Investment Policy Statement from the saved picture: objectives and required "
+                   "return per goal, ability vs willingness to take risk, reserve and goal buckets, a strategic "
+                   "allocation with ranges, constraints, rebalancing bands and review cadence; every number carries "
+                   "its rule. propose=true records it as a decision; the person's accept stores it as policy.ips.",
+        "required": ["client_id (or facts [{key, value}] to draft without a profile)"],
+        "optional": ["propose (true: record the draft as a decision for the person to accept or dismiss)",
+                     "overrides {profile (only stricter), concentration_limit, reserve_months, "
+                     "review_cadence: annual|semiannual|quarterly} for an amendment", "as_of"],
+        "example": {"as_of": "2026-09-21", "facts": [
+            {"key": "client.profile", "value": {"residence": {"country": "MX"}, "birth_year": 1990, "us_person": False}},
+            {"key": "income.salary", "value": {"amount": 60000, "currency": "MXN", "frequency": "monthly", "kind": "salary"}},
+            {"key": "spending.monthly", "value": {"essential": 25000, "total": 35000, "currency": "MXN"}},
+            {"key": "cash.nu", "value": {"amount": 180000, "currency": "MXN", "purpose": "reserve"}},
+            {"key": "goals", "value": [{"id": "retiro", "name": "Retiro", "target_amount": 8000000, "currency": "MXN",
+                                        "target_date": "2055-01-01", "monthly_contribution": 6000}]},
+            {"key": "preference.risk", "value": {"drop_reaction": "hold", "experience": "some"}},
+            {"key": "onboarding", "value": {"steps": {"debts": "done"}, "started_at": "2026-09-01T00:00:00Z"}},
+        ]},
+    },
+    "policy_check": {
+        "purpose": "Check a proposed trade or target allocation against the accepted IPS: allocation bands, "
+                   "single-holding concentration, reserve untouched, near-goal buckets, leverage and exclusions, "
+                   "and (Mexico residents) the preference for non-US-situs funds. pass/warn/violation per rule.",
+        "required": ["proposal {kind: trade, action: buy|sell, symbol, amount, funding?: reserve|surplus|sale|"
+                     "cash:<id>|goal:<id>, asset_class?, sleeve?, domicile?, instrument?, leverage?, tags?} or "
+                     "{kind: allocation, target: {sleeve id: share}}", "client_id with an accepted policy.ips (or ips)"],
+        "optional": ["portfolio {currency, positions: [{symbol, value, asset_class?, sleeve?}]} for band and "
+                     "concentration effects of a trade", "as_of"],
+        "example": {
+            "proposal": {"kind": "trade", "action": "buy", "symbol": "VOO", "amount": 20000, "currency": "MXN",
+                         "funding": "surplus", "tags": []},
+            "portfolio": {"currency": "MXN", "positions": [{"symbol": "CSPX", "value": 300000},
+                                                           {"symbol": "CETES", "value": 175000},
+                                                           {"symbol": "CASH", "value": 25000, "asset_class": "cash"}]},
+            "ips": {"currency": "MXN", "allocation": {"model": "balanced", "sleeves": [
+                {"id": "global_equity", "name": "Global equity", "asset": "equity", "target": 0.6, "min": 0.55, "max": 0.65},
+                {"id": "mx_fixed_income", "name": "Mexican government fixed income", "asset": "fixed_income",
+                 "target": 0.35, "min": 0.3, "max": 0.4},
+                {"id": "cash", "name": "Cash (MXN)", "asset": "cash", "target": 0.05, "min": 0.0375, "max": 0.0625}]},
+                "constraints": {"concentration": {"limit": 0.1}, "leverage": {"allowed": False},
+                                "estate_situs": {"prefer": "non_us_domiciled"}},
+                "liquidity": {"reserve": {"sources": ["nu"]}}},
+        },
+    },
     "ledger": {
         "purpose": "Read the transaction ledger: holdings and lots, household document, statement reconciliation, realized gains, investment income, transfers, exposure groups.",
         "required": ["client_id with a posted ledger (wealth_ingest confirm)"],
