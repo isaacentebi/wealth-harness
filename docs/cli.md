@@ -133,10 +133,12 @@ printf '%s' '{"action":"inspect","client_id":"ana","inputs":{"detail":"history",
 printf '%s' '{"action":"export","client_id":"ana"}' | uv run wealth client > ana-export.json
 ```
 
-Delete one named client (CLI only; the matching ID is the confirmation):
+Delete one named client (CLI only). Run it from an interactive terminal; it asks
+you to type the client ID followed by `DELETE`. Piped or scripted input is
+refused, so an agent with shell access cannot delete a profile:
 
 ```sh
-printf '%s' '{"action":"forget","client_id":"ana","inputs":{"confirm_client_id":"ana"}}' | uv run wealth client
+uv run wealth forget --client ana
 ```
 
 ## Monitoring

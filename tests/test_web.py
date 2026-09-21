@@ -55,8 +55,8 @@ def test_local_http_chat_memory_context_and_request_boundary(tmp_path, monkeypat
 def test_live_search_defaults_on_and_prompt_agrees(tmp_path):
     assert 'web_search="live"' in build_command("sol", tmp_path / "db")
     assert 'web_search="live"' in build_command("sol", tmp_path / "db", web_search=True)
-    assert "Live web search is available" in build_prompt("question", "client", web_search=True)
-    assert "General web search is disabled" in build_prompt("question", "client", web_search=False)
+    assert "Web search: on" in build_prompt("question", "client", web_search=True)
+    assert "Web search: off" in build_prompt("question", "client", web_search=False)
 
 
 def test_reasoning_selection_reaches_model_and_rejects_unknown(tmp_path, monkeypatch):
