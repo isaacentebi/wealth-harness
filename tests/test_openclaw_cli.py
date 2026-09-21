@@ -4,8 +4,6 @@ from __future__ import annotations
 import copy
 import json
 import stat
-import sys
-import types
 from pathlib import Path
 
 import pytest
@@ -109,21 +107,19 @@ def test_numbered_answers_for_each_chip_step():
     assert cli_text.numbered_answer(goals, "1, 2, 3") is None
 
 
-def test_today_is_guarded_without_the_proactive_module(db, capsys, monkeypatch):
-    monkeypatch.setitem(sys.modules, "wealth.proactive", None)  # import fails
-    code, out, err = _cli(capsys, "today", "--client", "me")
-    assert code == cli_text.NOTHING and out == ""
-    assert "not available" in err
-
-
-def test_today_prints_short_lines_from_proactive(db, capsys, monkeypatch):
-    module = types.ModuleType("wealth.proactive")
-    module.today = lambda service, client_id, language=None: [
-        {"text": "Tu tarjeta vence el viernes:\n$4,200."}, "x" * 400, {"other": 1}]
-    monkeypatch.setitem(sys.modules, "wealth.proactive", module)
+def test_today_prints_nothing_when_no_nudge_fires(db, capsys):
     code, out, _ = _cli(capsys, "today", "--client", "me")
+    assert code == cli_text.NOTHING and out == ""
+
+
+def test_today_prints_short_lines_in_the_persons_language(db, capsys, monkeypatch):
+    items = [{"title": {"es": "Llegó tu aguinaldo:\n$42,000", "en": "Your aguinaldo arrived"},
+              "next_step": {"es": "¿Qué hago con él?", "en": "What should I do with it?"}},
+             {"title": {"es": "x" * 400}}, {"other": 1}]
+    monkeypatch.setattr(WealthService, "run", lambda self, task, inputs, client_id=None: {"result": {"today": items}})
+    code, out, _ = _cli(capsys, "today", "--client", "me", "--lang", "es")
     lines = out.splitlines()
-    assert code == 0 and lines[0] == "Tu tarjeta vence el viernes: $4,200."
+    assert code == 0 and lines[0] == "Llegó tu aguinaldo: $42,000 — ¿Qué hago con él?"
     assert len(lines) == 2 and len(lines[1]) == cli_text.MAX_LINE
 
 

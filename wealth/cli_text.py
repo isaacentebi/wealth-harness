@@ -13,7 +13,6 @@ interpret it (stdout is a JSON hint), 4 nothing to send.
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import re
 import sqlite3
@@ -259,28 +258,24 @@ def onboarding_answer(service: WealthService, client_id: str, step: str, *, text
 # ------------------------------------------------------------------ daily nudges
 
 
-def _nudge_line(item: Any) -> str | None:
-    if isinstance(item, Mapping):
-        item = item.get("text") or item.get("line") or item.get("title") or item.get("message")
-    if not isinstance(item, str):
+def _nudge_line(item: Any, lang: str) -> str | None:
+    """One nudge as a short chat line: the title, then the question the person can reply with."""
+    if not isinstance(item, Mapping):
         return None
-    line = " ".join(item.split())
-    return line[:MAX_LINE - 1] + "…" if len(line) > MAX_LINE else line or None
+    pick = lambda value: value.get(lang) or value.get("en") if isinstance(value, Mapping) else value  # noqa: E731
+    title, step = pick(item.get("title")), pick(item.get("next_step"))
+    if not isinstance(title, str) or not title.strip():
+        return None
+    line = " ".join(title.split()) + (f" — {' '.join(step.split())}" if isinstance(step, str) and step.strip() else "")
+    return line[:MAX_LINE - 1] + "…" if len(line) > MAX_LINE else line
 
 
-def today_lines(service: WealthService, client_id: str, lang: str | None = None) -> list[str] | None:
-    """Today's nudges as short lines, or ``None`` when this Wealth has no proactive module."""
-    try:
-        proactive = importlib.import_module("wealth.proactive")
-    except ImportError:
-        return None
-    today = getattr(proactive, "today", None)
-    if not callable(today):
-        return None
-    result = today(service, client_id, language=_lang(service, client_id, lang))
-    if isinstance(result, Mapping):
-        result = result.get("nudges") or result.get("items") or []
-    lines = [line for line in (_nudge_line(item) for item in result or []) if line]
+def today_lines(service: WealthService, client_id: str, lang: str | None = None) -> list[str]:
+    """Today's nudges (at most three) as short lines in the person's language."""
+    language = _lang(service, client_id, lang)
+    report = service.run("today", {}, client_id=client_id)
+    items = (report.get("result") or {}).get("today") or []
+    lines = [line for line in (_nudge_line(item, language) for item in items) if line]
     return lines[:MAX_NUDGES]
 
 
@@ -384,10 +379,6 @@ def main(argv: list[str]) -> int:
             return code
         if args.command == "today":
             lines = today_lines(service, args.client, args.lang)
-            if lines is None:
-                print("Daily nudges are not available in this version of Wealth (wealth.proactive is missing); "
-                      "nothing to send.", file=sys.stderr)
-                return NOTHING
             if not lines:
                 return NOTHING
             print("\n".join(lines))
