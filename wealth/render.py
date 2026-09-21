@@ -953,7 +953,7 @@ def _keys(p: dict, b: dict, bname: str, clusters=None) -> str:
          f"{_upper1(bname)} fell {_bare(bdd)}" if bdd is not None
          else "peak to trough, over the window"),
         ("git-fork", "Separate bets",
-         "\u2014" if bets is None else f"{int(math.floor(float(bets) + 0.5))} of {p.get('n_holdings', '\u2014')}",
+         "\u2014" if bets is None else f"{int(math.floor(float(bets) + 0.5))} of {p.get('n_holdings', '—')}",
          _bets_note(clusters, p.get("n_holdings"))),
         ("activity", "Moves with the market",
          "\u2014" if beta is None else f"{float(beta):.2f}\u00d7",
