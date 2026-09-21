@@ -16,6 +16,10 @@ Open [Wealth chat](http://127.0.0.1:8765). This uses the same client database as
 The page shows working status, source links, retryable errors, and a Low/Medium/High
 reasoning selector. Low is the default; the chosen level applies to the next message. Client facts
 persist across restarts; the visible transcript lasts for the server session.
+The launcher also sets low response verbosity, independently of reasoning effort.
+Ask for a detailed explanation when you want one; this is not a word limit.
+The shared conversation policy is delivered once as developer instructions;
+personal context and the current request remain in the turn prompt.
 The server binds only to localhost and validates request origins and a session
 token. It is a local personal interface, not a hosted multi-user application.
 

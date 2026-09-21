@@ -165,3 +165,36 @@ capabilities described accurately. Unlinked theme notes are marked historical.
 Catalog examples are explicitly fictional; SPY is classified as a fund and its
 missing constituents produce partial coverage. Skill validation, that exposure
 probe, all 355 checks and package build passed.
+
+
+## Conversation refinement (2026-09-21)
+
+The shared policy now asks the assistant to supply analytical expertise, select
+consequential findings, and learn personal context through useful work. Ownership
+overlap, historical co-movement and economic exposure remain distinct. Ambiguous
+amounts still need clarification; they do not block unrelated research. Experience
+is not inferred from wealth or holding count.
+
+The launcher delivers this policy once through Codex developer instructions,
+instead of embedding it in the user message. Native verbosity defaults to low
+independently of the existing reasoning selector. Standalone MCP retains its
+policy. The command regression parses the TOML override and verifies deduplication.
+
+Real Sol/low probes used isolated fictional profiles with web search enabled:
+
+- Mixed portfolio review and Micron valuation: an early low-verbosity attempt
+  remained a long report. Policy relocation and refinement reduced the final
+  probe to 295 words, retaining cash commitments, indirect ownership and valuation
+  uncertainty. It still volunteered risk statistics and used a figurative finance
+  label, so this is an improvement, not reliable conversational compliance.
+- Ambiguous Costco amount: investigated fund overlap and asked a relevant amount
+  clarification without inventing the position size. Neutral tone was imperfect.
+- Explicit expert comparison: preserved a detailed technical response (2,318 words)
+  under developer instructions and low verbosity, before the last synthesis edit.
+
+These are conversational smoke checks, not an independent audit of every live
+market claim or a statistical quality evaluation. Outputs remain in ignored
+private/agent-smoke; no real-client transcript was committed. Full regression
+suite: 355 passed. After the final wording edits, 12 agent/MCP checks passed;
+package build and skill validation passed. Local chat reload preserved the
+conversation, token and reasoning selection, verified through HTTP state.
