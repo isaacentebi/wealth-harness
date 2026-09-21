@@ -63,13 +63,13 @@ def _research_inputs(today: date) -> dict:
         "symbol": "ACME", "as_of": _iso(today), "sources": [source],
         "business_facts": [{"label": "business", "value": "Fictional industrial software", "source_ids": [source["id"]]}],
         "statements": [
-            {"period_end": _iso(today), "currency": "USD", "source_ids": [source["id"]], "metrics": {
+            {"period_end": _iso(today), "period_type": "FY", "currency": "USD", "source_ids": [source["id"]], "metrics": {
                 "revenue": 120, "gross_profit": 72, "operating_income": 18, "net_income": 12,
                 "total_assets": 200, "shareholders_equity": 80, "cash": 20, "total_debt": 50,
                 "ebitda": 25, "current_assets": 60, "current_liabilities": 30,
                 "operating_cash_flow": 24, "capital_expenditure": -6,
             }},
-            {"period_end": _iso(today.replace(year=today.year - 1)), "currency": "USD",
+            {"period_end": _iso(today.replace(year=today.year - 1)), "period_type": "FY", "currency": "USD",
              "source_ids": [source["id"]], "metrics": {"revenue": 100}},
         ],
         "thesis_evidence": {
@@ -130,7 +130,7 @@ def run_demo(db_path: str | Path) -> dict:
             "name": "fictional base", "kind": "dcf_fcff", "currency": "USD", "valuation_date": _iso(today),
             "forecast": [{"period": 1, "free_cash_flow": 10}, {"period": 2, "free_cash_flow": 11}],
             "discount_rate": 0.10, "terminal_growth": 0.02, "net_debt": 20,
-            "shares_outstanding": 10, "current_price": 90, "source_ids": ["fictional-filing"],
+            "shares_outstanding": 10, "current_price": 90, "current_price_currency": "USD", "source_ids": ["fictional-filing"],
         }],
     }, CLIENT_ID)
 
@@ -184,7 +184,7 @@ def run_demo(db_path: str | Path) -> dict:
         },
     }, CLIENT_ID)
     mx_tax = service.run("tax", {
-        "jurisdiction": "MX_ARTICLE_129", "household": _mx_household(today), "as_of": _iso(today),
+        "jurisdiction": "MX_ARTICLE_129", "household": _mx_household(today), "as_of": _iso(today), "sale_date": _iso(today),
         "article_129_sales": [{"lot_id": "mx-lot", "quantity": 100, "proceeds_mxn": 12000,
                                "article_129_adjusted_basis_mxn": 18000,
                                "basis_source": "fictional broker Article 129 statement",
