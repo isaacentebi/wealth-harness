@@ -589,6 +589,73 @@ CATALOG: dict[str, dict[str, Any]] = {
                                    {"name": "cetes", "kind": "mx_fixed_income", "holdings": [{"account_id": "gbm", "value": 200000}]}]},
         },
     },
+    "retirement_mx": {
+        "purpose": "Mexico retirement in real MXN: IMSS regime (Ley 73 if first cotizacion before 1997-07-01), Ley 73 pension "
+                   "(Art. 167 table, cesantia 60-65, 1.11 decree factor, minimum pension) with Modalidad 40 cost, payback and IRR, "
+                   "or the Ley 97 AFORE projection (2020-reform contribution schedule, fees, weeks by year, programmed withdrawal, "
+                   "pension garantizada), voluntary contributions, and the gap to target spending.",
+        "required": ["first_cotizacion_date (or regime: ley73|ley97)", "birth_year (or age, or stored client.profile)", "weeks_cotizadas",
+                     "ley73 {average_daily_salary_mxn | salary_history [{weeks, daily_salary_mxn}] most recent first, dependants {spouse, children_under_16, dependent_parents}}",
+                     "or ley97 {sbc_daily_mxn, afore_balance_mxn, average_career_sbc_daily_mxn}", "target_monthly_spending_mxn"],
+        "optional": ["as_of", "retirement_age (60-65; default 65)", "longevity_ages", "other_monthly_income_mxn",
+                     "ley73.modalidad40 {daily_salary_mxn | salary_uma_multiple, years, start_year, longevity_ages}",
+                     "ley97 {real_return [low, base, high], fee, salary_real_growth, weeks_per_year, voluntary_monthly_mxn, cuota_social_daily_mxn, annuity_real_rate}",
+                     "voluntary {short_term_monthly_mxn, long_term_monthly_mxn, accumulable_income_mxn}",
+                     "parameters {key: {value, source}} (e.g. pension_garantizada_inpc_factor, cuota_social_daily_mxn)"],
+        "notes": "Unverified parameters (INPC update of the pension garantizada, cuota social, other years' salario minimo) are never "
+                 "used; the affected piece is omitted and listed under missing. result.parameters_used carries each source and status.",
+        "example": {"as_of": "2026-09-21", "birth_year": 1966, "first_cotizacion_date": "1990-03-01", "weeks_cotizadas": 1300,
+                    "retirement_age": 65, "target_monthly_spending_mxn": 40000,
+                    "ley73": {"average_daily_salary_mxn": 600, "dependants": {"spouse": True, "children_under_16": 0},
+                              "modalidad40": {"salary_uma_multiple": 10, "years": 5}}},
+        "variants": {
+            "ley97_with_voluntary": {
+                "as_of": "2026-09-21", "birth_year": 1990, "first_cotizacion_date": "2012-01-01", "weeks_cotizadas": 600,
+                "retirement_age": 65, "target_monthly_spending_mxn": 30000,
+                "ley97": {"sbc_daily_mxn": 1000, "afore_balance_mxn": 400000, "average_career_sbc_daily_mxn": 700,
+                          "real_return": [0.02, 0.035, 0.05]},
+                "voluntary": {"short_term_monthly_mxn": 1000, "long_term_monthly_mxn": 2000, "accumulable_income_mxn": 400000},
+                "parameters": {"pension_garantizada_inpc_factor": {"value": 1.33, "source": "fictional example ratio; use INEGI INPC"}}},
+        },
+    },
+    "retirement_us": {
+        "purpose": "US retirement in today's dollars: Social Security claim ages 62-70 from a supplied PIA with breakevens and a "
+                   "spousal note, 2026 contribution limits (401(k), catch-ups, Roth catch-up wage rule, IRA, HSA), RMD age and "
+                   "amount, and withdrawal ordering (taxable-first vs proportional vs bracket-filling Roth conversions) on the "
+                   "federal bracket engine.",
+        "required": ["at least one of social_security {pia_monthly_usd, birth_year}, contributions {tax_year, birth_year, "
+                     "prior_year_fica_wages_usd, hdhp_coverage: none|self|family}, rmd {birth_year, age, prior_year_end_balance_usd}, "
+                     "withdrawals {balances {taxable, taxable_basis, tax_deferred, roth}, annual_spending_usd, start_age, years, "
+                     "filing_status, real_return, birth_year}"],
+        "optional": ["birth_year (top level, shared by sections; or stored client.profile)",
+                     "social_security {real_discount_rate, longevity_ages, spouse {birth_year, own_pia_monthly_usd}}",
+                     "withdrawals {tax_year (bracket table, default 2026), other_ordinary_income_usd, deduction_usd, "
+                     "conversion_target_rate (default 0.12), terminal_rates {tax_deferred, taxable_gain}}",
+                     "parameters {key: {value, source}}"],
+        "example": {"birth_year": 1964,
+                    "social_security": {"pia_monthly_usd": 2400, "spouse": {"birth_year": 1966, "own_pia_monthly_usd": 600}},
+                    "contributions": {"tax_year": 2026, "prior_year_fica_wages_usd": 180000, "hdhp_coverage": "family"},
+                    "rmd": {"age": 62, "prior_year_end_balance_usd": 500000},
+                    "withdrawals": {"balances": {"taxable": 400000, "taxable_basis": 250000, "tax_deferred": 800000, "roth": 150000},
+                                    "annual_spending_usd": 70000, "other_ordinary_income_usd": 0, "start_age": 62, "years": 30,
+                                    "filing_status": "married_filing_jointly", "real_return": 0.03}},
+    },
+    "retirement_readiness": {
+        "purpose": "Retirement readiness in any currency: required nest egg over a safe-withdrawal range, projected savings over "
+                   "a return range, the gap with the extra monthly contribution to close it, and the Monte Carlo probability "
+                   "from the planning income simulator.",
+        "required": ["currency", "current_age (or birth_year / stored client.profile)", "retirement_age", "plan_to_age",
+                     "target_annual_spending (real)", "guaranteed_annual_income (pension, Social Security; 0 if none)",
+                     "current_savings", "annual_contribution", "real_return (number or [low, base, high])"],
+        "optional": ["withdrawal_rates (default [0.03, 0.035, 0.04])",
+                     "return_model (planning schema, e.g. {type: parametric, basis: real, annual_return, annual_volatility}) + annual_inflation",
+                     "simulations (2000)", "seed (7)", "annual_fee"],
+        "example": {"currency": "MXN", "current_age": 45, "retirement_age": 65, "plan_to_age": 95, "target_annual_spending": 480000,
+                    "guaranteed_annual_income": 190000, "current_savings": 1500000, "annual_contribution": 120000,
+                    "real_return": [0.02, 0.035, 0.05],
+                    "return_model": {"type": "parametric", "basis": "real", "annual_return": 0.035, "annual_volatility": 0.1},
+                    "annual_inflation": 0.04, "simulations": 500, "seed": 7},
+    },
     "monitor": {
         "purpose": "Evaluate opt-in review, expiry, drift, goal, threshold, or thesis rules and return only state changes to the caller.",
         "required": ["client_id on wealth_run", "rules or stored monitor.rules"],
