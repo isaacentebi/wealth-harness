@@ -176,6 +176,32 @@ BEGIN SELECT RAISE(ABORT, 'the orders audit trail is append-only'); END""",
 WHEN EXISTS (SELECT 1 FROM clients WHERE id = OLD.client_id)
 BEGIN SELECT RAISE(ABORT, 'the orders audit trail is append-only'); END""",
 )
+# The market-data cache (wealth/prices.py): shared by every client in this database,
+# keyed by provider symbol, series kind and date.  Additive and created on open like
+# ``orders``; the schema version does not change.  A past day's row fetched after that
+# day is final (history is immutable); ``market_fetches`` records which ranges were read.
+_MARKET_SCHEMA = (
+    """CREATE TABLE IF NOT EXISTS market_prices (
+    symbol TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('close','adjclose')),
+    date TEXT NOT NULL,
+    value TEXT NOT NULL,
+    currency TEXT,
+    source TEXT NOT NULL,
+    retrieved_at TEXT NOT NULL,
+    PRIMARY KEY (symbol, kind, date)
+)""",
+    """CREATE TABLE IF NOT EXISTS market_fetches (
+    symbol TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    start TEXT NOT NULL,
+    end TEXT NOT NULL,
+    retrieved_at TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('ok','failed')),
+    detail TEXT
+)""",
+    "CREATE INDEX IF NOT EXISTS market_fetches_symbol ON market_fetches(symbol, kind, retrieved_at)",
+)
 _ORDER_EVENTS = frozenset({"ticket", "checks", "confirm", "blocked", "request", "response", "status",
                            "cancel", "fill_posted", "live_acknowledged", "discarded", "nonce_rejected", "error"})
 _AUXILIARY = frozenset({"embeddings", "monitor", "ingest", "execution"})
@@ -847,6 +873,8 @@ class WealthStore:
             if self._schema_version(tables) == str(SCHEMA_VERSION) and tables >= _TABLES | _LEDGER_TABLES:
                 if not self._has_orders():
                     self._migrate_orders()
+                if not self._has_market():
+                    self._migrate_market()
                 return
             self._db.execute("BEGIN IMMEDIATE")
             try:
@@ -857,6 +885,26 @@ class WealthStore:
                     self._db.execute("ROLLBACK")
                 raise
             self._migrate_orders()
+            self._migrate_market()
+
+    def _has_market(self) -> bool:
+        return self._db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'market_fetches_symbol'"
+        ).fetchone() is not None
+
+    def _migrate_market(self) -> None:
+        """Add the market-data cache tables (idempotent and additive; no version change)."""
+
+        self._db.execute("BEGIN IMMEDIATE")
+        try:
+            if not self._has_market():
+                for statement in _MARKET_SCHEMA:
+                    self._db.execute(statement)
+            self._db.execute("COMMIT")
+        except Exception:
+            if self._db.in_transaction:
+                self._db.execute("ROLLBACK")
+            raise
 
     def _has_orders(self) -> bool:
         return self._db.execute(
@@ -1983,6 +2031,71 @@ class WealthStore:
                     "ledger": self._ledger_rows(client_id, include_batches=True),
                     "orders": self._order_rows(client_id),
                 }
+
+    # ---- market-data cache (shared, not client data; see wealth/prices.py)
+
+    def market_rows(self, symbol: str, kind: str, start: str | None = None,
+                    end: str | None = None) -> list[dict[str, Any]]:
+        """Cached daily values of one provider symbol, oldest first, within [start, end]."""
+        sql = "SELECT * FROM market_prices WHERE symbol = ? AND kind = ?"
+        args: list[Any] = [symbol, kind]
+        if start:
+            sql += " AND date >= ?"
+            args.append(start)
+        if end:
+            sql += " AND date <= ?"
+            args.append(end)
+        with self._lock:
+            self._ensure_open()
+            return [dict(row) for row in self._db.execute(sql + " ORDER BY date", args)]
+
+    def market_fetches(self, symbol: str, kind: str, limit: int = 50) -> list[dict[str, Any]]:
+        """Recent fetch attempts for a symbol, newest first."""
+        with self._lock:
+            self._ensure_open()
+            return [dict(row) for row in self._db.execute(
+                "SELECT * FROM market_fetches WHERE symbol = ? AND kind = ? ORDER BY retrieved_at DESC LIMIT ?",
+                (symbol, kind, int(limit)))]
+
+    def put_market(self, rows: Sequence[Mapping[str, Any]], fetch: Mapping[str, Any]) -> int:
+        """Store fetched rows and log the fetch in one transaction.
+
+        A row for a past day that was already fetched after that day is final and
+        is not overwritten; a row fetched on its own day (an intraday value) is.
+        """
+        with self._lock:
+            self._begin()
+            try:
+                written = 0
+                for row in rows:
+                    cursor = self._db.execute(
+                        "INSERT INTO market_prices(symbol, kind, date, value, currency, source, retrieved_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(symbol, kind, date) DO UPDATE SET "
+                        "value = excluded.value, currency = excluded.currency, source = excluded.source, "
+                        "retrieved_at = excluded.retrieved_at "
+                        "WHERE substr(market_prices.retrieved_at, 1, 10) <= market_prices.date",
+                        (row["symbol"], row["kind"], row["date"], str(row["value"]), row.get("currency"),
+                         row["source"], row["retrieved_at"]))
+                    written += cursor.rowcount
+                self._db.execute(
+                    "INSERT INTO market_fetches(symbol, kind, start, end, retrieved_at, status, detail) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (fetch["symbol"], fetch["kind"], fetch["start"], fetch["end"], fetch["retrieved_at"],
+                     fetch.get("status", "ok"), fetch.get("detail")))
+                self._commit()
+                return written
+            except Exception:
+                self._rollback()
+                raise
+
+    def market_summary(self) -> list[dict[str, Any]]:
+        """One line per cached symbol and kind: rows, first and last date, last retrieval."""
+        with self._lock:
+            self._ensure_open()
+            return [dict(row) for row in self._db.execute(
+                "SELECT symbol, kind, COUNT(*) AS rows, MIN(date) AS first, MAX(date) AS last, "
+                "MAX(retrieved_at) AS retrieved_at, MAX(currency) AS currency "
+                "FROM market_prices GROUP BY symbol, kind ORDER BY symbol, kind")]
 
     def auxiliary(self, client_id: str, namespace: str) -> dict:
         """Read derived state without taking a write lock or creating a row."""

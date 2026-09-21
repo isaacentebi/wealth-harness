@@ -10,6 +10,7 @@ import importlib
 from inspect import signature
 import uuid
 
+from . import prices as prices_module
 from . import situation as situation_module
 from . import views as views_module
 from .situation.schema import SCHEMA, out_of_range
@@ -190,7 +191,8 @@ def current_ledger(ledger: dict | None) -> dict | None:
             "assertions": [a for a in ledger.get("assertions") or [] if a.get("account_id") not in closed]}
 
 
-def build_situation(snapshot: dict, ledger: dict | None, today, *, since_revision: int | None = None) -> dict:
+def build_situation(snapshot: dict, ledger: dict | None, today, *, since_revision: int | None = None,
+                    market: dict | None = None) -> dict:
     """``situation.build`` that one bad fact cannot take down.
 
     Facts with numbers no reader can handle are left out up front; if the
@@ -200,7 +202,7 @@ def build_situation(snapshot: dict, ledger: dict | None, today, *, since_revisio
     clean, invalid = usable_snapshot(snapshot)
     ledger = current_ledger(ledger)
     try:
-        sit = situation_module.build(clean, ledger, today, since_revision=since_revision)
+        sit = situation_module.build(clean, ledger, today, since_revision=since_revision, market=market)
     except Exception:
         bad = []
         for fact in clean.get("facts") or []:
@@ -212,9 +214,43 @@ def build_situation(snapshot: dict, ledger: dict | None, today, *, since_revisio
         if not bad:
             raise
         clean = {**clean, "facts": [f for f in clean["facts"] if f["id"] not in bad]}
-        sit = situation_module.build(clean, ledger, today, since_revision=since_revision)
+        sit = situation_module.build(clean, ledger, today, since_revision=since_revision, market=market)
     sit["invalid_facts"] = invalid
     return sit
+
+
+# Waiting budgets for the network (seconds): a page read uses what is cached past its budget and
+# refreshes in the background; a quarterly review or a trade plan waits longer for complete data.
+SITUATION_PRICE_BUDGET = prices_module.DEFAULT_BUDGET_SECONDS
+REVIEW_PRICE_BUDGET = 20.0
+
+
+def _market_summary(market: dict | None) -> dict | None:
+    if market is None:
+        return None
+    return {"as_of": market.get("as_of"), "offline": market.get("offline"), "missing": market.get("missing") or [],
+            "pending": market.get("pending") or [], "stale_prices": market.get("stale_prices") or []}
+
+
+def _published_rate(reference) -> dict | None:
+    """A single published rate {rate, source} from ``cash_reference_rate`` (a range is not one rate)."""
+    if not isinstance(reference, dict) or not reference.get("source") or reference.get("low") is None:
+        return None
+    if str(reference.get("high", reference["low"])) != str(reference["low"]):
+        return None
+    rate = prices_module._dec(reference["low"])
+    if rate is None:
+        return None
+    unit = str(reference.get("unit") or "decimal")
+    rate = rate / 100 if unit == "percent" else rate / 10000 if unit == "bps" else rate
+    return {"rate": rate, "source": reference["source"]}
+
+
+def _price_sources(rows) -> list[dict]:
+    """Report ``sources`` entries for provider prices: one per source and date."""
+    seen = sorted({(r.get("source"), r.get("date") or r.get("last")) for r in rows if r.get("source")},
+                  key=lambda x: (x[0], x[1] or ""))
+    return [{"title": source, "date": day, "kind": "market_price"} for source, day in seen]
 
 
 def capabilities() -> dict:
@@ -346,8 +382,70 @@ def freshness(facts: list[dict]) -> dict:
 
 
 class WealthService:
-    def __init__(self, db_path: str | Path | None = None):
+    def __init__(self, db_path: str | Path | None = None, prices: "prices_module.PriceProvider | None" = None):
         self.db_path = database_path(db_path)
+        self._prices = prices
+
+    @property
+    def price_provider(self) -> prices_module.PriceProvider:
+        """Market data cached in this database (``WEALTH_OFFLINE=1`` reads the cache only)."""
+        if self._prices is None:
+            self._prices = prices_module.PriceProvider(self.db_path)
+        return self._prices
+
+    def _ledger_market(self, ledger: dict | None, sit: dict, today, budget: float | None) -> dict | None:
+        """Provider quotes for the ledger-only accounts the picture could not value (never raises)."""
+        if not ledger or not sit["net_worth"].get("unvalued_accounts"):
+            return None
+        accounts = [a["id"] for a in sit.get("accounts") or [] if a.get("source") == "ledger"]
+        try:
+            return prices_module.ledger_market(self.price_provider, current_ledger(ledger), today, sit.get("currency"),
+                                               budget=budget, accounts=accounts)
+        except Exception as exc:  # noqa: BLE001 - market data is optional; the picture stands without it
+            return {"prices": {}, "fx": [], "missing": [{"symbol": "*", "reason": f"{type(exc).__name__}: {exc}"}],
+                    "pending": [], "stale_prices": [], "offline": None, "as_of": str(today)}
+
+    def _priced_situation(self, snapshot: dict, ledger: dict | None, today, *, since_revision: int | None = None,
+                          budget: float | None = SITUATION_PRICE_BUDGET) -> dict:
+        """The picture, with ledger-only accounts valued at cached (or briefly fetched) provider prices."""
+        sit = build_situation(snapshot, ledger, today, since_revision=since_revision)
+        market = self._ledger_market(ledger, sit, today, budget)
+        if market is not None:
+            sit = build_situation(snapshot, ledger, today, since_revision=since_revision, market=market)
+            sit["market"] = _market_summary(market)
+        return sit
+
+    def prices(self, action: str = "status", client_id: str | None = None, symbols: list | None = None) -> dict:
+        """Market-data cache: ``status`` (what is cached, how old) or ``refresh`` (fetch now).
+
+        ``refresh`` takes ``symbols`` (strings or {symbol, venue?, currency?}) or, with ``client_id``,
+        what that client's ledger holds plus FX into the reporting currency.
+        """
+        provider = self.price_provider
+        if action == "status":
+            return provider.status()
+        if action != "refresh":
+            raise ValueError("prices action must be status or refresh")
+        if symbols is not None and not isinstance(symbols, list):
+            raise ValueError("symbols must be a list")
+        wanted = list(symbols or [])
+        if client_id:
+            with WealthStore(self.db_path) as store:
+                snapshot = store.snapshot(client_id)
+                ledger = current_ledger(store.ledger(client_id))
+            today = datetime.now(timezone.utc).date()
+            if ledger and ledger.get("entries"):
+                currency = build_situation(snapshot, ledger, today).get("currency")
+                held = {instrument for (_, instrument) in prices_module.held_quantities(ledger, today.isoformat())}
+                wanted += prices_module.instrument_specs(ledger, held)
+                for ccy in sorted({a.get("currency") for a in ledger.get("accounts") or [] if a.get("currency")}
+                                  | {i.get("currency") for i in ledger.get("instruments") or [] if i.get("currency")}):
+                    if currency and ccy != currency:
+                        pair = prices_module.fx_symbol(ccy, currency)
+                        wanted.append({"symbol": pair, "provider_symbol": pair})
+        result = provider.refresh(wanted or None)
+        result["status"] = provider.status()
+        return result
 
     def create(self, client_id: str, display_name: str) -> dict:
         with WealthStore(self.db_path) as store:
@@ -359,8 +457,8 @@ class WealthService:
             snapshot = store.snapshot(client_id)
             ledger = store.ledger(client_id)
             pending = store.contradictions(client_id)
-        sit = build_situation(snapshot, ledger, today or datetime.now(timezone.utc).date(),
-                              since_revision=since_revision)
+        sit = self._priced_situation(snapshot, ledger, today or datetime.now(timezone.utc).date(),
+                                     since_revision=since_revision)
         sit["contradictions"] = pending  # questions waiting for the person, in their own wording
         return sit
 
@@ -597,7 +695,12 @@ class WealthService:
                 store.update_auxiliary(client_id, "monitor", update)
         else:
             module = importlib.import_module("." + TASK_MODULES[task], __package__)
-            report = module.run(task, inputs, context)
+            module_inputs, market = self._task_prices(task, inputs, context, ledger)
+            report = module.run(task, module_inputs, context)
+            if market is not None:
+                report["market_data"] = market
+                if isinstance(report.get("sources"), list):
+                    report["sources"] = report["sources"] + _price_sources(market.get("prices") or [])
         if task in {"plan", "calendar", "debt_payoff"} or task in POLICY_TASKS or task in PROACTIVE_TASKS or task in REVIEW_TASKS or task in GUARDRAIL_TASKS:
             used_ids = set(packet["evidence_ids"] if task in {"plan", "calendar"} else []) | set(derived_evidence)
             consumed = [f for f in eligible if f["id"] in used_ids and f["key"] not in inputs]
@@ -651,6 +754,57 @@ class WealthService:
         # Engine-drawn views of this result the answer may place with [[view:<id>]] (never saved with it).
         report["views"] = views_module.summaries(views_module.views_for(task, report))
         return report
+
+    def _task_prices(self, task: str, inputs: dict, context: dict, ledger) -> tuple[dict, dict | None]:
+        """Default provider prices for ``rebalance`` (ledger holdings) and ``dca`` backtests when none are supplied.
+
+        Returns the inputs the module sees and a ``market`` note (sources with dates, missing,
+        ``stale_prices``), or the inputs unchanged and None.
+        """
+        if "prices" in inputs or "ledger" in inputs:
+            return inputs, None
+        provider = self.price_provider
+        try:
+            if task == "rebalance" and ledger is not None and "household" not in inputs:
+                jc = inputs.get("jurisdiction_context") if isinstance(inputs.get("jurisdiction_context"), dict) else {}
+                as_of = inputs.get("as_of") or jc.get("trade_date")
+                currency = inputs.get("currency") or jc.get("currency")
+                if not as_of or not currency:
+                    return inputs, None
+                market = prices_module.ledger_market(provider, ledger, as_of, currency, budget=REVIEW_PRICE_BUDGET)
+                if market is None or not market["prices"]:
+                    return inputs, market and _market_summary(market)
+                context["ledger"] = prices_module.with_fx(ledger, market["fx"])
+                series = {key: [{"date": q["date"], "price": q["price"]}] for key, q in market["prices"].items()}
+                note = _market_summary(market)
+                note["prices"] = [{"instrument_id": k, "source": q["source"], "date": q["date"], "stale": q["stale"]}
+                                  for k, q in sorted(market["prices"].items())]
+                return {**inputs, "prices": series}, note
+            if task == "dca" and inputs.get("view") == "backtest" and inputs.get("start") and inputs.get("end"):
+                from . import dca as dca_module
+                plan = dca_module._plan_from(inputs, context)
+                legs = [leg.get("instrument_id") for leg in (plan or {}).get("legs") or [] if isinstance(leg, dict)]
+                if not legs:
+                    return inputs, None
+                known = {i["id"]: i for i in (ledger or {}).get("instruments") or []}
+                specs = [prices_module.instrument_specs({"instruments": [known[i]]})[0] if i in known
+                         else {"id": i, "symbol": i} for i in dict.fromkeys(legs)]
+                start = datetime.fromisoformat(str(inputs["start"])[:10]).date()
+                got = self.price_provider.history(specs, start - timedelta(days=prices_module.LATEST_LOOKBACK_DAYS),
+                                                  inputs["end"], adjusted=True, budget=REVIEW_PRICE_BUDGET)
+                note = {"prices": [{"instrument_id": k, "source": s["source"], "first": s["first"], "last": s["last"],
+                                    "stale": s["stale"]} for k, s in got["series"].items()],
+                        "missing": got["missing"], "offline": got["offline"], "pending": got["pending"],
+                        "stale_prices": [{"symbol": k, "date": s["last"], "source": s["source"]}
+                                         for k, s in got["series"].items() if s["stale"]],
+                        "assumptions": ["Provider prices are adjusted closes (dividends reinvested)."]}
+                if not got["series"]:
+                    return inputs, note
+                return {**inputs, "prices": {k: s["points"] for k, s in got["series"].items()}}, note
+        except Exception as exc:  # noqa: BLE001 - without provider prices the task asks for them as before
+            return inputs, {"prices": [], "missing": [{"symbol": "*", "reason": f"{type(exc).__name__}: {exc}"}],
+                            "stale_prices": []}
+        return inputs, None
 
     def _debt_payoff(self, inputs: dict, snapshot: dict, ledger, today: str) -> dict:
         """Payoff dates for a monthly debt budget: stored liabilities unless ``liabilities`` is supplied."""
@@ -719,6 +873,11 @@ class WealthService:
         else:
             as_of, _ = client_today(snapshot, {"timezone": inputs["timezone"]} if inputs.get("timezone") else {})
         sit = situation_module.build(snapshot, ledger, as_of)
+        market = self._ledger_market(ledger, sit, as_of, SITUATION_PRICE_BUDGET)
+        if market is not None:
+            # Ledger-only accounts valued at provider prices, so harvest, drift and concentration see them.
+            sit = situation_module.build(snapshot, ledger, as_of, market=market)
+            snapshot, sit = prices_module.repriced_snapshot(snapshot, sit)
         options = {"jurisdiction": inputs.get("jurisdiction"), "timezone": inputs.get("timezone")}
         run = proactive.today if task == "today" else proactive.weekly
         state: dict = {}
@@ -741,8 +900,11 @@ class WealthService:
                     state = store.auxiliary(client_id, "monitor").get(PROACTIVE_STATE) or {}
             result = run(sit, ledger, snapshot, as_of, state=state, **options)
         result = proactive.public(result)
+        if market is not None:
+            result["stale_prices"] = sit.get("stale_prices") or []
         return {"status": "ready", "result": result, "missing": [], "warnings": [],
-                "sources": [{"title": "Wealth proactive rules (wealth/proactive.py; docs/scope.md sections 2-3)"}],
+                "sources": [{"title": "Wealth proactive rules (wealth/proactive.py; docs/scope.md sections 2-3)"}]
+                + _price_sources(sit.get("prices") or []),
                 "assumptions": ["Triggers read only known data; a trigger with missing inputs is listed under "
                                 "result.unknown and does not fire.",
                                 "Calendar dates are statutory defaults; weekends, holidays and SAT/IRS relief can move them."],
@@ -799,7 +961,91 @@ class WealthService:
                 keys = sorted({f["key"] for f in snapshot["facts"]
                                if max(str(f.get("recorded_at") or "")[:10], str(f.get("valid_from") or "")) >= start})
                 history = {key: store.history(client_id, key) for key in keys}
-        return review.run_task(task, inputs, snapshot, ledger, today, fact_history=history)
+        market = None
+        if ledger is not None and "ledger" not in inputs and "facts" not in inputs:
+            inputs, ledger, market = self._review_market(task, inputs, snapshot, ledger, today)
+        report = review.run_task(task, inputs, snapshot, ledger, today, fact_history=history)
+        if market is not None and isinstance(report.get("result"), dict) and report["result"]:
+            report["result"]["market_data"] = market
+            report["sources"] = (list(report.get("sources") or []) + _price_sources(market["prices"])
+                                 + _price_sources(market["proxies"]))
+        return report
+
+    def _review_market(self, task: str, inputs: dict, snapshot: dict, ledger: dict, today: str):
+        """Fill prices, FX and the IPS benchmark from the provider where the caller supplied none.
+
+        Returns ``(inputs, ledger, market)``; ``market`` lists every provider source used (with dates),
+        the benchmark proxies, what stayed missing and ``stale_prices``.
+        """
+        from datetime import date as _date
+
+        from . import policy
+        if task == "fee_audit" and "holdings" in inputs:
+            return inputs, ledger, None
+        try:
+            if task == "quarterly_review":
+                start = _date.fromisoformat(inputs["period_start"]) - timedelta(days=1)
+                end = _date.fromisoformat(inputs["period_end"])
+            else:
+                end = start = _date.fromisoformat(str(inputs.get("as_of") or today)[:10])
+        except (KeyError, TypeError, ValueError):
+            return inputs, ledger, None  # the review reports the bad or missing period itself
+        if not ledger.get("entries"):
+            return inputs, ledger, None
+        currency = inputs.get("currency")
+        if currency is None:
+            try:
+                currency = build_situation(snapshot, ledger, end).get("currency")
+            except Exception:  # noqa: BLE001
+                currency = None
+        if currency is None:
+            currencies = sorted({a["currency"] for a in ledger.get("accounts") or []})
+            currency = currencies[0] if len(currencies) == 1 else None
+        window = start - timedelta(days=prices_module.LATEST_LOOKBACK_DAYS)
+        provider, inputs = self.price_provider, dict(inputs)
+        market: dict = {"currency": currency, "prices": [], "proxies": [], "benchmarks": None, "missing": [],
+                        "stale_prices": []}
+        try:
+            if "prices" not in inputs:
+                got = prices_module.ledger_series(provider, ledger, window, end, budget=REVIEW_PRICE_BUDGET)
+                if got["prices"]:
+                    inputs["prices"] = got["prices"]
+                market["prices"] = got["sources"]
+                market["missing"] += got["missing"]
+                market["stale_prices"] = [
+                    {"symbol": r["instrument_id"], "date": r["last"], "source": r["source"]} for r in got["sources"]
+                    if (end - _date.fromisoformat(r["last"])).days > prices_module.STALE_AFTER_DAYS]
+            if currency:
+                currencies = ({a.get("currency") for a in ledger.get("accounts") or []}
+                              | {i.get("currency") for i in ledger.get("instruments") or []})
+                rows, missing = prices_module.fx_rows(provider, currencies, currency, window, end,
+                                                      budget=REVIEW_PRICE_BUDGET)
+                ledger = prices_module.with_fx(ledger, rows)
+                market["missing"] += missing
+                pairs: dict[tuple, dict] = {}
+                for row in rows:
+                    pairs[(row["base"], row["quote"])] = row
+                market["prices"] = market["prices"] + [
+                    {"instrument_id": f"{b}/{q}", "source": r["source"], "last": r["date"]} for (b, q), r in pairs.items()]
+            if task == "quarterly_review" and "benchmarks" not in inputs and currency:
+                ips = inputs.get("ips")
+                if ips is None and snapshot.get("facts"):
+                    ips = policy.current(snapshot, end.isoformat())
+                bench = prices_module.benchmarks(provider, ips, currency, start, end,
+                                                 cetes_rate=_published_rate((inputs.get("fees") or {})
+                                                                            .get("cash_reference_rate")),
+                                                 budget=REVIEW_PRICE_BUDGET)
+                if bench["benchmarks"]:
+                    inputs["benchmarks"] = bench["benchmarks"]
+                    market["benchmarks"] = {
+                        group: {key: {"name": spec["name"]} for key, spec in specs.items()}
+                        for group, specs in bench["benchmarks"].items()}
+                market["proxies"] = bench["proxies"]
+                market["missing"] += bench["missing"]
+        except Exception as exc:  # noqa: BLE001 - market data is optional; the review reports what is missing
+            market["missing"].append({"symbol": "*", "reason": f"{type(exc).__name__}: {exc}"})
+        market["offline"] = provider._offline()
+        return inputs, ledger, market
 
     def _guardrail(self, task: str, inputs: dict, snapshot: dict, ledger, today: str) -> dict:
         """Guardrail and protection tasks read the canonical picture (or inline ``facts``) and never write."""
@@ -1329,7 +1575,7 @@ def _ledger_summary(receipt: dict | None, mapping: dict) -> dict:
 
 # No operation here submits, confirms or cancels an order: that happens only on the web confirmation route.
 OPERATIONS = ("context", "run", "remember", "recall", "decision", "ingest", "client", "forget",
-              "history", "contradictions", "resolve_contradiction", "execution_status", "order_status")
+              "history", "contradictions", "resolve_contradiction", "execution_status", "order_status", "prices")
 
 
 def dispatch(operation: str, arguments: dict, db_path: str | Path | None = None) -> dict:

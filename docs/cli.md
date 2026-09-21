@@ -67,6 +67,7 @@ prints JSON; `--db` overrides `WEALTH_DB`. Errors go to stderr as
 | `resolve_contradiction` | `wealth_resolve_contradiction` | The person's answer |
 | `execution_status` | none | Trading mode, whether keys exist, limits, today's usage |
 | `order_status` | none | Order tickets and line states; `refresh` reads the broker |
+| `prices` | none | Market-data cache: `status`, or `refresh` now |
 | `forget` | none | Delete a profile; interactive terminal only |
 | `watch` | none | Foreground monitor polling |
 | `onboarding`, `today`, `view` | none | Text-channel helpers ([openclaw.md](openclaw.md)) |
@@ -172,6 +173,41 @@ printf '%s' '{"task":"order_ticket","client_id":"ana","inputs":{"source":"user_r
 printf '%s' '{"client_id":"ana"}' | uv run wealth execution_status
 printf '%s' '{"client_id":"ana"}' | uv run wealth order_status
 ```
+
+**prices** manages the market-data cache ([wealth/prices.py](../wealth/prices.py)).
+`status` lists each cached symbol with its last date and age; `refresh` fetches
+the latest closes now, for `symbols` or for what a client's ledger holds plus
+the FX into the reporting currency. Prices come from Yahoo Finance through
+yfinance and are cached in the Wealth database: 15 minutes for a latest price
+while markets are open (weekdays 13:30-21:00 UTC), 12 hours otherwise; a past
+day fetched after it closed is final. `WEALTH_OFFLINE=1`, or a failed fetch,
+serves the cache labelled `cache_fallback`, or leaves the price missing; a
+price is never zero or guessed. A price more than five days older than the
+date it values is listed in `stale_prices`.
+
+```sh
+printf '%s' '{"action":"status"}' | uv run wealth prices
+printf '%s' '{"action":"refresh","client_id":"ana"}' | uv run wealth prices
+printf '%s' '{"action":"refresh","symbols":["AAPL *","NAFTRAC ISHRS",{"symbol":"VOO","venue":"us"}]}' | uv run wealth prices
+```
+
+Symbols map to Yahoo: SIC and BMV listings take `.MX` with the series appended
+(`AAPL *` -> `AAPL.MX`, `WALMEX *` -> `WALMEX.MX`, `NAFTRAC ISHRS` ->
+`NAFTRAC.MX`, `GFNORTE O` -> `GFNORTEO.MX`); US share classes take a dash
+(`BRK.B` -> `BRK-B`); FX is `USDMXN=X`. CETES, UDIBONOS and other Mexican
+government bonds are not on Yahoo: they use a statement or trade price
+(accrued at a stated rate when one is known) or stay missing.
+
+With a provider in place, the picture values ledger-only accounts (every
+holding priced and the cash anchored by an opening or statement balance), the
+You page overview and `today`/`weekly` see them, `rebalance` and `dca`
+backtests get prices when none are supplied, and `quarterly_review` gets
+period prices, FX and an IPS benchmark built from labelled proxies: global
+equity is the ACWI ETF (total return, converted from USD at the daily Yahoo
+rate), US bonds AGG, USD cash BIL, the 60/40 reference ACWI with BNDW, and
+CETES accrue at the published 28-day rate only when one is supplied (otherwise
+that benchmark is missing). Each derived number names its price source and
+date in `sources` or `market_data`.
 
 **watch** evaluates the client's opt-in monitor rules and prints only changed
 events; it runs in the foreground until stopped (`--interval` seconds, default
