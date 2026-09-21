@@ -88,13 +88,16 @@ def _calendar_schedule(value) -> bool:
 def fact_contract() -> dict:
     today = datetime.now(timezone.utc).date()
     return {
-        "fields": ["key", "value", "source", "confidence", "expires_on", "merge"],
-        "source": {"kind": "user|document|web|tool|inference", "ref": "actual source reference (URL for web)",
-                   "observed_on": "YYYY-MM-DD"},
+        "fields": ["key", "value", "source", "confidence", "expires_on", "merge", "valid_from"],
+        "source": {"kind": "user|document|web|tool|inference|pattern",
+                   "ref": "actual source reference (URL for web)", "observed_on": "YYYY-MM-DD"},
         "source_kinds": "user: only what the person said themselves in this conversation. document: a file or "
                         "statement they supplied. web: a page you read (ref is its URL). tool: a Wealth result. "
-                        "inference: your own interpretation. Document/web facts for goals, profile, preferences, "
-                        "constraints or tax profile are saved as inferred until the person confirms them.",
+                        "inference: your own interpretation. pattern: something noticed in their transactions "
+                        "(e.g. pattern.<id> for a recurring transfer); always inferred and listed apart from what "
+                        "they told you until they confirm it (then save it with source.kind=user). Document/web "
+                        "facts for goals, profile, preferences, constraints or tax profile are saved as inferred "
+                        "until the person confirms them.",
         "confidence": "confirmed: the person explicitly confirmed it | reported (default): the person stated it "
                       "or a document shows it | inferred: an interpretation. Only a user source may be confirmed.",
         "keys": ["client.profile", "income.<id>", "spending.monthly", "cash.<id>", "liability.<id>",
@@ -118,6 +121,14 @@ def fact_contract() -> dict:
         "partial_values": "Incomplete canonical objects and goal entries may be remembered; omit unknown fields. "
                           "Calculations remain unavailable until required fields are present. Never use zero for "
                           "an unknown amount.",
+        "valid_from": "When the value became true in the world (YYYY-MM-DD; default source.observed_on), e.g. "
+                      "'my salary went up in March' -> valid_from 2026-03-01. The previous value is closed at that "
+                      "date and kept in the history (wealth_inspect detail=history).",
+        "update_policy": "Document, web, inference and pattern sources never overwrite what the person stated or "
+                         "confirmed: the write is held and returned in the receipt's needs_user. Ask the person "
+                         "with its question and save their answer with wealth_resolve_contradiction; never pick a "
+                         "side silently. An inferred value is replaced by better evidence without expected_revision.",
+        "forget": "A null value forgets a key: it leaves a tombstone in the history and is no longer used.",
         "never_store": "Government IDs (SSN, RFC, CURP), account or card numbers, street addresses, passwords, "
                        "tokens or other credentials.",
     }
@@ -181,13 +192,36 @@ class WealthService:
         with WealthStore(self.db_path) as store:
             snapshot = store.snapshot(client_id)
             ledger = store.ledger(client_id)
-        return situation_module.build(snapshot, ledger, today or datetime.now(timezone.utc).date(),
-                                      since_revision=since_revision)
+            pending = store.contradictions(client_id)
+        sit = situation_module.build(snapshot, ledger, today or datetime.now(timezone.utc).date(),
+                                     since_revision=since_revision)
+        sit["contradictions"] = pending  # questions waiting for the person, in their own wording
+        return sit
 
     def remember(self, client_id: str, facts: list[dict], expected_revision: int | None = None,
                  request_id: str | None = None) -> dict:
         with WealthStore(self.db_path) as store:
             return store.remember(client_id, facts, expected_revision, request_id)
+
+    def contradictions(self, client_id: str) -> dict:
+        """Pending contradictions between what the person said and newer evidence."""
+        with WealthStore(self.db_path) as store:
+            pending = store.contradictions(client_id)
+        return {"client_id": client_id, "contradictions": pending,
+                "next_step": ("Ask the person each question as worded; never pick a side silently. Save the answer "
+                              "with resolve_contradiction (keep | use_new | changed, valid_from for changed).")
+                if pending else None}
+
+    def resolve_contradiction(self, client_id: str, contradiction_id: str, choice: str,
+                              valid_from: str | None = None) -> dict:
+        """Apply the person's answer: keep (theirs stands), use_new (theirs was wrong), changed (both, in turn)."""
+        with WealthStore(self.db_path) as store:
+            return store.resolve_contradiction(client_id, contradiction_id, choice, valid_from)
+
+    def history(self, client_id: str, key: str) -> dict:
+        """One key's timeline: "MXN 85,000 since 2026-03; MXN 78,000 from 2025-01 to 2026-03"."""
+        with WealthStore(self.db_path) as store:
+            return {"client_id": client_id, **store.timeline(client_id, key)}
 
     def prepare(self, client_id: str, intent: str = "overview") -> dict:
         """Workflow packet (plan, exposure or income) from remembered facts; used by the examples."""
@@ -455,8 +489,12 @@ class WealthService:
             if detail == "export":
                 return store.export_client(client_id)
             if detail == "history" and key:
-                return {"client_id": client_id, "key": key, "history": store.history(client_id, key)}
-            raise ValueError("detail must be current, export, or history with a key")
+                timeline = store.timeline(client_id, key)
+                return {"client_id": client_id, "key": key, "history": store.history(client_id, key),
+                        "timeline": timeline["entries"], "text": timeline["text"]}
+            if detail == "contradictions":
+                return {"client_id": client_id, "contradictions": store.contradictions(client_id)}
+            raise ValueError("detail must be current, export, contradictions, or history with a key")
 
     def propose(self, client_id: str, title: str, rationale: str, expected_revision: int,
                 evidence_ids: list[str], alternatives: list | None = None) -> dict:
@@ -615,8 +653,9 @@ class WealthService:
             "status": "saved",
             "result": {
                 "summary": " ".join(summary),
-                "saved": {"keys": [f["key"] for f in facts], "client_revision": saved["client"]["revision"],
+                "saved": {"keys": [w["key"] for w in saved["written"]], "client_revision": saved["client"]["revision"],
                           "expires_on": packet["result"]["expires_on"]},
+                "needs_user": saved["needs_user"],
                 "ledger": ledger_view,
                 "statement_prices": mapping["prices"],
                 "picture_after": situation_module.picture_delta(before, after, after["profile"].get("language")),
@@ -727,7 +766,8 @@ def _ledger_summary(receipt: dict | None, mapping: dict) -> dict:
             "not_posted": mapping["not_posted"], "reconciliation": recon, "plain": text}
 
 
-OPERATIONS = ("context", "run", "remember", "recall", "decision", "ingest", "client", "forget")
+OPERATIONS = ("context", "run", "remember", "recall", "decision", "ingest", "client", "forget",
+              "history", "contradictions", "resolve_contradiction")
 
 
 def dispatch(operation: str, arguments: dict, db_path: str | Path | None = None) -> dict:
