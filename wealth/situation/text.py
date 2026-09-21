@@ -68,7 +68,7 @@ _B = {
            "debt": "Deuda {n}: {b} al {r}; pago {p}/mes; {when}", "paid": "liquida {d}", "missing": "falta {x}",
            "never": "no se liquida con ese pago", "interest": ", intereses {x}",
            "goal": "Meta {n}: {detail} ({st})", "per_month": "{x}/mes", "target": "{x} para {d}",
-           "inv": "Inversiones: {x}", "top": "mayor exposición {u} {w} ({s})",
+           "inv": "Inversiones: {x}", "pos": "Posiciones: {x}", "units": "títulos", "top": "mayor exposición {u} {w} ({s})",
            "diff": "Diferencia {inst}: dijiste {s}; estado {x} ({d})",
            "thread": "Pendiente [{k}, {d}]: {t}", "k_advice": "consejo", "k_question": "pregunta", "k_commitment": "compromiso",
            "stale": "Por reconfirmar: {x}", "inferred": "Sin confirmar: {x}", "unknown": "Desconocido: {x}",
@@ -88,7 +88,7 @@ _B = {
            "debt": "Debt {n}: {b} at {r}; payment {p}/month; {when}", "paid": "paid off {d}", "missing": "missing {x}",
            "never": "never at this payment", "interest": ", interest {x}",
            "goal": "Goal {n}: {detail} ({st})", "per_month": "{x}/month", "target": "{x} by {d}",
-           "inv": "Investments: {x}", "top": "largest exposure {u} {w} ({s})",
+           "inv": "Investments: {x}", "pos": "Positions: {x}", "units": "units", "top": "largest exposure {u} {w} ({s})",
            "diff": "Difference {inst}: stated {s}; statement {x} ({d})",
            "thread": "Open [{k}, {d}]: {t}", "k_advice": "advice", "k_question": "question", "k_commitment": "commitment",
            "stale": "Reconfirm: {x}", "inferred": "Unconfirmed: {x}", "unknown": "Unknown: {x}",
@@ -205,6 +205,14 @@ def brief(sit: Mapping[str, Any], language: str | None = None) -> str:
         investing.append(line.replace(" ()", ""))
     if investing:
         lines.append((7, t["inv"].format(x="; ".join(investing[:4]))))
+    positions = []
+    for row in holdings.get("largest") or []:
+        amount = f"{fmt(row['quantity'])} {t['units']} " if row.get("quantity") is not None else ""
+        place = f" ({row['institution']})" if row.get("institution") else ""
+        positions.append(f"{row['symbol']} {amount}{fmt(row['value'])}{place}")
+    if positions:
+        # The saved holdings themselves, so the adviser never asks what is already known.
+        lines.append((7, t["pos"].format(x="; ".join(positions))))
     for diff in sit["differences"][:1]:
         if diff.get("statement"):
             lines.append((8, t["diff"].format(inst=diff["institution"] or "", s=f"{fmt(diff['stated']['amount'])} {diff['stated']['currency']}",

@@ -249,7 +249,7 @@ def test_statement_insights_and_picture_after_confirm(tmp_path, monkeypatch):
     view = profile_view(service, "ana")
     assert view["overview"]["differences"][0]["institution"] == "GBM"
     labels = [e["label"] for g in view["groups"] for e in g["entries"]]
-    assert "GBM · brokerage (MXN)" in labels and not any("gbm-4" in label for label in labels)
+    assert "GBM (MXN)" in labels and not any("gbm-4" in label for label in labels)
     assert not any("gbm-4" in item["label"] for item in view["upcoming"])
 
 
@@ -308,3 +308,14 @@ def test_older_flat_shapes_feed_income_retirement_assets_and_debt_rates(tmp_path
     assert sit["cash_flow"]["income"] == 22000
     assert sit["net_worth"]["illiquid"] == 310000 and sit["net_worth"]["liquid"] == 0
     assert sit["liabilities"][0]["annual_rate"] == 0.72
+
+
+def test_statement_insight_names_holdings_that_changed_since_saved():
+    before = {"holdings": {"saved": [{"ticker": "VOO", "symbol": "VOO (SIC)", "quantity": 7, "value": 80000,
+                                      "institution": "GBM"}]}, "investments": [], "cash": []}
+    result = {"household": {"currency": "MXN", "accounts": [{"id": "g", "institution": "GBM", "currency": "MXN"}],
+                            "positions": [{"account_id": "g", "symbol": "SIC:VOO", "quantity": 5, "value": 54250,
+                                           "currency": "MXN"}]}}
+    change = next(i for i in situation.statement_insights(result, before) if i["kind"] == "position_change")
+    assert change["symbol"] == "VOO" and change["saved"]["quantity"] == 7 and change["statement"]["quantity"] == 5
+    assert "fewer" in change["text"]

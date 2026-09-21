@@ -11,7 +11,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any, Mapping
 
-from .model import CASH_DRAG_SHARE, CONCENTRATION_SHARE, D, num, underlying_of
+from .model import CASH_DRAG_SHARE, CONCENTRATION_SHARE, D, num, ticker_of, underlying_of
 from .text import fmt
 
 
@@ -81,6 +81,32 @@ def statement_insights(result: Mapping[str, Any], before: Mapping[str, Any] | No
                             "statement_value": num(total) if known else None,
                             "difference": num(total - stated) if known and stated is not None else None,
                             "text": text + "."})
+
+    # 1b. Holdings that changed since they were saved: the difference is the question worth asking.
+    if before:
+        saved = {}
+        for row in (before.get("holdings") or {}).get("saved") or []:
+            saved.setdefault(row["ticker"], []).append(row)
+        for position in positions:
+            if _is_cash(position):
+                continue
+            ticker = ticker_of(position.get("symbol") or position.get("instrument_id"))
+            institution = (accounts.get(position.get("account_id")) or {}).get("institution") or ""
+            candidates = [r for r in saved.get(ticker, [])
+                          if not r.get("institution") or not institution
+                          or r["institution"].strip().lower() == institution.strip().lower()]
+            quantity = D(position.get("quantity"))
+            for row in candidates[:1]:
+                had = D(row.get("quantity"))
+                if had is None or quantity is None or had == quantity:
+                    continue
+                out.append({"kind": "position_change", "symbol": ticker, "institution": institution or None,
+                            "saved": {"quantity": num(had), "value": row.get("value")},
+                            "statement": {"quantity": num(quantity), "value": num(D(position.get("value"))),
+                                          "currency": position.get("currency")},
+                            "text": f"{ticker}: {fmt(num(had))} units were saved; the statement shows {fmt(num(quantity))} "
+                                    f"({'more' if quantity > had else 'fewer'}). Ask whether they bought or sold since, "
+                                    "or which figure is current."})
 
     # 2. A single holding over 25% of its account.
     for account_id, account in sorted(accounts.items()):

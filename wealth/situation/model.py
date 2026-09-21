@@ -100,8 +100,14 @@ def _as_date(value: Any) -> date | None:
     return None
 
 
+_ACRONYMS = {"gbm": "GBM", "ibkr": "IBKR", "bbva": "BBVA", "hsbc": "HSBC", "afore": "AFORE", "ppr": "PPR",
+             "cetes": "CETES", "ira": "IRA", "hsa": "HSA", "401k": "401(k)", "sic": "SIC", "nu": "Nu"}
+_ACCOUNT_TYPES = {"taxable": "", "bank": "", "brokerage": "", "government_securities": "", "retirement": ""}
+
+
 def humanize(text: str) -> str:
     words = re.sub(r"[._-]+", " ", str(text)).strip()
+    words = " ".join(_ACRONYMS.get(w.lower(), w) for w in words.split())
     return words[:1].upper() + words[1:] if words else str(text)
 
 
@@ -569,9 +575,11 @@ def _liability_view(item: dict, fx: _FX, currency: str | None, today: date) -> d
 
 def _account_label(account: dict, duplicates: set[tuple]) -> str:
     institution = account.get("institution") or humanize(account.get("id") or "account")
-    kind = account.get("type")
+    raw_kind = account.get("type")
+    # The institution is the name people use; a generic account type adds nothing to it.
+    kind = None if raw_kind in _ACCOUNT_TYPES else raw_kind
     label = f"{institution} · {kind}" if kind else institution
-    if (institution, kind) in duplicates and account.get("currency"):
+    if (institution, raw_kind) in duplicates and account.get("currency"):
         label += f" ({account['currency']})"
     return label
 
@@ -666,6 +674,13 @@ def _stated_investments(facts: _Facts) -> list[dict]:
     return []
 
 
+def ticker_of(symbol: Any) -> str | None:
+    """'VOO (SIC)', 'SIC:VOO', 'VOO *' and 'voo' are the same holding."""
+    if not isinstance(symbol, str) or not symbol.strip():
+        return None
+    return symbol.upper().split(":")[-1].split()[0].split(".")[0].rstrip("*") or None
+
+
 def underlying_of(symbol: Any) -> str | None:
     if not isinstance(symbol, str):
         return None
@@ -682,7 +697,8 @@ def _holdings(accounts: list[dict], fx: _FX, currency: str | None) -> dict:
             value = fx.convert(D(position.get("value")), position.get("currency"), currency)
             symbol = position.get("symbol") or position.get("instrument_id")
             asset_class = position.get("asset_class") or ("cash" if str(position.get("instrument_id", "")).startswith("CASH:") else None)
-            rows.append({"account": account["id"], "symbol": symbol, "value": value,
+            rows.append({"account": account["id"], "institution": account.get("institution"), "symbol": symbol,
+                         "value": value, "quantity": num(D(position.get("quantity"))),
                          "underlying": underlying_of(position.get("underlying_symbol") or symbol) or symbol,
                          "venue": position.get("venue"), "domicile": position.get("issuer_domicile"),
                          "asset_class": asset_class})
@@ -708,6 +724,13 @@ def _holdings(accounts: list[dict], fx: _FX, currency: str | None) -> dict:
                      for g in top if len(g["symbols"]) > 1],
         "venue": split("venue"), "domicile": split("domicile"),
         "positions": len(rows),
+        "saved": [{"ticker": ticker_of(r["symbol"]), "symbol": r["symbol"], "quantity": r["quantity"],
+                   "value": num(r["value"]), "institution": r["institution"]}
+                  for r in rows if r["asset_class"] != "cash" and ticker_of(r["symbol"])],
+        "largest": [{"symbol": r["symbol"], "value": num(r["value"]), "quantity": r["quantity"],
+                     "institution": r["institution"]}
+                    for r in sorted((r for r in known if r["asset_class"] != "cash"),
+                                    key=lambda r: (-r["value"], str(r["symbol"])))[:6]],
     }
 
 
