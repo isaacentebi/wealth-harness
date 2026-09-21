@@ -25,7 +25,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from . import agent as _agent
 from . import onboarding as _onboarding
 from .agent import (
-    AgentError, REASONING_LEVELS, TurnControl, TurnEvent, profile_state, resolve_model, situation_brief,
+    AgentError, REASONING_LEVELS, TurnControl, TurnEvent, profile_state, remember_exchange, resolve_model,
+    situation_brief,
     run_turn, seed_demo, stream_turn,
 )
 from .service import WealthService, database_path, upload_dir
@@ -63,6 +64,7 @@ MAX_MESSAGE_CHARS = 12_000
 MAX_JSON_BYTES = 40_000
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_ATTACHMENTS = 5
+MEMORY_WAIT_SECONDS = 180
 UPLOAD_TYPES = {
     "application/pdf": ".pdf",
     "text/csv": ".csv",
@@ -71,6 +73,8 @@ UPLOAD_TYPES = {
     "image/webp": ".webp",
 }
 _UPLOAD_ID = re.compile(r"^[0-9a-f]{32}$")
+_HISTORY_PATH = re.compile(r"^/api/profile/fact/([^/]{1,200})/history$")
+_CONTRADICTION_PATH = re.compile(r"^/api/profile/contradictions/([A-Za-z0-9_-]{1,80})$")
 _FACT_PATH = re.compile(r"^/api/facts/([^/]{1,200})$")
 _TURN_PATH = re.compile(r"^/api/turns/([0-9a-f]{16})(/events|/cancel)?$")
 
@@ -237,6 +241,7 @@ class Chat:
         self.thread_id: str | None = None
         self.brief_revision: int | None = None  # the brief lists changes since this revision
         self.turn: Turn | None = None
+        self.memory_thread: threading.Thread | None = None
         self.uploads = Uploads(upload_dir(client_id, db))
         service = WealthService(db)
         try:
@@ -320,7 +325,7 @@ class Chat:
                 "csrf_token": self.token, "messages": list(self.messages),
                 "onboarding": onboarding,
                 "starters": list(STARTERS) if not self.messages and not onboarding["active"] else [],
-                "turn": turn.summary() if turn and turn.status in {"running", "error", "cancelled"} else None,
+                "turn": turn.summary() if turn and turn.status in {"running", "error", "cancelled"} and turn.answer is None else None,
                 "uploads": {"max_bytes": MAX_UPLOAD_BYTES, "types": list(UPLOAD_TYPES),
                             "max_files": MAX_ATTACHMENTS},
                 "capabilities": {"python_analytics": True, "persistent_memory": True,
@@ -342,9 +347,15 @@ class Chat:
         if run_turn is not _agent.run_turn:
             # A substituted blocking turn (tests, local stubs) has no event stream.
             kwargs.pop("control", None)
+            kwargs.pop("defer_memory", None)
             yield TurnEvent("answer", run_turn(message, **kwargs))
             return
         yield from stream_turn(message, **kwargs)
+
+    @property
+    def defers_memory(self) -> bool:
+        """Save after answering only with the real Codex runtime; substituted turns save in-turn."""
+        return run_turn is _agent.run_turn and stream_turn is _agent.stream_turn
 
     def start(self, message, reasoning=None, attachments=(), timezone_name=None, internal=False) -> Turn:
         reasoning = self.reasoning if reasoning is None else reasoning
@@ -374,6 +385,11 @@ class Chat:
 
     def _work(self, turn: Turn, reasoning: str, timezone_name: str | None) -> None:
         status = "error"
+        pending = self.memory_thread
+        if pending is not None:
+            pending.join(timeout=MEMORY_WAIT_SECONDS)  # the next turn starts from what the last one saved
+        defer = self.defers_memory
+        handed_off = False
         try:
             state = profile_state(self.db, self.client_id)
             brief, revision = situation_brief(self.db, self.client_id, turn.message, self.brief_revision)
@@ -385,7 +401,7 @@ class Chat:
                 profile_empty=not any(state.values()), profile=state, brief=brief,
                 thread_id=self.thread_id, timezone_name=timezone_name,
                 attachments=[{k: a[k] for k in ("name", "type", "size", "path")} for a in turn.attachments],
-                control=turn.control, ephemeral=self.ephemeral,
+                control=turn.control, ephemeral=self.ephemeral, defer_memory=defer,
             ):
                 if event.type == "thread":
                     self.thread_id = str(event.data.get("thread_id") or "") or self.thread_id
@@ -418,6 +434,12 @@ class Chat:
             turn.answer = answer
             turn.emit("answer", user=None if turn.internal else user, message=reply)
             status = "done"
+            if defer and not turn.internal:
+                # Saving runs after the reply is on screen; the turn closes when it finishes.
+                self.memory_thread = threading.Thread(
+                    target=self._remember, args=(turn, reply, brief), daemon=True, name=f"wealth-memory-{turn.id}")
+                self.memory_thread.start()
+                handed_off = True
         except AgentError as exc:
             status = "cancelled" if exc.kind == "cancelled" else "error"
             self._fail(turn, exc, exc.kind, exc.detail)
@@ -427,8 +449,24 @@ class Chat:
             print(f"wealth-chat: turn failed with {type(exc).__name__}", file=sys.stderr)
             self._fail(turn, exc, "other", "")
         finally:
-            turn.finish(status)
+            if not handed_off:
+                turn.finish(status)
             self.lock.release()
+
+    def _remember(self, turn: Turn, reply: dict[str, Any], brief: str | None) -> None:
+        try:
+            keys = remember_exchange(turn.message, turn.answer or "", client_id=self.client_id, db_path=self.db,
+                                     model=self.model, brief=brief, control=turn.control)
+            items = [self._memory_item(k) for k in keys]
+            if items:
+                turn.memory.extend(items)
+                reply["memory"] = list(turn.memory)
+                turn.emit("memory", items=list(turn.memory), message_id=reply["id"])
+        except Exception as exc:  # noqa: BLE001 - a failed save must not break the conversation
+            print(f"wealth-chat: memory step failed with {type(exc).__name__}", file=sys.stderr)
+            turn.emit("memory_error", message_id=reply["id"])
+        finally:
+            turn.finish("done")
 
     @staticmethod
     def _fail(turn: Turn, exc: BaseException, kind: str, detail: str) -> None:
@@ -587,7 +625,14 @@ def create_server(chat, port=8765, host="127.0.0.1"):
                 if url.path == "/profile":
                     return self.respond(200, Path(__file__).with_name("profile.html").read_bytes(), "text/html")
                 if url.path == "/api/profile":
-                    return self.respond(200, profile_view(WealthService(chat.db), chat.client_id))
+                    lang = (parse_qs(url.query).get("lang") or [None])[0]
+                    return self.respond(200, profile_view(WealthService(chat.db), chat.client_id,
+                                                          language=lang if lang in {"en", "es"} else None))
+                if url.path == "/api/profile/contradictions":
+                    return self.respond(200, WealthService(chat.db).contradictions(chat.client_id))
+                history = _HISTORY_PATH.match(url.path)
+                if history:
+                    return self.respond(200, WealthService(chat.db).history(chat.client_id, unquote(history.group(1))))
                 fact = _FACT_PATH.match(url.path)
                 if fact:
                     return self.respond(200, fact_detail(WealthService(chat.db), chat.client_id, unquote(fact.group(1))))
@@ -651,6 +696,15 @@ def create_server(chat, port=8765, host="127.0.0.1"):
                     return self.respond(200, chat.state())
                 if path == "/api/upload":
                     return self.upload()
+                resolve = _CONTRADICTION_PATH.match(path)
+                if resolve:
+                    body = self.read_json()
+                    if body.get("choice") not in {"keep", "use_new", "changed"}:
+                        raise ValueError("Choose keep, use_new or changed.")
+                    service = WealthService(chat.db)
+                    service.resolve_contradiction(chat.client_id, resolve.group(1), body["choice"],
+                                                  valid_from=body.get("valid_from"))
+                    return self.respond(200, {"profile": profile_view(service, chat.client_id)})
                 if path == "/api/profile/form":
                     return self.profile_write(self.read_json(), form=True)
                 fact = _FACT_PATH.match(path)

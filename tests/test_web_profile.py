@@ -74,3 +74,30 @@ def test_profile_writes_need_the_token_and_a_known_fact(tmp_path):
         with pytest.raises(HTTPError) as unknown:
             urlopen(Request(base + "/api/facts/nope"), timeout=10)
         assert unknown.value.code == 422
+
+
+def test_contradictions_and_history_endpoints(tmp_path):
+    db = tmp_path / "w.sqlite3"
+    _seed(db)
+    service = WealthService(db)
+    today = date.today().isoformat()
+    service.remember("personal", [{"key": "cash.nu", "value": {"amount": 150000, "currency": "MXN", "institution": "Nu"},
+                                   "source": {"kind": "user", "ref": "chat", "observed_on": today}}])
+    receipt = service.remember("personal", [{"key": "cash.nu", "value": {"amount": 160000, "currency": "MXN", "institution": "Nu"},
+                                             "source": {"kind": "document", "ref": "nu.pdf", "observed_on": today},
+                                             "confidence": "reported"}])
+    assert receipt["needs_user"]
+    chat = web.Chat(db, "personal")
+    with serving(chat) as (base, _):
+        listed = json.loads(_get(base, "/api/profile/contradictions").read())
+        items = listed.get("contradictions") or listed.get("items") or []
+        assert len(items) == 1
+        cid = items[0]["id"]
+        with _post(base, f"/api/profile/contradictions/{cid}", chat.token, b'{"choice": "keep"}') as response:
+            assert "profile" in json.loads(response.read())
+        after = json.loads(_get(base, "/api/profile/contradictions").read())
+        assert not (after.get("contradictions") or after.get("items"))
+        timeline = json.loads(_get(base, "/api/profile/fact/cash.nu/history").read())
+        assert timeline["key"] == "cash.nu" and timeline["entries"]
+        with _get(base, "/api/profile?lang=es") as response:
+            assert json.loads(response.read())

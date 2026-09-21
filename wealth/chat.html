@@ -2474,6 +2474,7 @@
     function finish(turn) {
       clearPending(turn.pendingNode);
       if (current === turn) current = null;
+      if (current) return;  // a newer turn already started while this one was saving
       setBusy(false);
       setupFollowsTurn();
       if (!coarse.matches && (document.activeElement === document.body || document.activeElement === send)) input.focus();
@@ -2488,14 +2489,21 @@
         if (!turn.stopping) setStep(turn.pendingNode, event.text);
       } else if (event.type === 'memory') {
         turn.memoryEvent = event;
-        if (turn.pendingNode && !turn.stopping) setPresence(turn.pendingNode._mark, 'remembering');
+        if (turn.answerNode) {
+          // Saved after the answer was shown: add the quiet line to that answer.
+          const remembered = memoryPhrase(event.items, turn.lang || LANG, { event });
+          turn.answerNode.querySelector('p.memory')?.remove();
+          if (remembered) turn.answerNode.append(tagLang(el('p', 'memory', remembered), turn.lang || LANG));
+        } else if (turn.pendingNode && !turn.stopping) setPresence(turn.pendingNode._mark, 'remembering');
       } else if (event.type === 'answer') {
         clearPending(turn.pendingNode);
         turn.pendingNode = null;
         const m = event.message || {};
-        assistantMessage(m.content || '', { memory: m.memory, memoryEvent: turn.memoryEvent, message: m, lang: turn.lang, announce: true });
+        turn.answerNode = assistantMessage(m.content || '', { memory: m.memory, memoryEvent: turn.memoryEvent, message: m, lang: turn.lang, announce: true });
         turn.answered = true;
         follow();
+        // The answer is the end of the wait; saving continues quietly in the background.
+        if (current === turn) { current = null; setBusy(false); setupFollowsTurn(); }
       } else if (event.type === 'error') {
         clearPending(turn.pendingNode);
         turn.pendingNode = null;

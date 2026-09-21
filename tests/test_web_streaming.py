@@ -307,3 +307,33 @@ def test_turn_language_follows_the_conversation():
         "[languageOf('¿Cuánto me cuesta mi cuenta de GBM?'), languageOf('Revisa mi asignación'),"
         " languageOf('How much does my GBM account cost?'), languageOf('ok'), languageOf('GBM 4321')]")
     assert result == ["es", "es", "en", "en", "en"]
+
+
+def test_answer_arrives_before_the_deferred_memory_step(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_stream(message, **kwargs):
+        assert kwargs["defer_memory"] is True
+        calls.append(("turn", message))
+        yield TurnEvent("answer", f"Answer to {message}")
+
+    def fake_remember(message, answer, **kwargs):
+        time.sleep(0.3)
+        calls.append(("remember", message))
+        return ["income.salary"]
+
+    monkeypatch.setattr(agent, "stream_turn", fake_stream)
+    monkeypatch.setattr(web, "stream_turn", fake_stream)
+    monkeypatch.setattr(web, "remember_exchange", fake_remember)
+    chat = web.Chat(tmp_path / "w.sqlite3", "personal")
+    with serving(chat) as (base, _):
+        first = json.loads(_post(base, "/api/turns", chat.token, json.dumps({"message": "gano 85 mil"}).encode()).read())
+        events = _events(base, first["turn"]["id"], chat.token)
+        types = [e["type"] for e in events]
+        assert types.index("answer") < types.index("memory") < types.index("done")
+        memory = next(e for e in events if e["type"] == "memory")
+        assert memory["items"] == [{"key": "income.salary"}] and memory["message_id"]
+        second = json.loads(_post(base, "/api/turns", chat.token, json.dumps({"message": "y ahora?"}).encode()).read())
+        _events(base, second["turn"]["id"], chat.token)
+    assert calls == [("turn", "gano 85 mil"), ("remember", "gano 85 mil"), ("turn", "y ahora?"), ("remember", "y ahora?")]
+    assert chat.messages[1]["memory"] == [{"key": "income.salary"}]
