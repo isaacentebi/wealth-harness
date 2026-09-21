@@ -62,7 +62,7 @@ and a model judge. A live run spends Codex quota and uses a temporary database
 per scenario:
 
 ```sh
-uv run python -m evals.run --scenarios all --model sol --judge codex
+uv run python -m evals.run --scenarios all --judge codex
 ```
 
 `--replay` rescores saved transcripts and `--compare` runs a pairwise A/B; see

@@ -9,8 +9,10 @@ and Luna; it does not implement an OpenRouter chat client or extract OAuth token
 ```sh
 uv sync
 codex login
-uv run wealth-chat --client my-profile --model sol
+uv run wealth-chat --client my-profile
 ```
+
+Wealth uses the model in your Codex config (`~/.codex/config.toml`), so a Codex model change moves Wealth too. Pass `--model sol`, `--model luna` or a full model ID to override it.
 
 Open **http://127.0.0.1:8765/**. `--model` defaults to `sol` and `--client` to
 `personal`. Use `--model luna` for Luna. The page streams
@@ -69,7 +71,7 @@ To test onboarding from zero, stop the running chat with Ctrl+C and choose a
 **new, unused database path**:
 
 ```sh
-uv run wealth-chat --client test --model sol --db private/onboarding-test-01.sqlite3
+uv run wealth-chat --client test --db private/onboarding-test-01.sqlite3
 ```
 
 Reload the browser after restarting. Reusing that database resumes its memory;
@@ -79,8 +81,8 @@ Never commit a personal database or exported conversation.
 ## Terminal and fictional demo
 
 ```sh
-uv run wealth-agent --client my-profile --model sol
-uv run wealth-agent --demo --model sol
+uv run wealth-agent --client my-profile
+uv run wealth-agent --demo
 ```
 
 The fictional demo starts with $200,000 in SPY and $100,000 cash. A $24,000

@@ -39,6 +39,8 @@ from .store import (
 
 
 MODEL_ALIASES = {"sol": "gpt-5.6-sol", "luna": "gpt-5.6-luna"}
+DEFAULT_MODEL = "default"  # the model the user configured for Codex; one global change migrates Wealth too
+FALLBACK_MODEL = "gpt-5.6-sol"
 DEMO_CLIENT_ID = "fictional-demo"
 MAX_HISTORY_MESSAGES = 6
 MAX_HISTORY_CHARS = 12_000
@@ -152,7 +154,22 @@ def _toml(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-def resolve_model(value: str) -> str:
+def configured_codex_model() -> str | None:
+    """The model in the user's Codex config (Wealth runs Codex with --ignore-user-config, so it reads it here)."""
+    import tomllib
+
+    home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+    try:
+        config = tomllib.loads((home / "config.toml").read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    model = config.get("model")
+    return model if isinstance(model, str) and model.strip() else None
+
+
+def resolve_model(value: str | None) -> str:
+    if not value or value.lower() == DEFAULT_MODEL:
+        return configured_codex_model() or FALLBACK_MODEL
     return MODEL_ALIASES.get(value.lower(), value)
 
 
@@ -947,7 +964,7 @@ def remember_exchange(
     *,
     client_id: str,
     db_path: str | Path,
-    model: str = "sol",
+    model: str = DEFAULT_MODEL,
     brief: str | None = None,
     timeout: float = 180,
     control: TurnControl | None = None,
@@ -981,7 +998,7 @@ def stream_turn(
     *,
     client_id: str,
     db_path: str | Path,
-    model: str = "sol",
+    model: str = DEFAULT_MODEL,
     history: Iterable[tuple[str, str]] = (),
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     profile_empty: bool | None = None,
@@ -1184,7 +1201,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model",
-        default="sol",
+        default=DEFAULT_MODEL,
         help="sol, luna, or a full Codex model ID (default: sol)",
     )
     parser.add_argument("--client", help="stable Wealth client identifier")

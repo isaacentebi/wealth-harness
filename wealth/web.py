@@ -287,7 +287,7 @@ def _public_attachment(item: dict[str, Any]) -> dict[str, Any]:
 
 
 class Chat:
-    def __init__(self, db, client_id, model="sol", web_search=True, ephemeral=False):
+    def __init__(self, db, client_id, model=_agent.DEFAULT_MODEL, web_search=True, ephemeral=False):
         self.db, self.client_id, self.model = db, client_id, model
         self.web_search = web_search
         self.ephemeral = ephemeral
@@ -985,7 +985,8 @@ def create_server(chat, port=8765, host="127.0.0.1"):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Local Wealth browser chat")
     parser.add_argument("--client", default="personal")
-    parser.add_argument("--model", default="sol")
+    parser.add_argument("--model", default=_agent.DEFAULT_MODEL,
+                        help="Codex model: default (your Codex config), sol, luna or a full model ID")
     parser.add_argument("--db")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--host", choices=("127.0.0.1", "::1"), default="127.0.0.1",

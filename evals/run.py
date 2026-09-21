@@ -397,7 +397,7 @@ def parser() -> argparse.ArgumentParser:
     mode.add_argument("--list", action="store_true", help="list scenarios")
     p.add_argument("--scenarios", default="all")
     p.add_argument("--scenario-file", default=str(scenario_lib.SCENARIOS_PATH))
-    p.add_argument("--model", default="sol", help="agent model: sol, luna or a full Codex model ID")
+    p.add_argument("--model", default="default", help="agent model: default (your Codex config), sol, luna or a full Codex model ID")
     p.add_argument("--reasoning", default="low", choices=agent.REASONING_LEVELS)
     p.add_argument("--judge", default="none", help="none | codex | codex:<model> | cmd:<command>")
     p.add_argument("--judge-reasoning", default="medium", choices=agent.REASONING_LEVELS)
