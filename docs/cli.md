@@ -5,25 +5,24 @@ See [agent setup](agent.md) for interactive chat.
 
 ## Surface
 
-| MCP tool | What it does |
-| --- | --- |
-| `wealth_context` | Discover tasks without a client, or retrieve a compact intent/query-specific client packet |
-| `wealth_remember` | Atomically record sourced facts, corrections or `merge` patches; returns a compact receipt |
-| `wealth_run` | Run one catalog task, optionally against client context and optionally save its validated result |
-| `wealth_recall` | Retrieve bounded evidence by query; optional semantic vectors must be supplied and identified by the host |
-| `wealth_decision` | Propose, accept, or dismiss an evidence-bound decision; acceptance is not execution |
-| `wealth_inspect` | Read-only: current facts (optionally filtered by `key`/`keys`), one key's `history`, or a full `export` |
-| `wealth_client` | Create a client or attach a host-provided vector index entry |
+| MCP tool | CLI | What it does |
+| --- | --- | --- |
+| `wealth_context` | `context` | Task schemas without a client; with one, the facts relevant to a task |
+| `wealth_remember` | `remember` | Atomically record sourced facts, corrections or `merge` patches; returns a receipt |
+| `wealth_run` | `run` | Run one catalog task, optionally with client facts and ledger; optionally save the result |
+| `wealth_recall` | `recall` | Search all remembered facts; optional host-supplied vectors |
+| `wealth_decision` | `decision` | Propose, accept, or dismiss an evidence-bound decision; acceptance is not execution |
+| `wealth_ingest` | `ingest` | Statement, image-text, export or chat facts into a reconciled proposal; `confirm` saves it |
+| `wealth_inspect` | `client` action `inspect`/`export` | Current facts (`key`/`keys`), one key's `history`, or a full `export` |
+| `wealth_client` | `client` action `create`/`index` | Create the profile or attach a host-provided vector |
+| none | `forget`, `client` action `forget` | Delete a profile; interactive terminal only |
+| none | `watch` | Foreground polling of one client's monitor rules |
 
 `wealth_context`, `wealth_recall` and `wealth_inspect` are annotated read-only.
-No MCP tool is destructive: deleting a client is CLI-only (`client` action
-`forget`), so a model cannot erase a profile without the person running it.
-
-The CLI uses the same names without `wealth_`: `context`, `remember`, `run`,
-`recall`, `decision`, and `client` (whose `inspect`/`export` actions correspond
-to `wealth_inspect`). Existing compatibility aliases remain
-available. Commands accept one JSON object from `--input request.json` or stdin;
-`--db` overrides `WEALTH_DB`.
+No MCP tool is destructive. Every CLI command reads one JSON object from
+`--input request.json` or stdin; `--db` overrides `WEALTH_DB`. Errors name the
+offending field and the expected inputs; a stale revision error reports the
+current revision.
 
 Compound operations use a small action envelope:
 
@@ -31,13 +30,31 @@ Compound operations use a small action envelope:
 | --- | --- | --- |
 | `decision` | `propose` | `title`, `rationale`, `expected_revision`, `evidence_ids`, optional `alternatives` |
 | `decision` | `accept` / `dismiss` | `decision_id`, optional `expected_revision` |
+| `ingest` | `file` | `path` (name or path inside the upload directory), optional `owner_id`, `currency`, `as_of`, `preset`, `aliases`, `tolerance`, `source_text` |
+| `ingest` | `extraction` | `extraction_id`, `payload` (the filled `extraction_request.schema`) |
+| `ingest` | `chat` | `items` (each with `quote`, the person's words), optional `as_of`, `currency` |
+| `ingest` | `confirm` | `proposal_id`, optional `acknowledge_discrepancies`, `expires_on`; only after the person's yes |
+| `ingest` | `confirm_duplicates` | `proposal_id`, `entry_ids` of held lines the person says are separate |
+| `ingest` | `diff` | `proposal_id`, optional `previous_proposal_id` |
 | `client` | `create` | `display_name` |
 | `client` | `inspect` | optional `detail: current|history|export`; `key` or `keys` filters current facts; `key` is required for history |
 | `client` | `export` | none; full private history including superseded facts and decision events |
+| `client` | `index` | `fact_id`, host-supplied `embedding`, exact `model` identifier |
 | `client` | `forget` | `confirm_client_id` matching the requested client (CLI only) |
 
-Errors name the offending field and the expected inputs. A stale revision error
-reports the current revision.
+## Ingestion
+
+`ingest` reads files only from the client's upload directory:
+`WEALTH_UPLOAD_DIR/<client>` when set, otherwise `<db dir>/uploads/<client>`, the
+directory the browser chat saves attachments to. Proposals are held server-side
+by `proposal_id`; `confirm` saves the held proposal (never one sent by the
+caller) as `account.<id>`, `liability.<id>` and `income.<id>` facts and posts
+its accounts, holdings, transactions, balance checks and FX to the ledger
+(batch `ingest:<proposal_id>`). An account new to the ledger gets opening
+balances derived from the statement; an account already there gets only new
+lines, and its closing figures become balance checks. Lines resembling another
+statement's are held until `confirm_duplicates`. The confirm result includes
+`statement_prices` for `run` task `ledger` view `household`.
 
 ## Facts
 
@@ -45,13 +62,14 @@ A fact has `key`, `value`, `source` (`kind`, `ref`, `observed_on`), optional
 `confidence` (default `reported`), optional `expires_on` and optional `merge`.
 
 - `source.kind`: `user` for what the person said, `document` for a supplied file,
-  `web` for a page (`ref` is the URL), `tool` for a Wealth result, `inference`
-  for an interpretation. Goals, profile, preferences, constraints and tax
-  profile from `document`/`web` are stored as `inferred` until the person
-  confirms them.
+  `web` for a page (`ref` is the URL), `connector` for an account aggregator,
+  `tool` for a Wealth result, `inference` for an interpretation. Goals, profile,
+  preferences, constraints and tax profile from `document`/`web`/`connector` are
+  stored as `inferred` until the person confirms them.
 - `expires_on` defaults to `observed_on` plus the review horizon for the key
-  (`store.REVIEW_DAYS`: 30 days for holdings and balances, 90 for plan
-  resources, income schedules and research, 180 for theses, 365 otherwise).
+  (`store.REVIEW_DAYS`: 30 days for holdings, balances, `account.*` and
+  `liability.*`, 90 for plan resources, `income.*` and research, 180 for
+  theses, 365 otherwise).
   Past-review facts remain in recall and context, marked stale, and are
   excluded from calculations and decisions.
 - Without `expected_revision`, a write may add new keys or apply `merge: true`
@@ -62,7 +80,6 @@ A fact has `key`, `value`, `source` (`kind`, `ref`, `observed_on`), optional
 
 `remember` returns `client`, `written` (key, id, confidence, expiry, source
 kind), `write_result` and `warnings`; use `inspect` to read values.
-| `client` | `index` | `fact_id`, host-supplied `embedding`, exact `model` identifier |
 
 ## A client journey from the CLI
 

@@ -101,10 +101,10 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = True) -
         intent: str = "overview",
         query: str = "",
     ) -> dict[str, Any]:
-        """Omit client_id for task schemas; include it for personal recall instead.
+        """Without client_id: task schemas (intent=overview lists all, or one exact task name).
 
-        intent is an exact task name (e.g. plan, exposure, analyze, research,
-        income, tax), not a natural-language request. Use overview to list tasks.
+        With client_id: the facts relevant to that task, marked fresh or stale.
+        intent is a task name such as plan, exposure, tax or spending, not free text.
         """
         return service.context(client_id=client_id, intent=intent, query=query)
 
@@ -132,7 +132,11 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = True) -
         save_as: str | None = None,
         expires_on: str | None = None,
     ) -> dict[str, Any]:
-        """Run deterministic analysis; optional saving or monitoring makes this a write tool."""
+        """Run one catalog task (schemas: wealth_context without client_id).
+
+        client_id adds remembered facts and the ledger; inputs override them.
+        save_as (analysis.<name>, research.<symbol>, or household for import) needs expires_on.
+        """
         return service.run(
             task=task,
             inputs=inputs,
@@ -150,7 +154,7 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = True) -
         embedding_model: str | None = None,
         include_stale: bool = False,
     ) -> dict[str, Any]:
-        """Recall bounded evidence by keyword and optional host-supplied vector; stale facts are marked."""
+        """Search all remembered facts by keyword (optionally a host vector); stale facts are marked."""
         return service.recall(
             client_id=client_id,
             query=query,
@@ -173,6 +177,24 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = True) -
         """
         return service.decision(action=action, client_id=client_id, inputs=inputs)
 
+    @tool(annotations=WRITE)
+    def wealth_ingest(
+        client_id: str,
+        action: Literal["file", "extraction", "chat", "confirm", "confirm_duplicates", "diff"],
+        inputs: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Turn an upload or stated balances into a reconciled proposal; save only on the person's yes.
+
+        file: path (name or path inside the upload dir), optional owner_id, currency, as_of, source_text (image text).
+        extraction: extraction_id, payload (extraction_request.schema filled from its page text only).
+        chat: items [{kind, label, amount, currency, ..., quote: the person's own words}], optional as_of, currency.
+        confirm: proposal_id, acknowledge_discrepancies? — call ONLY after the person explicitly says yes.
+          Saves the stored proposal and posts it to the ledger.
+        confirm_duplicates: proposal_id, entry_ids (held lines the person says are separate transactions).
+        diff: proposal_id, previous_proposal_id? — changes since the last confirmed statement.
+        """
+        return service.ingest(client_id=client_id, action=action, inputs=inputs)
+
     @tool(annotations=READ)
     def wealth_inspect(
         client_id: str,
@@ -180,7 +202,7 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = True) -
         keys: list[str] | None = None,
         detail: Literal["current", "history", "export"] = "current",
     ) -> dict[str, Any]:
-        """Read full current facts (optionally only key/keys), one key's history, or a full export."""
+        """Read full current facts (key/keys filter), one key's history, or a full export (only on request)."""
         return service.inspect(client_id, detail=detail, key=key, keys=keys)
 
     @tool(annotations=WRITE)
@@ -189,7 +211,7 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = True) -
         client_id: str,
         inputs: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """create inputs: display_name. index inputs: fact_id, embedding, model."""
+        """create: inputs.display_name (once, at setup). index: inputs.fact_id, embedding, model."""
         return service.client(action=action, client_id=client_id, inputs=inputs)
 
     return MCPServer(
@@ -204,6 +226,8 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = True) -
             "actually confirmed the fact. Use wealth_run for deterministic calculations; "
             "a ready result is not a suitability judgment. Decisions are not orders. "
             "Monitoring runs only when explicitly called and sends no external notifications. "
+            "wealth_ingest action=confirm saves a stored proposal; call it only after the person "
+            "explicitly says yes to the summary you showed. "
             "Exports contain sensitive history and should be fetched only when requested. "
             "Deleting a profile is not available here; the person runs `wealth client` forget "
             "themselves.\n"

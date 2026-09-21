@@ -23,7 +23,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 SCHEMA_VERSION = 2
 _CONFIDENCES = frozenset({"confirmed", "reported", "inferred"})
-_SOURCE_KINDS = frozenset({"user", "document", "web", "tool", "inference"})
+_SOURCE_KINDS = frozenset({"user", "document", "web", "tool", "inference", "connector"})
 _DECISION_STATUSES = frozenset({"accepted", "dismissed"})
 _TABLES = frozenset(
     {"metadata", "clients", "facts", "batches", "decisions", "decision_events", "auxiliary"}
@@ -123,8 +123,9 @@ DUPLICATE_SIMILARITY = 0.6
 # its observation. The horizon is a review deadline, not a prediction.
 REVIEW_DAYS: tuple[tuple[str, int], ...] = (
     ("portfolio.snapshot", 30), ("household", 30), ("account.", 30), ("lot.", 30),
+    ("liability.", 30),
     ("analysis.", 30), ("plan.resources", 90), ("income.schedule", 90),
-    ("planning.", 90), ("research.", 90), ("thesis.", 180),
+    ("planning.", 90), ("research.", 90), ("income.", 90), ("thesis.", 180),
 )
 DEFAULT_REVIEW_DAYS = 365  # client.profile, goals, preference.*, constraint.*, tax.*, other
 # Facts that set financial policy; document/web sources cannot establish them.
@@ -716,7 +717,7 @@ class WealthStore:
         if kind == "inference" and confidence != "inferred":
             raise ValidationError(f"{key}: an inference source must carry inferred confidence")
         warnings = []
-        if kind in {"document", "web"} and _is_policy_key(key) and confidence != "inferred":
+        if kind in {"document", "web", "connector"} and _is_policy_key(key) and confidence != "inferred":
             confidence = "inferred"
             warnings.append(
                 f"{key} came from a {kind} source, so it was saved as inferred; ask the "
@@ -1077,7 +1078,7 @@ class WealthStore:
         """Read derived state without taking a write lock or creating a row."""
         client_id = _required_text(client_id, "client_id")
         namespace = _required_text(namespace, "namespace")
-        if namespace not in {"embeddings", "monitor"}:
+        if namespace not in {"embeddings", "monitor", "ingest"}:
             raise ValidationError("unknown auxiliary namespace")
         with self._lock:
             with self._read_transaction():
@@ -1093,7 +1094,7 @@ class WealthStore:
         """Serialize derived-state read/modify/write across processes."""
         client_id = _required_text(client_id, "client_id")
         namespace = _required_text(namespace, "namespace")
-        if namespace not in {"embeddings", "monitor"}:
+        if namespace not in {"embeddings", "monitor", "ingest"}:
             raise ValidationError("unknown auxiliary namespace")
         with self._lock:
             self._begin()

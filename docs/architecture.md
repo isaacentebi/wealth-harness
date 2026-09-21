@@ -6,8 +6,12 @@ records, arithmetic, dates, and decision state.
 
 ```mermaid
 flowchart LR
-    Host[Existing assistant] --> API[Six tools / JSON CLI]
+    Host[Existing assistant] --> API[Eight tools / JSON CLI]
     API --> Memory[SQLite evidence and decisions]
+    API --> Ingest[Statement ingestion]
+    Ingest -->|confirmed| Memory
+    Ingest -->|confirmed| Ledger[Transaction ledger]
+    Ledger --> Financial
     API --> Financial[Financial workflows]
     Memory --> Financial
     Financial --> Report[Result, sources, coverage, assumptions]
@@ -18,24 +22,43 @@ flowchart LR
 
 ## Small public surface
 
-`context`, `remember`, `run`, `recall`, `decision`, `client` are the public
-operations; the CLI also retains compatibility aliases. [The task catalog](../wealth/catalog.py) documents calculation inputs.
-MCP and CLI share [one service boundary](../wealth/service.py).
+Eight MCP tools: `wealth_context`, `wealth_remember`, `wealth_run`,
+`wealth_recall`, `wealth_decision`, `wealth_ingest`, `wealth_inspect`,
+`wealth_client`. The CLI exposes the same operations (`context`, `remember`,
+`run`, `recall`, `decision`, `ingest`, `client`) plus the person-only `forget`
+and the foreground `watch`. [The task catalog](../wealth/catalog.py) documents
+every task's inputs with a runnable example. MCP and CLI share
+[one service boundary](../wealth/service.py).
 
 ## Responsibilities
 
 - `store.py`: client-scoped facts, correction history, atomic revisions,
   idempotent writes, proposal lifecycle, export/delete, derived-state cursors.
 - `recall.py`: bounded lexical/concept retrieval; optional host-supplied vectors.
+- `ingest/`: statement PDFs, CSV/XLSX exports, host-read image text, host LLM
+  extraction (checked against the page text) and chat facts become one
+  reconciled, redacted proposal. `service.ingest` holds proposals by id; only
+  `confirm` saves one, and `ingest_posting.py` turns it into a ledger batch.
+- `ledger/`: append-only, idempotent transaction ledger (store tables) with
+  derived holdings, lots, realized gains, income, reconciliation against
+  statement balances, household export and performance (TWR, XIRR).
+  `cashflow.py` categorizes spending and derives the investable surplus;
+  `dca.py` schedules, checks and backtests recurring-investment plans.
 - `household.py`: canonical import, reconciliation, ownership, liquidity,
   look-through, overlap, FX, and uncertain exposure ranges.
 - `market.py`: historical analysis, stress, comparison, constrained construction,
-  dated walk-forward validation, and factors over the retained `legacy.py` engine.
+  dated walk-forward validation, factors, and SIC (`.MX`) pricing against the
+  home market, over the retained `legacy.py` engine.
 - `research.py`: source-led company/fund cases, household links, case changes,
   DCF and multiples scenarios; optional public-data adapters.
 - `workflows.py`, `planning.py`: protected capital, cash calendars, simulations,
   income comparisons, liability matching with arrears.
-- `tax.py`: scoped US federal and Mexican Article 129 lot scenarios.
+- `tax.py`, `us_tax_parameters.py`: US federal lot, wash-sale and harvesting
+  scenarios on dated 2025/2026 brackets; Mexican Article 129 sales.
+- `mexico.py`: Mexico-resident holdings, real interest, deductions/PPR, foreign
+  securities outside the SIC and the tax calendar, from a dated parameter table
+  that fails closed on unverified values. `estate.py`: US estate exposure for
+  non-residents.
 - `monitor.py`: opt-in checks and change events; the host or foreground CLI polls.
 
 Financial modules return `status`, `result`, `missing`, `warnings`, `sources`,
