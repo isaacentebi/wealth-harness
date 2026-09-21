@@ -1,8 +1,8 @@
 # Financial judgment and interpretation
 
-This supersedes the previous heuristic allocation tables. The target is a good
-client decision with explicit evidence, assumptions and alternatives. It is not
-a universal allocation formula. Detailed roadmap: ../docs/product.md.
+Read the section relevant to the current question. Task inputs and examples
+come from `wealth_context(intent=...)`; this guide covers interpretation.
+A useful conclusion makes its evidence, assumptions and alternatives explicit.
 
 ## Separate the questions
 
@@ -23,7 +23,7 @@ portfolio on paper may be inappropriate for the account or household. See
   of days with the same sign. Use the engine's `same_sign_fraction` when that
   is the actual question. Neither is a prediction that diversification persists.
 - `1 / sum(weight**2)` is effective holding count under a concentration measure,
-  not the number of independent economic bets. Correlated positions can have
+  not the number of independent economic exposures. Correlated positions can have
   many equal-sized holdings and still share one dominant exposure.
 - Beta is a fitted historical sensitivity within a sample. It is not a promise
   about what happens in the next selloff. Report currency, benchmark and window.
@@ -49,9 +49,15 @@ subtract outside funding twice or reuse one reserve for several goals. Do not
 apply arbitrary universal equity floors, maximums, or gold allocations. Compare
 current policy with alternatives against actual goals and capacity.
 
-The implemented `plan` workflow is only reservation arithmetic. It does not yet
-model discounted liabilities, debt amortization, inflation, insurance, pensions,
-return scenarios, retirement or probabilities of achieving a goal.
+`plan` reserves declared capital for expenses, debt payments and protected goals.
+Its total uncommitted capital can include existing investments; only explicitly
+supplied unrestricted cash supports `additional_cash_to_invest`. The calculation
+does not reconcile that declared capital against household holdings or restrictions.
+
+For return and inflation scenarios, `project` and `income` simulate supplied
+cash flows and assumptions; `ladder` matches dated asset receipts to liabilities.
+Withdrawal fulfillment and positive terminal wealth are separate outcomes.
+These tools do not infer insurance needs, pension entitlements or a debt schedule.
 
 ## Construction that earns its complexity
 
@@ -79,15 +85,21 @@ Dividends can change. Yield is not total return or a guarantee. Distribution
 payments may include return of capital. Show cash shortfalls and sequence risk;
 do not infer sustainability by comparing withdrawal rate with recent CAGR.
 
-The implemented calendar uses supplied expected gross inflows. It does not infer
-payouts, tax them, forecast dividend cuts or model a sustainable withdrawal rate.
+`calendar` uses supplied `expected_cash_received`, committed outflows and spending
+needs. State whether supplied receipts already reflect taxes or other deductions;
+the calendar does not calculate them. It does not infer dividend amounts or cuts.
+`income` and `project` can model withdrawals using explicit return, inflation,
+fee and tax-drag assumptions. Dividends are part of total return, not an extra
+return added to it. A simulated success rate depends on those assumptions.
 
 ## Taxes are jurisdiction-specific computation
 
-No tax calculator is implemented. Future adapters must identify taxpayer,
-jurisdiction, tax year, account wrapper, asset classification, venue, currency,
-complete adjusted lots and relevant related-account transactions. Missing basis
-is unknown, never zero. Rules must be versioned and separately tested.
+`tax` implements scoped US federal taxable-security scenarios and qualifying
+Mexico Article 129 scenarios. Read the selected jurisdiction's current contract:
+account type, lots, basis, sale-date evidence, eligibility and coverage matter.
+Incomplete inputs can leave candidates visible while withholding a savings
+estimate. Missing basis or realized tax results are unknown, never zero.
+This is not a general tax-return calculator or support for every jurisdiction.
 
 For U.S. workflows, [IRS Publication 550](https://www.irs.gov/publications/p550)
 is a primary starting point for basis, identification and wash sales; future
@@ -100,4 +112,5 @@ and relevant current administrative guidance. Do not transfer U.S. wash-sale,
 holding-period or account assumptions. A proposed harvest is an estimate with
 conditions and data gaps, not a guaranteed saving or an executed order.
 
-Sources inspected 2026-09-20. Recheck applicable versions before implementation.
+Source links are reference material, not a guarantee of current law. Check the
+applicable current primary sources before making a tax recommendation.

@@ -1,3 +1,7 @@
+> Historical reference; not part of the active Wealth skill. Instrument lists,
+> fees and the old presentation instructions below are not current guidance.
+> Use task discovery and fresh primary sources for present-day investment work.
+
 # Themes → instruments
 
 A starting map so "I want AI" resolves to candidates without a search. Not a

@@ -4,6 +4,8 @@ Examples are task ``inputs`` objects. A host passes them inside
 ``wealth_run(task=..., inputs=...)`` and may add ``client_id`` when remembered
 context should be used. Fields described as stored alternatives are not required
 inside ``inputs`` when an eligible fact is already present for that client.
+Examples are fictional dated fixtures, not current evidence or client defaults.
+The fund fixture omits constituents, so its look-through coverage is partial.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ _HOUSEHOLD: dict[str, Any] = {
     "accounts": [{"id": "a1", "owner_id": "p1", "type": "taxable", "currency": "USD"}],
     "positions": [
         {"id": "pos-1", "account_id": "a1", "instrument_id": "SPY", "symbol": "SPY",
-         "quantity": 10, "value": 6000, "currency": "USD", "asset_class": "equity"}
+         "quantity": 10, "value": 6000, "currency": "USD", "asset_class": "fund"}
     ],
     "lots": [], "liabilities": [], "external_assets": [], "income_exposures": [],
     "fx": [], "fund_holdings": [],

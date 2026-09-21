@@ -33,6 +33,7 @@ def capabilities() -> dict:
     from .catalog import CATALOG
     return {
         "product": "wealth-harness", "release": "0.2.0", "tasks": CATALOG,
+        "example_policy": "Catalog examples are fictional dated inputs, not current market evidence, recommended assumptions, or facts about this person. Missing fund constituents mean partial look-through coverage.",
         "workflow": "Recall the client; run a financial task; remember verified results; record the decision.",
         "memory": "Sourced facts, revisions, correction history, bounded keyword/concept recall and optional host-supplied semantic vectors.",
         "privacy": "Local plaintext SQLite. Retrieved context may reach the host's model provider. No credentials are stored.",

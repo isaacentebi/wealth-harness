@@ -155,3 +155,13 @@ checks covered request rejection, busy handling, history and agent arguments.
 The full suite passed 353 checks; wheel build includes the HTML and server.
 Facts persist in SQLite; the browser transcript persists only for the running
 server session. File upload is not implemented.
+
+## Skill review (2026-09-21)
+
+The active Wealth skill was shortened from 160 to 107 lines, keeping task routing,
+automatic memory, revisions, evidence and decision boundaries. The interpretation
+guide is conditional reading, with current scoped tax, calendar and simulation
+capabilities described accurately. Unlinked theme notes are marked historical.
+Catalog examples are explicitly fictional; SPY is classified as a fund and its
+missing constituents produce partial coverage. Skill validation, that exposure
+probe, all 355 checks and package build passed.
