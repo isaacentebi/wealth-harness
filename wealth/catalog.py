@@ -950,6 +950,27 @@ CATALOG: dict[str, dict[str, Any]] = {
                     "return_model": {"type": "parametric", "basis": "real", "annual_return": 0.035, "annual_volatility": 0.1},
                     "annual_inflation": 0.04, "simulations": 500, "seed": 7},
     },
+    "order_ticket": {
+        "purpose": "Prepare an order ticket when the person asks to act (Alpaca; paper unless the person enabled live "
+                   "trading). Wealth stores the exact orders with pre-trade checks (tradable/fractionable, cash buying "
+                   "power, the accepted IPS, live per-order and daily limits, duplicates, market hours, a limit price "
+                   "collared around the last trade, estimated tax and cost) and returns a ticket id and a summary. It "
+                   "never places an order: the person reviews and confirms the card in the app. inputs {ticket_id} "
+                   "alone reads a stored ticket's state instead.",
+        "required": ["orders [{symbol, side: buy|sell, qty | notional (USD)}] (a rebalance trade's instrument_id, "
+                     "quantity and estimated_amount are accepted)",
+                     "rationale (one or two sentences the person reads)", "client_id (a ticket belongs to a person)"],
+        "optional": ["source: rebalance|manager_mirror|user_request (default user_request)",
+                     "orders[].type: limit (default) | market (paper only)", "orders[].limit_price (default: last "
+                     "trade +/- half the collar)", "orders[].time_in_force: day (default) | gtc (whole shares)",
+                     "orders[].account_id, estimated_tax, estimated_cost, asset_class, sleeve, domicile, tags"],
+        "notes": "Result: ticket {id, mode PAPER|LIVE, status, total, lines [{side, symbol, qty, limit_price, "
+                 "estimated_amount, state}], notices [{code, status: warn|violation|block|unknown, message}]} and "
+                 "summary. Tell the person to confirm on the card; never say an order was placed or filled until "
+                 "its line state says so. Without client_id the result is a preview that cannot be confirmed.",
+        "example": {"source": "user_request", "rationale": "Invest this month's USD 500 in the total-market fund.",
+                    "orders": [{"symbol": "VTI", "side": "buy", "notional": 500}]},
+    },
     "speculation_check": {
         "purpose": "Check a speculative idea (options, leverage, crypto, a single stock) against the play-money "
                    "policy: a cap of 5% of liquid net worth (0% while the reserve is short or any debt costs over "
