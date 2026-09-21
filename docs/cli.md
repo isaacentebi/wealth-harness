@@ -36,6 +36,8 @@ Compound operations use a small action envelope:
 | `ingest` | `confirm` | `proposal_id`, optional `acknowledge_discrepancies`, `expires_on`; only after the person's yes |
 | `ingest` | `confirm_duplicates` | `proposal_id`, `entry_ids` of held lines the person says are separate |
 | `ingest` | `diff` | `proposal_id`, optional `previous_proposal_id` |
+| `ingest` | `connector` | `name` (`ibkr_flex`), `query_id`, optional `owner_id`, `sic_listed`; the credential is never an input |
+| `ingest` | `connector_status` | optional `name`; whether a credential is available and the last sync (never the credential) |
 | `client` | `create` | `display_name` |
 | `client` | `inspect` | optional `detail: current|history|export`; `key` or `keys` filters current facts; `key` is required for history |
 | `client` | `export` | none; full private history including superseded facts and decision events |
@@ -55,6 +57,68 @@ balances derived from the statement; an account already there gets only new
 lines, and its closing figures become balance checks. Lines resembling another
 statement's are held until `confirm_duplicates`. The confirm result includes
 `statement_prices` for `run` task `ledger` view `household`.
+
+## Connectors
+
+`ingest action=connector` pulls a read-only account connector on demand and
+returns the same held proposal as an upload: show the summary, then `confirm`
+only after the person says yes. Nothing runs in the background.
+
+**Interactive Brokers (`ibkr_flex`)** uses the IBKR Flex Web Service
+(`wealth/connectors/ibkr_flex.py` cites IBKR's documentation). It can only read
+reports; it cannot trade or move money.
+
+1. In the IBKR portal open *Performance & Reports > Flex Queries* and create an
+   **Activity Flex Query**: format **XML**, period **Last 365 Calendar Days**,
+   date format **yyyyMMdd**, all accounts. Add these sections, each with all
+   fields selected:
+   - Account Information (Account ID, Currency, Account Type)
+   - Net Asset Value (NAV) in Base: the equity summary by report date (Report
+     Date, Cash, Stock, Interest/Dividend Accruals, Total)
+   - Cash Report (Currency, Ending Cash)
+   - Open Positions, level of detail **Summary and Lot** (Symbol, ISIN,
+     Listing Exchange, Underlying Symbol, Asset Class, Currency, Quantity, Mark
+     Price, Position Value, Cost Basis Money, Multiplier, Open Date Time)
+   - Trades, level of detail **Executions and Closed Lots** (Trade ID,
+     Transaction ID, Trade Date, Settle Date, Buy/Sell, Quantity, Trade Price,
+     Proceeds, Taxes, IB Commission and its currency, Net Cash)
+   - Cash Transactions, level of detail **Detail** (Type, Amount, Currency,
+     Date/Time, Settle Date, Symbol, ISIN, Transaction ID)
+   - Corporate Actions (Type, Description, Quantity, Proceeds, Date/Time,
+     Transaction ID, Action ID)
+   - Conversion Rates (Report Date, From/To Currency, Rate)
+
+   Note the query id shown next to the saved query. It is not secret.
+2. Open *Flex Web Service Configuration*, enable the service and copy the
+   current token. Choose an expiry; a new token invalidates the old one, and an
+   optional IP restriction limits where it works.
+3. Store the token yourself; never paste it into the chat:
+
+   ```sh
+   security add-generic-password -U -s wealth-ibkr-flex -a "$USER" -w
+   ```
+
+   macOS prompts for the token. On Linux use
+   `secret-tool store --label="Wealth IBKR Flex" service wealth-ibkr-flex`, or
+   export `WEALTH_IBKR_FLEX_TOKEN` for one session. Wealth reads it only from
+   there, and it never reaches SQLite, logs, errors or outputs.
+4. `{"client_id": "ana", "action": "connector_status", "inputs": {}}` shows
+   whether a token is found. Sync with
+   `{"client_id": "ana", "action": "connector", "inputs": {"name": "ibkr_flex", "query_id": "987654"}}`.
+
+A sync calls SendRequest, then polls GetStatement with backoff while IBKR
+answers 1019 (statement generation in progress) or another "try again shortly"
+code. After 1018 (too many requests; the limit is 1 request per second and 10
+per minute per token) it waits at least 10 seconds, and it gives up after 120
+seconds. The proposal reconciles positions plus cash per currency (converted
+with IBKR's conversion rates) against NAV excluding accruals. Instruments carry
+venue, listing exchange, ISIN, underlying symbol and issuer domicile (from the
+ISIN prefix: `US`, `IE`, `MX` or `other`). IBKR does not report Mexican SIC
+listing, so `sic_listed` stays `unknown` unless you pass it. Transactions carry
+IBKR trade and transaction ids, so a re-sync posts only new lines, and
+`result.changes` lists what changed since the last confirmed sync. Splits
+post with their ratio. Other corporate actions, derivative trades and
+unmapped cash types are listed under `ledger.not_posted` with the reason.
 
 ## Facts
 

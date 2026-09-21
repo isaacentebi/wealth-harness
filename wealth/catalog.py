@@ -427,4 +427,24 @@ CATALOG: dict[str, dict[str, Any]] = {
 }
 
 
-__all__ = ["CATALOG"]
+# Read-only account connectors used through ``ingest`` (not ``run`` tasks).  A pull
+# returns the same held proposal as a statement upload; saving still needs the
+# person's yes (``ingest action=confirm``).  Credentials are never inputs.
+CONNECTORS: dict[str, dict[str, Any]] = {
+    "ibkr_flex": {
+        "purpose": "Pull an Interactive Brokers Activity Flex Query (positions with lots and cost basis, trades, "
+                   "dividends, withholding, interest, fees, deposits/withdrawals, FX conversions, splits, conversion "
+                   "rates, NAV) into a reconciled ingest proposal. Read-only: it cannot trade or move money.",
+        "action": "ingest action=connector",
+        "required": ["name: ibkr_flex", "query_id (numeric Activity Flex Query id; not secret)",
+                     "token in the OS keychain (service wealth-ibkr-flex) or WEALTH_IBKR_FLEX_TOKEN; never an input"],
+        "optional": ["owner_id", "sic_listed: [symbols] or {symbol: true|false} (Mexican SIC listing; unknown otherwise)"],
+        "example": {"name": "ibkr_flex", "query_id": "987654"},
+        "status": "ingest action=connector_status (optional name): whether a token is available and the last sync",
+        "resync": "Transactions carry IBKR trade/transaction ids, so a re-sync posts only new lines; "
+                  "result.changes lists what moved since the last confirmed sync.",
+    },
+}
+
+
+__all__ = ["CATALOG", "CONNECTORS"]
