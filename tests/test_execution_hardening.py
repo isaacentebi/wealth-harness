@@ -48,7 +48,9 @@ def test_concurrent_live_confirms_cannot_exceed_the_daily_limit(db, monkeypatch)
     first = make_ticket(db, [{"symbol": s, "side": "buy", "qty": 10} for s in ("AAA", "BBB", "CCC")])
     second = make_ticket(db, [{"symbol": s, "side": "buy", "qty": 10} for s in ("DDD", "EEE", "FFF")])
     ids = [first["result"]["ticket"]["id"], second["result"]["ticket"]["id"]]
-    nonces = [nonce_of(db, i) for i in ids]
+    with WealthStore(db) as store:  # one listing issues both cards' codes (showing a card again replaces its code)
+        issued = {t["id"]: t["nonce"] for t in tickets.list_tickets(store, "ana", include_nonce=True, now=NOW)}
+    nonces = [issued[i] for i in ids]
     slow["on"] = True
     outcome: dict[str, str] = {}
 
@@ -270,7 +272,8 @@ def _connector_then_orders(tmp_path, monkeypatch, orders_first):
         ticket = tickets.create_ticket(store, "ana", {"orders": [{"symbol": "VOO", "side": "buy", "qty": "0.5"}],
                                                       "rationale": "x"}, snapshot={"facts": []}, now=now)
         ticket_id = ticket["result"]["ticket"]["id"]
-        nonce = store.auxiliary("ana", "execution")["tickets"][ticket_id]["nonce"]
+        nonce = next(t["nonce"] for t in tickets.list_tickets(store, "ana", include_nonce=True, now=now)
+                     if t["id"] == ticket_id)
         order_id = tickets.confirm(store, "ana", ticket_id, nonce=nonce, snapshot={"facts": []},
                                    now=now)["lines"][0]["broker_order_id"]
         activity = broker.fill(order_id, qty="0.5", price="550", when="2026-09-18T15:05:00Z")

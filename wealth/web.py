@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import secrets
 import socket
@@ -133,6 +134,14 @@ SURFACE_GETS = frozenset({"/review", "/api/today", "/api/review", "/api/connecti
 _VIEW_PATH = re.compile(r"^/api/views/([a-z][a-z0-9_]{0,31}-[0-9a-f]{10})\.(svg|png)$")
 # Order tickets: confirm takes a ticket id; cancel takes a ticket id (discard) or an Alpaca order id.
 _ORDER_PATH = re.compile(r"^/api/orders/([A-Za-z0-9-]{1,64})/(confirm|cancel)$")
+# Profile reads (the profile, contradictions, one fact, its history) need the session token like every
+# other /api read. profile.html sends it once its owner's update lands; until then this stays False so the
+# page keeps working. Flip to True (or set WEALTH_PROFILE_READS_NEED_TOKEN=1) to enforce it.
+PROFILE_READS_NEED_TOKEN = False
+
+
+def profile_reads_need_token() -> bool:
+    return PROFILE_READS_NEED_TOKEN or os.environ.get("WEALTH_PROFILE_READS_NEED_TOKEN") == "1"
 
 
 def friendly_name(client_id: str, display_name: str | None = None) -> str:
@@ -189,7 +198,7 @@ class Uploads:
             raise ValueError("Attach a PDF, CSV, PNG, JPEG or WebP file.")
         if not 0 < length <= MAX_UPLOAD_BYTES:
             raise ValueError("Choose a non-empty file under 25 MB.")
-        self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._private_dirs()
         upload_id = secrets.token_hex(16)
         target = self.dir / f"{upload_id}{UPLOAD_TYPES[content_type]}"
         partial = target.with_suffix(".part")
@@ -212,8 +221,20 @@ class Uploads:
             partial.unlink(missing_ok=True)
         meta = {"id": upload_id, "name": self.clean_name(name), "type": content_type,
                 "size": length, "created": int(time.time())}
-        (self.dir / f"{upload_id}.json").write_text(json.dumps(meta), encoding="utf-8")
+        sidecar = os.open(self.dir / f"{upload_id}.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(sidecar, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(meta))
         return meta
+
+    def _private_dirs(self) -> None:
+        """The uploads root and the client's folder: created (or tightened to) 0700, whatever the umask."""
+        for folder in (self.dir.parent, self.dir):
+            folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if not folder.is_dir() or (folder == self.dir and folder.is_symlink()):
+                raise OSError("The upload folder is not a directory.")
+            info = folder.stat()
+            if info.st_mode & 0o077 and info.st_uid == os.getuid():
+                folder.chmod(0o700)
 
     def get(self, upload_id: str) -> dict[str, Any] | None:
         if not isinstance(upload_id, str) or not _UPLOAD_ID.match(upload_id):
@@ -447,6 +468,7 @@ class Chat:
             kwargs.pop("control", None)
             kwargs.pop("defer_memory", None)
             kwargs.pop("views", None)
+            kwargs.pop("person_message", None)
             yield TurnEvent("answer", run_turn(message, **kwargs))
             return
         yield from stream_turn(message, **kwargs)
@@ -498,11 +520,13 @@ class Chat:
             answer = None
             for event in self._events(
                 turn.message, client_id=self.client_id, db_path=self.db, model=self.model,
-                history=history, web_search=self.web_search, reasoning=reasoning,
+                history=history, web_search=self.web_search and not turn.attachments, reasoning=reasoning,
                 profile_empty=not any(state.values()), profile=state, brief=brief,
                 thread_id=self.thread_id, timezone_name=timezone_name,
                 attachments=[{k: a[k] for k in ("name", "type", "size", "path")} for a in turn.attachments],
                 control=turn.control, ephemeral=self.ephemeral, defer_memory=defer, views=offered,
+                # Wealth's own requests (the setup reveal) carry no consent: only the person's words do.
+                person_message="" if turn.internal else turn.message,
             ):
                 if event.type == "view":
                     for spec in event.data.get("views", ()):
@@ -570,8 +594,10 @@ class Chat:
 
     def _remember(self, turn: Turn, reply: dict[str, Any], brief: str | None) -> None:
         try:
+            earlier = [str(m.get("content") or "") for m in self.messages if m.get("role") == "user"]
             keys = remember_exchange(turn.message, turn.answer or "", client_id=self.client_id, db_path=self.db,
-                                     model=self.model, brief=brief, control=turn.control)
+                                     model=self.model, brief=brief, control=turn.control,
+                                     recent_person=earlier[:-1] if earlier and earlier[-1] == turn.message else earlier)
             items = [self._memory_item(k) for k in keys]
             if items:
                 turn.memory.extend(items)
@@ -765,6 +791,8 @@ def create_server(chat, port=8765, host="127.0.0.1"):
                     return self.respond(200, chat.onboarding(lang if lang in ("es", "en") else None, step))
                 if url.path == "/profile":
                     return self.respond(200, Path(__file__).with_name("profile.html").read_bytes(), "text/html")
+                if self.profile_read(url.path) and profile_reads_need_token() and not self.authorized():
+                    return self.respond(403, {"error": "Reload to reconnect.", "kind": "forbidden"})
                 if url.path == "/api/profile":
                     lang = (parse_qs(url.query).get("lang") or [None])[0]
                     return self.respond(200, profile_view(WealthService(chat.db), chat.client_id,
@@ -796,6 +824,11 @@ def create_server(chat, port=8765, host="127.0.0.1"):
             except Exception as exc:  # noqa: BLE001
                 return self.handle_failure(exc)
             self.respond(404, {"error": "Not found."})
+
+        @staticmethod
+        def profile_read(path):
+            return (path in {"/api/profile", "/api/profile/contradictions"}
+                    or bool(_HISTORY_PATH.match(path)) or bool(_FACT_PATH.match(path)))
 
         def render_view(self, view_id, extension, query):
             """A placed view as an image for text channels: SVG always, PNG when Pillow is installed."""

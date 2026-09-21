@@ -1157,6 +1157,25 @@ class WealthService:
             pass
         return _call(handlers[action], f"ingest {action}", inputs or {}, client_id=client_id)
 
+    def ingested_sources(self, client_id: str) -> list[dict]:
+        """Provenance (sha256, filename, ref) of every statement this client actually ingested.
+
+        Used by the MCP boundary: a fact written with ``source.kind="document"`` must
+        cite one of these, so a model cannot label its own figure as a statement.
+        """
+        state = self._ingest_state(client_id)
+        found: list[dict] = []
+        for bucket in ("pending", "confirmed"):
+            for record in (state.get(bucket) or {}).values():
+                provenance = ((record.get("proposal") or {}).get("result") or {}).get("provenance") or {}
+                if provenance.get("sha256") or provenance.get("ref"):
+                    found.append({k: provenance.get(k) for k in ("sha256", "filename", "ref")})
+        for record in (state.get("extractions") or {}).values():
+            source = (record.get("request") or {}).get("source") or {}
+            if source.get("sha256") or source.get("ref"):
+                found.append({k: source.get(k) for k in ("sha256", "filename", "ref")})
+        return found
+
     def _ingest_state(self, client_id: str, update=None) -> dict:
         with WealthStore(self.db_path) as store:
             if update is None:

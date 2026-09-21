@@ -19,6 +19,7 @@ from pathlib import Path
 import queue
 import re
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,7 @@ import time
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from . import consent as _consent
 from . import views as _views
 from .behavior import INSTRUCTIONS_PATH, ONBOARDING_WELCOME
 from .service import WealthService, database_path
@@ -174,7 +176,8 @@ def resolve_model(value: str | None) -> str:
 
 
 def _config_overrides(db_path: str | Path, *, web_search: bool, reasoning: str,
-                      instructions: Path | None = None, tools: Iterable[str] | None = None) -> list[str]:
+                      instructions: Path | None = None, tools: Iterable[str] | None = None,
+                      turn_env: Mapping[str, str] | None = None) -> list[str]:
     database = Path(db_path).expanduser().resolve()
     values = [
         f"model_reasoning_effort={_toml(reasoning)}",
@@ -192,6 +195,10 @@ def _config_overrides(db_path: str | Path, *, web_search: bool, reasoning: str,
         'mcp_servers.wealth.env.WEALTH_BEHAVIOR_IN_HOST="1"',
         'mcp_servers.wealth.default_tools_approval_mode="approve"',
         *([f"mcp_servers.wealth.env.WEALTH_MCP_TOOLS={_toml(','.join(sorted(tools)))}"] if tools is not None else []),
+        # The person's own words for this turn: the MCP server checks consent and "the person said it"
+        # against them. The model has no shell, so it cannot change this environment.
+        *(f"mcp_servers.wealth.env.{name}={_toml(value)}" for name, value in sorted((turn_env or {}).items())
+          if re.fullmatch(r"WEALTH_[A-Z0-9_]+", name)),
     ]
     return [part for value in values for part in ("-c", value)]
 
@@ -206,6 +213,7 @@ def build_command(
     ephemeral: bool = False,
     instructions: Path | None = None,
     tools: Iterable[str] | None = None,
+    turn_env: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Build an isolated Codex invocation exposing only the Wealth MCP server.
 
@@ -218,7 +226,7 @@ def build_command(
     if reasoning not in REASONING_LEVELS:
         raise ValueError("reasoning must be low, medium, or high")
     overrides = _config_overrides(db_path, web_search=web_search, reasoning=reasoning,
-                                  instructions=instructions, tools=tools)
+                                  instructions=instructions, tools=tools, turn_env=turn_env)
     if resume_thread is not None:
         if not _THREAD_ID.match(resume_thread):
             raise ValueError("invalid Codex session id")
@@ -916,8 +924,49 @@ def _split_sections(text: str) -> list[tuple[str | None, str]]:
     return parts
 
 
+def instructions_cache_dir() -> Path:
+    """A per-user private folder for derived instruction files (never a shared temp directory).
+
+    ``$XDG_CACHE_HOME/wealth/instructions``, else ``~/Library/Caches/wealth/instructions``
+    on macOS or ``~/.cache/wealth/instructions``. Created 0700; refused unless it is a
+    real directory owned by this user; group/other write bits are removed.
+    """
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    if xdg and Path(xdg).is_absolute():
+        base = Path(xdg)
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Caches"
+    else:
+        base = Path.home() / ".cache"
+    folder = base / "wealth" / "instructions"
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for path in (folder.parent, folder):
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise PermissionError(f"{path} must be a real directory")
+        if hasattr(os, "getuid") and info.st_uid != os.getuid():
+            raise PermissionError(f"{path} is not owned by the current user")
+        if info.st_mode & 0o077:
+            path.chmod(0o700)
+    return folder
+
+
+def _write_private(path: Path, text: str) -> None:
+    """Atomic write: a fresh 0600 temp file in the same folder, fsync, then rename over ``path``."""
+    handle, temp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as out:
+            out.write(text)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(temp, path)
+    except BaseException:
+        Path(temp).unlink(missing_ok=True)
+        raise
+
+
 def _derived(source: Path, kind: str) -> Path:
-    """Write (once per content) the conversation or memory instructions derived from ``source``."""
+    """Write the conversation or memory instructions derived from ``source`` (always rewritten, never trusted)."""
 
     text = source.read_text(encoding="utf-8")
     sections = _split_sections(text)
@@ -927,11 +976,8 @@ def _derived(source: Path, kind: str) -> Path:
     else:
         derived = _MEMORY_PREAMBLE + "\n".join(body for title, body in sections if title in _MEMORY_SECTIONS)
     digest = hashlib.sha256(derived.encode()).hexdigest()[:16]
-    folder = Path(tempfile.gettempdir()) / "wealth-instructions"
-    folder.mkdir(mode=0o700, exist_ok=True)
-    path = folder / f"{kind}-{digest}.md"
-    if not path.exists():
-        path.write_text(derived, encoding="utf-8")
+    path = instructions_cache_dir() / f"{kind}-{digest}.md"
+    _write_private(path, derived)
     return path
 
 
@@ -968,15 +1014,21 @@ def remember_exchange(
     brief: str | None = None,
     timeout: float = 180,
     control: TurnControl | None = None,
+    recent_person: Sequence[str] = (),
 ) -> list[str]:
     """Record what one finished exchange established; returns the fact keys written.
 
     Runs after the reply is shown so saving never delays the answer. Uses only
-    the memory tools, no web search, and an ephemeral session.
+    the memory tools (never a consent tool), no web search, and an ephemeral
+    session. The MCP server gets the person's words (``WEALTH_TURN_SESSION=memory``),
+    so a figure they did not write is saved as an inference, not as theirs.
     """
 
+    if MEMORY_TOOLS & _consent.CONSENT_TOOLS:
+        raise RuntimeError("the memory step must not be able to confirm, resolve or accept")
     command = build_command(model, db_path, web_search=False, reasoning="low", ephemeral=True,
-                            instructions=memory_instructions(), tools=MEMORY_TOOLS)
+                            instructions=memory_instructions(), tools=MEMORY_TOOLS,
+                            turn_env=_consent.turn_env("memory", user_prompt, recent_person))
     prompt = build_memory_prompt(user_prompt, answer, client_id, brief=brief)
     parser = _TurnParser()
     keys: list[str] = []
@@ -1013,6 +1065,7 @@ def stream_turn(
     ephemeral: bool = False,
     defer_memory: bool = False,
     views: Sequence[Mapping[str, Any]] = (),
+    person_message: str | None = None,
 ) -> Iterator[TurnEvent]:
     """Run one turn, yielding progress, memory, view and thread events, then the answer.
 
@@ -1026,9 +1079,18 @@ def stream_turn(
     example the session file is gone), the turn restarts as a fresh session with
     the bounded recent conversation and a rolling summary of earlier requests.
     Raises ``AgentError`` (with ``kind``) on failure or cancellation.
+
+    ``person_message`` is what the person typed this turn (default ``user_prompt``;
+    ``""`` when the request comes from Wealth itself). It and their recent messages
+    reach the MCP server as consent evidence. Web search is off while the turn
+    has attachments, so nothing read from their files can leave in a query.
     """
 
     history = list(history)
+    if attachments:
+        web_search = False
+    said = user_prompt if person_message is None else person_message
+    env = _consent.turn_env("chat", said, [text for role, text in history if role == "user"])
     views = [dict(v) for v in views]
     if views:
         yield TurnEvent("view", data={"views": views})
@@ -1040,6 +1102,7 @@ def stream_turn(
             resume_thread=resume, ephemeral=ephemeral,
             instructions=conversation_instructions() if defer_memory else None,
             tools=WEALTH_TOOLS - {"wealth_remember"} if defer_memory else None,
+            turn_env=env,
         )
         prompt = build_prompt(
             user_prompt, client_id, history, profile_empty=profile_empty, profile=profile, brief=brief,

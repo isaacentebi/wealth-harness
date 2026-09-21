@@ -101,7 +101,7 @@ def test_an_expired_ticket_cannot_be_placed(tmp_path, fake):
             old = tickets.create_ticket(store, "ana", {"orders": [{"symbol": "VTI", "side": "buy", "qty": 1}],
                                                        "rationale": "x"}, snapshot={"facts": []},
                                         now=datetime.now(timezone.utc) - timedelta(minutes=11))
-            nonce = store.auxiliary("ana", "execution")["tickets"][old["result"]["ticket"]["id"]]["nonce"]
+            nonce = "ABCD1234"  # only the code's hash is stored; an expired ticket is refused before the code
         status, body = call(base, f"/api/orders/{old['result']['ticket']['id']}/confirm", token=chat.token,
                             body={"nonce": nonce})
         assert status == 410 and body["kind"] == "expired" and fake.posts() == []

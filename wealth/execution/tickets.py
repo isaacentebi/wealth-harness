@@ -7,7 +7,8 @@ Principle, enforced here rather than in prompts:
   only ever *reads* from the broker.  Its result never contains the nonce.
 * :func:`confirm` is the only function that submits orders.  It is called only
   by the local web route ``POST /api/orders/<ticket_id>/confirm`` (session token
-  plus local Host/Origin) and needs the one-time nonce shown on the card and an
+  plus local Host/Origin) and needs the one-time nonce shown on the card (only its
+  hash is stored; each time the card is listed a fresh code replaces it) and an
   unexpired ticket; it re-runs every check on fresh broker data first.  It is
   not a :class:`~wealth.service.WealthService` method, not a CLI operation and
   not an MCP tool, so a model — or a "yes" typed in chat — cannot reach it.
@@ -691,8 +692,12 @@ def _totals(lines: list[dict]) -> dict[str, Any]:
 
 
 def public_ticket(ticket: Mapping[str, Any], *, include_nonce: bool = False, now: datetime | None = None,
-                  live_acknowledged: bool = True) -> dict[str, Any]:
-    """What the card and the model see.  The nonce is only for the card (``include_nonce``)."""
+                  live_acknowledged: bool = True, nonce: str | None = None) -> dict[str, Any]:
+    """What the card and the model see.  The nonce is only for the card (``include_nonce``).
+
+    Only the nonce's hash is stored; ``nonce`` is the plain code just issued (or just
+    presented by the card) for this one response.
+    """
     now = _now(now)
     status = ticket["status"]
     if status == "pending" and _parse(ticket["expires_at"]) <= now:
@@ -716,8 +721,29 @@ def public_ticket(ticket: Mapping[str, Any], *, include_nonce: bool = False, now
             "needs_typed": ticket["mode"] == "live" and not live_acknowledged,
             "override": ticket.get("override")}
     if include_nonce and status == "pending":
-        view["nonce"] = ticket.get("nonce")
+        view["nonce"] = nonce
     return view
+
+
+def _issue_nonces(store: Any, client_id: str, ticket_ids: list[str], now: datetime) -> dict[str, str]:
+    """A fresh card code for each still-pending ticket; only its hash is stored and the old code stops working."""
+    if not ticket_ids:
+        return {}
+    issued: dict[str, str] = {}
+
+    def rotate(state: dict) -> dict:
+        tickets = dict(state.get("tickets") or {})
+        for ticket_id in ticket_ids:
+            item = tickets.get(ticket_id)
+            if item is None or item["status"] != "pending" or _parse(item["expires_at"]) <= now:
+                continue
+            code = secrets.token_hex(4).upper()
+            tickets[ticket_id] = {**item, "nonce": None, "nonce_hash": _nonce_hash(ticket_id, code)}
+            issued[ticket_id] = code
+        return {**state, "tickets": tickets}
+
+    store.update_auxiliary(client_id, "execution", rotate)
+    return issued
 
 
 def _summary(view: Mapping[str, Any]) -> str:
@@ -790,7 +816,7 @@ def create_ticket(store: Any, client_id: str | None, inputs: Mapping[str, Any], 
     nonce = secrets.token_hex(4).upper()
     ticket = {"id": ticket_id, "broker": BROKER, "mode": mode, "status": "pending", "source": source,
               "rationale": rationale.strip()[:600], "created_at": _iso(now), "expires_at": _iso(now + TICKET_TTL),
-              "lines": lines, "checks": checks, "nonce": nonce, "nonce_hash": _nonce_hash(ticket_id, nonce),
+              "lines": lines, "checks": checks, "nonce": None, "nonce_hash": _nonce_hash(ticket_id, nonce),
               "failures": 0}
     warnings: list[str] = []
     if store is not None and client_id:
@@ -848,6 +874,11 @@ def ticket_status(store: Any, client_id: str, ticket_id: str, *, now: datetime |
 
 def list_tickets(store: Any, client_id: str, *, include_nonce: bool = False, now: datetime | None = None,
                  since_hours: int = 24) -> list[dict[str, Any]]:
+    """Recent tickets; with ``include_nonce`` (the card, token holder only) each pending one gets a fresh code.
+
+    Plain codes are never stored, so showing the card again issues a new code and the earlier one stops
+    working (a second open page must reload to confirm).
+    """
     now = _now(now)
     state = store.auxiliary(client_id, "execution")
     acknowledged = bool((state.get("live_ack") or {}).get(BROKER))
@@ -855,7 +886,10 @@ def list_tickets(store: Any, client_id: str, *, include_nonce: bool = False, now
     rows = [t for t in (state.get("tickets") or {}).values()
             if _parse(t["created_at"]) >= horizon or t["status"] in ("submitting", "submitted")]
     rows.sort(key=lambda t: t["created_at"])
-    return [public_ticket(t, include_nonce=include_nonce, now=now, live_acknowledged=acknowledged) for t in rows]
+    codes = _issue_nonces(store, client_id, [t["id"] for t in rows if t["status"] == "pending"], now) \
+        if include_nonce else {}
+    return [public_ticket(t, include_nonce=include_nonce, now=now, live_acknowledged=acknowledged,
+                          nonce=codes.get(t["id"])) for t in rows]
 
 
 # -- confirmation: the only path that submits ------------------------------------------
@@ -926,7 +960,8 @@ def confirm(store: Any, client_id: str, ticket_id: str, *, nonce: Any, override:
         _audit(store, client_id, ticket, "blocked", {"reasons": [c["code"] for c in blocking]})
         fresh = {**ticket, "lines": lines, "checks": checks}
         raise ConfirmError("blocked", blocking[0]["message"], 409,
-                           public_ticket(fresh, include_nonce=True, now=now, live_acknowledged=acknowledged))
+                           public_ticket(fresh, include_nonce=True, now=now, live_acknowledged=acknowledged,
+                                         nonce=nonce.strip().upper()))
 
     # Claim the ticket atomically so two taps cannot both submit.
     violations = [c for c in checks if c["status"] == "violation"]
@@ -973,7 +1008,8 @@ def confirm(store: Any, client_id: str, ticket_id: str, *, nonce: Any, override:
         _audit(store, client_id, ticket, "blocked", {"reasons": ["live_daily_limit"], "at": _iso(now)})
         fresh = {**ticket, "lines": lines, "checks": checks + [_check("live_daily_limit", "block", str(exc))]}
         raise ConfirmError("blocked", str(exc), 409,
-                           public_ticket(fresh, include_nonce=True, now=now, live_acknowledged=acknowledged)) from None
+                           public_ticket(fresh, include_nonce=True, now=now, live_acknowledged=acknowledged,
+                                         nonce=nonce.strip().upper())) from None
     _IN_FLIGHT.add(ticket_id)
     ticket = {**ticket, "lines": lines, "checks": checks, "override": record}
     submitted: list[dict] = []
