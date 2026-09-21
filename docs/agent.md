@@ -1,8 +1,9 @@
 # Run the assistant
 
 The optional local launcher uses your installed Codex CLI and its normal login.
-Wealth itself is a model-independent MCP server. The local launcher supports Sol
-and Luna; it does not implement an OpenRouter chat client or extract OAuth tokens.
+Wealth itself is a model-independent MCP server. The local launcher runs whatever
+model your Codex config names; it does not implement an OpenRouter chat client or
+extract OAuth tokens.
 
 ## Browser chat
 
@@ -14,8 +15,7 @@ uv run wealth-chat --client my-profile
 
 Wealth uses the model in your Codex config (`~/.codex/config.toml`), so a Codex model change moves Wealth too. Pass `--model sol`, `--model luna` or a full model ID to override it.
 
-Open **http://127.0.0.1:8765/**. `--model` defaults to `sol` and `--client` to
-`personal`. Use `--model luna` for Luna. The page streams
+Open **http://127.0.0.1:8765/**. `--client` defaults to `personal`. The page streams
 progress ("Checking your saved profile", "Searching the web", "Running a stress
 test"), can stop a response, and renders headings, lists, tables and source
 links. Response depth is Fast, Balanced or Deep (Codex reasoning low, medium,
