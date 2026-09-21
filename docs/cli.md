@@ -36,7 +36,7 @@ Compound operations use a small action envelope:
 | `ingest` | `confirm` | `proposal_id`, optional `acknowledge_discrepancies`, `expires_on`; only after the person's yes |
 | `ingest` | `confirm_duplicates` | `proposal_id`, `entry_ids` of held lines the person says are separate |
 | `ingest` | `diff` | `proposal_id`, optional `previous_proposal_id` |
-| `ingest` | `connector` | `name` (`ibkr_flex`), `query_id`, optional `owner_id`, `sic_listed`; the credential is never an input |
+| `ingest` | `connector` | `name` (`ibkr_flex`, `alpaca`, `cuenca`); `query_id` for `ibkr_flex`; optional `owner_id`, `sic_listed` (`ibkr_flex`, `alpaca`), `paper` (`alpaca`), `since` (`alpaca`, `cuenca`); the credential is never an input |
 | `ingest` | `connector_status` | optional `name`; whether a credential is available and the last sync (never the credential) |
 | `client` | `create` | `display_name` |
 | `client` | `inspect` | optional `detail: current|history|export`; `key` or `keys` filters current facts; `key` is required for history |
@@ -57,6 +57,36 @@ balances derived from the statement; an account already there gets only new
 lines, and its closing figures become balance checks. Lines resembling another
 statement's are held until `confirm_duplicates`. The confirm result includes
 `statement_prices` for `run` task `ledger` view `household`.
+
+`confirm` is one transaction: the facts, the ledger lines and the proposal's
+state commit together or not at all, so a failed confirm can simply be retried,
+and a repeated or concurrent confirm of the same proposal returns the first
+receipt with `replayed: true`. Writes made meanwhile never conflict with it.
+
+A newer statement for an account already in the ledger is reconciled to it:
+after its own lines are posted, any cash or position the lines do not explain
+gets a labelled `Statement reconciliation` adjustment dated at the statement
+(cash as an opening-balance correction, extra units as an opening position
+without basis, missing units as an outgoing transfer, so no gain is invented).
+The receipt lists them in `result.ledger.adjustments`, and holdings the
+statement no longer lists in `result.reconciliation.missing_positions` (also
+shown on the proposal before confirming). An older statement only adds balance
+checks. Forgetting an `account.<id>` fact posts reversal entries for that
+account's ledger lines (append-only; the history stays), so the account leaves
+the brief, the net worth and `task=ledger` together.
+
+**Upload retention.** Raw statements hold RFC, CURP, CLABE and account numbers,
+so uploads are deleted (overwritten, then unlinked) once they are no longer
+needed: the file of a confirmed statement right after `confirm`, any other
+upload 30 days after it was saved (checked on every `ingest` call), and the
+client's whole upload directory when the client is deleted. Set
+`WEALTH_UPLOAD_RETENTION_DAYS` to change the 30 days (`0` turns age-based
+deletion off) and `WEALTH_KEEP_CONFIRMED_UPLOADS=1` to keep confirmed files.
+
+Amounts, balances and quantities must be below 10^15 in absolute value and rates
+within their documented range; a fact saved before these bounds that no reader
+can use is left out of the picture and listed in `invalid_facts` (situation and
+profile) so the person can remove it.
 
 ## Connectors
 
@@ -119,6 +149,95 @@ IBKR trade and transaction ids, so a re-sync posts only new lines, and
 `result.changes` lists what changed since the last confirmed sync. Splits
 post with their ratio. Other corporate actions, derivative trades and
 unmapped cash types are listed under `ledger.not_posted` with the reason.
+
+**Alpaca (`alpaca`)** uses the Alpaca Trading API v2
+(`wealth/connectors/alpaca.py` cites Alpaca's documentation). It sends only
+`GET` requests to `/v2/account`, `/v2/positions`, `/v2/orders` (open orders,
+listed as a warning), `/v2/account/activities`, `/v2/account/portfolio/history`
+and `/v2/assets/{symbol}`; any other method or path is refused before it is
+sent, so it cannot place or cancel orders, close positions or move money.
+
+1. In the Alpaca dashboard generate an API key for the live or the paper
+   account and copy the key id and the secret (the secret is shown once).
+   Paper and live accounts have different keys and hosts.
+2. Store both yourself; never paste them into the chat:
+
+   ```sh
+   security add-generic-password -U -s wealth-alpaca -a key_id -w
+   security add-generic-password -U -s wealth-alpaca -a secret -w
+   ```
+
+   On Linux use `secret-tool store --label="Wealth Alpaca" service wealth-alpaca account key_id`
+   (and `account secret`), or export `WEALTH_ALPACA_KEY_ID` and
+   `WEALTH_ALPACA_SECRET` for one session. For the paper account export
+   `WEALTH_ALPACA_PAPER=1` or pass `"paper": true`.
+3. Sync with
+   `{"client_id": "ana", "action": "connector", "inputs": {"name": "alpaca", "since": "2026-01-01"}}`
+   (`since` defaults to 365 days ago).
+
+Activities are paged 100 at a time with `page_token`. Requests are spaced at
+least 0.3 s apart (Alpaca's limit is 200 requests per minute per account); an
+HTTP 429 or 5xx is retried with backoff that honours `Retry-After`. The
+proposal reconciles positions plus cash against account equity; the account is
+read before and after the positions, and if equity moved (market open) the
+tolerance widens by that amount with a warning. Alpaca reports only an average
+entry price, so holdings carry average cost with `lots: "unavailable"`.
+Fractional quantities are kept exactly. Fills post as buys and sells at
+quantity x price (Alpaca is commission-free; regulatory fees arrive as FEE
+lines). DIV and capital-gain distributions post as dividends; DIVNRA, DIVFT,
+DIVTW, INTNRA and INTTW as `tax_withheld` on the holding, which keeps the US
+withholding a Mexican resident credits in their return. CSD/CSW post as
+deposits and withdrawals, JNLC as transfers, INT as interest (negative INT, i.e.
+margin interest, as a fee) and FEE/PTC as fees. Splits, mergers, symbol
+changes, stock journals, return of capital and option events are listed under
+`ledger.not_posted`. Instruments carry venue `us`, listing exchange and CUSIP;
+Alpaca has no ISIN, so issuer domicile is set only for CINS CUSIPs (non-US
+issuers) and `sic_listed` stays `unknown` unless you pass it. Portfolio history
+gives the opening equity of the period for a NAV balance check.
+
+**Cuenca (`cuenca`)** uses the API behind the official `cuenca` Python SDK
+(`wealth/connectors/cuenca.py` cites the SDK sources). It sends only `GET`
+requests to `balance_entries`, `deposits`, `transfers`, `card_transactions`,
+`commissions`, `bill_payments`, `savings` and `statements`, with HTTP Basic
+auth as the SDK does. Transfers, card changes, wallet movements, API-key and
+login calls are refused before they are sent.
+
+1. Cuenca must have issued you an API key and secret. Cuenca offers its API to
+   platforms and does not publish whether an individual app user can get one;
+   without a key, upload the monthly *estado de cuenta* instead.
+2. Store both yourself:
+
+   ```sh
+   security add-generic-password -U -s wealth-cuenca -a api_key -w
+   security add-generic-password -U -s wealth-cuenca -a api_secret -w
+   ```
+
+   Or export `WEALTH_CUENCA_API_KEY` and `WEALTH_CUENCA_API_SECRET` for one
+   session (`WEALTH_CUENCA_SANDBOX=1` selects the sandbox host).
+3. Sync with `{"client_id": "ana", "action": "connector", "inputs": {"name": "cuenca"}}`.
+
+Balance entries are Cuenca's own ledger, each with its rolling balance; the
+connector checks that the rolling balances chain and that opening plus the
+period's movements equals the current balance, then records the balance as a
+check on the account. Each *apartado* is its own savings account. Amounts are
+MXN (Cuenca amounts are centavos). SPEI movements use their *clave de rastreo*
+as the external id, everything else Cuenca's id, so a re-sync posts only new
+lines. Descriptions keep Cuenca's Spanish text with CLABEs masked to the last
+four digits. Card purchases post as expenses with the merchant as the
+description, so spending categories apply as for any statement (refunds offset
+spending); ATM withdrawals post as withdrawals, commissions as fees (counted as
+bank fees), and incoming SPEI as income only when its text says nómina, sueldo
+or honorarios, otherwise as a transfer. Cuenca publishes no rate limit; requests
+are spaced 0.25 s apart and 429/5xx are retried with backoff.
+
+**Vest** has no API for individual users (its app offers monthly statements,
+trade confirmations and the 1042-S or 1099 tax report, with no documented
+export format), so there is no connector and nothing is scraped. Upload the
+statement PDF, or a CSV with holdings (Symbol, Description, Quantity, Price,
+Market Value, Cost Basis) and/or activity (Date, Type, Description, Symbol,
+Quantity, Price, Amount, Fees) using `"preset": "vest"`. The preset is a
+generic US-broker layout (USD, month-first dates) and says so in the proposal's
+assumptions.
 
 ## Facts
 

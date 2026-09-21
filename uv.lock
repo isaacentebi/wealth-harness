@@ -2060,6 +2060,9 @@ dev = [
     { name = "pytest" },
     { name = "scikit-learn" },
 ]
+images = [
+    { name = "pillow" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -2068,6 +2071,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.26" },
     { name = "openpyxl", specifier = ">=3.1" },
     { name = "pandas", specifier = ">=2" },
+    { name = "pillow", marker = "extra == 'images'", specifier = ">=10" },
     { name = "pypdf", specifier = ">=5" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8,<10" },
     { name = "scikit-learn", marker = "extra == 'dev'", specifier = ">=1.5" },
@@ -2075,7 +2079,7 @@ requires-dist = [
     { name = "statsmodels", specifier = ">=0.14" },
     { name = "yfinance", specifier = ">=0.2.50" },
 ]
-provides-extras = ["mcp", "analytics", "dev"]
+provides-extras = ["mcp", "analytics", "images", "dev"]
 
 [[package]]
 name = "websockets"

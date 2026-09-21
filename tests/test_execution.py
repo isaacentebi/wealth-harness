@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from wealth import service as service_module
+from wealth.connectors import _rest
 from wealth.execution import tickets
 from wealth.execution.brokers import alpaca_orders
 from wealth.execution.brokers.alpaca_orders import AlpacaKeys, AlpacaOrders, BrokerError
@@ -128,7 +129,7 @@ def no_network(monkeypatch):
         raise AssertionError("tests must never reach a real broker")
 
     monkeypatch.setattr(alpaca_orders, "default_transport", refuse)
-    monkeypatch.setattr(alpaca_orders, "_keychain", lambda *a, **k: None)
+    monkeypatch.setattr(_rest, "keychain_command", lambda *a, **k: None)
     monkeypatch.setattr(alpaca_orders, "default_sleep", lambda seconds: None)
     for name in ("WEALTH_TRADING_LIVE", "WEALTH_ALPACA_KEY_ID", "WEALTH_ALPACA_SECRET", "WEALTH_ALPACA_PAPER",
                  "WEALTH_ALPACA_PAPER_KEY_ID", "WEALTH_ALPACA_PAPER_SECRET", "WEALTH_TRADING_MAX_ORDER_USD",
@@ -246,7 +247,7 @@ def test_ticket_stores_orders_checks_and_a_short_summary(db, paper):
     assert Decimal(ticket["total"]["amount"]) == Decimal(vti["estimated_amount"]) + Decimal("144.72")
     assert ticket["total"]["estimated_tax"] == "0"
     assert "Nothing has been sent" in report["result"]["summary"] and "nonce" not in json.dumps(report)
-    assert [n["code"] for n in ticket["notices"]] == ["no_policy", "no_policy"]
+    assert [n["code"] for n in ticket["notices"]] == ["no_policy"]  # one quiet line, not one per order
     assert ticket["expires_at"] == "2026-09-21T15:10:00Z"
 
 
@@ -375,7 +376,7 @@ def test_live_needs_opt_in_typed_confirmation_and_stays_within_limits(db, fake, 
     assert fake.posts()[0]["headers"]["APCA-API-KEY-ID"] == LIVE_KEY
 
     # Second live ticket: no typed phrase needed; the daily limit counts what was already confirmed today.
-    for _ in range(5):
+    for _ in range(8):
         follow = make_ticket(db, [{"symbol": "VTI", "side": "buy", "qty": 3}])["result"]["ticket"]
         if any(n["code"] == "live_daily_limit" for n in follow["notices"]):
             break
@@ -445,7 +446,8 @@ def test_audit_rows_are_redacted_and_append_only(db, paper):
         tickets.refresh(store, "ana", now=NOW)
         events = store.order_events("ana", ticket_id)
     kinds = [e["event"] for e in events]
-    assert {"ticket", "checks", "confirm", "request", "response", "status"} <= set(kinds)
+    assert {"ticket", "checks", "confirm", "request", "response"} <= set(kinds)
+    assert {"lookup", "submit", "status"} <= {e["payload"].get("action") for e in events}
     dump = json.dumps(events)
     for secret in (PAPER_KEY, PAPER_SECRET, nonce, ACCOUNT_NUMBER):
         assert secret not in dump
@@ -586,3 +588,31 @@ def test_rebalance_trades_can_become_a_ticket(db, paper):
     ticket = make_ticket(db, [trade], source="rebalance")["result"]["ticket"]
     assert ticket["source"] == "rebalance" and ticket["lines"][0]["qty"] == "3"
     assert ticket["lines"][0]["account"] == "brk" and ticket["total"]["estimated_cost"] == "0"
+
+
+@pytest.mark.parametrize("method, path", [
+    ("DELETE", "/v2/orders"), ("DELETE", "/v2/positions"), ("DELETE", "/v2/positions/VTI"), ("PATCH", "/v2/orders/abcdef12"),
+    ("POST", "/v2/account/configurations"), ("POST", "/v2/transfers"), ("POST", "/v2/positions/VTI"),
+    ("GET", "/v2/account/configurations"), ("PUT", "/v2/orders"),
+])
+def test_the_order_client_refuses_anything_outside_its_allowlist(method, path, fake):
+    api = AlpacaOrders(AlpacaKeys(PAPER_KEY, PAPER_SECRET, mode="paper", source="env"), transport=fake)
+    with pytest.raises(BrokerError, match="Refusing"):
+        api._request(method, path)
+    with pytest.raises(BrokerError, match="Refusing"):
+        alpaca_orders.urllib_transport(method, "https://paper-api.alpaca.markets" + path, {}, None, 1)
+    with pytest.raises(BrokerError, match="non-Alpaca"):
+        alpaca_orders.urllib_transport("GET", "https://example.com/v2/account", {}, None, 1)
+    assert fake.calls == []
+    assert alpaca_orders.allowed("POST", "api", "/v2/orders") and alpaca_orders.allowed("DELETE", "api", "/v2/orders/0a1b2c3d-1")
+
+
+def test_the_client_stays_under_alpacas_rate_limit(fake):
+    moments, slept = [0.0], []
+    api = AlpacaOrders(AlpacaKeys(PAPER_KEY, PAPER_SECRET, mode="paper", source="env"), transport=fake,
+                       clock=lambda: moments[0], sleep=lambda s: (slept.append(s), moments.__setitem__(0, moments[0] + s)))
+    for _ in range(alpaca_orders.WINDOW_BUDGET):
+        api.clock()
+    assert slept == []  # a ticket's requests go out without waiting
+    api.clock()
+    assert slept == [60.0] and alpaca_orders.WINDOW_BUDGET < alpaca_orders.RATE_LIMIT_PER_MINUTE

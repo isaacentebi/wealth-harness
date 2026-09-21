@@ -1,0 +1,14 @@
+{
+  "VOO": {"id": "5b0b9e1c-2f5f-4a55-9a6e-1f2e3d4c5b6a", "class": "us_equity", "exchange": "ARCA", "symbol": "VOO",
+          "name": "Vanguard S&P 500 ETF", "status": "active", "tradable": true, "marginable": true, "shortable": true,
+          "fractionable": true, "cusip": "922908363"},
+  "AAPL": {"id": "b0b6dd9d-8b9b-48a9-ba46-b9d54906e415", "class": "us_equity", "exchange": "NASDAQ", "symbol": "AAPL",
+           "name": "Apple Inc. Common Stock", "status": "active", "tradable": true, "marginable": true,
+           "shortable": true, "fractionable": true, "cusip": "037833100"},
+  "ASML": {"id": "3c9a1d2e-7f4b-4e8a-b1c2-d3e4f5a6b7c8", "class": "us_equity", "exchange": "NASDAQ", "symbol": "ASML",
+           "name": "ASML Holding N.V. New York Registry Shares", "status": "active", "tradable": true,
+           "marginable": true, "shortable": true, "fractionable": true, "cusip": "N07059210"},
+  "TSLA": {"id": "8ccae427-5dd0-45b3-b5fe-7ba5e422c766", "class": "us_equity", "exchange": "NASDAQ", "symbol": "TSLA",
+           "name": "Tesla, Inc. Common Stock", "status": "active", "tradable": true, "marginable": true,
+           "shortable": true, "fractionable": true, "cusip": "88160R101"}
+}

@@ -32,7 +32,9 @@ from .agent import (
 from .views import placed_ids, png_available, render_png, render_svg
 from .service import WealthService, database_path, upload_dir
 from .profile import fact_action, fact_detail, form_facts, profile_view
-from .store import ClientExistsError, ClientNotFoundError, StaleRevisionError, StoreError, WealthStore
+from .store import (ClientExistsError, ClientNotFoundError, ContradictionNotFoundError, DecisionNotFoundError,
+                    IneligibleEvidenceError, RequestConflictError, StaleRevisionError, StoreError, ValidationError)
+from .store import WealthStore
 from .execution import tickets as _tickets
 
 STARTERS = (
@@ -64,6 +66,44 @@ REVEAL_STATEMENTS = (
 )
 MAX_MESSAGE_CHARS = 12_000
 MAX_JSON_BYTES = 40_000
+MAX_JSON_DEPTH = 32  # objects and lists nested deeper than this are refused before parsing
+
+
+def json_depth(raw: bytes) -> int:
+    """The deepest nesting of objects/lists in a JSON text (brackets inside strings are ignored)."""
+    depth = deepest = 0
+    in_string = escaped = False
+    for byte in raw:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif byte == 0x5C:  # backslash
+                escaped = True
+            elif byte == 0x22:  # quote
+                in_string = False
+        elif byte == 0x22:
+            in_string = True
+        elif byte in (0x5B, 0x7B):  # [ {
+            depth += 1
+            deepest = max(deepest, depth)
+        elif byte in (0x5D, 0x7D):  # ] }
+            depth -= 1
+    return deepest
+
+
+def _store_message(exc: Exception) -> str:
+    """A store validation error in words for the page (never a stack trace or raw repr dump)."""
+    text = str(exc).split("; see fact_contract.schema")[0].strip()
+    if "expected_revision" in text or "merge=true" in text:
+        return "This changed since the page was loaded. Reload and try again."
+    if "is too large" in text:
+        return "That number is too large; check it for a typo."
+    if not text:
+        return "That can’t be saved."
+    text = text[:1].upper() + text[1:]
+    if len(text) > 200:
+        text = text[:197] + "..."
+    return text if text.endswith((".", "?", "!")) else text + "."
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_ATTACHMENTS = 5
 MEMORY_WAIT_SECONDS = 180
@@ -595,7 +635,13 @@ def create_server(chat, port=8765, host="127.0.0.1"):
             size = int(self.headers.get("Content-Length", "0") or 0)
             if not 0 < size <= MAX_JSON_BYTES or self.headers.get_content_type() != "application/json":
                 raise ValueError("Send a JSON message under 40 KB.")
-            body = json.loads(self.rfile.read(size))
+            raw = self.rfile.read(size)
+            if json_depth(raw) > MAX_JSON_DEPTH:
+                raise ValueError(f"Send JSON nested at most {MAX_JSON_DEPTH} levels deep.")
+            try:
+                body = json.loads(raw)
+            except RecursionError:
+                raise ValueError(f"Send JSON nested at most {MAX_JSON_DEPTH} levels deep.") from None
             if not isinstance(body, dict):
                 raise ValueError("Send a JSON object.")
             return body
@@ -614,16 +660,26 @@ def create_server(chat, port=8765, host="127.0.0.1"):
                         timezone_name=body.get("timezone"))
 
         def handle_failure(self, exc):
+            # Validation, lookup and conflict errors are the request's fault (4xx, in words);
+            # only a real storage failure is a 503.
             if isinstance(exc, BlockingIOError):
                 return self.respond(409, _error_payload("busy", str(exc)))
-            if isinstance(exc, StaleRevisionError):
+            if isinstance(exc, (StaleRevisionError, RequestConflictError, IneligibleEvidenceError)):
                 return self.respond(409, _error_payload("conflict", "This changed elsewhere. Reload and try again."))
+            if isinstance(exc, (ClientNotFoundError, DecisionNotFoundError, ContradictionNotFoundError)):
+                return self.respond(404, _error_payload("missing", "That item is no longer there. Reload the page."))
             if type(exc) is LookupError:  # raised by profile lookups; KeyError stays a 500
                 return self.respond(422, _error_payload("missing", "That item is no longer there."))
             if isinstance(exc, AgentError):
                 return self.respond(502, _error_payload(exc.kind, None, exc.detail))
+            if isinstance(exc, ValidationError):
+                return self.respond(400, _error_payload("invalid", _store_message(exc)))
             if isinstance(exc, (StoreError, sqlite3.Error)):
                 return self.respond(503, _error_payload("storage"))
+            if isinstance(exc, RecursionError):
+                return self.respond(400, _error_payload("invalid", "That request is nested too deeply."))
+            if isinstance(exc, OverflowError):
+                return self.respond(400, _error_payload("invalid", "That number is too large."))
             if isinstance(exc, (ValueError, UnicodeError)):
                 message = str(exc) if str(exc)[:1].isupper() and len(str(exc)) < 120 else "Invalid request."
                 return self.respond(400, _error_payload("invalid", message))

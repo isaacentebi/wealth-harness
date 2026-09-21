@@ -386,7 +386,7 @@ def test_resync_dedupes_by_ibkr_ids_and_diffs_against_the_last_sync(service):
 
 def test_connector_status_reports_the_token_source_never_the_token(service):
     before = service.ingest("ana", "connector_status", {})
-    [row] = before["result"]["connectors"]
+    [row] = [r for r in before["result"]["connectors"] if r["name"] == "ibkr_flex"]
     assert (row["name"], row["token"], row["ready"], row["last_sync"]) == ("ibkr_flex", "env", True, None)
     _sync(service)
     after = dispatch("ingest", {"client_id": "ana", "action": "connector_status", "inputs": {"name": "ibkr_flex"}},

@@ -141,13 +141,30 @@ def _fail(path: str, message: str) -> None:
     raise SchemaError(f"{path} {message}")
 
 
-def _number(value: Any, path: str, *, required: bool = True, minimum: float | None = 0) -> None:
+MAX_AMOUNT = 10 ** 15
+"""Amounts, balances and quantities must be smaller than this (a quadrillion) in absolute value.
+
+Anything larger is a typo or an attack, and it would break the decimal arithmetic
+every reader of the picture relies on."""
+MAX_RATE = 10
+MAX_MONTHS = 1200
+
+
+def _shown(value: Any) -> str:
+    text = repr(value)
+    return text if len(text) <= 40 else text[:37] + "..."
+
+
+def _number(value: Any, path: str, *, required: bool = True, minimum: float | None = 0,
+            maximum: float = MAX_AMOUNT) -> None:
     if value is None:
         if required:
             _fail(path, "is required (a number; leave the whole fact out if unknown, never 0)")
         return
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-        _fail(path, f"must be a number, not {value!r}")
+        _fail(path, f"must be a number, not {_shown(value)}")
+    if abs(value) >= maximum:
+        _fail(path, f"is too large: numbers here must be below {maximum:,} (check for a typo)")
     if minimum is not None and value < minimum:
         _fail(path, f"must be at least {minimum}")
 
@@ -216,7 +233,7 @@ def _object(value: Any, path: str, fields: set[str]) -> dict:
 
 
 def _rate(value: Any, path: str) -> None:
-    _number(value, path, required=False)
+    _number(value, path, required=False, maximum=100 * MAX_RATE)  # 45 means 45%: explained below
     if isinstance(value, (int, float)) and value > 1:
         _fail(path, f"is a decimal rate: write {value / 100:g} for {value:g}%")
 
@@ -246,7 +263,8 @@ def _profile(value: dict, key: str) -> None:
             _fail(f"{key}.{name}", "must be a list of ISO-2 country codes such as [\"MX\"]")
     _bool(value.get("us_person"), f"{key}.us_person")
     dependents = value.get("dependents")
-    if dependents is not None and (isinstance(dependents, bool) or not isinstance(dependents, int) or dependents < 0):
+    if dependents is not None and (isinstance(dependents, bool) or not isinstance(dependents, int)
+                                   or not 0 <= dependents <= 100):
         _fail(f"{key}.dependents", "must be a whole number (0 when they said none)")
     ages = value.get("dependent_ages")
     if ages is not None and (not isinstance(ages, list) or not all(
@@ -318,7 +336,7 @@ def _liability(value: dict, key: str) -> None:
     if value.get("payment") is not None and value.get("payment_frequency") is None:
         _fail(f"{key}.payment_frequency", "is required with payment: " + "|".join(PAYMENT_FREQUENCIES))
     term = value.get("remaining_term_months")
-    if term is not None and (isinstance(term, bool) or not isinstance(term, int) or term < 0):
+    if term is not None and (isinstance(term, bool) or not isinstance(term, int) or not 0 <= term <= MAX_MONTHS):
         _fail(f"{key}.remaining_term_months", "must be a whole number of months")
     _iso_date(value.get("maturity"), f"{key}.maturity")
     _text(value.get("lender"), f"{key}.lender", limit=80)
@@ -371,7 +389,7 @@ def _goals(value: Any, key: str) -> None:
 
 def _reserve(value: dict, key: str) -> None:
     _object(value, key, {"target_months", "target_amount", "currency", "funded_by", "note"})
-    _number(value.get("target_months"), f"{key}.target_months", required=False)
+    _number(value.get("target_months"), f"{key}.target_months", required=False, maximum=MAX_MONTHS)
     _number(value.get("target_amount"), f"{key}.target_amount", required=False)
     if value.get("target_amount") is not None:
         _currency(value.get("currency"), f"{key}.currency")
@@ -420,7 +438,7 @@ _IPS_FIELDS = {"version", "decision_id", "accepted_on", "supersedes", "as_of", "
 
 
 def _share(value: Any, path: str) -> float:
-    _number(value, path)
+    _number(value, path, maximum=MAX_RATE)
     if value > 1:
         _fail(path, f"is a share between 0 and 1, not {value!r}")
     return float(value)
@@ -508,6 +526,32 @@ def _validator(key: str) -> Callable[[Any, str], None] | None:
     return {"cash": _cash, "liability": _liability, "investment": _investment, "thread": _thread}.get(head)
 
 
+def out_of_range(value: Any, path: str = "value") -> str | None:
+    """The first number anywhere in ``value`` that no reader can handle, named by its path.
+
+    Applies to every fact, canonical or not (statement records, legacy shapes):
+    a nonfinite number or one of ``MAX_AMOUNT`` or more in absolute value.
+    """
+    if isinstance(value, bool) or value is None or isinstance(value, str):
+        return None
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and not math.isfinite(value):
+            return f"{path} is not a finite number"
+        return f"{path} is too large: numbers must be below {MAX_AMOUNT:,} (check for a typo)" \
+            if abs(value) >= MAX_AMOUNT else None
+    if isinstance(value, dict):
+        items = value.items()
+    elif isinstance(value, list):
+        items = ((f"[{i}]", v) for i, v in enumerate(value))
+    else:
+        return None
+    for name, item in items:
+        found = out_of_range(item, f"{path}{name}" if str(name).startswith("[") else f"{path}.{name}")
+        if found:
+            return found
+    return None
+
+
 def validate(key: str, value: Any) -> list[str]:
     """Raise ``SchemaError`` for a canonical key whose value breaks the schema.
 
@@ -537,5 +581,5 @@ def validate(key: str, value: Any) -> list[str]:
     return warnings
 
 
-__all__ = ["SCHEMA", "SchemaError", "validate", "country_code", "COUNTRIES", "ONBOARDING_STEPS", "LANGUAGES", "FREQUENCIES", "INCOME_KINDS",
+__all__ = ["SCHEMA", "SchemaError", "validate", "MAX_AMOUNT", "out_of_range", "country_code", "COUNTRIES", "ONBOARDING_STEPS", "LANGUAGES", "FREQUENCIES", "INCOME_KINDS",
            "LIABILITY_KINDS", "GOAL_ACTIONS", "THREAD_KINDS", "THREAD_STATUSES", "DROP_REACTIONS", "EXPERIENCE"]

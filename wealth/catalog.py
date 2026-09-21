@@ -325,6 +325,23 @@ _MX_REVIEW_EXAMPLE: dict[str, Any] = {
 }
 
 
+_GUARD_FACTS: list[dict[str, Any]] = [
+    {"key": "client.profile", "value": {"residence": {"country": "MX"}, "birth_year": 1988, "dependents": 2,
+                                        "dependent_ages": [4, 7], "us_person": False}},
+    {"key": "income.salary", "value": {"amount": 70000, "currency": "MXN", "frequency": "monthly", "net": True,
+                                       "kind": "salary"}},
+    {"key": "spending.monthly", "value": {"essential": 30000, "total": 42000, "currency": "MXN"}},
+    {"key": "cash.nu", "value": {"amount": 200000, "currency": "MXN", "purpose": "reserve"}},
+    {"key": "reserve", "value": {"target_months": 6}},
+    {"key": "investment.gbm", "value": {"amount": 500000, "currency": "MXN", "institution": "GBM", "kind": "brokerage"}},
+    {"key": "goals", "value": [{"id": "retiro", "name": "Retiro", "target_amount": 9000000, "currency": "MXN",
+                                "target_date": "2053-01-01", "monthly_contribution": 8000},
+                               {"id": "auto", "name": "Coche", "target_amount": 250000, "currency": "MXN",
+                                "target_date": "2027-12-01"}]},
+    {"key": "preference.risk", "value": {"drop_reaction": "hold", "experience": "some"}},
+]
+
+
 CATALOG: dict[str, dict[str, Any]] = {
     "import": {
         "purpose": "Validate and reconcile a household from canonical JSON, CSV, or XLSX without inventing accounts, lots, or values.",
@@ -937,6 +954,113 @@ CATALOG: dict[str, dict[str, Any]] = {
         "example": {"source": "user_request", "rationale": "Invest this month's USD 500 in the total-market fund.",
                     "orders": [{"symbol": "VTI", "side": "buy", "notional": 500}]},
     },
+    "speculation_check": {
+        "purpose": "Check a speculative idea (options, leverage, crypto, a single stock) against the play-money "
+                   "policy: a cap of 5% of liquid net worth (0% while the reserve is short or any debt costs over "
+                   "15%), a single-position loss limit and a drawdown stop. Returns allow | allow_with_warning | "
+                   "decline_to_recommend with plain reasons (en/es) and the mechanics-and-risks card; never a trade "
+                   "call, and action=explain always explains.",
+        "required": ["proposal {action: buy|sell|explain, instrument: options|crypto|margin|cfd|future|perp|"
+                     "leveraged_etf|short|stock|fintech_yield, amount?, currency?, leverage?, side?: long|short, "
+                     "option_type?, covered?, strike?, contracts?, negative_balance_protection?, "
+                     "sleeve?: {value, peak}}", "client_id (or facts [{key, value}])"],
+        "optional": ["policy {cap_share (<= 0.10), max_position_loss_share, drawdown_stop} (else preference.speculation, "
+                     "else defaults)", "ips (else the accepted policy.ips)",
+                     "context {now: ISO date-time, timezone: IANA, last_move: {size, at}, udi_value} for the cool-off "
+                     "flag", "as_of"],
+        "example": {"as_of": "2026-09-21", "facts": _GUARD_FACTS,
+                    "proposal": {"action": "buy", "instrument": "options", "amount": 3000, "currency": "MXN",
+                                 "sleeve": {"value": 10000, "peak": 12000}},
+                    "context": {"now": "2026-09-21T15:10:00-06:00", "timezone": "America/Mexico_City"}},
+        "variants": {
+            "card_debt_blocks_play_money": {"as_of": "2026-09-21", "facts": _GUARD_FACTS + [
+                {"key": "liability.tdc", "value": {"kind": "card", "balance": 40000, "currency": "MXN",
+                                                   "annual_rate": 0.45, "payment": 5000, "payment_frequency": "monthly"}}],
+                "proposal": {"action": "buy", "instrument": "crypto", "amount": 5000, "currency": "MXN"}},
+            "explain_mechanics": {"proposal": {"action": "explain", "instrument": "cfd"}},
+        },
+    },
+    "panic_check": {
+        "purpose": "Circuit breaker for 'sell everything' after a fall above 10%: what is actually at risk for the "
+                   "goals, what followed similar S&P 500 drawdowns (with a stress request for this portfolio), the "
+                   "tax cost of selling and a suggested cool-off. It never blocks the person's choice.",
+        "required": ["request {action: sell_all|sell, share? (for sell), drawdown (0.18 = 18% below the peak)}",
+                     "client_id (or facts)"],
+        "optional": ["request.portfolio_value", "request.holdings [{symbol, value, cost_basis, account_type?, "
+                     "acquired_on?, listed_in_mx?}] for the tax cost", "request.history (stress-task scenario rows)",
+                     "request.jurisdiction", "context {now, timezone, last_move}", "as_of"],
+        "example": {"as_of": "2026-09-21", "facts": _GUARD_FACTS,
+                    "request": {"action": "sell_all", "drawdown": 0.18, "portfolio_value": 500000,
+                                "holdings": [{"symbol": "CSPX", "value": 400000, "cost_basis": 330000},
+                                             {"symbol": "AFORE", "value": 100000, "account_type": "afore"}]},
+                    "context": {"now": "2026-09-21T23:40:00-06:00", "timezone": "America/Mexico_City",
+                                "last_move": {"size": -0.06, "at": "2026-09-21T23:05:00-06:00"}}},
+    },
+    "scam_check": {
+        "purpose": "Screen a message or a transfer for scam patterns (guaranteed or high monthly returns, urgency, "
+                   "requests for codes or passwords, 'safe account', pay-to-withdraw, advance-fee loans, fake "
+                   "CONDUSEF/SAT/IRS contact, pig-butchering scripts, a large transfer to a new payee). Deterministic; "
+                   "returns risk low|medium|high, reasons (en/es) and the official places to verify (CONDUSEF SIPRES, "
+                   "CNBV padron, FINRA BrokerCheck, SEC Investor.gov, FTC, IC3).",
+        "required": ["item: message text, or {text?, amount?, currency?, payee?, new_payee?: bool}"],
+        "optional": ["jurisdiction: MX|US (else residence; unknown lists both)", "typical_transfer",
+                     "client_id (liquid assets size 'large')"],
+        "example": {"item": "Hola, soy asesor de inversiones. Te ofrezco 8% mensual garantizado en nuestra plataforma, "
+                            "solo hoy. Deposita en USDT y compárteme el código que te llegó por SMS.",
+                    "jurisdiction": "MX"},
+        "variants": {
+            "large_transfer_new_payee": {"item": {"text": "Transfer to new beneficiary", "amount": 9000, "currency": "USD",
+                                                  "payee": "Global Asset Partners", "new_payee": True},
+                                         "jurisdiction": "US"},
+        },
+    },
+    "protection_review": {
+        "purpose": "Protection review: life-insurance need as a needs-minus-resources range (only with dependants), "
+                   "disability income gap, health cover (Mexico: gastos medicos mayores deductible and coaseguro vs "
+                   "the reserve; US: out-of-pocket maximum and HSA eligibility) and an estate checklist with status "
+                   "(testamento and Mes del Testamento, beneficiaries, poder notarial, marital regime, US-situs "
+                   "exposure via estate). Refers to a licensed agent and a notario/attorney; never drafts.",
+        "required": ["client_id (or facts [{key, value}])"],
+        "optional": ["policies [{kind: life|disability|gmm|health, cover_amount?, monthly_benefit?, deductible?, "
+                     "coinsurance?, coinsurance_cap?, out_of_pocket_max?, coverage?: self|family, hdhp?, currency?}] "
+                     "(omitted = unknown, [] = none)",
+                     "life {years?, replacement_ratio?, education?, final_expenses?}",
+                     "disability {gross_monthly_income?, other_monthly_benefit?}",
+                     "estate {will: yes|no|unknown, will_date?, beneficiaries: {afore, insurance, accounts, retirement}, "
+                     "power_of_attorney, advance_directive, married, marital_regime: sociedad_conyugal|"
+                     "separacion_de_bienes, us_situs: estate-task inputs}", "jurisdiction", "as_of"],
+        "example": {"as_of": "2026-09-21", "facts": _GUARD_FACTS[:-2] + [
+                        {"key": "goals", "value": [{"id": "uni", "name": "Universidad", "action": "education",
+                                                    "target_amount": 900000, "currency": "MXN",
+                                                    "target_date": "2040-08-01"}]}],
+                    "policies": [{"kind": "life", "cover_amount": 1000000, "currency": "MXN"},
+                                 {"kind": "gmm", "deductible": 20000, "coinsurance": 0.1, "coinsurance_cap": 40000},
+                                 {"kind": "disability", "monthly_benefit": 20000}],
+                    "estate": {"will": "no", "beneficiaries": {"afore": "yes", "insurance": "yes", "accounts": "unknown"},
+                               "power_of_attorney": "no", "married": True, "marital_regime": "sociedad_conyugal",
+                               "us_situs": {"year": 2026, "decedent": {"us_citizen": False, "green_card": False,
+                                                                       "us_domiciled": False},
+                                            "assets": [{"id": "voo", "type": "us_domiciled_fund", "value_usd": 90000}]}}},
+        "variants": {
+            "us_hsa": {"as_of": "2026-09-21", "facts": [
+                {"key": "client.profile", "value": {"residence": {"country": "US"}, "birth_year": 1968, "dependents": 0}},
+                {"key": "income.salary", "value": {"amount": 9000, "currency": "USD", "frequency": "monthly", "net": False}},
+                {"key": "cash.bank", "value": {"amount": 20000, "currency": "USD", "purpose": "reserve"}}],
+                "policies": [{"kind": "health", "coverage": "self", "hdhp": True, "deductible": 2000,
+                              "out_of_pocket_max": 6000},
+                             {"kind": "disability", "monthly_benefit": 4000}]},
+        },
+    },
+    "life_event": {
+        "purpose": "Route a life event (marriage, birth_or_adoption, divorce, death_in_family, job_change, layoff, "
+                   "relocation, inheritance, home_purchase, retirement) to an ordered checklist of reviews: facts to "
+                   "update, tasks to run, referrals and dated nudges, in English and Mexican Spanish, filtered by "
+                   "residence.",
+        "required": ["kind"],
+        "optional": ["date (YYYY-MM-DD; default today)", "details", "jurisdiction: MX|US (else residence; unknown "
+                     "lists both)", "client_id"],
+        "example": {"kind": "birth_or_adoption", "date": "2026-09-21", "jurisdiction": "MX"},
+    },
     "monitor": {
         "purpose": "Evaluate opt-in review, expiry, drift, goal, threshold, or thesis rules and return only state changes to the caller.",
         "required": ["client_id on wealth_run", "rules or stored monitor.rules"],
@@ -965,7 +1089,47 @@ CONNECTORS: dict[str, dict[str, Any]] = {
         "resync": "Transactions carry IBKR trade/transaction ids, so a re-sync posts only new lines; "
                   "result.changes lists what moved since the last confirmed sync.",
     },
+    "alpaca": {
+        "purpose": "Pull an Alpaca brokerage account (Trading API v2: account, positions with average cost, open "
+                   "orders, fills, dividends, NRA withholding, interest, fees, cash transfers, portfolio history) into "
+                   "a reconciled ingest proposal. Read-only: only GET on read endpoints; it cannot trade or move money.",
+        "action": "ingest action=connector",
+        "required": ["name: alpaca",
+                     "key id and secret in the OS keychain (service wealth-alpaca, accounts key_id and secret) or "
+                     "WEALTH_ALPACA_KEY_ID/WEALTH_ALPACA_SECRET; never an input"],
+        "optional": ["owner_id", "paper: true for the paper host (or WEALTH_ALPACA_PAPER=1)",
+                     "since: YYYY-MM-DD (default 365 days ago)",
+                     "sic_listed: [symbols] or {symbol: true|false} (Mexican SIC listing; unknown otherwise)"],
+        "example": {"name": "alpaca", "since": "2026-01-01"},
+        "status": "ingest action=connector_status (optional name): whether keys are available and the last sync",
+        "resync": "Lines carry Alpaca activity ids, so a re-sync posts only new lines; result.changes lists what moved.",
+        "limits": "Alpaca reports average entry price, not tax lots (lots are marked unavailable), and no ISIN.",
+    },
+    "cuenca": {
+        "purpose": "Pull a Cuenca account (MXN): balance and apartados as balance checks, SPEI and internal transfers, "
+                   "deposits, card purchases (merchant, categorised like statement lines), ATM withdrawals and "
+                   "commissions into a reconciled ingest proposal. Read-only: only GET; it cannot transfer or pay.",
+        "action": "ingest action=connector",
+        "required": ["name: cuenca",
+                     "API key and secret issued by Cuenca, in the OS keychain (service wealth-cuenca, accounts api_key "
+                     "and api_secret) or WEALTH_CUENCA_API_KEY/WEALTH_CUENCA_API_SECRET; never an input"],
+        "optional": ["owner_id", "since: YYYY-MM-DD (default 365 days ago)"],
+        "example": {"name": "cuenca", "since": "2026-08-01"},
+        "status": "ingest action=connector_status (optional name): whether keys are available and the last sync",
+        "resync": "SPEI lines carry their clave de rastreo and others their Cuenca id, so a re-sync posts only new lines.",
+        "limits": "Cuenca does not publish whether individual app users can get API keys; without one, upload the "
+                  "monthly estado de cuenta with ingest action=file.",
+    },
+}
+# Providers without an API for individuals: statements come in through ingest action=file.
+STATEMENT_ONLY: dict[str, dict[str, Any]] = {
+    "vest": {
+        "why": "Vest (vest.investments) offers no API for individual users; its app provides monthly statements, "
+               "trade confirmations and 1042-S/1099 tax reports, with no documented export layout.",
+        "action": "ingest action=file with preset=vest (a generic US-broker CSV layout, labelled as such), or upload "
+                  "the monthly statement PDF.",
+    },
 }
 
 
-__all__ = ["CATALOG", "CONNECTORS"]
+__all__ = ["CATALOG", "CONNECTORS", "STATEMENT_ONLY"]

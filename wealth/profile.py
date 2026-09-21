@@ -17,6 +17,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Iterable
 
+from . import finmath
 from .policy import current as current_policy, summary as policy_summary
 from .situation import build as build_situation, sentences, summaries
 from .situation.model import goal_name
@@ -695,7 +696,8 @@ def situation_overview(sit: dict) -> dict:
     dated = [a["as_of"] for a in sit["accounts"] if a.get("as_of")]
     accounts = [{"name": r.get("institution") or r.get("name") or r["id"], "id": r["key"], "value": r["value"]}
                 for r in sit["cash"] if r["counted"] and r["value"] is not None]
-    accounts += [{"name": a["label"], "id": a["key"], "value": a["value"]} for a in sit["accounts"] if a["value"] is not None]
+    accounts += [{"name": a["label"], "id": a["key"], "value": a["value"]} for a in sit["accounts"]
+                 if a["value"] is not None and not a.get("superseded_by")]
     accounts += [{"name": r.get("institution") or r.get("name") or r["id"], "id": r["key"], "value": r["value"]}
                  for r in sit["investments"] if r["counted"] and r["value"] is not None]
     assets = _num(nw["assets"]) or 0.0
@@ -769,60 +771,13 @@ def time_weighted_return(valuations: list[tuple[date, float]], flows: list[tuple
 def xirr(cashflows: list[tuple[date, float]]) -> float | None:
     """Annualized money-weighted return (investor view: deposits negative).
 
-    Brackets a sign change on a grid expanding outward from 0 %, then bisects.
-    Returns ``None`` when no root exists in (-99.99 %, 1e6 %).
+    One implementation for the whole app: :func:`wealth.finmath.xirr`.
     """
-    flows = sorted((d, a) for d, a in cashflows if a)
-    if len(flows) < 2 or all(a > 0 for _, a in flows) or all(a < 0 for _, a in flows):
-        return None
-    origin = flows[0][0]
-    years = [((d - origin).days / 365.0, a) for d, a in flows]
-
-    def npv(rate: float) -> float:
-        return sum(a / (1 + rate) ** t for t, a in years)
-
-    grid = [0.0]
-    step = 0.01
-    while step < 1e4:
-        grid.extend([step, -min(step, 0.9999)])
-        step *= 1.6
-    grid.append(-0.9999)
-    grid = sorted(set(grid), key=abs)
-    # Walk outward: check neighbouring grid points on each side of zero.
-    positives = sorted(r for r in grid if r >= 0)
-    negatives = sorted((r for r in grid if r <= 0), reverse=True)
-    candidates = []
-    for side in (positives, negatives):
-        for lo, hi in zip(side, side[1:]):
-            try:
-                f_lo, f_hi = npv(lo), npv(hi)
-            except (OverflowError, ZeroDivisionError):
-                break
-            if f_lo == 0:
-                return lo
-            if f_lo * f_hi < 0:
-                candidates.append((min(lo, hi), max(lo, hi)))
-                break
-    if not candidates:
-        return None
-    lo, hi = min(candidates, key=lambda pair: min(abs(pair[0]), abs(pair[1])))
-    f_lo = npv(lo)
-    for _ in range(200):
-        mid = (lo + hi) / 2
-        f_mid = npv(mid)
-        if abs(f_mid) < 1e-9 or hi - lo < 1e-12:
-            return mid
-        if f_lo * f_mid < 0:
-            hi = mid
-        else:
-            lo, f_lo = mid, f_mid
-    return (lo + hi) / 2
+    return finmath.xirr(cashflows)
 
 
 def _annualize(total: float | None, days: int) -> float | None:
-    if total is None or days < 365 or total <= -1:
-        return None
-    return (1 + total) ** (365.0 / days) - 1
+    return finmath.annualize(total, days)
 
 
 def _value_on(series: list[tuple[date, float]], when: date) -> float | None:
@@ -1132,7 +1087,11 @@ def memory_view(sit: dict, snapshot: dict, language: str, missing: Iterable[str]
     heads = summaries(sit, language)
     items, conflicts, answered = [], [], set()
     records = [c for c in sit.get("contradictions") or [] if c.get("status", "pending") == "pending"]
-    for index, s in enumerate(sentences(sit, language) + _held_back(sit, snapshot, language)):
+    direct = sentences(sit, language)
+    # A stale statement account is worded by the situation itself; its held-back copy would repeat it.
+    worded = {(s["key"], s.get("ref")) for s in direct}
+    extra = [s for s in _held_back(sit, snapshot, language) if (s["key"], s.get("ref")) not in worded]
+    for index, s in enumerate(direct + extra):
         fact = facts.get(s["key"] or "")
         ref = s.get("ref")
         editable = not s.get("readonly")
@@ -1279,12 +1238,22 @@ def profile_view(service: Any, client_id: str, today: Any = None, language: str 
     ``language`` ("es"/"en", e.g. from ``?lang=``) builds the memory in that
     language only; without it both are included so the page can switch offline.
     """
+    from .service import usable_snapshot
+
     today = _today(today)
-    snapshot = _snapshot(service, client_id)
+    # A fact no reader can handle (e.g. an amount of 1e308 saved before numbers were bounded) is left
+    # out of every view and listed for the person to remove, instead of breaking the page.
+    snapshot, invalid = usable_snapshot(_snapshot(service, client_id))
     facts = _facts_by_key(snapshot)
     profile = _dict_value(facts.get("client.profile"))
     household = _dict_value(facts.get("household"))
     sit = _situation(service, client_id, snapshot, today)
+    seen_invalid = {item["key"] for item in invalid}
+    invalid += [item for item in sit.get("invalid_facts") or [] if item["key"] not in seen_invalid]
+    if invalid:
+        excluded = {item["key"] for item in invalid}
+        snapshot = {**snapshot, "facts": [f for f in snapshot["facts"] if f["key"] not in excluded]}
+        facts = _facts_by_key(snapshot)
     ov = overview(snapshot, today)
     if ov.get("status") == "empty":
         ov = situation_overview(sit)
@@ -1302,6 +1271,7 @@ def profile_view(service: Any, client_id: str, today: Any = None, language: str 
     memory: dict[str, Any] = {"language": _memory_lang(language) if language else saved}
     for lang in langs:
         memory[lang] = memory_view(sit, snapshot, lang, known["missing"])
+        memory[lang]["review"] = _invalid_items(invalid, lang) + memory[lang]["review"]
     return {
         "version": 2, "today": today.isoformat(),
         "client": {"display_name": snapshot["client"].get("display_name"),
@@ -1316,7 +1286,26 @@ def profile_view(service: Any, client_id: str, today: Any = None, language: str 
         "upcoming": upcoming(snapshot, today, labels=fact_labels(sit)),
         # The accepted investment policy (profile, sleeves with ranges, reserve, review), or None.
         "policy": policy_summary(current_policy(snapshot, today)),
+        # Saved facts left out of every number because they cannot be read; each can be removed.
+        "invalid_facts": invalid,
     }
+
+
+def _invalid_items(invalid: list[dict], language: str) -> list[dict]:
+    """Review cards for unreadable facts: named in the person's words, with a remove action."""
+    from .store import _label
+
+    items = []
+    for index, item in enumerate(invalid):
+        label = _label(item["key"], None, language)
+        text = (f"La cifra guardada de {label} no se puede usar (es demasiado grande o está mal escrita). "
+                "Elimínala y vuelve a escribirla." if language == "es" else
+                f"The saved figure for {label} can’t be used (it is too large or malformed). "
+                "Remove it and enter it again.")
+        items.append({"id": f"invalid-{index}", "topic": "about", "text": text, "emphasis": [], "key": item["key"],
+                      "origin": {"kind": "said"}, "since": None, "age_days": None, "unconfirmed": False,
+                      "stale": True, "invalid": True, "edit": None, "forget": {"field": None}, "confirm": False})
+    return items
 
 
 # ---------------------------------------------------------------- writes (returned, not performed)

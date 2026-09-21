@@ -1,4 +1,4 @@
-"""CSV/XLSX brokerage and bank exports (Schwab, Fidelity, Vanguard, IBKR, Mexican exports).
+"""CSV/XLSX brokerage and bank exports (Schwab, Fidelity, Vanguard, IBKR, Mexican exports, generic Vest).
 
 Columns are mapped through configurable header aliases
 (:data:`wealth.ingest.columns.HEADER_ALIASES` plus caller ``aliases``).  Presets
@@ -34,7 +34,21 @@ PRESETS: dict[str, dict[str, Any]] = {
     "ibkr": {"institution": "Interactive Brokers", "currency": None},
     "mx": {"institution": None, "currency": "MXN",
            "headers_any": {"emisora", "titulos", "valor de mercado", "cargo", "abono", "concepto", "descripcion"}},
+    # Vest (vest.investments; brokerage through Northbound Securities, custody at
+    # DriveWealth) has no API for individual users and publishes no export layout:
+    # its help center lists monthly account statements, trade confirmations and
+    # the 1042-S/1099 tax reports in the app, with no file format stated
+    # (https://intercom.help/helpvest/en/articles/6338715-where-can-i-find-my-account-reports).
+    # This is therefore a GENERIC layout for a CSV the person makes from those
+    # statements: holdings (Symbol, Description, Quantity, Price, Market Value,
+    # Cost Basis) and/or activity (Date, Type, Description, Symbol, Quantity,
+    # Price, Amount, Fees).  US month-first dates, USD.
+    "vest": {"institution": "Vest", "currency": "USD", "generic": True,
+             "signature": re.compile(r"(?i)\bvest\b[^\n]{0,80}(?:northbound|drivewealth)|northbound securities|"
+                                     r"\bvest (?:investments|account statement|estado de cuenta)\b")},
 }
+VEST_NOTE = ("Vest preset: a generic US-broker layout, not a documented Vest export (Vest publishes none and offers no "
+             "API for individual users). Check the columns were read as intended.")
 _ACCOUNT_LINE = re.compile(r"(?i)^(?:positions for account\s+)?(?P<label>[A-Za-z][A-Za-z &'\-]{1,40}?)\s*(?:\.\.\.|…|[Xx*]{2,})\s*(?P<tail>\d{3,4})\b")
 _PENDING = re.compile(r"(?i)^pending activity\b")
 _IBKR_SECTIONS = {"Statement", "Account Information", "Net Asset Value", "Open Positions", "Trades", "Dividends",
@@ -96,6 +110,8 @@ def _detect_preset(rows: list[list[str]]) -> str | None:
     if sum(1 for row in head if len(row) > 2 and row[1] in ("Header", "Data") and row[0] in _IBKR_SECTIONS) >= 2:
         return "ibkr"
     blob = " ".join(" ".join(row) for row in head)
+    if PRESETS["vest"]["signature"].search(blob):
+        return "vest"
     if PRESETS["schwab"]["signature"].search(blob):
         return "schwab"
     for row in head:
@@ -122,8 +138,8 @@ def parse_export(rows: list[list[str]], *, preset: str | None = None, aliases: d
     if preset and PRESETS[preset]["institution"] and institution is None:
         institution, institution_key = PRESETS[preset]["institution"], preset
     spanish = preset == "mx"
-    day_first = True if spanish else False if preset in ("schwab", "fidelity", "vanguard") else None
-    notes: list[str] = []
+    day_first = True if spanish else False if preset in ("schwab", "fidelity", "vanguard", "vest") else None
+    notes: list[str] = [VEST_NOTE] if preset == "vest" else []
     warnings: list[str] = []
     confidence: dict[str, str] = {}
 
@@ -263,7 +279,7 @@ def parse_export(rows: list[list[str]], *, preset: str | None = None, aliases: d
     return {
         "statement": {"institution": institution, "institution_key": institution_key, "as_of": statement_as_of,
                       "currency": statement_currency, "decimal_comma": None, "accounts": statement_accounts, "fx": [],
-                      "market": "mx" if preset == "mx" else "us" if preset in ("schwab", "fidelity", "vanguard") else None},
+                      "market": "mx" if preset == "mx" else "us" if preset in ("schwab", "fidelity", "vanguard", "vest") else None},
         "confidence": confidence, "notes": notes, "warnings": warnings, "preset": preset,
         "parsed": any(a["positions"] or a["transactions"] for a in statement_accounts),
     }

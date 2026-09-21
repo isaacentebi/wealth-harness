@@ -27,8 +27,6 @@ Broker facts are cited in :mod:`wealth.execution.brokers.alpaca_orders`.
 from __future__ import annotations
 
 import hashlib
-import importlib
-import importlib.util
 import os
 import re
 import secrets
@@ -37,6 +35,7 @@ from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_FLOOR, Decimal, InvalidOper
 from typing import Any, Callable, Mapping
 from zoneinfo import ZoneInfo
 
+from ..connectors.alpaca import _external_id  # the read connector's FILL ids, so a later sync dedupes
 from .brokers import alpaca_orders
 from .brokers.alpaca_orders import AlpacaOrders, BrokerError
 
@@ -288,12 +287,15 @@ def _policy_rows(snapshot: Mapping[str, Any] | None, line: dict, amount: Decimal
         return [_check("policy_unchecked", "warn", f"The policy check could not run: {exc}", line["index"])]
     rows, unchecked = [], 0
     for rule in result["rules"]:
+        extra = {"rule": rule["rule"], "symbol": line["symbol"]}
+        if rule.get("sleeve"):
+            extra["sleeve"] = rule["sleeve"]
         if rule["status"] == "violation":
-            rows.append(_check("policy", "violation", rule["explanation"], line["index"], rule=rule["rule"]))
+            rows.append(_check("policy", "violation", rule["explanation"], line["index"], **extra))
         elif rule["status"] == "warn" and rule["explanation"].startswith("Not checked"):
             unchecked += 1
         elif rule["status"] == "warn":
-            rows.append(_check("policy", "warn", rule["explanation"], line["index"], rule=rule["rule"]))
+            rows.append(_check("policy", "warn", rule["explanation"], line["index"], **extra))
     if unchecked:
         rows.append(_check("policy_unchecked", "warn",
                            f"{unchecked} policy rule(s) could not be checked for {line['symbol']}.", line["index"],
@@ -301,26 +303,54 @@ def _policy_rows(snapshot: Mapping[str, Any] | None, line: dict, amount: Decimal
     return rows
 
 
-def _guardrail_rows(lines: list[dict], context: Mapping[str, Any]) -> list[dict]:
-    """Run ``wealth.guardrails.check_order(order, context)`` when that module exists."""
-    if importlib.util.find_spec("wealth.guardrails") is None:
-        return []
-    module = importlib.import_module("wealth.guardrails")
-    check = getattr(module, "check_order", None)
-    if not callable(check):
-        return []
-    rows = []
-    for line in lines:
-        try:
-            found = check(dict(line), dict(context)) or []
-        except Exception as exc:  # noqa: BLE001 - a broken guardrail fails closed
-            rows.append(_check("guardrail", "unknown", f"A guardrail could not run ({type(exc).__name__}).",
-                               line["index"]))
+def _condense_policy(checks: list[dict]) -> list[dict]:
+    """One quiet line per kind of policy note, so the card stays calm; violations stay per order."""
+    out: list[dict] = []
+    seen: set[tuple] = set()
+    unchecked = 0
+    band = False
+    for check in checks:
+        code, params = check["code"], check.get("params") or {}
+        if code == "no_policy":
+            key = ("no_policy",)
+            check = _check("no_policy", "warn", "No accepted investment policy; the orders were not checked "
+                           "against one.")
+        elif code == "policy_unchecked" and check["status"] == "warn":
+            unchecked += int(params.get("count") or 1)
             continue
-        for item in found:
-            status = item.get("status") if item.get("status") in ("warn", "block", "violation") else "warn"
-            rows.append(_check("guardrail", status, str(item.get("message") or "Guardrail"), line["index"]))
-    return rows
+        elif code == "policy" and check["status"] == "warn" and params.get("rule") == "allocation_band":
+            band = True
+            continue
+        elif code == "policy":
+            key = ("policy", check["status"], params.get("rule"), check.get("line") if check["status"] == "violation"
+                   else params.get("symbol"))
+        else:
+            out.append(check)
+            continue
+        if key not in seen:
+            seen.add(key)
+            out.append(check)
+    if band:
+        out.append(_check("policy_band", "warn", "Part of the portfolio is already outside its policy ranges."))
+    if unchecked:
+        out.append(_check("policy_unchecked", "warn", f"{unchecked} policy check(s) could not run for lack of data.",
+                          count=unchecked))
+    return out
+
+
+def _guardrail_rows(snapshot: Mapping[str, Any] | None, now: datetime) -> list[dict]:
+    """Wealth's cool-off flag (:func:`wealth.guardrails.cool_off`) as quiet lines; guardrails never block."""
+    from .. import guardrails
+
+    zone = None
+    for fact in (snapshot or {}).get("facts") or []:
+        if fact.get("key") == "client.profile" and isinstance(fact.get("value"), Mapping):
+            zone = fact["value"].get("timezone")
+    try:
+        result = guardrails.cool_off(now=now.isoformat(), tz=zone if isinstance(zone, str) else None)
+    except ValueError:
+        return []
+    return [_check("cool_off", "warn", flag["en"], es=flag["es"]) for flag in result["flags"]]
 
 
 def run_checks(lines: list[dict], *, mode: str, broker: AlpacaOrders | None, snapshot: Mapping[str, Any] | None,
@@ -498,9 +528,8 @@ def run_checks(lines: list[dict], *, mode: str, broker: AlpacaOrders | None, sna
                 if any(o["symbol"] == line["symbol"] and o["side"] == line["side"] for o in other.get("lines", [])):
                     checks.append(_check("duplicate_ticket", "warn", f"Another recent ticket also has {line['side']} "
                                          f"{line['symbol']}.", line["index"], symbol=line["symbol"]))
-    checks += _guardrail_rows(lines, {"mode": mode, "account": account and {
-        k: account.get(k) for k in ("cash", "buying_power", "non_marginable_buying_power")}})
-    return lines, checks
+    checks += _guardrail_rows(snapshot, now)
+    return lines, _condense_policy(checks)
 
 
 def _blocking(checks: list[dict], override: bool) -> list[dict]:
@@ -517,9 +546,12 @@ def _ledger_account_id(store: Any, client_id: str | None, account: Mapping[str, 
 # -- tickets -------------------------------------------------------------------------
 
 def _totals(lines: list[dict]) -> dict[str, Any]:
+    """``amount``: net cash, buys minus sells (negative means money comes in); ``gross``: all orders."""
     amounts = [_opt(l.get("estimated_amount")) for l in lines]
-    total = sum(amounts, Decimal(0)) if all(a is not None for a in amounts) else None
-    result: dict[str, Any] = {"amount": _s(total), "currency": "USD"}
+    known = all(a is not None for a in amounts)
+    net = sum((a if l["side"] == "buy" else -a for a, l in zip(amounts, lines)), Decimal(0)) if known else None
+    gross = sum(amounts, Decimal(0)) if known else None
+    result: dict[str, Any] = {"amount": _s(net), "gross": _s(gross), "currency": "USD"}
     for name in ("estimated_tax", "estimated_cost"):
         values = [_opt(l.get(name)) for l in lines if l.get(name) is not None]
         result[name] = _s(sum(values, Decimal(0))) if values else None
@@ -560,7 +592,10 @@ def _summary(view: Mapping[str, Any]) -> str:
     total = view["total"]["amount"]
     count = len(view["lines"])
     parts = [f"{'LIVE' if view['mode'] == 'live' else 'PAPER'} ticket {view['id']}: {count} order(s)"]
-    parts.append(f"about USD {total}" if total else "amount not yet known")
+    if total is None:
+        parts.append("amount not yet known")
+    else:
+        parts.append(f"net about USD {total} to pay" if Decimal(total) >= 0 else f"net about USD {total[1:]} to receive")
     notes = [n for n in view["notices"] if n["status"] in ("violation", "block", "unknown")]
     text = ", ".join(parts) + "."
     if notes:
@@ -822,15 +857,6 @@ def _update_line(line: dict, order: Mapping[str, Any]) -> dict:
     line["filled_qty"] = order.get("filled_qty")
     line["filled_avg_price"] = order.get("filled_avg_price")
     return line
-
-
-def _external_id(activity: Mapping[str, Any]) -> str | None:
-    """The read connector's id for an Alpaca activity (``ALPACA-A<date>_<uuid>``), so both dedupe."""
-    raw = str(activity.get("id") or "")
-    if not re.fullmatch(r"[0-9]{8,20}::[0-9a-fA-F\-]{8,40}", raw):
-        return None
-    head, tail = raw.split("::")
-    return f"ALPACA-A{head}_{tail.replace('-', '').lower()}"
 
 
 def _fill_date(activity: Mapping[str, Any]) -> str | None:

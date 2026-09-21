@@ -88,8 +88,9 @@ def test_required_return_edges():
     assert policy.required_return(10 ** 9, 10, 1, 12)["status"] == "unrealistic"
     assert policy.required_return(1000, 2000, 0, 0)["status"] == "reached"
     assert policy.required_return(1000, 100, 0, 0)["status"] == "due"
-    # Already over-funded: a negative rate still reaches it, reported as such.
-    assert policy.required_return(1000, 2000, 0, 24)["rate"] < 0
+    # Already over-funded: no return is needed; never a negative "required" rate.
+    over = policy.required_return(1000, 2000, 0, 24)
+    assert over["status"] == "met" and over["rate"] == 0.0
 
 
 def test_goal_objectives_use_earmarked_cash_and_contributions():

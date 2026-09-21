@@ -268,7 +268,7 @@ def test_sic_listing_not_the_broker_decides_the_ten_percent_rate():
     totals = report["result"]["totals"]
     assert totals["article_129_net_gain_or_loss_mxn"] == "72000.00"
     assert totals["article_129_tax_mxn"] == "7200.00"
-    assert totals["net_gain_or_loss_mxn"] == "36000.00"  # only the non-SIC sale is progressive income
+    assert totals["progressive_net_gain_or_loss_mxn"] == "36000.00"  # only the non-SIC sale is progressive income
     assert any("contested" in w for w in report["warnings"])
     assert any("constancia" in w for w in report["warnings"])
     missing = mexico.foreign_securities({"tax_year": 2026, "marginal_rate": "0.3", "sales": [{**sale, "id": "x"}]})

@@ -3,9 +3,8 @@
 This is the only module in Wealth that can place or cancel an order, and only
 :func:`wealth.execution.tickets.confirm` / :func:`~wealth.execution.tickets.cancel`
 call its write methods.  Nothing reachable from the model (MCP tools, the CLI
-``dispatch`` operations, ``WealthService.run``) imports those entry points.
-The read-only account connector (``wealth/connectors/alpaca.py``) is separate
-and never places orders.
+``dispatch`` operations, ``WealthService.run``) calls those entry points.  The
+read-only account connector (``wealth/connectors/alpaca.py``) stays GET-only.
 
 Environments
     Paper is the default.  Live needs ``WEALTH_TRADING_LIVE=alpaca`` in the
@@ -15,15 +14,26 @@ Environments
     latest prices come from ``https://data.alpaca.markets``.
 
 Credentials
-    Paper keys: ``WEALTH_ALPACA_PAPER_KEY_ID`` / ``WEALTH_ALPACA_PAPER_SECRET``
-    or the OS keychain service ``wealth-alpaca-paper`` (accounts ``key_id`` and
-    ``secret``); ``WEALTH_ALPACA_KEY_ID``/``WEALTH_ALPACA_SECRET`` are used for
-    paper only when ``WEALTH_ALPACA_PAPER`` is set (the read connector's
-    convention for paper keys).  Live keys: ``WEALTH_ALPACA_KEY_ID`` /
-    ``WEALTH_ALPACA_SECRET`` (without ``WEALTH_ALPACA_PAPER``) or keychain
-    service ``wealth-alpaca``.  Keys are wrapped so ``repr`` never shows them,
-    they travel only in the ``APCA-API-KEY-ID``/``APCA-API-SECRET-KEY`` headers
-    and every error and audit payload is scrubbed of them.
+    Shared with the read-only connector and loaded with its helpers
+    (:func:`wealth.connectors.alpaca.load_keys`, built on
+    :func:`wealth.connectors._rest.load_secret`): env ``WEALTH_ALPACA_KEY_ID`` /
+    ``WEALTH_ALPACA_SECRET`` or the OS keychain service ``wealth-alpaca``
+    (accounts ``key_id`` and ``secret``), with ``WEALTH_ALPACA_PAPER`` saying
+    they are paper keys.  Keys serve only the mode they belong to: paper keys
+    only ever reach the paper URL, live keys only the live URL.  Someone who
+    syncs a live account and wants to paper trade may add dedicated paper keys:
+    env ``WEALTH_ALPACA_PAPER_KEY_ID`` / ``WEALTH_ALPACA_PAPER_SECRET`` or
+    keychain service ``wealth-alpaca-paper``.  Keys never print or pickle,
+    travel only in the ``APCA-API-KEY-ID`` / ``APCA-API-SECRET-KEY`` headers,
+    and every error and audit payload is scrubbed of them
+    (:func:`wealth.connectors._rest.scrub`).
+
+Allowlist
+    Unlike the connector's GET-only client, this client may write, but only
+    ``POST /v2/orders`` and ``DELETE /v2/orders/{id}`` (one order); everything
+    else is a GET on :data:`ALLOWED`.  Cancel-all, closing positions, account
+    configuration and transfers are refused before a request is built, and the
+    default transport checks the list again.
 
 Alpaca sources (read 2026-09-21)
     * Orders at Alpaca (order types; time in force; fractional orders are
@@ -37,7 +47,7 @@ Alpaca sources (read 2026-09-21)
     * Create an order, ``POST /v2/orders`` (symbol, qty, notional, side, type,
       time_in_force, limit_price, extended_hours, ``client_order_id`` "<= 128
       characters", 403 "Buying power or shares is not sufficient", 422 input
-      not recognized; qty/notional cannot be combined):
+      not recognized; qty and notional cannot be combined):
       https://docs.alpaca.markets/reference/postorder
     * Fractional trading (``fractionable`` asset flag; up to 9 decimals; limit
       orders are supported for fractional and notional orders, ``day`` only;
@@ -59,25 +69,26 @@ Alpaca sources (read 2026-09-21)
       https://alpaca.markets/support/usage-limit-api-calls
     * Also used: ``GET /v2/clock`` (is_open, next_open), ``GET /v2/orders/{id}``,
       ``GET /v2/orders:by_client_order_id``, ``DELETE /v2/orders/{id}``,
-      ``GET /v2/positions/{symbol}``, ``GET /v2/account/activities/FILL``
-      (id, order_id, qty, price, side, symbol, transaction_time) and
+      ``GET /v2/positions``, ``GET /v2/account/activities/FILL`` (id, order_id,
+      qty, price, side, symbol, transaction_time) and
       ``GET /v2/stocks/{symbol}/trades/latest`` on the market data host.
 """
 
 from __future__ import annotations
 
 import json
+from collections import deque
 import os
 import re
-import shutil
 import ssl
-import subprocess
-import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any, Callable, Mapping
+
+from ...connectors import _rest
+from ...connectors import alpaca as _connector
 
 NAME = "alpaca"
 PAPER_URL = "https://paper-api.alpaca.markets"
@@ -85,21 +96,31 @@ LIVE_URL = "https://api.alpaca.markets"
 DATA_URL = "https://data.alpaca.markets"
 HOSTS = frozenset({"paper-api.alpaca.markets", "api.alpaca.markets", "data.alpaca.markets"})
 RATE_LIMIT_PER_MINUTE = 200
-MIN_INTERVAL = 60.0 / RATE_LIMIT_PER_MINUTE
+WINDOW_BUDGET = RATE_LIMIT_PER_MINUTE - 20  # per client, leaving room for the read connector
 TIMEOUT_SECONDS = 20.0
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 MAX_CLIENT_ORDER_ID = 128
-TERMINAL = frozenset({"filled", "canceled", "expired", "rejected", "replaced", "done_for_day_final"})
-CANCELABLE = frozenset({"new", "accepted", "pending_new", "partially_filled", "accepted_for_bidding",
-                        "done_for_day", "held", "calculated", "stopped", "suspended"})
+# Optional dedicated paper keys; the shared keys belong to the read connector.
+PAPER_ENV = ("WEALTH_ALPACA_PAPER_KEY_ID", "WEALTH_ALPACA_PAPER_SECRET")
+PAPER_KEYCHAIN = "wealth-alpaca-paper"
 _SYMBOL = re.compile(r"^[A-Z][A-Z0-9.]{0,9}$")
 _ORDER_ID = re.compile(r"^[0-9a-fA-F-]{8,64}$")
 _CLIENT_ORDER_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
-
-PAPER_ENV = ("WEALTH_ALPACA_PAPER_KEY_ID", "WEALTH_ALPACA_PAPER_SECRET")
-LIVE_ENV = ("WEALTH_ALPACA_KEY_ID", "WEALTH_ALPACA_SECRET")
-PAPER_FLAG = "WEALTH_ALPACA_PAPER"
-KEYCHAIN = {"paper": "wealth-alpaca-paper", "live": "wealth-alpaca"}
+# The only requests this client can make: (method, host kind, path pattern).
+ALLOWED: tuple[tuple[str, str, re.Pattern[str]], ...] = tuple(
+    (method, host, re.compile(pattern)) for method, host, pattern in (
+        ("GET", "api", r"/v2/account"),
+        ("GET", "api", r"/v2/clock"),
+        ("GET", "api", r"/v2/assets/[A-Z][A-Z0-9.]{0,9}"),
+        ("GET", "api", r"/v2/positions"),
+        ("GET", "api", r"/v2/orders"),
+        ("GET", "api", r"/v2/orders/[0-9a-fA-F-]{8,64}"),
+        ("GET", "api", r"/v2/orders:by_client_order_id"),
+        ("GET", "api", r"/v2/account/activities/FILL"),
+        ("GET", "data", r"/v2/stocks/[A-Z][A-Z0-9.]{0,9}/trades/latest"),
+        ("POST", "api", r"/v2/orders"),
+        ("DELETE", "api", r"/v2/orders/[0-9a-fA-F-]{8,64}"),
+    ))
 
 # (method, url, headers, body, timeout) -> (status, body bytes)
 Transport = Callable[[str, str, Mapping[str, str], "bytes | None", float], "tuple[int, bytes]"]
@@ -116,35 +137,23 @@ class BrokerError(Exception):
         self.body = body
 
 
-class _Secret:
-    __slots__ = ("_value",)
+def allowed(method: str, host_kind: str, path: str) -> bool:
+    """Whether ``method path`` on the api or data host is a request this client may make."""
+    return any(m == method and h == host_kind and p.fullmatch(path) for m, h, p in ALLOWED)
 
-    def __init__(self, value: str):
-        value = (value or "").strip()
-        if not value or re.search(r"[\s\x00-\x1f]", value):
-            raise ValueError("an Alpaca credential is empty or malformed")
-        self._value = value
 
-    def reveal(self) -> str:
-        return self._value
-
-    def __repr__(self) -> str:
-        return "'****'"
-
-    __str__ = __repr__
-
-    def __reduce__(self):
-        raise TypeError("credentials cannot be serialized")
-
+# -- credentials ---------------------------------------------------------------
 
 class AlpacaKeys:
     """A key id and secret for one mode; never printed or pickled."""
 
     __slots__ = ("mode", "source", "_key", "_secret")
 
-    def __init__(self, key_id: str, secret: str, *, mode: str, source: str):
+    def __init__(self, key_id: Any, secret: Any, *, mode: str, source: str):
         self.mode, self.source = mode, source
-        self._key, self._secret = _Secret(key_id), _Secret(secret)
+        self._key = key_id if isinstance(key_id, _rest.Secret) else _rest.Secret(str(key_id), source, "Alpaca key id")
+        self._secret = secret if isinstance(secret, _rest.Secret) else _rest.Secret(str(secret), source,
+                                                                                   "Alpaca secret")
 
     def headers(self) -> dict[str, str]:
         return {"APCA-API-KEY-ID": self._key.reveal(), "APCA-API-SECRET-KEY": self._secret.reveal()}
@@ -161,53 +170,29 @@ class AlpacaKeys:
         raise TypeError("AlpacaKeys cannot be serialized")
 
 
-def _truthy(value: str | None) -> bool:
-    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _keychain(service: str, account: str, runner: Callable[..., Any] | None, platform: str | None) -> str | None:
-    runner = runner or subprocess.run
-    platform = platform or sys.platform
-    if platform == "darwin":
-        command = ["security", "find-generic-password", "-s", service, "-a", account, "-w"]
-    elif platform.startswith("linux") and shutil.which("secret-tool"):
-        command = ["secret-tool", "lookup", "service", service, "account", account]
-    else:
-        return None
-    try:
-        done = runner(command, capture_output=True, text=True, timeout=10, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    value = (getattr(done, "stdout", "") or "").strip()
-    return value if getattr(done, "returncode", 1) == 0 and value else None
-
-
 def load_keys(mode: str, environ: Mapping[str, str] | None = None, runner: Callable[..., Any] | None = None,
               platform: str | None = None) -> AlpacaKeys | None:
-    """Keys for ``mode`` ('paper' or 'live') from the environment or the OS keychain, else ``None``."""
+    """Keys for ``mode`` ('paper' or 'live'), or ``None``.
+
+    The shared connector keys count only for the mode ``WEALTH_ALPACA_PAPER``
+    says they belong to; paper mode may also use dedicated paper keys.
+    """
     if mode not in ("paper", "live"):
         raise ValueError("mode must be paper or live")
     environ = os.environ if environ is None else environ
-    paper_flag = _truthy(environ.get(PAPER_FLAG))
-    candidates = [PAPER_ENV] if mode == "paper" else []
-    if (mode == "paper") == paper_flag:
-        candidates.append(LIVE_ENV)  # the read connector's variables, when they hold keys of this mode
-    for key_name, secret_name in candidates:
-        key, secret = (environ.get(key_name) or "").strip(), (environ.get(secret_name) or "").strip()
+    if mode == "paper":
+        key = _rest.load_secret(PAPER_ENV[0], PAPER_KEYCHAIN, "key_id", label="Alpaca paper key id",
+                                environ=environ, runner=runner, platform=platform)
+        secret = _rest.load_secret(PAPER_ENV[1], PAPER_KEYCHAIN, "secret", label="Alpaca paper secret",
+                                   environ=environ, runner=runner, platform=platform) if key else None
         if key and secret:
-            try:
-                return AlpacaKeys(key, secret, mode=mode, source="env")
-            except ValueError:
-                return None
-    service = KEYCHAIN[mode]
-    key = _keychain(service, "key_id", runner, platform)
-    secret = _keychain(service, "secret", runner, platform) if key else None
-    if key and secret:
-        try:
-            return AlpacaKeys(key, secret, mode=mode, source="keychain")
-        except ValueError:
-            return None
-    return None
+            return AlpacaKeys(key, secret, mode="paper", source=key.source)
+    if _connector.paper_default(environ) != (mode == "paper"):
+        return None
+    shared = _connector.load_keys(environ, runner=runner, platform=platform)
+    if shared is None:
+        return None
+    return AlpacaKeys(shared.key_id, shared.secret, mode=mode, source=shared.source)
 
 
 def base_url(mode: str) -> str:
@@ -227,10 +212,12 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def urllib_transport(method: str, url: str, headers: Mapping[str, str], body: bytes | None,
                      timeout: float) -> tuple[int, bytes]:
-    """HTTPS with certificate verification, an Alpaca host allowlist, no redirects and a size cap."""
+    """HTTPS with certificate verification, the host and request allowlists, no redirects and a size cap."""
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme != "https" or parsed.hostname not in HOSTS:
         raise BrokerError("Refusing to call a non-Alpaca or non-HTTPS address.")
+    if not allowed(method, "data" if parsed.hostname == "data.alpaca.markets" else "api", parsed.path):
+        raise BrokerError(f"Refusing {method} {parsed.path}: not an order request Wealth makes.")
     request = urllib.request.Request(url, data=body, method=method, headers=dict(headers))
     opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ssl.create_default_context()),
                                          _NoRedirect())
@@ -240,7 +227,7 @@ def urllib_transport(method: str, url: str, headers: Mapping[str, str], body: by
         with opener.open(request, timeout=timeout) as response:
             status = response.status
             data = response.read(MAX_RESPONSE_BYTES + 1)
-    except urllib.error.HTTPError as exc:
+    except urllib.error.HTTPError as exc:  # keep status and body; the exception object carries the URL
         status = exc.code
         try:
             data = exc.read(MAX_RESPONSE_BYTES + 1)
@@ -253,7 +240,7 @@ def urllib_transport(method: str, url: str, headers: Mapping[str, str], body: by
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         failure = BrokerError(f"Could not reach Alpaca ({type(exc).__name__}).", retryable=True)
     if failure is not None:
-        raise failure
+        raise failure  # raised outside the except block, so no chained exception holds the URL or headers
     if len(data) > MAX_RESPONSE_BYTES:
         raise BrokerError("Alpaca returned an oversized response; refused.")
     return status, data
@@ -273,8 +260,8 @@ def default_clock() -> float:
 
 # -- redaction -----------------------------------------------------------------
 
-_REDACT_KEYS = frozenset({"account_number", "apca-api-key-id", "apca-api-secret-key", "authorization",
-                          "key_id", "secret", "api_key", "token"})
+_REDACT_KEYS = frozenset({"apca-api-key-id", "apca-api-secret-key", "authorization", "key_id", "secret",
+                          "api_key", "token", "nonce", "nonce_hash"})
 
 
 def redact(value: Any, secrets: tuple[str, ...] = ()) -> Any:
@@ -294,11 +281,7 @@ def redact(value: Any, secrets: tuple[str, ...] = ()) -> Any:
     if isinstance(value, (list, tuple)):
         return [redact(item, secrets) for item in value]
     if isinstance(value, str):
-        text = value
-        for secret in secrets:
-            if secret:
-                text = text.replace(secret, "****")
-        return text
+        return _rest.scrub(value, *secrets)
     return value
 
 
@@ -307,8 +290,9 @@ def redact(value: Any, secrets: tuple[str, ...] = ()) -> Any:
 class AlpacaOrders:
     """A thin, audited Alpaca REST client for one mode.
 
-    ``audit(kind, payload)`` receives every request and response (redacted,
-    without headers); ``tickets`` writes it to the append-only ``orders`` table.
+    ``audit(kind, payload)`` receives every order request and response
+    (redacted, without headers); ``tickets`` writes it to the append-only
+    ``orders`` table.
     """
 
     def __init__(self, keys: AlpacaKeys, *, transport: Transport | None = None,
@@ -320,42 +304,46 @@ class AlpacaOrders:
         self.mode = keys.mode
         self.base = base_url(keys.mode)
         self._transport = transport
-        self._sleep = sleep or default_sleep
+        self._sleep = sleep
         self._clock = clock or default_clock
-        self._last: float | None = None
+        self._sent: deque[float] = deque()
         self.audit = audit
         self.timeout = timeout
 
     def __repr__(self) -> str:
         return f"AlpacaOrders(mode={self.mode!r})"
 
-    # plumbing
     def _scrub(self, value: Any) -> Any:
         return redact(value, self.keys.secrets())
 
     def _request(self, method: str, path: str, *, query: Mapping[str, Any] | None = None,
                  body: Mapping[str, Any] | None = None, data_host: bool = False,
                  audit_as: str | None = None) -> tuple[int, Any]:
-        base = DATA_URL if data_host else self.base
-        url = base + path + (("?" + urllib.parse.urlencode(query)) if query else "")
+        if not allowed(method, "data" if data_host else "api", path):
+            raise BrokerError(f"Refusing {method} {path}: not an order request Wealth makes.")
+        url = (DATA_URL if data_host else self.base) + path + (("?" + urllib.parse.urlencode(query)) if query else "")
         payload = json.dumps(body, separators=(",", ":")).encode() if body is not None else None
         headers = {**self.keys.headers(), "Accept": "application/json", "User-Agent": "wealth-harness/0.2 (orders)"}
         if payload is not None:
             headers["Content-Type"] = "application/json"
-        if self._last is not None:
-            wait = MIN_INTERVAL - (self._clock() - self._last)
-            if wait > 0:
-                self._sleep(wait)
-        self._last = self._clock()
+        # Stay under Alpaca's documented 200 requests a minute (sliding window, with headroom); a ticket's
+        # few dozen requests go out without waiting.
+        now = self._clock()
+        while self._sent and now - self._sent[0] >= 60.0:
+            self._sent.popleft()
+        if len(self._sent) >= WINDOW_BUDGET:
+            (self._sleep or default_sleep)(60.0 - (now - self._sent[0]))
+            self._sent.popleft()
+        self._sent.append(self._clock())
         if audit_as and self.audit:
-            self.audit("request", {"method": method, "path": path, "query": dict(query or {}),
+            self.audit("request", {"action": audit_as, "method": method, "path": path, "query": dict(query or {}),
                                    "body": self._scrub(dict(body)) if body is not None else None})
-        transport = self._transport or default_transport
         try:
-            status, raw = transport(method, url, headers, payload, self.timeout)
+            status, raw = (self._transport or default_transport)(method, url, headers, payload, self.timeout)
         except BrokerError as exc:
             if audit_as and self.audit:
-                self.audit("response", {"method": method, "path": path, "error": self._scrub(str(exc))})
+                self.audit("response", {"action": audit_as, "method": method, "path": path,
+                                        "error": self._scrub(str(exc))})
             raise BrokerError(self._scrub(str(exc)), retryable=exc.retryable) from None
         try:
             parsed = json.loads(raw.decode("utf-8")) if raw else None
@@ -363,7 +351,8 @@ class AlpacaOrders:
             parsed = {"message": "unparseable response"}
         clean = self._scrub(parsed)
         if audit_as and self.audit:
-            self.audit("response", {"method": method, "path": path, "status": status, "body": clean})
+            self.audit("response", {"action": audit_as, "method": method, "path": path, "status": status,
+                                    "body": clean})
         return status, clean
 
     def _ok(self, method: str, path: str, **kwargs: Any) -> Any:
@@ -379,7 +368,7 @@ class AlpacaOrders:
         raise BrokerError(f"Alpaca answered HTTP {status}. {hint} {message or ''}".strip(), status=status,
                           retryable=status == 429 or status >= 500, body=body)
 
-    # reads (used by the pre-trade checks; safe from any path)
+    # reads (used by the pre-trade checks and status refresh)
     def account(self) -> dict[str, Any]:
         return self._ok("GET", "/v2/account")
 
@@ -387,18 +376,8 @@ class AlpacaOrders:
         return self._ok("GET", "/v2/clock")
 
     def asset(self, symbol: str) -> dict[str, Any] | None:
-        symbol = _symbol(symbol)
         try:
-            return self._ok("GET", f"/v2/assets/{symbol}")
-        except BrokerError as exc:
-            if exc.status == 404:
-                return None
-            raise
-
-    def position(self, symbol: str) -> dict[str, Any] | None:
-        symbol = _symbol(symbol)
-        try:
-            return self._ok("GET", f"/v2/positions/{symbol}")
+            return self._ok("GET", f"/v2/assets/{_symbol(symbol)}")
         except BrokerError as exc:
             if exc.status == 404:
                 return None
@@ -413,9 +392,8 @@ class AlpacaOrders:
         return value if isinstance(value, list) else []
 
     def last_price(self, symbol: str) -> str | None:
-        symbol = _symbol(symbol)
-        body = self._ok("GET", f"/v2/stocks/{symbol}/trades/latest", data_host=True)
-        trade = (body or {}).get("trade") if isinstance(body, Mapping) else None
+        body = self._ok("GET", f"/v2/stocks/{_symbol(symbol)}/trades/latest", data_host=True)
+        trade = body.get("trade") if isinstance(body, Mapping) else None
         price = (trade or {}).get("p")
         return str(price) if price not in (None, "") else None
 
@@ -442,7 +420,7 @@ class AlpacaOrders:
         value = self._ok("GET", "/v2/account/activities/FILL", query=query)
         return value if isinstance(value, list) else []
 
-    # writes (reachable only from tickets.confirm / tickets.cancel, i.e. the web confirmation route)
+    # writes: reachable only from tickets.confirm / tickets.cancel, i.e. the person's tap in the app
     def submit(self, order: Mapping[str, Any]) -> dict[str, Any]:
         """POST one order; a repeated ``client_order_id`` resolves to the existing order, never a second one."""
         body = dict(order)
@@ -478,11 +456,12 @@ def _symbol(value: Any) -> str:
 
 
 def client(mode: str, *, environ: Mapping[str, str] | None = None, transport: Transport | None = None,
-           audit: Callable[[str, dict[str, Any]], None] | None = None, **kwargs: Any) -> AlpacaOrders | None:
+           audit: Callable[[str, dict[str, Any]], None] | None = None, runner: Callable[..., Any] | None = None,
+           platform: str | None = None, **kwargs: Any) -> AlpacaOrders | None:
     """A client for ``mode`` when its keys are configured, else ``None``."""
-    keys = load_keys(mode, environ, runner=kwargs.pop("runner", None), platform=kwargs.pop("platform", None))
+    keys = load_keys(mode, environ, runner=runner, platform=platform)
     return AlpacaOrders(keys, transport=transport, audit=audit, **kwargs) if keys else None
 
 
-__all__ = ["AlpacaKeys", "AlpacaOrders", "BrokerError", "CANCELABLE", "DATA_URL", "LIVE_URL", "PAPER_URL",
-           "TERMINAL", "base_url", "client", "load_keys", "redact", "urllib_transport"]
+__all__ = ["ALLOWED", "AlpacaKeys", "AlpacaOrders", "BrokerError", "DATA_URL", "LIVE_URL", "PAPER_URL", "allowed",
+           "base_url", "client", "load_keys", "redact", "urllib_transport"]

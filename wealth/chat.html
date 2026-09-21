@@ -212,6 +212,36 @@
     .ticket .row.total dt, .ticket .row.total dd { color: var(--ink); font-weight: 600; }
     .ticket .row.total dd.num { font-weight: 500; }
 
+    /* Order card: the confirm screen, the calmest view. One number, one line per order, quiet notices,
+       one vermilion action. Cobalt marks only an order that is still working. */
+    .order { margin: 0; padding: 20px 16px 12px; border: 1px solid var(--hairline); border-radius: 8px; background: var(--surface); }
+    .order .mode { margin: 0; color: var(--muted); font: 500 11px/16px var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+    .order .mode.live { color: var(--ink); font-weight: 600; }
+    .order .mode .code { letter-spacing: .12em; }
+    .order .total { margin: 4px 0 0; font: 600 32px/40px var(--sans); letter-spacing: -.02em; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .order .caption { margin: 0; color: var(--muted); font-size: 13px; line-height: 20px; }
+    .order dl { margin: 16px 0 0; }
+    .order .line { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding: 12px 0 11px; border-top: 1px solid var(--hairline); }
+    .order .line dt { min-width: 0; font-size: 15px; line-height: 24px; overflow-wrap: anywhere; }
+    .order .line dd { margin: 0; text-align: right; font: 400 15px/24px var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .order .line .sub { display: block; color: var(--muted); font: 400 13px/20px var(--sans); }
+    .order .line .state { display: block; color: var(--ink-soft); font: 500 13px/20px var(--sans); }
+    .order .line .state.working { color: var(--cobalt); }
+    .order .notes { margin: 8px 0 0; padding: 0; list-style: none; }
+    .order .notes li { margin: 4px 0 0; color: var(--ink-soft); font-size: 14px; line-height: 20px; text-wrap: pretty; }
+    .order .notes li.stop { color: var(--ink); }
+    .order .costs { margin: 8px 0 0; color: var(--muted); font-size: 13px; line-height: 20px; font-variant-numeric: tabular-nums; }
+    .order .agree { display: flex; align-items: center; gap: 12px; min-height: 44px; margin-top: 12px; font-size: 15px; line-height: 20px; cursor: pointer; }
+    .order .agree input { width: 20px; height: 20px; margin: 0; accent-color: var(--ink); flex: none; }
+    .order .typed { display: block; margin-top: 16px; font-size: 14px; color: var(--ink-soft); }
+    .order .typed input { display: block; width: min(100%, 16rem); min-height: 44px; margin-top: 8px; padding: 0 12px; border: 0; border-radius: 8px; box-shadow: inset 0 0 0 1px var(--hairline); background: var(--canvas); font: 500 16px/1 var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+    .order .typed input:focus-visible { outline: 1.5px solid var(--ink); outline-offset: -1.5px; }
+    .order .problem { margin: 12px 0 0; color: var(--ink); font-size: 14px; line-height: 20px; }
+    .order .problem:empty { display: none; }
+    .order .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; margin-top: 20px; }
+    .order .actions .text-control { margin: 0 -8px; }
+    .order .settled { margin: 12px 0 0; color: var(--muted); font-size: 13px; line-height: 20px; }
+
     /* Engine-drawn views: the engine supplies every number; the page only draws. One surface, hairlines,
        ink marks, cobalt only for a live/current point. The drawing is aria-hidden; a table carries the data. */
     .view {
@@ -948,6 +978,46 @@
           decisions: 'decisions', spending: 'spending', cash: 'cash', investments: 'investments',
           reserve: 'emergency fund'
         },
+        orders: {
+          region: 'Order ticket', paper: 'Paper · practice', live: 'Live · real money', code: 'Confirmation code',
+          total: 'Estimated total to pay', receive: 'Estimated net to receive', shares: 'shares',
+          buy: 'Buy', sell: 'Sell', limit: 'limit', market: 'market', account: 'Alpaca',
+          place: 'Place orders', cancel: 'Cancel', cancelOpen: 'Cancel open orders', placing: 'Placing…',
+          override: 'Place anyway: I am overriding my investment policy', typed: 'Type LIVE to place your first live orders',
+          tax: 'Estimated tax', cost: 'Estimated cost', expired: 'This ticket expired. Ask for a new one.',
+          discarded: 'Cancelled. Nothing was sent.', stopped: 'Not placed',
+          states: { proposed: '', sent: 'Sent', partial: 'Partly filled', filled: 'Filled', rejected: 'Rejected',
+                    failed: 'Not sent', canceled: 'Cancelled', expired: 'Expired', unknown: 'Unconfirmed' },
+          notes: {
+            broker_unavailable: () => 'Alpaca keys are not set up here, so this ticket could not be checked.',
+            buying_power: p => `The buys need ${p.need} USD; cash available is ${p.have} USD.`,
+            not_tradable: p => `${p.symbol} cannot be traded at Alpaca.`,
+            not_fractionable: p => `${p.symbol} trades in whole shares only.`,
+            collar: p => `The ${p.symbol} limit is too far from the last price (${p.last}).`,
+            far_from_market: p => `The ${p.symbol} limit is far from the last price; it may not fill.`,
+            sell_exceeds_position: p => `You hold ${p.held} ${p.symbol}, less than this sale.`,
+            live_order_limit: p => `Above the live limit of ${p.limit} USD per order.`,
+            live_daily_limit: p => `Today's live orders would reach ${p.total} USD, above the ${p.limit} USD daily limit.`,
+            live_needs_limit: () => 'Live orders must be limit orders.',
+            market_order: p => `${p.symbol} is a market order: its price is not capped.`,
+            market_closed: () => 'The market is closed; day orders wait for the next open.',
+            duplicate_ticket: p => `Another recent ticket also has ${p.symbol}.`,
+            duplicate_line: p => `${p.symbol} appears twice in this ticket.`,
+            open_order: p => `An open order for ${p.symbol} is already at Alpaca.`,
+            no_policy: () => 'No accepted investment policy to check against.',
+            account_blocked: () => 'The Alpaca account cannot place orders right now.',
+            policy_band: () => 'Part of your portfolio is already outside its policy ranges.',
+            policy_unchecked: p => `${p.count} policy check(s) could not run for lack of data.`,
+            policy_exclusions: p => p.status === 'warn' ? `Confirm ${p.symbol} holds nothing your policy excludes.` : `${p.symbol} is excluded by your policy.`,
+            policy_allocation_band: p => `This would take ${p.sleeve || 'a sleeve'} outside your policy range.`,
+            policy_concentration: p => p.status === 'warn' ? `${p.symbol} would be close to your single-holding limit.` : `${p.symbol} would be above your single-holding limit.`,
+            policy_leverage: () => 'Your policy rules out leverage.',
+            policy_liquidity_reserve: p => p.status === 'warn' ? 'Your reserve is below its target.' : 'This would use your emergency reserve.',
+            policy_goal_bucket: () => 'This uses money set aside for a near goal.',
+            policy_position: p => `This sells more ${p.symbol} than you hold.`,
+            policy_estate_situs: p => `${p.symbol} is US-domiciled: it counts toward US estate tax for a non-resident.`
+          }
+        },
         retry: 'Retry', askAgain: 'Ask again', details: 'Details', uploading: 'Uploading…',
         badType: 'Use PDF, CSV or image', tooBig: 'Over 25 MB', empty: 'Empty file', uploadFailed: 'Upload failed',
         remove: name => `Remove ${name}`,
@@ -1001,6 +1071,46 @@
           holdings: 'posiciones', portfolio: 'portafolio', preferences: 'preferencias', constraints: 'restricciones',
           decisions: 'decisiones', spending: 'gastos', cash: 'efectivo', investments: 'inversiones',
           reserve: 'fondo de emergencia'
+        },
+        orders: {
+          region: 'Órdenes por enviar', paper: 'Paper · práctica', live: 'Live · dinero real', code: 'Código de confirmación',
+          total: 'Total estimado a pagar', receive: 'Neto estimado a recibir', shares: 'acciones',
+          buy: 'Compra', sell: 'Venta', limit: 'límite', market: 'a mercado', account: 'Alpaca',
+          place: 'Enviar órdenes', cancel: 'Cancelar', cancelOpen: 'Cancelar órdenes abiertas', placing: 'Enviando…',
+          override: 'Enviar de todos modos: decido no seguir mi política de inversión', typed: 'Escribe EN VIVO para enviar tus primeras órdenes reales',
+          tax: 'Impuesto estimado', cost: 'Costo estimado', expired: 'Este ticket venció. Pide uno nuevo.',
+          discarded: 'Cancelado. No se envió nada.', stopped: 'No enviada',
+          states: { proposed: '', sent: 'Enviada', partial: 'Ejecutada en parte', filled: 'Ejecutada', rejected: 'Rechazada',
+                    failed: 'No enviada', canceled: 'Cancelada', expired: 'Vencida', unknown: 'Sin confirmar' },
+          notes: {
+            broker_unavailable: () => 'Las llaves de Alpaca no están configuradas aquí; no se pudo revisar este ticket.',
+            buying_power: p => `Las compras requieren ${p.need} USD; el efectivo disponible es ${p.have} USD.`,
+            not_tradable: p => `${p.symbol} no se puede operar en Alpaca.`,
+            not_fractionable: p => `${p.symbol} solo se opera en acciones enteras.`,
+            collar: p => `El límite de ${p.symbol} está demasiado lejos del último precio (${p.last}).`,
+            far_from_market: p => `El límite de ${p.symbol} está lejos del último precio; quizá no se ejecute.`,
+            sell_exceeds_position: p => `Tienes ${p.held} ${p.symbol}, menos de lo que vendes.`,
+            live_order_limit: p => `Supera el límite real de ${p.limit} USD por orden.`,
+            live_daily_limit: p => `Las órdenes reales de hoy llegarían a ${p.total} USD, arriba del límite diario de ${p.limit} USD.`,
+            live_needs_limit: () => 'Las órdenes reales deben ser órdenes límite.',
+            market_order: p => `${p.symbol} es a mercado: su precio no tiene tope.`,
+            market_closed: () => 'El mercado está cerrado; las órdenes del día esperan la próxima apertura.',
+            duplicate_ticket: p => `Otro ticket reciente también incluye ${p.symbol}.`,
+            duplicate_line: p => `${p.symbol} aparece dos veces en este ticket.`,
+            open_order: p => `Ya hay una orden abierta de ${p.symbol} en Alpaca.`,
+            no_policy: () => 'No hay una política de inversión aceptada con la cual revisar.',
+            account_blocked: () => 'La cuenta de Alpaca no puede enviar órdenes ahora.',
+            policy_band: () => 'Parte de tu portafolio ya está fuera de los rangos de tu política.',
+            policy_unchecked: p => `${p.count} revisión(es) de tu política no se pudieron hacer por falta de datos.`,
+            policy_exclusions: p => p.status === 'warn' ? `Confirma que ${p.symbol} no tenga nada que tu política excluye.` : `${p.symbol} está excluido por tu política.`,
+            policy_allocation_band: p => `Esto sacaría ${p.sleeve || 'una parte'} del rango de tu política.`,
+            policy_concentration: p => p.status === 'warn' ? `${p.symbol} quedaría cerca de tu límite por posición.` : `${p.symbol} rebasaría tu límite por posición.`,
+            policy_leverage: () => 'Tu política no permite apalancamiento.',
+            policy_liquidity_reserve: p => p.status === 'warn' ? 'Tu fondo de emergencia está por debajo de su meta.' : 'Esto usaría tu fondo de emergencia.',
+            policy_goal_bucket: () => 'Esto usa dinero apartado para una meta cercana.',
+            policy_position: p => `Vendes más ${p.symbol} del que tienes.`,
+            policy_estate_situs: p => `${p.symbol} está domiciliado en EE. UU.: cuenta para el impuesto sucesorio de EE. UU. si no resides ahí.`
+          }
         },
         retry: 'Reintentar', askAgain: 'Preguntar de nuevo', details: 'Detalles', uploading: 'Subiendo…',
         badType: 'Usa PDF, CSV o imagen', tooBig: 'Más de 25 MB', empty: 'Archivo vacío', uploadFailed: 'No se pudo subir',
@@ -1780,6 +1890,192 @@
         if (node) { container.append(node); shown.add(match[1]); }
       });
       flush();
+    }
+
+    // ------------------------------------------------------------------ order cards (DOM only; the tap is the only way to place)
+
+    const orderCards = new Map();
+    let orderPoll = null;
+    const WORKING = new Set(['sent', 'partial', 'unknown']);
+    const orderUsd = (value, lang = LANG) => {
+      const n = Number(value);
+      if (value === null || value === undefined || value === '' || !Number.isFinite(n)) return '—';
+      return new Intl.NumberFormat(localeOf(lang), { style: 'currency', currency: 'USD', currencyDisplay: 'narrowSymbol', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
+    };
+    const orderQty = (value, lang = LANG) => {
+      const n = Number(value);
+      return Number.isFinite(n) ? new Intl.NumberFormat(localeOf(lang), { maximumFractionDigits: 6 }).format(n) : '—';
+    };
+
+    function orderNote(note) {
+      const O = T.orders, params = note.params || {};
+      if (LANG === 'es' && typeof params.es === 'string') return params.es;
+      const text = O.notes[note.code === 'policy' ? `policy_${params.rule}` : note.code];
+      if (text) return text(Object.assign({ status: note.status }, params));
+      return String(note.message || '');
+    }
+
+    function orderLine(line) {
+      const O = T.orders;
+      const row = el('div', 'line');
+      const dt = el('dt', '', `${line.side === 'sell' ? O.sell : O.buy} ${line.symbol}`);
+      const qty = line.qty !== undefined ? orderQty(line.qty) : '—';
+      const price = line.type === 'market' ? O.market : `${O.limit} ${orderUsd(line.limit_price)}`;
+      dt.append(el('span', 'sub', [`${qty} ${O.shares}`, price, line.account].filter(Boolean).join(' · ')));
+      const dd = el('dd', '', orderUsd(line.estimated_amount));
+      const state = O.states[line.state] || '';
+      if (state) {
+        const tag = el('span', WORKING.has(line.state) ? 'state working' : 'state', state);
+        if (line.state === 'filled' && line.filled_avg_price) tag.textContent = `${state} · ${orderUsd(line.filled_avg_price)}`;
+        dd.append(tag);
+      }
+      row.append(dt, dd);
+      return row;
+    }
+
+    function orderCard(ticket) {
+      const O = T.orders;
+      const box = el('section', 'order');
+      box.dataset.ticket = ticket.id;
+      box.setAttribute('aria-label', O.region);
+      const mode = el('p', ticket.mode === 'live' ? 'mode live' : 'mode', `${O.account} · ${ticket.mode === 'live' ? O.live : O.paper}`);
+      if (ticket.status === 'pending' && ticket.nonce) {
+        mode.append(document.createTextNode(' · '));
+        const code = el('span', 'code', ticket.nonce);
+        code.setAttribute('aria-label', `${O.code} ${ticket.nonce.split('').join(' ')}`);
+        mode.append(code);
+      }
+      box.append(mode);
+      const net = Number(ticket.total && ticket.total.amount);
+      const receive = Number.isFinite(net) && net < 0;
+      const total = el('p', 'total', orderUsd(ticket.total && ticket.total.amount !== null ? Math.abs(net) : null));
+      box.append(total, el('p', 'caption', receive ? O.receive : O.total));
+      const list = el('dl');
+      (ticket.lines || []).forEach(line => list.append(orderLine(line)));
+      box.append(list);
+
+      const notes = (ticket.notices || []).filter(n => n.status !== 'pass');
+      if (notes.length && ticket.status === 'pending') {
+        const ul = el('ul', 'notes');
+        const seen = new Set();
+        notes.forEach(n => {
+          const text = orderNote(n);
+          if (!text || seen.has(text)) return;
+          seen.add(text);
+          ul.append(el('li', n.status === 'warn' ? '' : 'stop', text));
+        });
+        box.append(ul);
+      }
+      const t = ticket.total || {};
+      const costs = [];
+      if (t.estimated_tax !== null && t.estimated_tax !== undefined) costs.push(`${O.tax} ${orderUsd(t.estimated_tax)}`);
+      if (t.estimated_cost !== null && t.estimated_cost !== undefined) costs.push(`${O.cost} ${orderUsd(t.estimated_cost)}`);
+      if (costs.length) box.append(el('p', 'costs', costs.join(' · ')));
+
+      if (ticket.status === 'pending') {
+        const problem = el('p', 'problem');
+        problem.setAttribute('role', 'status');
+        let agree = null, typed = null;
+        if (ticket.needs_override) {
+          const label = el('label', 'agree');
+          agree = el('input'); agree.type = 'checkbox';
+          label.append(agree, document.createTextNode(O.override));
+          box.append(label);
+        }
+        if (ticket.needs_typed) {
+          const label = el('label', 'typed', O.typed);
+          typed = el('input'); typed.type = 'text'; typed.autocomplete = 'off'; typed.spellcheck = false;
+          label.append(typed);
+          box.append(label);
+        }
+        const actions = el('div', 'actions');
+        const place = el('button', 'primary', O.place); place.type = 'button';
+        const cancel = el('button', 'text-control', O.cancel); cancel.type = 'button';
+        const ready = () => {
+          const phrase = typed ? typed.value.trim().toUpperCase() : '';
+          place.disabled = !!ticket.blocked || (agree && !agree.checked) || (typed && phrase !== 'LIVE' && phrase !== 'EN VIVO');
+        };
+        if (agree) agree.addEventListener('change', ready);
+        if (typed) typed.addEventListener('input', ready);
+        ready();
+        place.addEventListener('click', () => placeOrders(ticket, { place, cancel, problem, agree, typed }));
+        cancel.addEventListener('click', () => orderAction(ticket.id, 'cancel', { place, cancel, problem }));
+        actions.append(place, cancel);
+        box.append(problem, actions);
+      } else if (ticket.status === 'expired' || ticket.status === 'void') {
+        box.append(el('p', 'settled', O.expired));
+      } else if (ticket.status === 'discarded') {
+        box.append(el('p', 'settled', O.discarded));
+      } else if ((ticket.lines || []).some(l => WORKING.has(l.state) && l.broker_order_id)) {
+        const actions = el('div', 'actions');
+        const stop = el('button', 'text-control', O.cancelOpen); stop.type = 'button';
+        const problem = el('p', 'problem');
+        problem.setAttribute('role', 'status');
+        stop.addEventListener('click', async () => {
+          stop.disabled = true;
+          for (const line of ticket.lines) {
+            if (WORKING.has(line.state) && line.broker_order_id) await orderAction(line.broker_order_id, 'cancel', { problem });
+          }
+        });
+        actions.append(stop);
+        box.append(problem, actions);
+      }
+      return box;
+    }
+
+    function showOrder(ticket) {
+      const known = orderCards.get(ticket.id);
+      if (!known && !['pending', 'submitting', 'submitted', 'done'].includes(ticket.status)) return;
+      const node = orderCard(ticket);
+      if (known && messages.contains(known)) known.replaceWith(node);
+      else messages.append(node);
+      orderCards.set(ticket.id, node);
+    }
+
+    async function loadOrders() {
+      let data;
+      try { data = await json(await api('/api/orders')); } catch (_) { return; }
+      (Array.isArray(data.tickets) ? data.tickets : []).forEach(showOrder);
+      const working = (data.tickets || []).some(t => t.status === 'submitted');
+      clearTimeout(orderPoll);
+      if (working) orderPoll = setTimeout(loadOrders, 5000);
+      follow();
+    }
+
+    // The person's tap is the only thing that places orders: the server also wants the card's code.
+    async function placeOrders(ticket, ui) {
+      ui.place.disabled = true; ui.cancel.disabled = true;
+      ui.place.textContent = T.orders.placing;
+      ui.problem.textContent = '';
+      const body = { nonce: ticket.nonce, override: !!(ui.agree && ui.agree.checked) };
+      if (ui.typed) body.typed = ui.typed.value.trim();
+      await orderAction(ticket.id, 'confirm', ui, body);
+    }
+
+    async function orderAction(target, action, ui, body = null) {
+      const options = { method: 'POST' };
+      if (body) { options.headers = { 'Content-Type': 'application/json' }; options.body = JSON.stringify(body); }
+      let data = {};
+      try {
+        const response = await api(`/api/orders/${encodeURIComponent(target)}/${action}`, options);
+        data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          if (data.ticket) showOrder(data.ticket);
+          const node = data.ticket && orderCards.get(data.ticket.id);
+          const problem = (node && node.querySelector('.problem')) || ui.problem;
+          if (problem) problem.textContent = data.error || T.errors.other;
+          if (!data.ticket && ui.place) { ui.place.disabled = false; ui.place.textContent = T.orders.place; }
+          if (ui.cancel) ui.cancel.disabled = false;
+          return;
+        }
+      } catch (err) {
+        if (ui.problem) ui.problem.textContent = err.message || T.errors.connection;
+        if (ui.place) { ui.place.disabled = false; ui.place.textContent = T.orders.place; }
+        if (ui.cancel) ui.cancel.disabled = false;
+        return;
+      }
+      if (data.ticket) showOrder(data.ticket);
+      loadOrders();
     }
 
     // ------------------------------------------------------------------ memory line
@@ -2919,6 +3215,7 @@
         turn.answerNode = assistantMessage(m.content || '', { memory: m.memory, memoryEvent: turn.memoryEvent, message: m, lang: turn.lang, announce: true, views: m.views || turn.views });
         turn.answered = true;
         follow();
+        loadOrders();
         // The answer is the end of the wait; saving continues quietly in the background.
         if (current === turn) { current = null; setBusy(false); setupFollowsTurn(); }
       } else if (event.type === 'error') {
@@ -3172,6 +3469,7 @@
       newChat.disabled = false;
 
       if (flow) startSetup(onboarding, state);
+      loadOrders();
 
       const turn = state.turn;
       if (turn && (turn.message || turn.internal)) {
