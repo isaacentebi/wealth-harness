@@ -2075,8 +2075,10 @@ def review_view(service: Any, client_id: str, period: str | None = None, today: 
     if latest is not None and latest >= current_start:
         current = {"period": current_label, "start": current_start.isoformat(), "end": latest.isoformat(),
                    "quarter_end": current_end.isoformat(), "label": _quarter_label(current_label, partial=True)}
-    label = period or (quarters[0] if quarters else current_label if current else
-                       _quarter_of(current_start - timedelta(days=1)))
+    # Open on the latest ended quarter that has evidence, not an empty one after a quiet stretch.
+    with_evidence = [q for q in quarters if latest is not None and quarter_bounds(q)[0] <= latest]
+    label = period or (with_evidence[0] if with_evidence else quarters[0] if quarters else
+                       current_label if current else _quarter_of(current_start - timedelta(days=1)))
     start, end = quarter_bounds(label)
     partial = label == current_label
     if partial:
