@@ -1672,8 +1672,9 @@ _VALUE_IN_TITLE = re.compile(
 
 def _value_spans(text: str) -> list[list[int]]:
     """Where the title's value sits, so the page sets it in weight (the first money, percent or ratio)."""
+    from .situation.text import js_span  # offsets in UTF-16 units: the page slices with JavaScript
     match = _VALUE_IN_TITLE.search(text or "")
-    return [[match.start(), match.end()]] if match else []
+    return [js_span(text, match.start(), match.end())] if match else []
 
 
 def today_view(service: Any, client_id: str, *, action: str | None = None, item_id: str | None = None,

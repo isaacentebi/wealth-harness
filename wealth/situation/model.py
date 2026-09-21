@@ -190,13 +190,41 @@ def _summarize_value(value: Any) -> str | None:
     return None
 
 
-def _stale_values(facts: "_Facts") -> list[dict]:
+def _stale_name(key: str, value: Any, labels: Mapping[str, str]) -> str | None:
+    """The person's own name for a stale fact (institution, label), never its key."""
+    if key in labels:
+        return labels[key]
+    if isinstance(value, Mapping):
+        for field in ("institution", "name", "lender", "label"):
+            if isinstance(value.get(field), str) and value[field].strip():
+                return value[field].strip()
+        account = value.get("account")
+        if isinstance(account, Mapping) and isinstance(account.get("institution"), str):
+            return account["institution"]
+    return None
+
+
+def _stale_values(facts: "_Facts", labels: Mapping[str, str] | None = None) -> list[dict]:
+    """Stale facts with a short reading of their value and the person's name for them.
+
+    ``amount``, ``currency`` and ``frequency`` let a renderer say the value in the person's language;
+    ``value`` is the compact (English-free for money) reading kept for older readers.
+    """
     out = []
     for key in facts.stale:
         fact = facts.all[key]
+        value = fact.get("value")
         source = fact.get("source") if isinstance(fact.get("source"), dict) else {}
-        out.append({"key": key, "value": _summarize_value(fact.get("value")),
-                    "observed_on": source.get("observed_on")})
+        row = {"key": key, "value": _summarize_value(value), "observed_on": source.get("observed_on"),
+               "name": _stale_name(key, value, labels or {}), "amount": None, "currency": None, "frequency": None}
+        if isinstance(value, Mapping):
+            for field in ("amount", "monthly_take_home", "total", "essential", "monthly_essentials", "balance",
+                          "target_amount", "available_capital"):
+                if D(value.get(field)) is not None:
+                    row.update(amount=num(D(value.get(field))), currency=value.get("currency"),
+                               frequency=value.get("frequency"))
+                    break
+        out.append(row)
     return out
 
 
@@ -223,6 +251,11 @@ class _Facts:
         self.used: dict[str, str] = {}  # key -> fact id, for evidence
 
     def _stale(self, fact: Mapping[str, Any]) -> bool:
+        key, value = str(fact.get("key") or ""), fact.get("value")
+        if key.startswith("account.") and key.count(".") > 1:
+            return False  # a statement's activity rides with its account: never a separate figure to reconfirm
+        if isinstance(value, dict) and value.get("balance_unknown") is True and D(value.get("amount")) is None:
+            return False  # a balance nobody gave has nothing to reconfirm: it is still asked for, not read back
         expires = _as_date(fact.get("expires_on"))
         return bool(expires and expires < self.today)
 
@@ -501,8 +534,57 @@ def _spending(facts: _Facts, ledger: Mapping[str, Any] | None, fx: _FX, currency
     return view
 
 
-def _covered(institution: str | None, statements: Iterable[str]) -> bool:
-    return bool(institution) and any(same_institution(institution, name) for name in statements)
+_CASH_KINDS = {"checking", "savings", "bank", "cash", "debit", "deposit", "current", "money market", "cuenta"}
+_RETIREMENT_WORDS = ("afore", "ppr", "ira", "401k", "401 k", "403b", "457b", "roth", "retirement", "retiro",
+                     "pension", "hsa", "sar", "tsp")
+_INVESTMENT_KINDS = {"brokerage", "taxable", "investment", "fund", "stocks", "etf", "government securities",
+                     "cetes", "bonds", "casa de bolsa", "individual", "joint"}
+
+
+_DEBT_ACCOUNT_KINDS = {"credit card", "card", "loan", "mortgage", "line of credit", "tarjeta", "tarjeta de credito",
+                       "credito", "prestamo", "hipoteca"}
+
+
+def kind_family(kind: Any) -> str | None:
+    """'cash', 'retirement', 'investment', 'debt' or None (unknown) for a stated kind or an account type."""
+    if not isinstance(kind, str) or not kind.strip():
+        return None
+    folded = _fold(kind.replace("_", " "))
+    padded = f" {folded} "
+    if folded in _DEBT_ACCOUNT_KINDS:
+        return "debt"
+    if any(f" {word} " in padded for word in _RETIREMENT_WORDS) or folded in _ILLIQUID_TYPES - {"real_estate"}:
+        return "retirement"
+    if folded in _CASH_KINDS:
+        return "cash"
+    if folded in _INVESTMENT_KINDS:
+        return "investment"
+    return None
+
+
+def stated_matches(item: Mapping[str, Any], account: Mapping[str, Any], *, cash: bool = False) -> bool:
+    """Whether a stated balance describes this statement account (one rule for the picture, insights and store).
+
+    * The institutions must be the same firm (loosely: aliases, accents, legal suffixes); without a stated
+      institution, the stated item's name must name the account's institution ("GBM / casa de bolsa" is GBM).
+    * The kinds must be compatible: cash is covered by a checking or savings account, an investment by a
+      brokerage, an AFORE, PPR, 401(k) or IRA only by a retirement account.  Unknown on one side is compatible,
+      except that a retirement item never matches an account that is not one.
+    * A credit card or loan statement covers debts only, never a stated balance of cash or investments.
+    """
+    item_family = "cash" if cash else kind_family(item.get("kind"))
+    if item_family is None and item.get("liquid") is False:
+        item_family = "retirement"
+    account_family = kind_family(account.get("type"))
+    if account_family == "debt" or (item_family == "retirement" and account_family != "retirement"):
+        return False
+    if not (item_family is None or account_family is None or item_family == account_family):
+        return False
+    institution = item.get("institution")
+    if isinstance(institution, str) and institution.strip():
+        return same_institution(institution, account.get("institution"))
+    name = item.get("name")
+    return isinstance(name, str) and same_institution(name, account.get("institution"))
 
 
 def _cash(facts: _Facts) -> tuple[list[dict], str | None]:
@@ -691,8 +773,11 @@ def _liability_view(item: dict, fx: _FX, currency: str | None, today: date) -> d
 def _account_label(account: dict, duplicates: set[tuple]) -> str:
     institution = account.get("institution") or humanize(account.get("id") or "account")
     raw_kind = account.get("type")
-    # The institution is the name people use; a generic account type adds nothing to it.
-    kind = None if raw_kind in _ACCOUNT_TYPES else raw_kind
+    # The institution is the name people use; a generic account type (checking, brokerage) adds nothing to it
+    # and would read in English inside a Spanish sentence.  A specific plan keeps its name ("Roth IRA").
+    family = kind_family(raw_kind)
+    kind = None if raw_kind in _ACCOUNT_TYPES or family in ("cash", "investment", "debt") or not raw_kind \
+        else humanize(raw_kind)
     label = f"{institution} · {kind}" if kind else institution
     if (institution, raw_kind) in duplicates and account.get("currency"):
         label += f" ({account['currency']})"
@@ -722,6 +807,39 @@ def _same_account(household_account: Mapping[str, Any], statement: Mapping[str, 
     return not (ca and cb and ca != cb)
 
 
+def _last4(account: Mapping[str, Any]) -> str | None:
+    for text in (account.get("number"), account.get("id")):
+        found = re.search(r"(\d{4})\D*$", str(text or ""))
+        if found:
+            return found.group(1)
+    return None
+
+
+def _dedupe_accounts(accounts: list[dict], facts: "_Facts") -> None:
+    """One account saved under two keys (``bbva-6789`` and ``bbva-bancomer-6789``) counts once: the newest.
+
+    Same firm (by alias), same kind of account and the same last four digits.  The older copy stays listed
+    with ``duplicate_of`` and out of every total.
+    """
+    groups: dict[tuple, list[dict]] = {}
+    for account in accounts:
+        last4 = _last4(account)
+        alias, tokens = institution_key(account.get("institution"))
+        if not last4 or not (alias or tokens):
+            continue
+        family = kind_family(account.get("type")) or str(account.get("type") or "")
+        groups.setdefault((alias or tokens, family, last4, account.get("currency")), []).append(account)
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        newest = max(group, key=lambda a: (str(a.get("as_of") or ""), a["key"]))
+        for account in group:
+            if account is not newest:
+                account["duplicate_of"] = newest["key"]
+                account["eligible"] = False
+                facts.used.pop(account["key"], None)
+
+
 def _statement_accounts(facts: _Facts, ledger: Mapping[str, Any] | None) -> list[dict]:
     accounts = []
     for key in facts.keys("account."):
@@ -742,9 +860,11 @@ def _statement_accounts(facts: _Facts, ledger: Mapping[str, Any] | None) -> list
                          "institution": account.get("institution"), "type": account.get("type"),
                          "currency": account.get("currency") or value.get("currency"), "as_of": value.get("as_of"),
                          "native": native, "positions": positions, "liabilities": value.get("liabilities") or [],
-                         "fx": value.get("fx") or [], "eligible": facts.eligible(key), "source": "statement"})
+                         "fx": value.get("fx") or [], "eligible": facts.eligible(key), "source": "statement",
+                         "number": account.get("number_masked") or account.get("number")})
         if facts.eligible(key):
             facts.used[key] = fact.get("id")
+    _dedupe_accounts(accounts, facts)
     household = facts.value("household", use=False)
     if isinstance(household, dict):
         covered = {a["id"] for a in accounts}
@@ -1107,8 +1227,8 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
 
     # -- assets
     live = [a for a in statement_accounts if a["eligible"] and a["source"] != "ledger" and a["key"] not in superseded]
-    statements = {a["institution"] for a in live if a.get("institution")}
-    has_statement = bool(live)
+    settled_by = [a for a in statement_accounts if a["source"] != "ledger" and a["key"] not in superseded
+                  and not a.get("duplicate_of")]
     unconverted: list[dict] = []
     by_currency: dict[str, Decimal] = {}
     differences = []
@@ -1129,8 +1249,11 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
                "liquid": item.get("liquid") is not False, "approximate": bool(item.get("approximate")),
                "legacy": bool(item.get("legacy")), "counted": True, "value": None,
                "balance_unknown": amount is None}
-        if item["key"] not in keeping and _covered(item.get("institution"), statements):
+        pool = live if amount is not None else settled_by
+        matching = [a for a in pool if stated_matches(item, a, cash=True)] if item["key"] not in keeping else []
+        if matching:
             row["counted"] = False
+            row["covered_by"] = [a["key"] for a in matching]
         elif amount is not None:
             row["value"] = num(value_of(amount, item.get("currency")))
         cash_rows.append(row)
@@ -1147,8 +1270,12 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
                "currency": account.get("currency"), "as_of": account["as_of"], "source": account["source"],
                "native": {c: num(v) for c, v in sorted((account["native"] or {}).items())} if account["native"] is not None else None,
                "value": None, "liquid": account["liquid"] if isinstance(account.get("liquid"), bool)
-               else (account.get("type") or "").lower() not in _ILLIQUID_TYPES,
-               "stale": not account["eligible"], "positions": len(account["positions"])}
+               else (account.get("type") or "").lower() not in _ILLIQUID_TYPES
+               and kind_family(account.get("type")) != "retirement",
+               "stale": not account["eligible"] and not account.get("duplicate_of"),
+               "positions": len(account["positions"])}
+        if account.get("duplicate_of"):
+            row["duplicate_of"] = account["duplicate_of"]
         if account["source"] == "ledger" and "priced_positions" in account:
             row["valued_by"] = account.get("valued_by")
             row["unpriced"] = account.get("unpriced") or []
@@ -1185,34 +1312,38 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
                "approximate": bool(item.get("approximate")), "legacy": bool(item.get("legacy")),
                "liquid": (item.get("kind") or "").lower() not in _ILLIQUID_TYPES, "counted": True, "value": None,
                "balance_unknown": amount is None}
-        # A stated balance without an institution is only assumed to be the statement's account when it is a
-        # sized, liquid brokerage-like holding; an AFORE, retirement plan or unknown balance is never folded in.
-        unnamed_match = (not institution and has_statement and amount is not None
-                         and (item.get("kind") or "").lower() not in _ILLIQUID_TYPES)
-        covered = item["key"] not in keeping and (_covered(institution, statements) or unnamed_match)
-        if covered:
+        # One matching rule (``stated_matches``): by institution, or by a name that names the institution with a
+        # compatible kind.  An AFORE, PPR or 401(k) is never folded into a brokerage or bank statement.
+        # An unsized item stays settled by its statement even after the statement passes its review date.
+        pool = live if amount is not None else settled_by
+        by_key = {a["key"]: a for a in pool}
+        matching = [a for a in accounts if a["key"] in by_key and stated_matches(item, by_key[a["key"]])
+                    and not a.get("superseded_by")] if item["key"] not in keeping else []
+        if matching:
             row["counted"] = False
-            matching = [a for a in accounts if a["source"] != "ledger" and not a["stale"] and not a.get("superseded_by")
-                        and (not institution or same_institution(a.get("institution"), institution))]
+            row["covered_by"] = [a["key"] for a in matching]
             statement_value = sum((D(a.get("value_known_part")) or Decimal(0) for a in matching), Decimal(0))
             native: dict[str, Any] = {}
             for account in matching:
                 for cur, amount_ in (account.get("native") or {}).items():
                     native[cur] = num((D(native.get(cur)) or Decimal(0)) + D(amount_))
             stated_value = fx.convert(amount, item.get("currency"), currency)
-            differences.append({
-                "institution": institution or item.get("name"), "key": item["key"],
-                "stated": _money(amount, item.get("currency")),
-                "stated_approximate": row["approximate"], "statement": native,
-                "statement_value": num(statement_value), "currency": currency,
-                "as_of": max((a["as_of"] for a in matching if a["as_of"]), default=None),
-                "difference": num(statement_value - stated_value) if stated_value is not None else None,
-            })
+            if amount is not None:  # an unsized stated item is simply settled by the statement: nothing to compare
+                differences.append({
+                    "institution": next((a["institution"] for a in matching if a.get("institution")), None)
+                    or institution or item.get("name"),
+                    "key": item["key"], "accounts": [a["key"] for a in matching],
+                    "stated": _money(amount, item.get("currency")),
+                    "stated_approximate": row["approximate"], "statement": native,
+                    "statement_value": num(statement_value), "currency": currency,
+                    "as_of": max((a["as_of"] for a in matching if a["as_of"]), default=None),
+                    "difference": num(statement_value - stated_value) if stated_value is not None else None,
+                })
         else:
             row["value"] = num(value_of(amount, item.get("currency")))
         investments.append(row)
     for row in cash_rows:
-        if not row["counted"]:
+        if not row["counted"] and row["amount"] is not None:
             differences.append({"institution": row["institution"], "key": row["key"],
                                 "stated": _money(D(row["amount"]), row["currency"]), "stated_approximate": row["approximate"],
                                 "statement": None, "statement_value": None, "currency": currency, "as_of": None,
@@ -1246,6 +1377,8 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
     unknown_balances = [r.get("institution") or r.get("name") or humanize(r["id"])
                         for r in (*cash_rows, *investments) if r.get("balance_unknown") and r.get("counted")]
     any_assets = bool(counted)
+    # A statement past its review date is out of the totals, so the total is incomplete, never "complete".
+    stale_accounts = [a["label"] for a in accounts if a["stale"] and a["source"] != "ledger"]
     net_worth = {
         "currency": currency, "currency_basis": currency_basis,
         "total": num(liquid + illiquid - owed) if (any_assets or liabilities) and currency and not unknown_balances
@@ -1255,8 +1388,9 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
         "assets": num(liquid + illiquid) if any_assets else None, "liquid": num(liquid) if any_assets else None,
         "illiquid": num(illiquid) if any_assets else None, "liabilities": num(owed),
         "by_currency": {c: num(v) for c, v in sorted(by_currency.items())},
-        "unconverted": unconverted, "unvalued_accounts": unvalued_accounts,
-        "complete": not unconverted and not unvalued_accounts and not unknown_balances and bool(any_assets),
+        "unconverted": unconverted, "unvalued_accounts": unvalued_accounts, "stale_accounts": stale_accounts,
+        "complete": not unconverted and not unvalued_accounts and not unknown_balances and not stale_accounts
+        and bool(any_assets),
     }
     if market is not None:
         net_worth["price_sources"] = sorted({(r["source"], r["date"]) for r in price_rows if r["source"]})
@@ -1273,11 +1407,14 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
             debt_unconverted.append(_money(D(r["monthly_payment"]), r["currency"]))
         else:
             debt_known += converted
-    # A payment without a rate is unknown, never zero: the debt total and the surplus are unknown.
+    # A payment without a rate, or a debt whose payment nobody gave, is unknown, never zero: the surplus is
+    # unknown too.  ``surplus_before_unknown_debts`` keeps the known part, named as such, for "before your
+    # card payment" sentences; it is never the surplus.
     debt_converted = None if debt_unconverted else debt_known
     income_monthly, spend_monthly = D(income["monthly"]), D(spending["monthly"])
-    surplus = (income_monthly - spend_monthly - debt_converted
-               if None not in (income_monthly, spend_monthly, debt_converted) else None)
+    known_part = (income_monthly - spend_monthly - debt_converted
+                  if None not in (income_monthly, spend_monthly, debt_converted) else None)
+    surplus = known_part if not debt_unknown else None
     flow_missing_fx = sorted(set(finmath.pairs(debt_unconverted, currency)) | set(spending["missing_fx"]))
     cash_flow = {"currency": currency, "income": income["monthly"], "spending": spending["monthly"],
                  "spending_basis": spending["monthly_basis"], "spending_source": spending["source"],
@@ -1285,6 +1422,8 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
                  "debt_payments_known": num(debt_known), "debt_payments_unknown": debt_unknown,
                  "debt_payments_unconverted": debt_unconverted,
                  "surplus": num(surplus), "missing_fx": flow_missing_fx,
+                 "surplus_before_unknown_debts": num(known_part) if debt_unknown else None,
+                 "missing": [f"liability.{i}.payment" for i in debt_unknown],
                  "complete": surplus is not None and not debt_unknown and spending["complete"]}
 
     # -- commitments
@@ -1299,7 +1438,20 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
                                        "amount": g["monthly_contribution"], "currency": g["currency"]})
         else:
             committed.append({"kind": "goal", "id": g["id"], "name": g["name"], "monthly": g["monthly_value"]})
+    # An invest goal and the recurring plan that carries it out are one commitment: the plan is not added again
+    # when the goal names it, or when their monthly amounts agree (within 5%).
+    invest_goals = [g for g in goals if g["status"] == "active" and g["eligible"] and g["action"] == "invest"
+                    and g["monthly_value"] is not None]
     for d in dca:
+        same = next((g for g in invest_goals if d["id"] is not None and d["id"] in (g.get("plan_id"), g["id"])), None)
+        if same is None and d["value"] is not None:
+            value = D(d["value"])
+            same = next((g for g in invest_goals if value and abs(D(g["monthly_value"]) - value) <= value * Decimal("0.05")),
+                        None)
+        if same is not None:
+            d["same_as_goal"] = same["id"]
+            invest_goals.remove(same)
+            continue
         if d["value"] is None:
             commit_unconverted.append({"kind": "dca", "id": d["id"], "name": d["id"], "amount": d["monthly"],
                                        "currency": d["currency"]})
@@ -1321,11 +1473,28 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
     if target_months is None and _plan_resources(facts).get("reserve_months") is not None:
         target_months = D(_plan_resources(facts)["reserve_months"])
     funded_by = set(reserve_fact.get("funded_by") or [])
-    designated = [r for r in cash_rows if r["counted"] and r["value"] is not None
-                  and (r["purpose"] == "reserve" or r["id"] in funded_by)]
+    # Liquid bank accounts from statements are cash like any stated balance (the statement replaced the estimate).
+    goal_accounts = {str(a) for g in (facts.any_value("goals") or []) if isinstance(g, dict)
+                     for a in (g.get("accounts") or [])} if isinstance(facts.any_value("goals"), list) else set()
+    # A statement that settled stated cash keeps that cash's designation (the reserve stays the reserve).
+    inherited: dict[str, str] = {}
+    for row in cash_rows:
+        for account_key in row.get("covered_by") or []:
+            if row["purpose"] == "reserve" or row["id"] in funded_by:
+                inherited[account_key] = "reserve"
+            elif row["purpose"] not in (None, "general"):
+                inherited.setdefault(account_key, row["purpose"])
+    bank_rows = [{"id": a["id"], "key": a["key"], "value": a["value"], "liquid": a["liquid"], "counted": True,
+                  "purpose": "goal" if a["id"] in goal_accounts or a["key"] in goal_accounts else inherited.get(a["key"]),
+                  "balance_unknown": False}
+                 for a in accounts if a["source"] != "ledger" and not a["stale"] and not a.get("superseded_by")
+                 and not a.get("duplicate_of") and a["value"] is not None and a["liquid"]
+                 and kind_family(a.get("type")) == "cash"]
+    designated = [r for r in (*cash_rows, *bank_rows) if r["counted"] and r["value"] is not None
+                  and (r["purpose"] == "reserve" or r["id"] in funded_by or r["key"] in funded_by)]
     basis = "designated"
     if not designated:
-        designated = [r for r in cash_rows if r["counted"] and r["value"] is not None and r["liquid"]
+        designated = [r for r in (*cash_rows, *bank_rows) if r["counted"] and r["value"] is not None and r["liquid"]
                       and (r["purpose"] in (None, "general"))]
         basis = "all undesignated cash" if designated else None
     reserve_amount = sum((D(r["value"]) for r in designated), Decimal(0)) if designated else None
@@ -1382,7 +1551,7 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
         "commitments": commitments, "reserve": reserve, "goals": goals, "dca": dca, "holdings": holdings,
         "threads": {"open": [t for t in threads if t["status"] == "open"],
                     "closed": [t for t in threads if t["status"] != "open"][:5]},
-        "stale": facts.stale, "stale_values": _stale_values(facts), "inferred": facts.inferred, "unknowns": unknowns,
+        "stale": facts.stale, "stale_values": _stale_values(facts, {a["key"]: a["label"] for a in accounts if a.get("key")}), "inferred": facts.inferred, "unknowns": unknowns,
         "patterns": [{"key": f["key"], "value": f.get("value"), "id": f.get("id"),
                       "confidence": f.get("confidence"), "observed_on": (f.get("source") or {}).get("observed_on"),
                       "valid_from": f.get("valid_from")} for f in sorted(facts.patterns, key=lambda f: f["key"])],
@@ -1424,5 +1593,5 @@ def missing_for_onboarding(sit: Mapping[str, Any]) -> list[str]:
     return [step for step in ONBOARDING_STEPS if not known[step] and steps.get(step) not in ("done", "skipped")]
 
 
-__all__ = ["build", "payoff", "annuity_payment", "missing_for_onboarding", "underlying_of", "goal_name",
+__all__ = ["build", "payoff", "annuity_payment", "missing_for_onboarding", "underlying_of", "goal_name", "stated_matches", "kind_family",
            "add_months", "D", "num", "UNDERLYING"]

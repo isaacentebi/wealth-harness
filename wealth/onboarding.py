@@ -246,6 +246,8 @@ def _identity_fields(lang: str, ctx: dict) -> list[dict]:
          "options": _labels(_COUNTRIES, lang), "max": 1, "required": True},
         {"name": "region", "type": "text", "label": {"en": "State", "es": "Estado"}[lang], "max": 80,
          "when": {"country": "US"}, "required": False, "autocomplete": "address-level1"},
+        {"name": "city", "type": "text", "label": {"en": "City", "es": "Ciudad"}[lang], "max": 80,
+         "when": {"country": "MX"}, "required": False, "autocomplete": "address-level2"},
     ]
 
 
@@ -281,7 +283,7 @@ def _identity_writer(answer: dict, ctx: dict) -> list[tuple[str, Any]]:
         raise ValueError("Choose where you live.")
     if country:
         residence: dict[str, Any] = {"country": country}
-        region = str(answer.get("region") or "").strip()
+        region = " ".join(str(answer.get("region") or "").split())
         if region and country == "US":
             residence["region"] = region[:80]
         city = " ".join(str(answer.get("city") or "").split())
@@ -297,8 +299,12 @@ def _identity_summary(answer: dict, lang: str, ctx: dict) -> str:
     name = " ".join(str(answer.get("name") or "").split())
     country = country_code(answer.get("country")) if answer.get("country") not in (None, "other") else None
     place = _COUNTRY_NAME[lang].get(country or "", country or "")
-    if answer.get("region") and country == "US":
-        place = f"{answer['region']}, {place}"
+    city = " ".join(str(answer.get("city") or "").split())
+    region = " ".join(str(answer.get("region") or "").split()) if country == "US" else ""
+    local = [p for p in (city, region) if p]
+    if local and place:
+        # "Texas, United States": after a city or state the country reads without its article.
+        place = ", ".join([*dict.fromkeys(local), place.removeprefix("the ")])
     if not place:
         return name
     return f"{name}, en {place}" if lang == "es" else f"{name}, in {place}"
@@ -502,18 +508,27 @@ def _spending_summary(answer: dict, lang: str, ctx: dict) -> str:
 # -- money
 
 
-_MONEY_MX = [_opt("bank", "Nu / bank", "Nu / banco"), _opt("cetes", "CETES"),
+# Nu comes after the older chips so numbered replies over text keep their meaning.
+_MONEY_MX = [_opt("bank", "Bank", "Banco"), _opt("cetes", "CETES"),
              _opt("brokerage", "GBM / brokerage", "GBM / casa de bolsa"), _opt("afore", "AFORE"), _opt("ppr", "PPR"),
-             _opt("us_broker", "US broker", "Broker en EE. UU."), _opt("none", "Nothing yet", "Nada aún")]
+             _opt("us_broker", "US broker", "Broker en EE. UU."), _opt("nu", "Nu"), _opt("none", "Nothing yet", "Nada aún")]
 _MONEY_US = [_opt("bank", "Checking / savings", "Cheques / ahorro"), _opt("brokerage", "Brokerage", "Casa de bolsa"),
              _opt("retirement", "401(k) / IRA"), _opt("hsa", "HSA"), _opt("none", "Nothing yet", "Nada aún")]
 _MONEY_OTHER = [_opt("bank", "Bank", "Banco"), _opt("brokerage", "Brokerage", "Casa de bolsa"),
                 _opt("retirement", "Retirement", "Retiro"), _opt("none", "Nothing yet", "Nada aún")]
 # option -> (key, kind, currency override)
-_MONEY_KEYS = {"bank": ("cash.bank", None, None), "cetes": ("investment.cetes", "fund", "MXN"),
+_MONEY_KEYS = {"bank": ("cash.bank", None, None), "nu": ("cash.nu", None, "MXN"),
+               "cetes": ("investment.cetes", "fund", "MXN"),
                "brokerage": ("investment.brokerage", "brokerage", None), "afore": ("investment.afore", "afore", "MXN"),
                "ppr": ("investment.ppr", "retirement", "MXN"), "us_broker": ("investment.us_broker", "brokerage", "USD"),
                "retirement": ("investment.retirement", "retirement", None), "hsa": ("investment.hsa", "retirement", "USD")}
+
+
+# Chips that name a firm save it as the institution, so a statement from that firm settles the balance.
+# The generic "bank" chip names no one.  Keyed by (country or None, option).
+_MONEY_INSTITUTIONS = {("MX", "nu"): "Nu", ("MX", "cetes"): "Cetesdirecto", ("MX", "brokerage"): "GBM"}
+# The name saved with the fact: the person's words for it, not the chip's "X / Y" wording.
+_MONEY_NAMES = {("MX", "brokerage"): {"en": "GBM", "es": "GBM"}, ("MX", "cetes"): {"en": "CETES", "es": "CETES"}}
 
 
 def _money_options(ctx: dict) -> list[dict]:
@@ -572,17 +587,19 @@ def _money_writer(answer: dict, ctx: dict) -> list[tuple[str, Any]]:
         detail = detail if isinstance(detail, dict) else {"amount": detail}
         key, kind, currency = _MONEY_KEYS[option]
         amount = _money(detail.get("amount"), currency or ctx["home"], "that balance", required=False)
-        name = _money_labels(ctx)[option][ctx.get("language") or "es"]
+        lang = ctx.get("language") or "es"
+        name = (_MONEY_NAMES.get((ctx.get("country"), option)) or _money_labels(ctx)[option])[lang]
+        institution = _MONEY_INSTITUTIONS.get((ctx.get("country"), option))
         if amount is None:
             # They have it but did not say how much: remember that it exists, with an unknown balance.
             amount = {"currency": currency or ctx["home"], "balance_unknown": True}
         if key.startswith("cash."):
-            facts.append((key, {**amount, "liquid": True, "name": name, "approximate": True}))
+            value = {**amount, "liquid": True, "name": name, "approximate": True}
         else:
             value = {**amount, "kind": kind, "name": name, "approximate": True}
-            if option == "cetes":
-                value["institution"] = "Cetesdirecto"
-            facts.append((key, value))
+        if institution:
+            value["institution"] = institution
+        facts.append((key, value))
     return facts
 
 
@@ -743,7 +760,11 @@ def _goals_prefill(sit, ctx) -> dict | None:
     return out
 
 
-def _goals_writer(answer: dict, ctx: dict) -> list[tuple[str, Any]]:
+# Goals that have a target amount and date by nature: a down payment, tuition, a reserve.
+_TARGET_GOALS = ("home", "education", "emergency_fund")  # in order of how naturally they carry one
+
+
+def _chosen_goals(answer: Mapping[str, Any]) -> list[str]:
     chosen = answer.get("goals")
     if isinstance(chosen, str):
         chosen = [chosen]
@@ -751,11 +772,35 @@ def _goals_writer(answer: dict, ctx: dict) -> list[tuple[str, Any]]:
         chosen = list(chosen)
     if not isinstance(chosen, list) or not 1 <= len(chosen) <= 2 or any(c not in _GOAL_BY_ID for c in chosen):
         raise ValueError("Choose one or two goals.")
+    return list(dict.fromkeys(chosen))
+
+
+def _target_goal(answer: Mapping[str, Any], chosen: list[str]) -> str | None:
+    """The goal the optional target and year belong to, or None when that is ambiguous (never guessed).
+
+    One goal takes it; else the person's explicit ``target_goal``; else the one chosen goal that has a
+    target by nature (home, education, emergency fund).  Retirement + home puts it on the home.
+    """
+    if len(chosen) == 1:
+        return chosen[0]
+    if answer.get("target_goal") in chosen:
+        return answer["target_goal"]
+    # A home or education has both an amount and a date by nature; an emergency fund an amount.
+    for tier in (("home", "education"), ("emergency_fund",)):
+        natural = [c for c in chosen if c in tier]
+        if natural:
+            return natural[0] if len(natural) == 1 else None
+    return None
+
+
+def _has_target(answer: Mapping[str, Any]) -> bool:
+    return answer.get("target_amount") not in (None, "", {}) or answer.get("target_year") not in (None, "")
+
+
+def _goals_writer(answer: dict, ctx: dict) -> list[tuple[str, Any]]:
+    chosen = _chosen_goals(answer)
     lang = ctx.get("language") or "es"
-    chosen = list(dict.fromkeys(chosen))
-    # The optional target belongs to the goal that has one by nature (a home, education, retirement).
-    sized = [c for c in chosen if c in ("home", "education", "retirement")]
-    target_goal = sized[0] if len(sized) == 1 else chosen[0]
+    target_goal = _target_goal(answer, chosen)
     goals = []
     for index, goal_id in enumerate(chosen):
         option, slug, action, obj = _GOAL_BY_ID[goal_id]
@@ -783,8 +828,16 @@ def _goals_writer(answer: dict, ctx: dict) -> list[tuple[str, Any]]:
 def _goals_summary(answer: dict, lang: str, ctx: dict) -> str:
     chosen = answer.get("goals")
     chosen = [chosen] if isinstance(chosen, str) else list(chosen or [])
-    names = [_GOAL_BY_ID[c][0]["label"][lang] for c in chosen if c in _GOAL_BY_ID]
+    chosen = [c for c in dict.fromkeys(chosen) if c in _GOAL_BY_ID]
+    names = [_GOAL_BY_ID[c][0]["label"][lang] for c in chosen]
     text = ", ".join(names[:1] + [n[:1].lower() + n[1:] for n in names[1:]])
+    if len(chosen) > 1 and _has_target(answer):
+        target_goal = _target_goal(answer, chosen)
+        if target_goal is None:
+            # Not assigned: say so and name the goals instead of guessing.
+            between = (" o " if lang == "es" else " or ").join(n.lower() for n in names)
+            return text + (f" · meta sin asignar ({between})" if lang == "es" else f" · target not assigned yet ({between})")
+        text += f" · {_GOAL_BY_ID[target_goal][0]['label'][lang]}"
     target = None
     try:
         target = _money(answer.get("target_amount"), ctx["home"], "target", required=False)
@@ -928,9 +981,15 @@ def progress(sit: Mapping[str, Any]) -> dict:
     """Card ids by status and whether onboarding started and completed."""
     record = _record(sit)
     out: dict[str, Any] = {"started": bool(record.get("started_at")), "completed": bool(record.get("completed_at")),
-                           "done": [], "skipped": [], "unsure": [], "pending": []}
+                           "done": [], "skipped": [], "unsure": [], "pending": [], "known": []}
     for step in STEPS:
         if step.condition(sit) and step.marks:  # statements is an offer, not a question
+            status = step_status(sit, step)
+            if status == "pending" and step.known(sit):
+                # Already known from memory (a statement, an earlier conversation): a one-tap confirmation at
+                # most, never counted as a question still to answer.
+                out["known"].append(step.id)
+                continue
             out[step_status(sit, step)].append(step.id)
     return out
 
@@ -953,7 +1012,8 @@ def card(sit: Mapping[str, Any], step_id: str, language: str | None = None) -> d
         "step": step.id, "index": visible.index(step) + 1 if step in visible else None, "total": len(visible),
         "language": lang, "prompt": step.prompt[lang], "title": step.title[lang],
         "fields": step.fields(lang, ctx), "prefill": prefill, "confirm": bool(prefill),
-        "status": step_status(sit, step), "currency": ctx["home"], "unsure": step.unsure, "upload": step.upload,
+        # One secondary action: "Omitir" / "Skip" (a typed "no sé" is read as the same skip).
+        "status": step_status(sit, step), "currency": ctx["home"], "unsure": False, "skip": True, "upload": step.upload,
     }
 
 
@@ -981,7 +1041,8 @@ def picture(sit: Mapping[str, Any], language: str | None = None) -> dict:
     if nw.get("total") is not None:
         parts.append(f"Patrimonio neto {m(nw['total'])}" if lang == "es" else f"Net worth {m(nw['total'])}")
     elif nw.get("unknown_balances"):
-        names = ", ".join(nw["unknown_balances"])
+        from .situation.text import unknown_names  # lazy: the text module imports the model
+        names = ", ".join(unknown_names(sit, lang))
         parts.append(f"falta el saldo de {names}" if lang == "es" else f"balance still needed for {names}")
     if flow.get("surplus") is not None:
         surplus = flow["surplus"]
@@ -989,6 +1050,11 @@ def picture(sit: Mapping[str, Any], language: str | None = None) -> dict:
             parts.append(f"te quedan {m(surplus)} al mes" if lang == "es" else f"{m(surplus)} left each month")
         else:
             parts.append(f"te faltan {m(-surplus)} al mes" if lang == "es" else f"{m(-surplus)} short each month")
+    elif flow.get("surplus_before_unknown_debts") is not None and flow["surplus_before_unknown_debts"] > 0:
+        # A debt payment nobody gave: the known part, said as what it is, never as the surplus.
+        before = m(flow["surplus_before_unknown_debts"])
+        parts.append(f"te quedan {before} al mes antes de pagar tus deudas" if lang == "es"
+                     else f"{before} left each month before debt payments")
     if reserve.get("months") is not None and flow.get("spending") is not None:
         months = reserve["months"]
         shown = f"{months:g}"  # es-MX writes decimals with a point, like en
@@ -1036,8 +1102,9 @@ def build_facts(sit: Mapping[str, Any], step_id: str, answer: Mapping[str, Any] 
     elif answer.get("unsure") is True:
         if not step.unsure:
             raise ValueError("This step needs an answer or Skip.")
-        status = "unsure"
-        summary = f"{step.title[lang]}: {'no estoy seguro' if lang == 'es' else 'not sure'}"
+        # "Not sure" and "Skip" are one action: the step is skipped and stays unknown, never asked again.
+        status = "skipped"
+        summary = f"{step.title[lang]}: {'omitido' if lang == 'es' else 'skipped'}"
     elif answer.get("confirm") is True and step.known(sit):
         status = "done"
         prefill = step.prefill(sit, ctx) or {}
@@ -1078,6 +1145,26 @@ def _last_open(sit: Mapping[str, Any], step: Step) -> bool:
     return not pending
 
 
+def target_chooser(sit: Mapping[str, Any], answer: Any, language: str | None = None) -> dict | None:
+    """A small goals card asking which chosen goal the target belongs to; None when it is not ambiguous."""
+    if not isinstance(answer, Mapping) or not _has_target(answer):
+        return None
+    try:
+        chosen = _chosen_goals(answer)
+    except ValueError:
+        return None
+    if _target_goal(answer, chosen) is not None:
+        return None
+    lang = _lang(language or (sit.get("profile") or {}).get("language"))
+    base = card(sit, "goals", lang)
+    options = [{"id": c, "label": _GOAL_BY_ID[c][0]["label"][lang]} for c in chosen]
+    prefill = {k: answer[k] for k in ("goals", "target_amount", "target_year") if answer.get(k) not in (None, "")}
+    return {**base, "prompt": {"en": "Which goal is that target for?", "es": "¿Para cuál meta es ese monto?"}[lang],
+            "fields": [*base["fields"], {"name": "target_goal", "type": "chips", "options": options, "max": 1,
+                                         "required": True, "label": {"en": "Target for", "es": "La meta es para"}[lang]}],
+            "prefill": prefill, "confirm": False, "chooser": "target_goal"}
+
+
 def apply(service: Any, client_id: str, step_id: str, answer: Mapping[str, Any] | None = None, *,
           skip: bool = False, language: str | None = None, today: date | str | None = None) -> dict:
     """Validate and write one answer, then return ``{card, picture, answered, complete, completed_now}``."""
@@ -1091,8 +1178,10 @@ def apply(service: Any, client_id: str, step_id: str, answer: Mapping[str, Any] 
     service.remember(client_id, facts)
     after = service.situation(client_id)
     lang = _lang(language or (after.get("profile") or {}).get("language"))
+    # A target that could belong to either goal is asked about, not guessed: the chooser comes next.
+    chooser = target_chooser(after, answer, lang) if step_id == "goals" and not skip else None
     return {
-        "card": next_step(after, lang), "picture": picture(after, lang),
+        "card": chooser or next_step(after, lang), "picture": picture(after, lang),
         "answered": {"step": step_id, "status": status, "summary": summary},
         "complete": bool(_record(after).get("completed_at")), "completed_now": completed_now,
     }
@@ -1135,7 +1224,7 @@ def parse_free_text(card_: Mapping[str, Any] | None, text: str) -> dict:
 
 def _parse_for_card(card_: Mapping[str, Any], text: str) -> dict | None:
     step = card_.get("step")
-    if _UNSURE.search(text) and card_.get("unsure"):
+    if _UNSURE.search(text) and BY_ID.get(step) is not None and BY_ID[step].unsure:
         return {"unsure": True}
     if step in ("income", "spending"):
         amount = parse_amount(text)
@@ -1191,4 +1280,5 @@ def brief_line(sit: Mapping[str, Any]) -> str | None:
 
 
 __all__ = ["STEPS", "BY_ID", "apply", "brief_line", "build_facts", "card", "money_text", "next_step",
-           "parse_amount", "parse_free_text", "picture", "progress", "skip", "step_status"]
+           "parse_amount", "parse_free_text", "picture", "progress", "skip", "step_status",
+           "target_chooser"]

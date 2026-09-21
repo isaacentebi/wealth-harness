@@ -382,7 +382,8 @@ def test_memory_reads_as_grouped_sentences_with_quiet_origins(tmp_path, monkeypa
     assert groups["money_in"]["summary"]["text"] == "Te sobran unos $40,000 al mes, sin contar el pago del coche."
     assert _spans(groups["money_in"]["summary"]) == ["$40,000"]
     assert groups["owe"]["summary"]["text"] == "Aún no sé cuánto pagas del coche al mes."
-    assert groups["goals"]["summary"]["text"] == "Apartas $10,000 al mes para tus metas; te quedan $30,000 libres."
+    # The car payment is unknown, so what stays free is unknown: only what is set aside is said.
+    assert groups["goals"]["summary"]["text"] == "Apartas $10,000 al mes para tus metas."
     own = [f["text"] for f in groups["own"]["facts"]]
     # One sentence per institution, whole pesos, no parenthetical dates, no difference sentence.
     assert own == ["Tienes $150,000 en efectivo en Nu.", "En GBM tienes $217,837 y $1,000 USD en tu cuenta de inversión."]

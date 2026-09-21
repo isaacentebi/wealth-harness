@@ -170,6 +170,20 @@ class _Book:
     def account_type(self, account_id: str) -> str:
         return str((self.accounts.get(account_id) or {}).get("type") or "other")
 
+    def days(self, *, portfolio: bool = False) -> list[str]:
+        """Sorted entry dates (investment accounts only with ``portfolio``)."""
+        return sorted(e["date"] for e in self.ledger.get("entries") or [] if isinstance(e.get("date"), str)
+                      and (not portfolio or self.account_type(e.get("account_id")) not in _NON_PORTFOLIO_TYPES))
+
+    def known_at(self, day: str, *, portfolio: bool = False) -> bool:
+        """Whether the ledger holds anything on or before ``day``: before that, balances are unknown, not zero."""
+        days = self.days(portfolio=portfolio)
+        return bool(days) and days[0] <= day
+
+    def active_in(self, start: str, end: str, *, portfolio: bool = False) -> bool:
+        """Whether the ledger has any entry inside the window (a quarter with no statement says nothing)."""
+        return any(start <= d <= end for d in self.days(portfolio=portfolio))
+
     def convert(self, amount: Decimal | None, ccy: str | None, day: str) -> Decimal | None:
         return self.fx.convert(amount, ccy, self.currency, day)
 
@@ -272,6 +286,19 @@ def _net_worth(book: _Book, start: str, end: str, sit: Mapping[str, Any] | None,
     costs = _d(total["decomposition"]["fees_and_withholding"])
     market, market_missing = _market_change(book, _day_before(start), end)
     missing += market_missing
+    # Before the first statement nothing is known: the opening value is unknown, never zero.  A period with
+    # no entries at all says nothing about flows or the closing value either.
+    if not book.known_at(_day_before(start)):
+        opening = None
+        missing.append(_miss(f"ledger.start@{_day_before(start)}",
+                             f"No statement or entry on or before {_day_before(start)}: the value at the start of "
+                             "the period is unknown.", "no_data"))
+    if not book.active_in(start, end):
+        closing = contributions = market = None
+        buckets = {k: None for k in buckets}
+        missing.append(_miss(f"ledger.period@{start}..{end}",
+                             f"No statement or entry between {start} and {end}: this period's flows and closing value "
+                             "are unknown.", "no_data"))
     growth = None if None in (income, costs, market) else income + costs + market
     residual = None if None in (opening, closing, contributions, growth) else closing - (opening + contributions + growth)
     data = {
@@ -309,7 +336,7 @@ def _net_worth(book: _Book, start: str, end: str, sit: Mapping[str, Any] | None,
         if outside:
             warnings.append("The picture also holds stated balances outside the ledger; they are in situation_end, "
                             "not in the decomposition.")
-    if buckets["opening_balances"]:
+    if buckets.get("opening_balances"):
         warnings.append("Opening balances were recorded inside the period; the change partly reflects accounts added "
                         "to the ledger, not saving.")
     return _section(data, missing=missing, sources=perf["sources"], assumptions=assumptions, warnings=warnings)
@@ -439,13 +466,17 @@ def _allocation(book: _Book, start: str, end: str, ips: Mapping[str, Any] | None
                 sleeve_map: Mapping[str, str]) -> dict:
     sleeves = ((ips or {}).get("allocation") or {}).get("sleeves") or []
     values, total, missing, unclassified = _weights(book, end, sleeves, sleeve_map)
-    before, before_total, _, _ = _weights(book, _day_before(start), sleeves, sleeve_map)
-    incomplete = any(m["key"].startswith(("prices.", "fx.")) for m in missing)
+    before, before_total, _, before_unclassified = _weights(book, _day_before(start), sleeves, sleeve_map)
+    # An unclassified holding is as unknown as an unpriced one: weights without it would mislead, so there is
+    # no portfolio value, no band judgement and no drift until it is mapped to a sleeve.
+    incomplete = any(m["key"].startswith(("prices.", "fx.")) for m in missing) or bool(unclassified)
+    if before_unclassified:
+        before, before_total = {}, ZERO
     rows = []
     if sleeves:
         for sleeve in sleeves:
             value = values.get(sleeve["id"], ZERO)
-            weight = value / total if total else None
+            weight = value / total if total and not unclassified else None
             prior = before.get(sleeve["id"], ZERO) / before_total if before_total else None
             drift = None if weight is None else weight - Decimal(str(sleeve["target"]))
             rows.append({"sleeve": sleeve["id"], "name": sleeve.get("name"), "value": money(value),
@@ -475,8 +506,14 @@ def _prior_period(start: str, end: str) -> tuple[str, str]:
     first, last = date.fromisoformat(start), date.fromisoformat(end)
     if _to_date(first, last):
         return add_months(first, -3).isoformat(), add_months(last, -3).isoformat()
-    months = (last.year - first.year) * 12 + last.month - first.month + 1
-    return add_months(first, -months).isoformat(), _day_before(start)
+    whole_months = first.day == 1 and (last + timedelta(days=1)).day == 1
+    if whole_months:
+        months = (last.year - first.year) * 12 + last.month - first.month + 1
+        return add_months(first, -months).isoformat(), _day_before(start)
+    # Any other window: the same number of days, ending the day before (15 Jan-14 Apr compares with the
+    # 90 days before it, never a four-month window).
+    days = (last - first).days + 1
+    return (first - timedelta(days=days)).isoformat(), _day_before(start)
 
 
 def _to_date(first: date, last: date) -> bool:
@@ -491,8 +528,8 @@ def _quarter_end(day: date) -> date:
 
 def _coverage(book: _Book, start: str, end: str) -> str:
     dates = [e["date"] for e in book.ledger.get("entries", []) if book.account_type(e["account_id"]) in _SPENDING_TYPES]
-    if not dates or min(dates) > end:
-        return "none"
+    if not dates or min(dates) > end or max(dates) < start:
+        return "none"  # nothing inside the window: income and spending are unknown, not zero
     return "full" if min(dates) <= start else "partial"
 
 
@@ -549,6 +586,17 @@ def _cash_flow(book: _Book, start: str, end: str) -> dict:
 # ------------------------------------------------------------------ goals
 
 
+def _months_left(today: date, when: date) -> int:
+    """Months of contributions left before ``when``, counting days: 1 Sep to 30 Sep is 1, never 0 ("due").
+
+    The smallest n with today + n months on or after the date; 0 only once the date has come.
+    """
+    if when <= today:
+        return 0
+    months = (when.year - today.year) * 12 + when.month - today.month
+    return months + 1 if add_months(today, months) < when else months
+
+
 def _goals(book: _Book, end: str, sit: Mapping[str, Any] | None, goal_accounts: Mapping[str, Any],
            assumed_return: Decimal) -> dict:
     if sit is None:
@@ -580,7 +628,7 @@ def _goals(book: _Book, end: str, sit: Mapping[str, Any] | None, goal_accounts: 
                 missing.append(_miss(f"goal_accounts.{goal['id']}",
                                      f"Nothing is earmarked for {goal['name']}; name its accounts to measure progress."))
         when = date.fromisoformat(goal["target_date"]) if goal.get("target_date") else None
-        months = (when.year - today.year) * 12 + when.month - today.month if when else None
+        months = _months_left(today, when) if when else None
         row = {"id": goal["id"], "name": goal["name"], "currency": goal.get("currency"), "target": money(target),
                "target_date": goal.get("target_date"), "months_left": months, "funded": money(funded),
                "funded_basis": basis, "funded_pct": _ratio(funded / target if funded is not None and target else None, "0.0001"),
@@ -782,6 +830,17 @@ def _taxes(book: _Book, start: str, end: str, jurisdiction: str | None, basis: s
     ytd = [s for s in sales if s["date"][:4] == end[:4] and s["date"] <= end]
     period_est, period_missing = _tax_estimate(period, jurisdiction, tax, sic_listed, "period")
     ytd_est, ytd_missing = _tax_estimate(ytd, jurisdiction, tax, sic_listed, "ytd")
+    # No sales is only "no tax" when the ledger covered the holdings the whole window; before the first
+    # statement a sale could have happened unseen, so the estimate is unknown, not zero.
+    for window_start, rows, est, gaps in ((start, period, period_est, period_missing),
+                                          (end[:4] + "-01-01", ytd, ytd_est, ytd_missing)):
+        if not rows and est.get("estimated_tax") and not (book.known_at(_day_before(window_start), portfolio=True)
+                                                          and book.active_in(window_start, end, portfolio=True)):
+            est["estimated_tax"] = {k: None for k in est["estimated_tax"]}
+            est["gains"] = {k: None for k in (est.get("gains") or {})}
+            gaps.append(_miss(f"ledger.trades@{window_start}..{end}",
+                              f"The investment statements do not cover {window_start}..{end}, so sales in that "
+                              "window are unknown; the estimate is unknown, not zero.", "no_data"))
     state, _ = replay(book.ledger, end)
     income: dict[str, Decimal | None] = {}
     missing = list(report["missing"])
@@ -1439,13 +1498,27 @@ def quarterly(context: Mapping[str, Any], period_start: str, period_end: str) ->
     accrued = [(_d(c["annual_low"]), _d(c["annual_high"])) for c in fee_report["result"]["components"]
                if c["id"] in {"fund_expenses", "afore", "advisory"} and c["annual_low"] is not None]
     fraction = Decimal(period_days) / Decimal(365)
+    paid = {"commissions": trading["commission"], "iva": trading["iva"], "total": trading["paid_in_window"]}
+    fee_missing = list(fee_report["missing"]) + holding_missing
+    if not book.active_in(start, end, portfolio=True):
+        # No investment statement in the window: commissions paid are unknown, not zero.
+        paid = {k: None for k in paid}
+        fee_missing.append(_miss(f"ledger.fees@{start}..{end}", "No investment statement in this period, so fees "
+                                 "paid are unknown.", "no_data"))
+    annual_cost = dict(fee_report["result"]["annual_cost"])
+    if not annual_cost.get("complete") and not _d(annual_cost.get("low")) and not _d(annual_cost.get("high")):
+        # A floor of zero is no floor: every cost is unknown, so the annual cost is unknown.
+        for field in ("low", "high", "bps_low", "bps_high"):
+            if field in annual_cost:
+                annual_cost[field] = None
+        fee_missing.append(_miss("holdings.costs", "No cost of any holding is known yet, so the annual cost is unknown.",
+                                 "no_data"))
     sections["fees"] = _section({
-        "paid_in_period": {"commissions": trading["commission"], "iva": trading["iva"],
-                           "total": trading["paid_in_window"]},
+        "paid_in_period": paid,
         "accrued_in_period_estimate": {"low": money(sum((lo for lo, _ in accrued), ZERO) * fraction),
                                        "high": money(sum((hi for _, hi in accrued), ZERO) * fraction)},
-        "annual_cost": fee_report["result"]["annual_cost"], "top_sources": fee_report["result"]["top_sources"],
-        "audit": fee_report["result"]}, missing=fee_report["missing"] + holding_missing, sources=fee_report["sources"],
+        "annual_cost": annual_cost, "top_sources": fee_report["result"]["top_sources"],
+        "audit": fee_report["result"]}, missing=fee_missing, sources=fee_report["sources"],
         assumptions=fee_report["assumptions"] + ["Commissions and IVA are the ledger's fee lines inside the period; "
                                                  "fund, AFORE and advisory costs accrue daily and are estimated for the period."])
     sections["changes"] = _changes(start, end, snapshot, context.get("fact_history"))
@@ -1483,12 +1556,9 @@ def quarterly(context: Mapping[str, Any], period_start: str, period_end: str) ->
         "taxes": {"jurisdiction": jurisdiction,
                   "period_estimate": (sections["taxes"]["data"]["period"].get("estimated_tax") or {}).get("total"),
                   "ytd_estimate": (sections["taxes"]["data"]["year_to_date"].get("estimated_tax") or {}).get("total")},
-        "fees": {"annual_low": fee_report["result"]["annual_cost"]["low"],
-                 "annual_high": fee_report["result"]["annual_cost"]["high"],
-                 "bps_low": fee_report["result"]["annual_cost"]["bps_low"],
-                 "bps_high": fee_report["result"]["annual_cost"]["bps_high"],
-                 "complete": fee_report["result"]["annual_cost"]["complete"],
-                 "paid_in_period": trading["paid_in_window"]},
+        "fees": {"annual_low": annual_cost.get("low"), "annual_high": annual_cost.get("high"),
+                 "bps_low": annual_cost.get("bps_low"), "bps_high": annual_cost.get("bps_high"),
+                 "complete": annual_cost.get("complete"), "paid_in_period": paid["total"]},
         "changes": len(sections["changes"]["data"]["timeline"]),
         "open_threads": [t["text"][:120] for t in sections["threads"]["data"]["open"][:3]],
         "next_quarter": [{"title": c["title"], "value": c["value"], "kind": c["kind"]} for c in candidates[:2]],

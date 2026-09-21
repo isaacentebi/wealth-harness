@@ -75,7 +75,7 @@ CHECKING_TYPES = frozenset({"checking", "bank", "debit"})
 TAXABLE_TYPES = frozenset({"brokerage", "taxable"})
 RETIREMENT_SAVINGS_TYPES = frozenset({"ppr", "afore"})
 FIBRA_TICKERS = frozenset({"FUNO11", "FMTY14", "FIBRAPL14", "DANHOS13", "TERRA13", "FIHO12", "FIBRAMQ12", "FSHOP13"})
-KIND_ORDER = ("scam", "reserve_low", "concentration", "tax_deadline", "harvest", "ppr_headroom", "windfall",
+KIND_ORDER = ("scam", "high_interest_debt", "reserve_low", "concentration", "tax_deadline", "harvest", "ppr_headroom", "windfall",
               "drift", "surplus", "follow_through", "cash_drag", "dca_slipped", "fee_creep", "thread_ready", "life_calendar",
               "guilt_free", "statement_overdue", "stale_facts")
 
@@ -353,9 +353,27 @@ def _surplus(run: _Run) -> None:
     unallocated = D(run.sit["commitments"].get("unallocated"))
     flow = run.sit["cash_flow"]
     if unallocated is None or not flow.get("complete"):
+        unknown_debts = [r for r in run.sit.get("liabilities") or [] if r["id"] in (flow.get("debt_payments_unknown") or [])]
+        payments = [f"{_debt_name(r, 'en')} payment" for r in unknown_debts]
         run.missing("surplus", *(["income"] if flow.get("income") is None else []),
-                    *(["spending"] if flow.get("spending") is None else []),
-                    *(["debt payments"] if flow.get("debt_payments_unknown") else []))
+                    *(["spending"] if flow.get("spending") is None else []), *payments)
+        before = D(flow.get("surplus_before_unknown_debts"))
+        asked = {i["data"].get("liability") for i in run.items if i["kind"] == "high_interest_debt"
+                 and i["data"].get("payment_unknown")}
+        if before is not None and before > 0 and unknown_debts and not {r["id"] for r in unknown_debts} <= asked:
+            # Never silently blocked: say what is left before the payment nobody gave, and ask for it.
+            amount = run.money(before)
+            names_en = ", ".join(_debt_name(r, "en") for r in unknown_debts)
+            names_es = ", ".join(_debt_name(r, "es") for r in unknown_debts)
+            run.items.append(_item(
+                "surplus", None, severity="consider", priority="opportunity",
+                title=(f"{amount}/month before your {names_en} payment", f"{amount} al mes antes del pago de {names_es}"),
+                why=(f"I don't know your monthly {names_en} payment, so what stays free each month is not known yet.",
+                     f"No sé cuánto pagas al mes de {names_es}, así que aún no sé cuánto te queda libre."),
+                next_step=(f"My monthly {names_en} payment is…", f"Lo que pago al mes de {names_es} es…"),
+                data={"surplus_before_unknown_debts": num(before), "currency": run.currency,
+                      "missing": [f"liability.{r['id']}.payment" for r in unknown_debts]},
+                sources=[r["key"] for r in unknown_debts], trigger=["before_debts", _sig2(before)]))
         return
     if unallocated <= 0:
         return
@@ -390,6 +408,84 @@ def _surplus(run: _Run) -> None:
               "surplus_monthly": run.sit["cash_flow"]["surplus"], "committed_monthly": run.sit["commitments"]["total"]},
         sources=[k for k in run.sit["evidence"] if k.startswith(("income.", "spending.", "goals", "planning.dca", "liability."))],
         trigger=["flow", _sig2(unallocated)]))
+
+
+HIGH_INTEREST_RATE = Decimal("0.20")        # a debt at 20% a year or more costs more than any safe return
+HIGH_INTEREST_PAYOFF_MONTHS = 12
+_DEBT_NAMES = {"en": {"card": "card", "auto": "car loan", "mortgage": "mortgage", "personal": "personal loan",
+                      "student": "student loan", "other": "loan"},
+               "es": {"card": "tu tarjeta", "auto": "tu crédito del coche", "mortgage": "tu hipoteca",
+                      "personal": "tu préstamo personal", "student": "tu crédito educativo", "other": "tu préstamo"}}
+
+
+def _debt_name(row: Mapping[str, Any], lang: str) -> str:
+    kind = row.get("kind") if row.get("kind") in _DEBT_NAMES[lang] else "other"
+    if kind == "other" and row.get("name"):
+        return str(row["name"])
+    return _DEBT_NAMES[lang][kind]
+
+
+def _high_interest(run: _Run) -> None:
+    """A card or loan at 20% a year or more: paying it down beats any investment.
+
+    Says the monthly amount that clears it in a year and the interest that saves against the current
+    payment; when the payment is unknown it still says the amount and asks for the payment.
+    """
+    from .situation.model import annuity_payment, payoff
+    for row in run.sit.get("liabilities") or []:
+        balance, rate = D(row.get("balance")), D(row.get("annual_rate"))
+        if balance is None or balance <= 0 or rate is None or rate < HIGH_INTEREST_RATE:
+            continue
+        currency = row.get("currency") or run.currency
+        needed = annuity_payment(balance, rate, HIGH_INTEREST_PAYOFF_MONTHS)
+        fast = payoff(balance, rate, needed, run.as_of)
+        payment = D(row.get("monthly_payment"))
+        current = payoff(balance, rate, payment, run.as_of) if payment is not None else {"status": "unknown"}
+        saved = None
+        if current.get("status") == "ready" and fast.get("status") == "ready":
+            saved = max(D(current["interest"]) - D(fast["interest"]), Decimal(0))
+        rate_text = f"{num(rate * 100, 0)}%"
+        name_en, name_es = _debt_name(row, "en"), _debt_name(row, "es")
+        pronoun = "la" if row.get("kind") in ("card", "mortgage") else "lo"
+        needed_text, fast_interest = run.money(needed, currency), run.money(D(fast.get("interest")), currency)
+        if payment is None:
+            why = (f"Clearing it in {HIGH_INTEREST_PAYOFF_MONTHS} months takes about {needed_text} a month and costs "
+                   f"{fast_interest} in interest. Tell me what you pay now to see how much that saves.",
+                   f"Liquidar{pronoun} en {HIGH_INTEREST_PAYOFF_MONTHS} meses pide unos {needed_text} al mes y cuesta "
+                   f"{fast_interest} de intereses. Dime cuánto pagas hoy para calcular cuánto te ahorras.")
+            step = (f"My monthly {name_en} payment is…", f"Lo que pago al mes de {name_es} es…")
+        elif current.get("status") == "never":
+            why = (f"Your {run.money(payment, currency)} payment does not cover the interest; about {needed_text} a month "
+                   f"clears it in {HIGH_INTEREST_PAYOFF_MONTHS} months.",
+                   f"Tu pago de {run.money(payment, currency)} no cubre los intereses; con unos {needed_text} al mes "
+                   f"{pronoun} liquidas en {HIGH_INTEREST_PAYOFF_MONTHS} meses.")
+            step = (f"How do I get to {needed_text} a month on my {name_en}?",
+                    f"¿Cómo llego a {needed_text} al mes para {name_es}?")
+        else:
+            saved_text = run.money(saved, currency) if saved else None
+            why = (f"About {needed_text} a month clears it in {HIGH_INTEREST_PAYOFF_MONTHS} months"
+                   + (f" and saves {saved_text} in interest against your current payment." if saved_text else "."),
+                   f"Con unos {needed_text} al mes {pronoun} liquidas en {HIGH_INTEREST_PAYOFF_MONTHS} meses"
+                   + (f" y te ahorras {saved_text} de intereses frente a tu pago actual." if saved_text else "."))
+            step = (f"How do I pay off my {name_en} faster?", f"¿Cómo liquido {name_es} más rápido?")
+        before = D(run.sit["cash_flow"].get("surplus_before_unknown_debts"))
+        if payment is None and before is not None and before > 0:
+            left = run.money(before)
+            why = (why[0] + f" Before that payment, {left} is left each month.",
+                   why[1] + f" Antes de ese pago te quedan {left} al mes.")
+        title_en = f"Your {name_en} charges {rate_text}: paying it off is your best investment"
+        title_es = f"{name_es[:1].upper() + name_es[1:]} cobra {rate_text}: pagar{pronoun} es tu mejor inversión"
+        run.items.append(_item(
+            "high_interest_debt", row["id"], severity="act", priority="risk", title=(title_en, title_es),
+            why=why, next_step=step,
+            data={"liability": row["id"], "annual_rate": num(rate, 4), "balance": num(balance), "currency": currency,
+                  "monthly_to_clear": num(needed), "months": HIGH_INTEREST_PAYOFF_MONTHS,
+                  "interest_if_cleared": fast.get("interest"), "monthly_payment": num(payment),
+                  "interest_at_current_payment": current.get("interest") if current.get("status") == "ready" else None,
+                  "interest_saved": num(saved), "payment_unknown": payment is None},
+            sources=[row["key"]], trigger=[row["id"], str(num(rate, 4)), payment is None]))
+        if payment is None:
+            run.missing("high_interest_debt", f"liability.{row['id']}.payment")
 
 
 _AMOUNT = re.compile(r"(?<![\d.,])(\d{1,3}(?:[,. ]\d{3})+|\d+(?:[.,]\d+)?)\s*(k|mil|thousand)?(?![\w])", re.I)
@@ -962,8 +1058,9 @@ def _statements(run: _Run) -> None:
     covered = set()
     for fact in run.snapshot.get("facts") or []:
         key, value = (fact or {}).get("key") or "", (fact or {}).get("value")
-        if not key.startswith("account.") or not isinstance(value, dict) or fact.get("status", "active") != "active":
-            continue
+        if not key.startswith("account.") or key.count(".") != 1 or not isinstance(value, dict) \
+                or fact.get("status", "active") != "active":
+            continue  # ``account.<id>.activity`` rides with its account, never a statement of its own
         account = value.get("account") if isinstance(value.get("account"), dict) else {}
         covered.add(account.get("id") or key.split(".", 1)[1])
         last = _date(value.get("as_of"))
@@ -987,9 +1084,11 @@ def _statements(run: _Run) -> None:
     if not overdue:
         return
     overdue.sort(key=lambda o: -o["days"])
+    # One statement per institution and date: GBM's MXN and USD sub-accounts arrive on one document.
+    documents = list(dict.fromkeys((o["institution"] or o["account"], o["last_statement"]) for o in overdue))
     first = overdue[0]
     label = first["institution"] or first["account"]
-    more = len(overdue) - 1
+    more = len(documents) - 1
     run.items.append(_item(
         "statement_overdue", None, severity="fyi", priority="info",
         title=(f"{label} statement is {first['days']} days old" + (f" (+{more} more)" if more else ""),
@@ -1198,7 +1297,7 @@ def _cohere(run: _Run) -> None:
             "es": surplus["why"]["es"] + f" A ese ritmo completas tu fondo de emergencia en unos {num(months, 1)} meses."}
 
 
-TRIGGERS = (_scam, _reserve, _concentration, _harvest, _ppr, _windfall, _drift, _surplus, _dca, _fee_creep,
+TRIGGERS = (_scam, _high_interest, _reserve, _concentration, _harvest, _ppr, _windfall, _drift, _surplus, _dca, _fee_creep,
             _threads, _guilt_free, _statements, _stale)
 
 

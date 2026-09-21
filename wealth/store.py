@@ -554,6 +554,32 @@ def _protected(row: Mapping[str, Any]) -> bool:
     return row["source_kind"] == "user" and row["confidence"] in {"reported", "confirmed"}
 
 
+def _record_date(value: Any, fallback: Any) -> str | None:
+    """The date a record describes: its ``as_of`` (a statement's closing date), else when it was valid from."""
+    day = value.get("as_of") if isinstance(value, Mapping) else None
+    day = day if isinstance(day, str) and len(day) >= 10 else fallback
+    return str(day)[:10] if day else None
+
+
+def _older_record(fact: Mapping[str, Any], prior: Mapping[str, Any]) -> tuple[str, str] | None:
+    """(new date, saved date) when a settling record is older than the saved evidence it would replace.
+
+    Only evidence against evidence: a statement never yields to what the person said, and an estimate
+    is always replaced by a statement whatever the dates.
+    """
+    if prior["source_kind"] not in _EVIDENCE_KINDS:
+        return None
+    try:
+        saved = json.loads(prior["value_json"])
+    except (TypeError, ValueError):
+        return None
+    new_day = _record_date(fact.get("value"), fact.get("valid_from"))
+    saved_day = _record_date(saved, prior["valid_from"])
+    if new_day and saved_day and new_day < saved_day:
+        return new_day, saved_day
+    return None
+
+
 def describe(value: Any) -> str:
     """A short readable rendering of a fact value (amount-shaped values as 'MXN 85,000')."""
 
@@ -1547,6 +1573,7 @@ class WealthStore:
                 }
                 needs_user: list[dict[str, Any]] = []
                 to_write: list[tuple[dict[str, Any], sqlite3.Row | None]] = []
+                history: list[dict[str, Any]] = []
                 for fact in normalized:
                     key = fact["key"]
                     prior_fact = current.get(key)
@@ -1584,6 +1611,17 @@ class WealthStore:
                             )
                         continue
                     settles = fact["source"]["kind"] in _EVIDENCE_KINDS and key.startswith(_FIGURE_PREFIXES)
+                    if settles and prior_fact is not None and fact["value"] is not None:
+                        older = _older_record(fact, prior_fact)
+                        if older:
+                            # An older statement re-uploaded never replaces a newer one: it becomes history.
+                            history.append((fact, older))
+                            continue
+                        if _protected(prior_fact) and not key.startswith("account.") \
+                                and _json(fact["value"]) != prior_fact["value_json"]:
+                            warnings.append(f"{key} was updated from a {fact['source']['kind']} "
+                                            f"({fact['source']['ref']}); the person had said something else, so "
+                                            "mention the new figure once")
                     if prior_fact is not None and not fact["merge"] and expected_revision is None and not settles:
                         if not (prior_fact["confidence"] == "inferred"
                                 and fact["confidence"] != "inferred"):
@@ -1629,6 +1667,11 @@ class WealthStore:
                             f"({replaced['stated']} stated, {replaced['statement']} on the statement); mention the "
                             "difference once if it matters, do not ask about it"
                         )
+                for fact, (new_day, saved_day) in history:
+                    kept = self._insert_history(client_id, fact, current[fact["key"]], now)
+                    warnings.append(f"{fact['key']}: this record is dated {new_day}, older than the saved one "
+                                    f"({saved_day}); " + ("it was kept in history and " if kept else "")
+                                    + "the newer figure stays current")
                 if request_id is not None:
                     self._db.execute(
                         "INSERT INTO batches(client_id, request_id, payload_hash, "
@@ -1662,6 +1705,27 @@ class WealthStore:
             ),
         )
         return fact_id
+
+    def _insert_history(self, client_id: str, fact: Mapping[str, Any], newer: sqlite3.Row, now: str) -> bool:
+        """Save an older record behind the current one: closed when the newer one begins, never current.
+
+        It takes the highest revision below the current row that this key has not used, so the timeline
+        (ordered by revision) reads oldest first and the newer record stays the latest revision.
+        """
+        used = {row[0] for row in self._db.execute(
+            "SELECT revision FROM facts WHERE client_id = ? AND key = ?", (client_id, fact["key"]))}
+        revision = next((r for r in range(newer["revision"] - 1, -1, -1) if r not in used), None)
+        if revision is None:
+            return False  # no slot before the current record; the newer figure stays and nothing older is added
+        self._db.execute(
+            "INSERT INTO facts(id, client_id, key, value_json, source_kind, source_ref, observed_on, confidence, "
+            "expires_on, revision, recorded_at, valid_from, valid_to, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')",
+            (uuid.uuid4().hex, client_id, fact["key"], _json(fact["value"]), fact["source"]["kind"],
+             fact["source"]["ref"], fact["source"]["observed_on"], fact["confidence"], fact.get("expires_on"),
+             revision, now, fact["valid_from"], max(str(newer["valid_from"] or fact["valid_from"]), str(fact["valid_from"]))),
+        )
+        return True
 
     def _close(self, fact_id: str, at: str, *, corrected: bool = False) -> None:
         """End a revision's valid time (never before it began); the value is kept."""
@@ -1756,14 +1820,10 @@ class WealthStore:
     ) -> list[dict[str, Any]]:
         """Replace stated balances that a just-saved statement covers; returns what was replaced."""
 
-        from .situation.model import build, same_institution
+        from .situation.model import build
 
         rows = {r["key"]: r for r in self._current_rows(client_id).values() if r["status"] == "active"}
         picture = build({"facts": [self._fact_from_row(r) for r in rows.values()]}, None, _today())
-        institutions = {
-            account["key"]: (account.get("institution") or "").strip().lower()
-            for account in picture["accounts"] if account.get("key") in statement_keys
-        }
         opened = []
         for difference in picture["differences"]:
             stated_key = difference.get("key") or ""
@@ -1771,9 +1831,9 @@ class WealthStore:
             if (difference.get("kind") == "cash" or stated_row is None or not _protected(stated_row)
                     or not stated_key.startswith(("investment.", "cash."))):
                 continue
-            institution = (difference.get("institution") or "").strip().lower()
-            matching = sorted(k for k, name in institutions.items()
-                              if not institution or same_institution(name, institution))
+            # Only the statement accounts the picture itself matched to this stated balance (institution, or a
+            # name naming it, with a compatible kind): a bank statement never replaces a fund or an AFORE.
+            matching = sorted(k for k in difference.get("accounts") or [] if k in statement_keys)
             gap, value = difference.get("difference"), difference.get("statement_value")
             if not matching or gap is None or value is None:
                 continue

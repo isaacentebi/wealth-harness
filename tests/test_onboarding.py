@@ -73,10 +73,11 @@ def test_chips_follow_the_country(service):
     ob.apply(service, "ana", "identity", {"name": "Ana", "country": "MX"}, language="es")
     sit = service.situation("ana")
     money = ob.card(sit, "money", "es")
-    assert _ids(money) == ["bank", "cetes", "brokerage", "afore", "ppr", "us_broker", "none"]
+    assert _ids(money) == ["bank", "cetes", "brokerage", "afore", "ppr", "us_broker", "nu", "none"]
     labels = [o["label"] for o in money["fields"][0]["options"]]
-    assert "Nu / banco" in labels and "GBM / casa de bolsa" in labels and "Broker en EE. UU." in labels
-    assert money["currency"] == "MXN" and money["fields"][0]["options"][-2]["fields"][0]["currency"] == "USD"
+    assert "Banco" in labels and "Nu" in labels and "GBM / casa de bolsa" in labels and "Broker en EE. UU." in labels
+    options = {o["id"]: o for o in money["fields"][0]["options"]}
+    assert money["currency"] == "MXN" and options["us_broker"]["fields"][0]["currency"] == "USD"
     # Extra income is never prompted: only take-home pay is asked.
     assert [f["name"] for f in ob.card(sit, "income", "es")["fields"]] == ["amount"]
     assert "student" not in _ids(ob.card(sit, "debts", "es"))
@@ -162,18 +163,18 @@ def test_invalid_answers_are_refused_before_anything_is_written(service):
 def test_skip_and_not_sure_are_settled_and_never_asked_again(service):
     ob.apply(service, "ana", "identity", {"name": "Ana", "country": "MX"}, language="es")
     ob.skip(service, "ana", "about", language="es")
+    # "Not sure" and "Skip" are one action on the card: a typed "no sé" records the step as skipped.
     result = ob.apply(service, "ana", "income", {"unsure": True}, language="es")
-    assert result["answered"]["status"] == "unsure" and result["answered"]["summary"] == "Ingreso: no estoy seguro"
-    assert result["card"]["step"] == "spending"
+    assert result["answered"]["status"] == "skipped" and result["answered"]["summary"] == "Ingreso: omitido"
+    assert result["card"]["step"] == "spending" and result["card"]["unsure"] is False and result["card"]["skip"] is True
     sit = service.situation("ana")
     steps = sit["profile"]["onboarding"]["steps"]
-    assert steps["birth_year"] == steps["dependents"] == "skipped" and steps["income"] == "unsure"
+    assert steps["birth_year"] == steps["dependents"] == "skipped" and steps["income"] == "skipped"
     assert sit["income"]["monthly"] is None  # unknown stays unknown, never zero
     assert not any(f["key"].startswith("income.") for f in service.inspect("ana")["facts"])
     progress = ob.progress(sit)
-    assert progress["skipped"] == ["about"] and progress["unsure"] == ["income"]
-    # Not sure is still an unknown the agent may fill later, when it matters.
-    assert "income" in situation.missing_for_onboarding(sit)
+    assert progress["skipped"] == ["about", "income"] and progress["unsure"] == []
+    assert ob.parse_free_text(ob.card(sit, "spending", "es"), "no sé") == {"status": "parsed", "answer": {"unsure": True}}
     with pytest.raises(ValueError):
         ob.apply(service, "ana", "identity", {"unsure": True})
 
@@ -220,8 +221,8 @@ def test_brief_shows_progress_while_in_progress(service):
     ob.apply(service, "ana", "spending", {"unsure": True})
     ob.skip(service, "ana", "debts")
     line = next(l for l in situation.brief(service.situation("ana"), "en").splitlines() if l.startswith("Onboarding"))
-    assert "in progress" in line and "done: identity" in line and "unsure: spending" in line
-    assert "skipped: debts" in line and "pending: about, income, money, goals, risk" in line
+    assert "in progress" in line and "done: identity" in line and "skipped: spending, debts" in line
+    assert "pending: about, income, money, goals, risk" in line
 
 
 # ------------------------------------------------------------------ typed answers

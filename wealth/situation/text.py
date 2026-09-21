@@ -12,6 +12,8 @@ from datetime import date
 from decimal import Decimal
 from typing import Any, Mapping
 
+from .model import humanize, kind_family
+
 BRIEF_MAX_LINES = 15
 _MONTHS = {
     "es": ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre",
@@ -71,14 +73,14 @@ _B = {
            "nw_unknown": "Patrimonio neto sin contar {x}: {k} (esos saldos no son cero; pregúntalos); deudas {o}",
            "unconv": "sin convertir {x}", "unvalued": "sin valuar {x}",
            "flow": "Mes: ingreso {i}{net} − gasto {s} ({src}) − deudas {d} = excedente {x}", "net": " neto",
-           "src_stated": "declarado", "src_ledger": "movimientos {n} meses", "essential_only": ", solo esenciales; el excedente aún cubre otros gastos", "without": " (sin pago de {x})",
+           "src_stated": "declarado", "src_ledger": "movimientos {n} meses", "essential_only": ", solo esenciales; el excedente aún cubre otros gastos", "without": " (falta el pago de {x}; antes de ese pago quedan {k}; pregúntalo)",
            "commit": "Excedente comprometido {t} ({items}); sin asignar {u}", "over": " · sobrecomprometido",
            "reserve": "Reserva {a} = {m} meses de gasto {b}; meta {t}", "unset": "sin definir",
            "b_essential": "esencial", "b_total": "total",
            "debt": "Deuda {n}: {b} al {r}; pago {p}/mes; {when}", "paid": "liquida {d}", "missing": "falta {x}",
            "never": "no se liquida con ese pago", "interest": ", intereses {x}",
            "goal": "Meta {n}: {detail} ({st})", "per_month": "{x}/mes", "target": "{x} para {d}",
-           "inv": "Inversiones: {x}", "invalid": "Datos guardados que no se pudieron leer (pide el valor correcto): {x}", "pos": "Posiciones: {x}", "units": "títulos", "top": "mayor exposición {u} {w} ({s})",
+           "inv": "Inversiones: {x}", "cash": "Efectivo: {x}", "invalid": "Datos guardados que no se pudieron leer (pide el valor correcto): {x}", "pos": "Posiciones: {x}", "units": "títulos", "top": "mayor exposición {u} {w} ({s})",
            "diff": "Diferencia {inst}: dijiste {s}; estado {x} ({d})",
            "thread": "Pendiente [{k}, {d}]: {t}", "k_advice": "consejo", "k_question": "pregunta", "k_commitment": "compromiso",
            "stale": "Por reconfirmar (confirma el valor, no lo pidas de nuevo): {x}", "inferred": "Sin confirmar: {x}", "unknown": "Desconocido: {x}",
@@ -92,14 +94,14 @@ _B = {
            "nw_unknown": "Net worth excluding {x}: {k} (those balances are not zero; ask for them); debts {o}",
            "unconv": "unconverted {x}", "unvalued": "unvalued {x}",
            "flow": "Month: income {i}{net} − spending {s} ({src}) − debt payments {d} = surplus {x}", "net": " net",
-           "src_stated": "stated", "src_ledger": "{n} months of transactions", "essential_only": ", essentials only; the surplus still covers other spending", "without": " (excludes {x} payment)",
+           "src_stated": "stated", "src_ledger": "{n} months of transactions", "essential_only": ", essentials only; the surplus still covers other spending", "without": " (the {x} payment is missing; {k} before it; ask for it)",
            "commit": "Surplus committed {t} ({items}); unallocated {u}", "over": " · overcommitted",
            "reserve": "Reserve {a} = {m} months of {b} spending; target {t}", "unset": "not set",
            "b_essential": "essential", "b_total": "total",
            "debt": "Debt {n}: {b} at {r}; payment {p}/month; {when}", "paid": "paid off {d}", "missing": "missing {x}",
            "never": "never at this payment", "interest": ", interest {x}",
            "goal": "Goal {n}: {detail} ({st})", "per_month": "{x}/month", "target": "{x} by {d}",
-           "inv": "Investments: {x}", "invalid": "Saved data that could not be read (ask for the correct value): {x}", "pos": "Positions: {x}", "units": "units", "top": "largest exposure {u} {w} ({s})",
+           "inv": "Investments: {x}", "cash": "Cash: {x}", "invalid": "Saved data that could not be read (ask for the correct value): {x}", "pos": "Positions: {x}", "units": "units", "top": "largest exposure {u} {w} ({s})",
            "diff": "Difference {inst}: stated {s}; statement {x} ({d})",
            "thread": "Open [{k}, {d}]: {t}", "k_advice": "advice", "k_question": "question", "k_commitment": "commitment",
            "stale": "Reconfirm (read the value back, do not ask afresh): {x}", "inferred": "Unconfirmed: {x}", "unknown": "Unknown: {x}",
@@ -113,6 +115,37 @@ _KIND = {"es": {"auto": "auto", "mortgage": "hipoteca", "card": "tarjeta", "pers
                 "student": "educativo", "other": "préstamo"},
          "en": {"auto": "car", "mortgage": "mortgage", "card": "card", "personal": "personal",
                 "student": "student", "other": "loan"}}
+
+
+_FREQUENCY = {"es": {"monthly": " al mes", "biweekly": " cada dos semanas", "annual": " al año", "weekly": " a la semana"},
+              "en": {"monthly": " a month", "biweekly": " every two weeks", "annual": " a year", "weekly": " a week"}}
+_KEY_NAMES = {"es": {"income": "ingreso", "spending": "gasto mensual", "client.profile": "perfil", "goals": "metas",
+                     "reserve": "reserva", "cash": "efectivo", "investment": "inversión", "liability": "deuda",
+                     "policy.ips": "política de inversión", "planning.dca": "plan de inversión periódica",
+                     "tax.profile": "perfil fiscal", "household": "cuentas guardadas", "account": "cuenta"},
+              "en": {"income": "income", "spending": "monthly spending", "client.profile": "profile", "goals": "goals",
+                     "reserve": "reserve", "cash": "cash", "investment": "investment", "liability": "debt",
+                     "policy.ips": "investment policy", "planning.dca": "recurring investment plan",
+                     "tax.profile": "tax profile", "household": "saved accounts", "account": "account"}}
+
+
+def _stale_name(row: Mapping[str, Any], sit: Mapping[str, Any], lang: str) -> str:
+    """The person's name for a stale fact ("BBVA México", "ingreso (salary)"), never its raw key."""
+    key = str(row.get("key") or "")
+    names = _KEY_NAMES[lang]
+    if row.get("name"):
+        return str(row["name"])
+    if key in names:
+        return names[key]
+    head, _, rest = key.partition(".")
+    if head in ("income", "spending"):
+        return names[head]
+    if head == "liability":
+        found = next((r for r in sit.get("liabilities") or [] if r.get("key") == key), None)
+        return liability_name(found, lang) if found else names["liability"]
+    if head in names:
+        return f"{names[head]} {humanize(rest)}".strip() if rest else names[head]
+    return humanize(key)
 
 
 def _native(amounts: Mapping[str, Any] | None) -> str:
@@ -161,9 +194,10 @@ def brief(sit: Mapping[str, Any], language: str | None = None) -> str:
             f"{fmt(flow['debt_payments_known'])}+?" if flow["debt_payments_known"] else "?")
         line = t["flow"].format(i=fmt(flow["income"]), net=t["net"] if sit["income"].get("net") else "",
                                 s=fmt(flow["spending"]), src=src_text, d=debts, x=fmt(flow["surplus"]))
-        if flow["debt_payments_unknown"] and flow["surplus"] is not None:
+        before = flow.get("surplus_before_unknown_debts")
+        if flow["debt_payments_unknown"] and before is not None:
             names = [liability_name(r, lang) for r in sit["liabilities"] if r["id"] in flow["debt_payments_unknown"]]
-            line += t["without"].format(x=", ".join(names))
+            line += t["without"].format(x=", ".join(names), k=fmt(before))
         lines.append((2, line))
     commitments = sit["commitments"]
     if commitments["items"]:
@@ -203,14 +237,21 @@ def brief(sit: Mapping[str, Any], language: str | None = None) -> str:
         if goal["target_amount"] is not None:
             parts.append(t["target"].format(x=fmt(goal["target_amount"]), d=goal["target_date"] or "?"))
         lines.append((6, t["goal"].format(n=goal["name"][:60], detail="; ".join(parts) or "?", st=t["st_" + goal["status"]])))
-    investing = []
+    investing, cash_line = [], []
+    for row in sit["cash"]:
+        if row["counted"] and row["value"] is not None:
+            cash_line.append(f"{row.get('institution') or row.get('name') or humanize(row['id'])} {fmt(row['value'])}")
     for account in sit["accounts"]:
         if account["source"] == "ledger" or account.get("superseded_by"):
             continue
         value = fmt(account["value"]) if account["value"] is not None else _native(account["native"])
-        investing.append(f"{account['label']} {value}" + (f" ({account['as_of']})" if account.get("as_of") else ""))
+        text = f"{account['label']} {value}" + (f" ({account['as_of']})" if account.get("as_of") else "")
+        # A checking or savings account is cash, never an investment.
+        (cash_line if kind_family(account.get("type")) == "cash" else investing).append(text)
+    if cash_line:
+        lines.append((7, t["cash"].format(x="; ".join(cash_line[:4]))))
     for item in sit["investments"]:
-        if item["counted"]:
+        if item["counted"] and (item["value"] is not None or item["amount"] is not None):  # unknowns: on the net worth line
             investing.append(f"{item.get('institution') or item.get('name') or item['id']} {fmt(item['value'] if item['value'] is not None else item['amount'])}")
     holdings = sit["holdings"]
     if holdings["top"] and holdings["top"][0]["weight"] is not None:
@@ -246,16 +287,28 @@ def brief(sit: Mapping[str, Any], language: str | None = None) -> str:
     for item in sit["unknowns"]:
         if item["code"].startswith("liability") or covered.get(item["code"]):
             continue  # already on the debt line, or on the reconfirm line
-        unknown.append(t["u_" + item["code"]].format(c=item.get("residence"), p=item.get("pair"), g=item.get("goal")))
+        country = _COUNTRY_NAMES[lang].get(item.get("residence") or "", item.get("residence"))
+        unknown.append(t["u_" + item["code"]].format(c=country, p=item.get("pair"), g=item.get("goal")))
     if unknown:
         lines.append((10, t["unknown"].format(x="; ".join(unknown[:4]))))
     if sit.get("invalid_facts"):
         lines.append((4, t["invalid"].format(x=", ".join(i["key"] for i in sit["invalid_facts"][:4]))))
     if sit["stale"]:
         stale = sit.get("stale_values") or [{"key": k} for k in sit["stale"]]
-        shown = [f"{s['key']} = {s['value']} ({s.get('observed_on') or '?'})" if s.get("value") else s["key"]
-                 for s in stale[:6]]
-        lines.append((11, t["stale"].format(x="; ".join(shown))))
+        shown = []
+        for row in stale:
+            if str(row["key"]).startswith("account.") and str(row["key"]).count(".") > 1:
+                continue  # a statement's activity is part of its account, never a line of its own
+            text = _stale_name(row, sit, lang)
+            if row.get("amount") is not None:
+                text += f" = {fmt(row['amount'])} {row.get('currency') or ''}".rstrip()
+                text += _FREQUENCY[lang].get(row.get("frequency") or "", "")
+            if row.get("observed_on"):
+                text += f" ({row['observed_on']})"
+            if text not in shown:
+                shown.append(text)
+        if shown:
+            lines.append((11, t["stale"].format(x="; ".join(shown[:6]))))
     if sit["inferred"]:
         lines.append((12, t["inferred"].format(x=", ".join(sit["inferred"][:6]))))
     from ..onboarding import brief_line  # lazy: onboarding imports this package's schema
@@ -277,19 +330,30 @@ class _Emph(str):
     """A value to emphasise inside a sentence."""
 
 
+def js_length(text: str) -> int:
+    """Length in UTF-16 code units, the unit JavaScript slices by (an emoji counts two, "é" one)."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def js_span(text: str, start: int, end: int) -> list[int]:
+    """A Python [start, end) span of ``text`` as the page's JavaScript offsets."""
+    return [js_length(text[:start]), js_length(text[:end])]
+
+
 def _compose(template: str, **values: Any) -> tuple[str, list[list[int]]]:
+    """Fill ``template``; spans of emphasised values are in UTF-16 units, as the page slices them."""
     out, spans, pos = [], [], 0
     for match in re.finditer(r"\{(\w+)\}", template):
         out.append(template[pos:match.start()])
         value = values[match.group(1)]
-        start = sum(len(p) for p in out)
+        start = sum(js_length(p) for p in out)
         out.append(str(value))
         if isinstance(value, _Emph):
-            spans.append([start, start + len(value)])
+            spans.append([start, start + js_length(str(value))])
         pos = match.end()
     out.append(template[pos:])
     text = "".join(out)
-    text = text[:1].upper() + text[1:]
+    text = text[:1].upper() + text[1:]  # one code point either way: the offsets are unchanged
     return text, spans
 
 
@@ -370,7 +434,10 @@ def sentences(sit: Mapping[str, Any], language: str | None = None) -> list[dict]
     residence = profile.get("residence") or {}
     if residence:
         country = _COUNTRY_NAMES[lang].get(residence.get("country"), residence.get("country") or "")
-        place = ", ".join(p for p in (residence.get("city"), residence.get("region") if residence.get("region") != residence.get("city") else None, country) if p)
+        local = [p for p in (residence.get("city"), residence.get("region") if residence.get("region") != residence.get("city") else None) if p]
+        if local:
+            country = country.removeprefix("the ")  # "Texas, United States", not "Texas, the United States"
+        place = ", ".join(p for p in (*local, country) if p)
         if place:
             add("about", key, "Vives en {p}." if es else "You live in {p}.", ref="residence", p=_Emph(place))
     if profile.get("tax_residence"):
@@ -436,9 +503,14 @@ def sentences(sit: Mapping[str, Any], language: str | None = None) -> list[dict]
 
     for row in sit["cash"]:
         if row.get("balance_unknown") or row.get("amount") is None:
+            if not row["counted"]:
+                continue  # a statement settled it: the statement's sentence says what is there
             label = row.get("institution") or row.get("name") or row["id"]
-            add("own", row["key"], (f"Tienes dinero en {label}; aún no sé cuánto." if es else
-                                    f"You have money at {label}; I don't know how much yet."), ref=_item_ref(row, "cash"))
+            generic = _generic_bank(label) and not row.get("institution")
+            where_es = "en el banco" if generic else f"en {label}"
+            where_en = "in the bank" if generic else f"at {label}"
+            add("own", row["key"], (f"Tienes dinero {where_es}; aún no sé cuánto." if es else
+                                    f"You have money {where_en}; I don't know how much yet."), ref=_item_ref(row, "cash"))
             continue
         approx = about(row["approximate"])
         amount = _amount(row["amount"], row["currency"], code(row["currency"]))
@@ -476,10 +548,10 @@ def sentences(sit: Mapping[str, Any], language: str | None = None) -> list[dict]
         if not item["counted"]:
             continue
         approx = about(item["approximate"])
-        where = (f" en {item['institution']}" if es else f" at {item['institution']}") if item.get("institution") else ""
         if item.get("balance_unknown") or item.get("amount") is None:
             add("own", item["key"], _unknown_balance(item, es), ref=_item_ref(item, "investments"))
             continue
+        where = _holding(item, lang, definite=True)
         add("own", item["key"], (f"Tienes {approx}{{a}} invertidos{where}." if es else f"You have {approx}{{a}} invested{where}."),
             ref=_item_ref(item, "investments"), a=_amount(item["amount"], item["currency"], code(item["currency"])))
     for diff in sit["differences"]:
@@ -590,6 +662,66 @@ def sentences(sit: Mapping[str, Any], language: str | None = None) -> list[dict]
     return out
 
 
+def unknown_names(sit: Mapping[str, Any], language: str | None = None) -> list[str]:
+    """The balances nobody gave, named the way the person would ("tu cuenta de inversión", "HSBC")."""
+    lang = _lang(language)
+    names = []
+    for row in sit.get("cash") or []:
+        if row.get("balance_unknown") and row.get("counted"):
+            label = row.get("institution") or row.get("name") or humanize(row["id"])
+            names.append(("el banco" if lang == "es" else "the bank") if _generic_bank(label) and not row.get("institution")
+                         else label)
+    for row in sit.get("investments") or []:
+        if row.get("balance_unknown") and row.get("counted"):
+            names.append(_holding(row, lang, definite=False))
+    return names or list((sit.get("net_worth") or {}).get("unknown_balances") or [])
+
+
+def _generic_bank(label: Any) -> bool:
+    return isinstance(label, str) and re.sub(r"[^a-z/ ]", "", label.lower()).strip() in {
+        "bank", "banco", "checking / savings", "cheques / ahorro", "checking", "savings"}
+
+
+_PLANS = {"afore": ("AFORE", "una", "an"), "ppr": ("PPR", "un", "a"), "hsa": ("HSA", "una", "an")}
+
+
+def _holding(item: Mapping[str, Any], lang: str, *, definite: bool) -> str:
+    """How the person names a stated investment, in their language.
+
+    definite=True: the place after an amount, with its preposition (" en tu AFORE", " at GBM", "" if nothing
+    to say).  definite=False: the thing itself for "You have ...; I don't know its balance yet"
+    ("una cuenta de inversión en GBM", "a brokerage account", "an AFORE").
+    """
+    es = lang == "es"
+    kind = str(item.get("kind") or "").lower()
+    name = item.get("name") if isinstance(item.get("name"), str) else None
+    institution = item.get("institution") if isinstance(item.get("institution"), str) else None
+    plan = next((p for p in _PLANS if kind == p or (name or "").strip().upper() == _PLANS[p][0]), None)
+    if plan:
+        label, article_es, article_en = _PLANS[plan]
+        if definite:
+            return f" en tu {label}" if es else f" in your {label}"
+        return f"{article_es} {label}" if es else f"{article_en} {label}"
+    family = kind_family(kind) or kind_family(name)
+    if family == "retirement":
+        if definite:
+            return (f" en tu {name}" if name else " en tu cuenta de retiro") if es else \
+                (f" in your {name}" if name else " in your retirement account")
+        return (f"una cuenta de retiro ({name})" if name else "una cuenta de retiro") if es else \
+            (f"a {name}" if name else "a retirement account")
+    if definite:
+        if institution:
+            return f" en {institution}" if es else f" at {institution}"
+        return f" en {name}" if name and not _generic_bank(name) and kind not in ("brokerage", "") else ""
+    if kind == "brokerage" or family == "investment" and not name:
+        base = "una cuenta de inversión" if es else "a brokerage account"
+        return base + ((f" en {institution}" if es else f" at {institution}") if institution else "")
+    label = name or institution
+    if label:
+        return label + ((f" en {institution}" if es else f" at {institution}") if institution and institution != label else "")
+    return "una inversión" if es else "an investment"
+
+
 _KIND_PHRASE = {"brokerage": ("una cuenta de inversión", "a brokerage account"),
                 "afore": ("una AFORE", "an AFORE"), "retirement": ("un plan de retiro", "a retirement account"),
                 "fund": ("un fondo", "a fund")}
@@ -654,6 +786,8 @@ def summaries(sit: Mapping[str, Any], language: str | None = None) -> dict[str, 
     unknown_debts = [r for r in sit["liabilities"] if r["id"] in (flow.get("debt_payments_unknown") or [])]
     about = ("unos " if es else "about ") if approx or unknown_debts else ""
     surplus = flow.get("surplus")
+    if surplus is None and unknown_debts:
+        surplus = flow.get("surplus_before_unknown_debts")  # said as "before your car payment", never as the surplus
     if surplus is not None and Decimal(str(surplus)) > 0:
         tail = ""
         if len(unknown_debts) == 1:
@@ -675,7 +809,7 @@ def summaries(sit: Mapping[str, Any], language: str | None = None) -> dict[str, 
     owned = [r for r in sit["cash"] if r["counted"]] + [r for r in sit["investments"] if r["counted"]]
     institutions = {a.get("institution") or a["label"] for a in sit["accounts"] if a["source"] != "ledger" and a.get("native")}
     if nw.get("assets") is not None and not nw.get("unconverted") and len(owned) + len(institutions) >= 2:
-        missing = ", ".join(nw.get("unknown_balances") or [])
+        missing = ", ".join(unknown_names(sit, lang))
         if missing:
             put("own", f"En total tienes {{x}}, sin contar {missing}." if es else
                 f"In all, you have {{x}}, not counting {missing}.", x=money(nw["assets"]))
@@ -700,6 +834,9 @@ def summaries(sit: Mapping[str, Any], language: str | None = None) -> dict[str, 
             put("goals", "Apartas {t} al mes para tus metas; te quedan {u} libres." if es else
                 "You set aside {t} a month for your goals; {u} stays free.",
                 t=money(commitments["total"]), u=money(commitments["unallocated"]))
+        else:  # what stays free is unknown (a debt payment is missing): say only what is set aside
+            put("goals", "Apartas {t} al mes para tus metas." if es else "You set aside {t} a month for your goals.",
+                t=money(commitments["total"]))
     return out
 
 

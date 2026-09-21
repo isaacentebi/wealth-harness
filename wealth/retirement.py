@@ -981,6 +981,13 @@ def retirement_mx(inputs: dict[str, Any], context: dict[str, Any] | None = None)
         contributing = data.get("still_contributing", False)
         if not isinstance(contributing, bool):
             raise ValueError("ley73.still_contributing must be a boolean")
+        earning = sorted(k for k, v in (context or {}).items() if isinstance(k, str) and k.startswith("income.")
+                         and isinstance(v, dict) and v.get("kind") in (None, "salary", "wages", "employment"))
+        if "still_contributing" not in data and earning and age_now < 65:
+            # Someone with a paycheck under 65 is still paying into IMSS unless they say otherwise.
+            contributing = True
+            assumptions.append(f"Still contributing assumed from your earned income ({', '.join(earning)}) and age under "
+                               "65; pass ley73.still_contributing: false if you no longer contribute to IMSS.")
 
         def weeks_at(pension_age: float) -> float:
             """Recognized weeks at ``pension_age``: 52 more per working year while the person still contributes."""

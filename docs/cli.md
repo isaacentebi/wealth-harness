@@ -142,12 +142,13 @@ printf '%s' '{"client_id":"ana","key":"income.salary"}' | uv run wealth history
 ```
 
 **contradictions** and **resolve_contradiction**: evidence that disagrees with
-what the person said is held, not saved, until they answer:
+what the person said is held, not saved, until they answer. A figure from a web
+page (here the card's published rate) opens a contradiction; a statement,
+payslip or connected account instead settles the figures it covers:
 
 ```sh
-printf '%s' '{"client_id":"ana","facts":[{"key":"income.salary",
-  "value":{"amount":39000,"currency":"MXN","frequency":"monthly","net":true,"kind":"salary"},
-  "source":{"kind":"document","ref":"payslip-2026-09.pdf","observed_on":"2026-09-21"}}]}' | uv run wealth remember
+printf '%s' '{"client_id":"ana","facts":[{"key":"liability.card","merge":true,"value":{"annual_rate":0.45},
+  "source":{"kind":"web","ref":"https://www.example.com/tarjetas/tasas","observed_on":"2026-09-21"}}]}' | uv run wealth remember
 CID=$(printf '%s' '{"client_id":"ana"}' | uv run wealth contradictions \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["contradictions"][0]["id"])')
 printf '%s' "{\"client_id\":\"ana\",\"contradiction_id\":\"$CID\",\"choice\":\"keep\"}" | uv run wealth resolve_contradiction

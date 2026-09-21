@@ -11,7 +11,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any, Mapping
 
-from .model import CASH_DRAG_SHARE, CONCENTRATION_SHARE, D, num, ticker_of, underlying_of
+from .model import CASH_DRAG_SHARE, CONCENTRATION_SHARE, D, num, stated_matches, ticker_of, underlying_of
 from .text import _clean_symbol, fmt
 
 
@@ -46,41 +46,53 @@ def statement_insights(result: Mapping[str, Any], before: Mapping[str, Any] | No
     positions = [p for p in household.get("positions") or [] if isinstance(p, dict)]
     out: list[dict] = []
 
-    # 1. What the person said vs what the statement shows, per institution.
+    # 1. What the person said vs what the statement shows: one comparison per stated balance, matched to the
+    # statement's accounts by the picture's own rule (institution, or a name naming it with a compatible kind).
+    # An AFORE or 401(k) is never compared with a brokerage statement, and an unsized balance has nothing to compare.
     native: dict[str, dict[str, Decimal]] = {}
     for position in positions:
-        institution = (accounts.get(position.get("account_id")) or {}).get("institution")
         amount = D(position.get("value"))
-        if institution and amount is not None and position.get("currency"):
-            bucket = native.setdefault(institution, {})
+        if position.get("account_id") in accounts and amount is not None and position.get("currency"):
+            bucket = native.setdefault(position["account_id"], {})
             bucket[position["currency"]] = bucket.get(position["currency"], Decimal(0)) + amount
     if before:
-        stated_rows = [*(before.get("investments") or []), *(before.get("cash") or [])]
-        for institution, amounts in sorted(native.items()):
-            matches = [r for r in stated_rows if (r.get("institution") or "").strip().lower() == institution.strip().lower()]
-            if not matches and len(native) == 1:
-                matches = [r for r in before.get("investments") or [] if not r.get("institution")]
-            for row in matches:
-                stated = D(row.get("amount"))
-                total = Decimal(0)
-                known = True
-                for cur, amount in amounts.items():
-                    converted = _convert(rates, amount, cur, row.get("currency"))
-                    if converted is None:
-                        known = False
-                    else:
-                        total += converted
-                shown = " + ".join(f"{c} {fmt(num(v))}" for c, v in sorted(amounts.items(), key=lambda kv: kv[0] != row.get("currency")))
-                text = (f"They said {'about ' if row.get('approximate') else ''}{row.get('currency')} {fmt(num(stated))} at "
-                        f"{institution}; the statement shows {shown}")
-                if known and stated is not None and len(amounts) > 1:
-                    text += f" (≈ {row.get('currency')} {fmt(num(total))} at the statement's FX)"
-                out.append({"kind": "stated_vs_statement", "institution": institution, "key": row.get("key"),
-                            "stated": {"amount": num(stated), "currency": row.get("currency")},
-                            "statement": {c: num(v) for c, v in sorted(amounts.items())},
-                            "statement_value": num(total) if known else None,
-                            "difference": num(total - stated) if known and stated is not None else None,
-                            "text": text + "."})
+        stated_rows = [*((r, False) for r in before.get("investments") or []),
+                       *((r, True) for r in before.get("cash") or [])]
+        for row, is_cash in stated_rows:
+            stated = D(row.get("amount"))
+            if stated is None or not row.get("currency"):
+                continue
+            matched = [a for a_id, a in sorted(accounts.items()) if a_id in native
+                       and stated_matches(row, a, cash=is_cash)]
+            if not matched:
+                continue
+            institution = next((a["institution"] for a in matched if a.get("institution")), None) or row.get("institution")
+            amounts: dict[str, Decimal] = {}
+            for account in matched:
+                for cur, amount in native[account["id"]].items():
+                    amounts[cur] = amounts.get(cur, Decimal(0)) + amount
+            total = Decimal(0)
+            known = True
+            for cur, amount in amounts.items():
+                converted = _convert(rates, amount, cur, row.get("currency"))
+                if converted is None:
+                    known = False
+                else:
+                    total += converted
+            shown = " + ".join(f"{c} {fmt(num(v))}" for c, v in sorted(amounts.items(), key=lambda kv: kv[0] != row.get("currency")))
+            what = row.get("name") if row.get("name") and not row.get("institution") else None
+            text = (f"They said {'about ' if row.get('approximate') else ''}{row.get('currency')} {fmt(num(stated))} at "
+                    f"{institution}" + (f" ({what})" if what and what != institution else "")
+                    + f"; the statement shows {shown}")
+            if known and len(amounts) > 1:
+                text += f" (≈ {row.get('currency')} {fmt(num(total))} at the statement's FX)"
+            out.append({"kind": "stated_vs_statement", "institution": institution, "key": row.get("key"),
+                        "accounts": [a["id"] for a in matched],
+                        "stated": {"amount": num(stated), "currency": row.get("currency")},
+                        "statement": {c: num(v) for c, v in sorted(amounts.items())},
+                        "statement_value": num(total) if known else None,
+                        "difference": num(total - stated) if known else None,
+                        "text": text + "."})
 
     # 1b. Holdings that changed since they were saved: the difference is the question worth asking.
     if before:

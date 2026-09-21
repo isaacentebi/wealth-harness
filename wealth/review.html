@@ -202,7 +202,7 @@
         onTime: '{a} of {b} on time', ofPlanned: '{a} of {b}', missed: 'missed {d}', noPlans: 'No recurring plan is saved.',
         taxPeriod: 'This quarter', taxYtd: 'Year to date', j_MX: 'Mexico', j_US: 'United States',
         paid: 'Paid this quarter', annual: 'Annual cost', bps: '{a}–{b} bp a year', bp1: '{a} bp a year',
-        talk: 'Talk about this', noNext: 'Nothing stands out for next quarter.',
+        talk: 'Talk about this', noNext: 'Nothing stands out for next quarter.', feesUnknown: 'The cost of your holdings is not known yet.',
         printed: 'Prepared {d} by Wealth from your statements and saved picture.',
         ac_cash: 'Cash', ac_equity: 'Equity', ac_fixed_income: 'Fixed income', ac_fund: 'Funds', ac_unknown: 'Unclassified'
       },
@@ -225,7 +225,7 @@
         onTime: '{a} de {b} a tiempo', ofPlanned: '{a} de {b}', missed: 'faltó {d}', noPlans: 'No hay un plan periódico guardado.',
         taxPeriod: 'Este trimestre', taxYtd: 'En lo que va del año', j_MX: 'México', j_US: 'Estados Unidos',
         paid: 'Pagadas este trimestre', annual: 'Costo anual', bps: '{a}–{b} pb al año', bp1: '{a} pb al año',
-        talk: 'Hablar de esto', noNext: 'Nada destaca para el próximo trimestre.',
+        talk: 'Hablar de esto', noNext: 'Nada destaca para el próximo trimestre.', feesUnknown: 'Aún no se conoce el costo de tus inversiones.',
         printed: 'Preparado el {d} por Wealth con tus estados de cuenta y tu panorama guardado.',
         ac_cash: 'Efectivo', ac_equity: 'Acciones', ac_fixed_income: 'Renta fija', ac_fund: 'Fondos', ac_unknown: 'Sin clasificar'
       }
@@ -356,10 +356,12 @@
       if (!(s.items || []).length) return note(s.note);
       return [h('div', {}, s.items.map(g => {
         const p = n(g.funded?.v);
+        // Only what is known: "— de — · —" says nothing, so a goal with no figures shows its name alone.
+        const known = [V(g.funded), V(g.target), V(g.by, { style: 'month' })].some(x => x !== '—');
         return h('div', { class: 'item' },
           h('div', { class: 'line' }, h('span', { class: 'what', text: g.name }), h('span', { class: 'v', text: t('st_' + g.status) })),
-          h('div', { class: 'fill', 'aria-hidden': 'true' }, p !== null ? h('span', { style: { width: `${Math.max(0, Math.min(1, p)) * 100}%` } }) : null),
-          h('div', { class: 'sub', text: t('funded', { p: V(g.funded), t: V(g.target), d: V(g.by, { style: 'month' }) }) }));
+          p !== null ? h('div', { class: 'fill', 'aria-hidden': 'true' }, h('span', { style: { width: `${Math.max(0, Math.min(1, p)) * 100}%` } })) : null,
+          known ? h('div', { class: 'sub', text: t('funded', { p: V(g.funded), t: V(g.target), d: V(g.by, { style: 'month' }) }) }) : null);
       })), note(s.note)];
     }
     function decisions(s) {
@@ -389,7 +391,10 @@
       const lo = n(s.bps?.lo), hi = n(s.bps?.hi);
       const fmt = x => new Intl.NumberFormat(locale, { maximumFractionDigits: 0 }).format(x);
       const bps = lo === null ? null : hi === null || Math.round(lo) === Math.round(hi) ? t('bp1', { a: fmt(lo) }) : t('bps', { a: fmt(lo), b: fmt(hi) });
-      return [h('dl', { class: 'ticket' }, row(t('paid'), V(s.paid)), row(t('annual'), V(s.annual), { sub: bps })), note(s.note)];
+      // The floor note describes a known floor; when the annual cost itself is unknown it says so instead.
+      const annualUnknown = V(s.annual) === '—';
+      return [h('dl', { class: 'ticket' }, row(t('paid'), V(s.paid)), row(t('annual'), V(s.annual), { sub: bps })),
+        annualUnknown ? h('p', { class: 'note', text: '— ' + t('feesUnknown') }) : note(s.note)];
     }
     function next(s) {
       const items = s.items || [];
@@ -409,13 +414,14 @@
       if (!data) return;
       const quarters = [...(data.current ? [data.current.period] : []), ...(data.quarters || [])];
       const header = [
-        h('p', { class: 'origin', text: t('origin') }),
-        h('h1', {}, periodName(data.period)),
+        data.sections ? h('p', { class: 'origin', text: t('origin') }) : null,
+        // With no quarter to review yet, the page is not headlined with one it cannot show.
+        h('h1', {}, data.sections ? periodName(data.period) : t('title')),
         h('div', { class: 'controls' },
           quarters.length > 1 ? h('nav', { class: 'quarters', 'aria-label': t('quarters') }, quarters.slice(0, 6).map(q =>
             h('a', { href: '/review?period=' + q, 'aria-current': q === data.period ? 'page' : null, text: periodName(q),
               onclick: e => { e.preventDefault(); if (q !== data.period) { period = q; history.replaceState(null, '', '/review?period=' + q); load(); } } }))) : h('span'),
-          data.sections ? h('button', { class: 'txt', type: 'button', text: t('pdf'), onclick: () => window.print() }) : null)];
+          data.sections ? h('button', { class: 'txt', type: 'button', text: t('pdf'), onclick: () => window.print() }) : null)].filter(Boolean);
       if (!data.sections) {
         root.replaceChildren(...header, h('p', { class: 'empty', text: t('empty') }),
           h('a', { class: 'txt act', href: '/', text: t('upload') }));
@@ -423,6 +429,15 @@
       }
       const s = data.sections;
       const prev = (() => { const m = /^(\d{4})-Q([1-4])$/.exec(data.period); if (!m) return ''; const q = +m[2], y = +m[1]; return q === 1 ? `${y - 1}-Q4` : `${y}-Q${q - 1}`; })();
+      // Sections with nothing known are left out (their numbers follow what is shown): no heading over
+      // "nothing stands out", no "$0" where the cost is unknown.
+      const unknown = value => V(value) === '—';
+      const shown = [
+        ['net_worth', netWorth(s.net_worth)], ['performance', performance(s.performance)],
+        ['allocation', allocation(s.allocation)], ['cash_flow', cashFlow(s.cash_flow, prev)], ['goals', goals(s.goals)],
+        ['decisions', decisions(s.decisions)], ['dca', dca(s.dca)], ['taxes', taxes(s.taxes)],
+        ['fees', unknown(s.fees.paid) && unknown(s.fees.annual) ? null : fees(s.fees)],
+        ['next', (s.next_quarter.items || []).length ? next(s.next_quarter) : null]].filter(([, body]) => body !== null);
       const letter = data.letter || {};
       const narrative = letter.narrative && letter.narrative[lang];
       const sentences = narrative ? [narrative] : ((letter.summary || {})[lang] || []);
@@ -430,16 +445,7 @@
         h('div', { class: 'letter', 'data-slot': 'narrative' },
           data.name ? h('p', { class: 'salute', text: lang === 'es' ? `${data.name}:` : `${data.name},` }) : null,
           sentences.map(text => h('p', { class: 'body', text }))),
-        part(1, 'net_worth', netWorth(s.net_worth)),
-        part(2, 'performance', performance(s.performance)),
-        part(3, 'allocation', allocation(s.allocation)),
-        part(4, 'cash_flow', cashFlow(s.cash_flow, prev)),
-        part(5, 'goals', goals(s.goals)),
-        part(6, 'decisions', decisions(s.decisions)),
-        part(7, 'dca', dca(s.dca)),
-        part(8, 'taxes', taxes(s.taxes)),
-        part(9, 'fees', fees(s.fees)),
-        part(10, 'next', next(s.next_quarter)),
+        ...shown.map(([key, body], i) => part(i + 1, key, body)),
         h('p', { class: 'printed', text: t('printed', { d: date(data.today) }) }));
     }
 

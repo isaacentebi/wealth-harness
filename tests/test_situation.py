@@ -67,9 +67,12 @@ def test_live_session_facts_build_the_whole_picture(tmp_path):
     assert sit["net_worth"]["total"] == 290000  # 150,000 cash + 200,000 GBM − 60,000 car
     assert sit["net_worth"]["liquid"] == 350000 and sit["net_worth"]["complete"]
     flow = sit["cash_flow"]
-    assert (flow["income"], flow["spending"], flow["surplus"]) == (85000, 45000, 40000)
+    # The car payment is unknown, so the surplus is unknown (never income − spending as if the car were free);
+    # the known part is kept, named as "before the car payment".
+    assert (flow["income"], flow["spending"], flow["surplus"]) == (85000, 45000, None)
+    assert flow["surplus_before_unknown_debts"] == 40000 and flow["missing"] == ["liability.debt0.payment"]
     assert flow["debt_payments_unknown"] == ["debt0"] and not flow["complete"]
-    assert sit["commitments"]["total"] == 10000 and sit["commitments"]["unallocated"] == 30000
+    assert sit["commitments"]["total"] == 10000 and sit["commitments"]["unallocated"] is None
     assert sit["reserve"]["months"] == 3.3 and sit["reserve"]["basis"] == "all undesignated cash"
     car = sit["liabilities"][0]
     assert car["kind"] == "auto" and car["annual_rate"] == 0.13
@@ -119,10 +122,11 @@ def test_brief_is_stable_short_and_numeric(tmp_path):
         assert text == situation.brief(sit, language)
         assert len(text.splitlines()) <= situation.text.BRIEF_MAX_LINES
     es = situation.brief(sit, "es")
-    assert "Patrimonio neto 290,000" in es and "excedente 40,000" in es and "3.3 meses" in es
-    assert "falta pago o plazo" in es and "sin asignar 30,000" in es
+    assert "Patrimonio neto 290,000" in es and "excedente ?" in es and "3.3 meses" in es
+    assert "antes de ese pago quedan 40,000" in es
+    assert "falta pago o plazo" in es and "sin asignar ?" in es
     en = situation.brief(sit, "en")
-    assert "surplus 40,000" in en and "tax residence not stated (lives in MX)" in en
+    assert "surplus ?" in en and "40,000 before it" in en and "tax residence not stated (lives in Mexico)" in en
     empty = WealthService(tmp_path / "e.sqlite3")
     empty.create("new", "New")
     assert situation.brief(empty.situation("new"), "en") == "Situation: nothing saved yet (first conversation)."

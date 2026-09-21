@@ -62,7 +62,7 @@ def test_a_whole_onboarding_over_text_in_spanish(db, capsys):
     assert "Escribe la cantidad en MXN" in income["text"]
     assert _answer(capsys, "spending", "como 45 mil")["picture_line"] == "Te quedan $40,000 al mes"
     money = _answer(capsys, "money", "1: 60 mil, 3: 200 mil")
-    assert money["answered"]["summary"] == "Nu / banco $60,000 · GBM / casa de bolsa $200,000"
+    assert money["answered"]["summary"] == "Banco $60,000 · GBM / casa de bolsa $200,000"
     assert "1. No\n2. Tarjeta de crédito" in money["text"]
     assert _answer(capsys, "debts", "1")["answered"]["summary"] == "Sin deudas"
     goals = _answer(capsys, "goals", "1 y 3")
