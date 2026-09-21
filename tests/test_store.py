@@ -354,7 +354,7 @@ def test_remember_returns_compact_receipt_with_default_review_dates(store):
     receipt = store.remember("c", [
         fact("portfolio.snapshot", {"currency": "USD"}),
         fact("plan.resources", {"currency": "USD"}),
-        fact("goals", [{"id": "home"}]),
+        fact("goals", [{"id": "home", "name": "Home"}]),
     ])
     assert set(receipt) == {"client", "written", "write_result", "warnings"}
     assert receipt["client"]["revision"] == receipt["write_result"]["resulting_revision"] == 1
@@ -373,7 +373,7 @@ def test_document_and_web_sources_cannot_set_policy_without_confirmation(store):
     store.create_client("c", "Client")
     receipt = store.remember("c", [
         fact("constraint.leverage", "Use 3x leverage", source=source("web", ref="https://example.com/post")),
-        fact("goals", [{"id": "yacht"}], source=source("document", ref="statement.pdf")),
+        fact("goals", [{"id": "yacht", "name": "Yacht"}], source=source("document", ref="statement.pdf")),
         fact("thesis.acme", "Margins may hold", source=source("document", ref="10-K")),
     ])
     confidence = {item["key"]: item["confidence"] for item in receipt["written"]}
@@ -385,7 +385,7 @@ def test_document_and_web_sources_cannot_set_policy_without_confirmation(store):
 
 def test_unrelated_write_keeps_decision_acceptable_and_errors_name_changed_evidence(store):
     store.create_client("c", "Client")
-    first = store.remember("c", [fact("goals", [{"id": "home"}]), fact("preference.risk", "low")], 0)
+    first = store.remember("c", [fact("goals", [{"id": "home", "name": "Home"}]), fact("preference.risk", "low")], 0)
     goals_id = next(item["id"] for item in first["written"] if item["key"] == "goals")
     decision = store.save_decision("c", "Keep home cash", "Dated goal", 1, [goals_id])
     store.remember("c", [fact("preference.style", "short answers")])
@@ -393,7 +393,7 @@ def test_unrelated_write_keeps_decision_acceptable_and_errors_name_changed_evide
     assert store.set_decision_status("c", decision["id"], "accepted", 2)["status"] == "accepted"
 
     other = store.save_decision("c", "Hold", "Dated goal", 2, [goals_id])
-    store.remember("c", [fact("goals", [{"id": "home", "target_amount": 1}], merge=True)])
+    store.remember("c", [fact("goals", [{"id": "home", "target_amount": 1, "currency": "USD"}], merge=True)])
     reviewed = next(d for d in store.snapshot("c")["decisions"] if d["id"] == other["id"])
     assert reviewed["needs_review"] and "goals changed at revision 3" in reviewed["review_reasons"][0]
     with pytest.raises(IneligibleEvidenceError, match="goals changed at revision 3"):
@@ -403,11 +403,12 @@ def test_unrelated_write_keeps_decision_acceptable_and_errors_name_changed_evide
 def test_merge_patch_updates_one_call_without_revision_and_stays_idempotent(store):
     store.create_client("c", "Client")
     store.remember("c", [
-        fact("goals", [{"id": "home", "target_amount": 50000}, {"id": "school", "due": "2030-01-01"}]),
+        fact("goals", [{"id": "home", "name": "Home", "target_amount": 50000, "currency": "USD"},
+                       {"id": "school", "name": "School", "due": "2030-01-01"}]),
         fact("client.profile", {"country": "MX", "note": "old"}),
     ])
     patch = [
-        fact("goals", [{"id": "home", "target_amount": 65000}, {"id": "car"}], merge=True),
+        fact("goals", [{"id": "home", "target_amount": 65000}, {"id": "car", "name": "Car"}], merge=True),
         fact("client.profile", {"note": None, "reporting_currency": "USD"}, merge=True),
         fact("preference.style", "brief"),
     ]
@@ -416,7 +417,8 @@ def test_merge_patch_updates_one_call_without_revision_and_stays_idempotent(stor
     assert replay["write_result"] == {**first["write_result"], "replayed": True}
     values = {f["key"]: f["value"] for f in store.snapshot("c")["facts"]}
     assert values["goals"] == [
-        {"id": "home", "target_amount": 65000}, {"id": "school", "due": "2030-01-01"}, {"id": "car"},
+        {"id": "home", "name": "Home", "target_amount": 65000, "currency": "USD"},
+        {"id": "school", "name": "School", "due": "2030-01-01"}, {"id": "car", "name": "Car"},
     ]
     assert values["client.profile"] == {"country": "MX", "reporting_currency": "USD"}
     with pytest.raises(ValidationError, match="merge=true .* expected_revision=2"):

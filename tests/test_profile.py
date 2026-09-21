@@ -139,8 +139,8 @@ def test_empty_profile_is_honest(tmp_path):
     assert view["overview"] == {"status": "empty"}
     assert view["performance"]["status"] == "insufficient"
     assert view["completeness"]["known"] == []
-    assert {g["id"] for g in view["memory"]} == {"money_in", "money_out", "own", "owe", "goals", "invest", "about"}
-    assert all(g["entries"] == [] and g["missing"] for g in view["memory"])
+    assert {g["id"] for g in view["groups"]} == {"money_in", "money_out", "own", "owe", "goals", "invest", "about"}
+    assert all(g["entries"] == [] and g["missing"] for g in view["groups"])
     assert len(view["completeness"]["missing"]) == 10
     assert view["upcoming"] == []
 
@@ -206,7 +206,7 @@ def test_goals_unknowns_are_not_zero(tmp_path):
     # An incomplete goal withholds the plan, so pool funding stays unknown.
     assert goals["school"]["funded_ratio"] is None
     assert _goals(service, "mx")["plan_status"] == "incomplete"
-    rows = next(g for g in profile_view(service, "mx")["memory"] if g["id"] == "goals")["entries"]
+    rows = next(g for g in profile_view(service, "mx")["groups"] if g["id"] == "goals")["entries"]
     assert {r["field"]: r["funded_ratio"] for r in rows if r["editor"] == "goal"} == {"school": None, "house": None}
 
 
@@ -220,7 +220,7 @@ def test_goal_funded_ratio_from_complete_plan(tmp_path):
 
 
 def _rows(view):
-    return {g["id"]: g for g in view["memory"]}
+    return {g["id"]: g for g in view["groups"]}
 
 
 def test_memory_is_grouped_trimmed_and_value_first(tmp_path):
@@ -252,9 +252,9 @@ def test_memory_is_grouped_trimmed_and_value_first(tmp_path):
     assert [e["editor"] for e in goal_rows[:2]] == ["goal", "goal"]
     assert {e["field"] for e in goal_rows[2:]} == {"available_capital", "cash_available", "reserve_months"}
     assert esg["label"] == "ESG"
-    resources = {e["field"] for g in view["memory"] for e in g["entries"] if e["key"] == "plan.resources"}
+    resources = {e["field"] for g in view["groups"] for e in g["entries"] if e["key"] == "plan.resources"}
     assert "reserve_outside_pool" not in resources and "currency" not in resources
-    assert not any(e["key"] == "performance.history" for g in view["memory"] for e in g["entries"])
+    assert not any(e["key"] == "performance.history" for g in view["groups"] for e in g["entries"])
     assert groups["invest"]["missing"] == ["risk"]
     assert view["completeness"] == {"known": ["income", "spending", "savings", "investments", "debts",
                                               "dependents", "tax_residence", "currencies", "goals"],
@@ -264,7 +264,7 @@ def test_memory_is_grouped_trimmed_and_value_first(tmp_path):
     assert types[0] == ("decision", "Keep six months of spending in CETES")
     assert ("review", "household") in types
     assert not any(k == "preference.esg" or t == "goal" for t, k in types)
-    assert "reporting_currency" not in {e["field"] for g in view["memory"] for e in g["entries"]}
+    assert "reporting_currency" not in {e["field"] for g in view["groups"] for e in g["entries"]}
 
 
 def test_fact_detail_on_tap(tmp_path):
@@ -289,7 +289,7 @@ def test_confirm_edit_delete_round_trip(tmp_path):
     service = seed_mexico(tmp_path / "w.db")
     snap = service.inspect("mx")
     _write(service, fact_action(snap, "preference.esg", "confirm"))
-    esg = next(e for g in profile_view(service, "mx")["memory"] for e in g["entries"]
+    esg = next(e for g in profile_view(service, "mx")["groups"] for e in g["entries"]
                if e["key"] == "preference.esg")
     assert "stale" not in esg
     assert service.inspect("mx", key="preference.esg")["facts"][0]["confidence"] == "confirmed"
@@ -310,7 +310,7 @@ def test_confirm_edit_delete_round_trip(tmp_path):
     assert [g["id"] for g in goals] == ["house"] and goals[0]["target_amount"] == 2500000
 
     _write(service, fact_action(service.inspect("mx"), "constraint.leverage", "delete"))
-    keys = [e["key"] for g in profile_view(service, "mx")["memory"] for e in g["entries"]]
+    keys = [e["key"] for g in profile_view(service, "mx")["groups"] for e in g["entries"]]
     assert "constraint.leverage" not in keys
     assert len(service.inspect("mx", detail="history", key="constraint.leverage")["history"]) == 2
 

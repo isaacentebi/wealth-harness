@@ -20,6 +20,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
+from .situation.schema import SchemaError, validate as validate_canonical
+
 
 SCHEMA_VERSION = 2
 _CONFIDENCES = frozenset({"confirmed", "reported", "inferred"})
@@ -123,11 +125,11 @@ DUPLICATE_SIMILARITY = 0.6
 # its observation. The horizon is a review deadline, not a prediction.
 REVIEW_DAYS: tuple[tuple[str, int], ...] = (
     ("portfolio.snapshot", 30), ("household", 30), ("account.", 30), ("lot.", 30),
-    ("liability.", 30),
+    ("liability.", 30), ("investment.", 90), ("cash.", 90), ("spending.", 90),
     ("analysis.", 30), ("plan.resources", 90), ("income.schedule", 90),
-    ("planning.", 90), ("research.", 90), ("income.", 90), ("thesis.", 180),
+    ("planning.", 90), ("research.", 90), ("income.", 90), ("thesis.", 180), ("thread.", 180),
 )
-DEFAULT_REVIEW_DAYS = 365  # client.profile, goals, preference.*, constraint.*, tax.*, other
+DEFAULT_REVIEW_DAYS = 365  # client.profile, goals, reserve, preference.*, constraint.*, tax.*, other
 # Facts that set financial policy; document/web sources cannot establish them.
 _POLICY_KEYS = frozenset({"goals", "client.profile", "tax.profile", "monitor.rules"})
 _POLICY_PREFIXES = ("preference.", "constraint.")
@@ -851,6 +853,10 @@ class WealthStore:
                         )
                     elif fact["merge"] and isinstance(fact["value"], dict):
                         fact["value"] = merge_patch({}, fact["value"])
+                    try:
+                        warnings.extend(validate_canonical(fact["key"], fact["value"]))
+                    except SchemaError as exc:
+                        raise ValidationError(f"{exc}; see fact_contract.schema") from exc
                 new_revision = current_revision + 1
                 self._db.execute(
                     "UPDATE clients SET revision = ? WHERE id = ?", (new_revision, client_id)

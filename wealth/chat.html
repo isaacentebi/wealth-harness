@@ -650,7 +650,8 @@
           account: (name, n) => name ? `${name} account${n > 1 ? 's' : ''}` : `statement account${n > 1 ? 's' : ''}`,
           debts: 'debts', income: 'income', goals: 'goals', profile: 'profile', plan: 'planning resources',
           holdings: 'holdings', portfolio: 'portfolio', preferences: 'preferences', constraints: 'constraints',
-          decisions: 'decisions'
+          decisions: 'decisions', spending: 'spending', cash: 'cash', investments: 'investments',
+          reserve: 'emergency fund'
         },
         retry: 'Retry', askAgain: 'Ask again', details: 'Details', uploading: 'Uploading…',
         badType: 'Use PDF, CSV or image', tooBig: 'Over 25 MB', empty: 'Empty file', uploadFailed: 'Upload failed',
@@ -682,7 +683,8 @@
           account: (name, n) => `${n > 1 ? 'cuentas' : 'cuenta'} ${name ? `de ${name}` : 'del estado de cuenta'}`,
           debts: 'deudas', income: 'ingresos', goals: 'metas', profile: 'perfil', plan: 'recursos del plan',
           holdings: 'posiciones', portfolio: 'portafolio', preferences: 'preferencias', constraints: 'restricciones',
-          decisions: 'decisiones'
+          decisions: 'decisiones', spending: 'gastos', cash: 'efectivo', investments: 'inversiones',
+          reserve: 'fondo de emergencia'
         },
         retry: 'Reintentar', askAgain: 'Preguntar de nuevo', details: 'Detalles', uploading: 'Subiendo…',
         badType: 'Usa PDF, CSV o imagen', tooBig: 'Más de 25 MB', empty: 'Archivo vacío', uploadFailed: 'No se pudo subir',
@@ -1203,7 +1205,7 @@
         if (!label && typeof named[key] === 'string') label = named[key];
         const [head, ...rest] = key.split('.');
         const tail = rest.join('.');
-        if (head === 'thread') return;
+        if (head === 'thread' || head === 'onboarding') return;
         if (head === 'account') {
           const name = institution || institutions[idOf(tail)] || '';
           accounts.set(name, (accounts.get(name) || 0) + 1);
@@ -1220,6 +1222,10 @@
         else if (head === 'preference') push(M.preferences);
         else if (head === 'constraint') push(M.constraints);
         else if (head === 'decision' || head === 'decisions') push(M.decisions);
+        else if (head === 'spending') push(M.spending);
+        else if (head === 'cash') push(M.cash);
+        else if (head === 'investment') push(M.investments);
+        else if (head === 'reserve') push(M.reserve);
         else if (key) push(key.replace(/[._-]+/g, ' ').trim());
       });
       const accountPhrases = [...accounts].sort(([a], [b]) => (a ? 0 : 1) - (b ? 0 : 1)).map(([name, n]) => M.account(name, n));

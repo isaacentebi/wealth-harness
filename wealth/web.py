@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import agent as _agent
 from .agent import (
-    AgentError, REASONING_LEVELS, TurnControl, TurnEvent, profile_state, resolve_model,
+    AgentError, REASONING_LEVELS, TurnControl, TurnEvent, profile_state, resolve_model, situation_brief,
     run_turn, seed_demo, stream_turn,
 )
 from .behavior import ONBOARDING_WELCOME, ONBOARDING_WELCOME_ES
@@ -222,6 +222,7 @@ class Chat:
         self.lock = threading.Lock()
         self.messages: list[dict[str, Any]] = []
         self.thread_id: str | None = None
+        self.brief_revision: int | None = None  # the brief lists changes since this revision
         self.turn: Turn | None = None
         self.uploads = Uploads(upload_dir(client_id, db))
         service = WealthService(db)
@@ -257,6 +258,7 @@ class Chat:
         try:
             self.messages = []
             self.thread_id = None
+            self.brief_revision = None
             self.turn = None
             facts = WealthService(self.db).inspect(self.client_id).get("facts")
             self.welcome = ONBOARDING_WELCOME if not facts else ""
@@ -301,6 +303,7 @@ class Chat:
         status = "error"
         try:
             state = profile_state(self.db, self.client_id)
+            brief, revision = situation_brief(self.db, self.client_id, turn.message, self.brief_revision)
             history = [(m["role"], m["content"]) for m in self.messages]
             if self.welcome:
                 history.insert(0, ("assistant", self.welcome))
@@ -308,7 +311,7 @@ class Chat:
             for event in self._events(
                 turn.message, client_id=self.client_id, db_path=self.db, model=self.model,
                 history=history, web_search=self.web_search, reasoning=reasoning,
-                profile_empty=not any(state.values()), profile=state,
+                profile_empty=not any(state.values()), profile=state, brief=brief,
                 thread_id=self.thread_id, timezone_name=timezone_name,
                 attachments=[{k: a[k] for k in ("name", "type", "size", "path")} for a in turn.attachments],
                 control=turn.control, ephemeral=self.ephemeral,
@@ -332,6 +335,7 @@ class Chat:
                 raise AgentError(None, "cancelled")
             if answer is None:
                 raise AgentError("Codex completed without an assistant response.")
+            self.brief_revision = revision
             user = {"id": secrets.token_hex(6), "role": "user", "content": turn.message}
             if turn.attachments:
                 user["attachments"] = [_public_attachment(a) for a in turn.attachments]

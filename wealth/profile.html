@@ -194,6 +194,7 @@
       en: {
         you: 'You', chat: '← Chat', loadError: 'Could not load your profile.',
         netWorth: 'Net worth', asOf: 'As of {d}', partial: 'Known records only',
+        differs: 'You said {s} at {i}; the statement shows {x}.', about: 'about ',
         staleHoldings: 'Holdings need a fresh statement.', unconfirmedHoldings: 'Holdings are not confirmed yet.',
         missingLine: 'Missing', nothingKnown: 'Wealth doesn’t know your finances yet.',
         tellWealth: 'Tell Wealth about your accounts', upload: 'Upload a statement',
@@ -232,6 +233,7 @@
       es: {
         you: 'Yo', chat: '← Chat', loadError: 'No se pudo cargar tu perfil.',
         netWorth: 'Patrimonio neto', asOf: 'Al {d}', partial: 'Solo registros conocidos',
+        differs: 'Dijiste {s} en {i}; el estado de cuenta muestra {x}.', about: 'unos ',
         staleHoldings: 'Tus posiciones necesitan un estado de cuenta reciente.', unconfirmedHoldings: 'Tus posiciones aún no están confirmadas.',
         missingLine: 'Falta', nothingKnown: 'Wealth aún no conoce tus finanzas.',
         tellWealth: 'Cuéntale a Wealth de tus cuentas', upload: 'Subir un estado de cuenta',
@@ -370,7 +372,7 @@
           return String(v);  // the person's own words stay as written
         case 'goal': return String(v.name ?? e.label);
         case null: case undefined:
-          if (e.derived) return money(v?.amount, v?.currency) ?? t('unknown');
+          if (e.derived) return (money(v?.amount, v?.currency) ?? t('unknown')) + per(e, v?.period);
           break;
         default:
           if (v?.type === 'household') return t('householdValue', { p: num(v.positions), a: num(v.accounts) });
@@ -533,7 +535,7 @@
     function render() {
       document.title = `${t('you')} · Wealth`;
       const ov = data.overview || { status: 'empty' };
-      const empty = ov.status === 'empty' && !(data.memory || []).some(g => g.entries.length);
+      const empty = ov.status === 'empty' && !(data.groups || []).some(g => g.entries.length);
       fill(root,
         h('h1', {}, t('you'), h('span', { class: 'dot', text: '.' })),
         h('div', { class: 'cols' },
@@ -554,19 +556,22 @@
         h('div', { class: 'label', text: t('netWorth') }),
         h('p', { class: 'figure' }, money(ov.net_worth, ov.currency, { bare: true }) ?? '—', h('span', { class: 'ccy', text: ov.currency || '' })),
         h('div', { class: 'quiet', text: quiet }),
+        (ov.differences || []).map(d => h('div', { class: 'quiet', text: t('differs', {
+          s: (d.stated_approximate ? t('about') : '') + money(d.stated.amount, d.stated.currency), i: d.institution,
+          x: Object.entries(d.statement || {}).map(([c, v]) => money(v, c)).join(' + ') }) })),
         ov.stale ? h('div', { class: 'quiet' }, t('staleHoldings'), ' ', h('a', { href: '/?draft=statement', text: t('upload') })) : null,
         ov.unconfirmed ? h('div', { class: 'quiet', text: t('unconfirmedHoldings') }) : null);
     }
 
     function renderKnown() {
       const missing = (data.completeness || {}).missing || [];
-      if (!missing.length || !(data.memory || []).some(g => g.entries.length)) return null;
+      if (!missing.length || !(data.groups || []).some(g => g.entries.length)) return null;
       return h('p', { class: 'known' }, h('b', { text: t('missingLine') + ': ' }), missing.map((k, i) => [i ? ' · ' : '',
         h('a', { href: '#add-' + k, text: t('f_' + k), onclick: e => { e.preventDefault(); adding = k; render(); document.getElementById('add-' + k)?.scrollIntoView({ block: 'center' }); } })]));
     }
 
     function renderGroups() {
-      return h('div', { class: 'groups' }, (data.memory || []).map(group => {
+      return h('div', { class: 'groups' }, (data.groups || []).map(group => {
         const open = expanded.has(group.id);
         const top = group.top || 3;
         const shown = open ? group.entries : group.entries.slice(0, top);

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "wealth-chat-live-test",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "wealth-chat", "--client", "live-test", "--model", "sol", "--db", "/private/tmp/claude-501/-Users-isaacentebi-wealth-mgmgt/2a48f12e-1ac3-4497-8ac5-4cedd78c565d/scratchpad/live/wealth.sqlite3", "--port", "8791"],
+      "port": 8791
+    }
+  ]
+}
