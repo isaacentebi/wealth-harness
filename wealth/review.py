@@ -470,9 +470,23 @@ def _allocation(book: _Book, start: str, end: str, ips: Mapping[str, Any] | None
 
 
 def _prior_period(start: str, end: str) -> tuple[str, str]:
+    """The window before: the same number of months; for a quarter to date, the same stretch of the
+    quarter before (1 Jul-31 Aug compares with 1 Apr-31 May), so the comparison is like for like."""
     first, last = date.fromisoformat(start), date.fromisoformat(end)
+    if _to_date(first, last):
+        return add_months(first, -3).isoformat(), add_months(last, -3).isoformat()
     months = (last.year - first.year) * 12 + last.month - first.month + 1
     return add_months(first, -months).isoformat(), _day_before(start)
+
+
+def _to_date(first: date, last: date) -> bool:
+    """A period that starts on a quarter's first day and ends before that quarter closes."""
+    return first.day == 1 and first.month % 3 == 1 and last < _quarter_end(first)
+
+
+def _quarter_end(day: date) -> date:
+    quarter = (day.month - 1) // 3 + 1
+    return (date(day.year + 1, 1, 1) if quarter == 4 else date(day.year, 3 * quarter + 1, 1)) - timedelta(days=1)
 
 
 def _coverage(book: _Book, start: str, end: str) -> str:
@@ -1372,6 +1386,9 @@ def quarterly(context: Mapping[str, Any], period_start: str, period_end: str) ->
     if end_day < start_day:
         raise ValueError("period_end precedes period_start")
     start, end = period_start, period_end
+    # A quarter to date (its end before the quarter closes) is labelled partial everywhere it travels.
+    to_date = ({"to_date": True, "quarter_end": _quarter_end(start_day).isoformat()}
+               if _to_date(start_day, end_day) else {"to_date": False})
     snapshot = context.get("snapshot") or {"client": {"id": None, "revision": None}, "facts": [], "decisions": []}
     ledger = context.get("ledger")
     if not isinstance(ledger, Mapping) or not ledger.get("accounts"):
@@ -1442,7 +1459,7 @@ def quarterly(context: Mapping[str, Any], period_start: str, period_end: str) ->
     narrative = {
         "rules": "Write prose around these values only. Quote numbers exactly as given; where a value is null say it "
                  "is not known yet and name what would fill it. No forecasts, no new numbers.",
-        "period": {"start": start, "end": end}, "currency": currency,
+        "period": {"start": start, "end": end, **to_date}, "currency": currency,
         "language": ((sit or {}).get("profile") or {}).get("language"),
         "name": ((sit or {}).get("profile") or {}).get("name"),
         "net_worth": {k: nw[k] for k in ("start", "end", "change")} | {"contributions": nw["contributions"]["net"],
@@ -1481,7 +1498,7 @@ def quarterly(context: Mapping[str, Any], period_start: str, period_end: str) ->
     status = "ready" if all(s["status"] == "ready" for s in sections.values()) else "partial"
     evidence = sorted(set((sit or {}).get("evidence", {}).values()))
     return {"status": status,
-            "result": {"period": {"start": start, "end": end, "opening_date": opening}, "currency": currency,
+            "result": {"period": {"start": start, "end": end, "opening_date": opening, **to_date}, "currency": currency,
                        "sections": sections, "narrative_inputs": narrative},
             "missing": missing, "warnings": [w for s in sections.values() for w in s["warnings"]],
             "sources": perf["sources"], "assumptions": [

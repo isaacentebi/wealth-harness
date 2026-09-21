@@ -4,6 +4,14 @@ Turns run in a background thread and publish display-safe events (progress
 steps, memory receipts, the answer or a classified error). The page reads them
 over a token-protected server-sent-event stream and can stop a turn, which kills
 the Codex process group.
+
+The conversation is kept in the client's SQLite database (``conversations`` and
+``conversation_messages``, see ``store.py``), so a restart shows the same messages
+and resumes the same Codex thread. Messages are redacted before they are written
+(RFC, CURP and SSN removed; CLABE, card and account numbers masked to the last four
+digits); the page keeps the words as typed for the session. "Nueva conversación"
+starts a new conversation and keeps the old one; export includes them and forget
+deletes them.
 """
 from __future__ import annotations
 
@@ -35,7 +43,7 @@ from .profile import (connections_view, export_payload, fact_action, fact_detail
                       review_view, today_view)
 from .store import (ClientExistsError, ClientNotFoundError, ContradictionNotFoundError, DecisionNotFoundError,
                     IneligibleEvidenceError, RequestConflictError, StaleRevisionError, StoreError, ValidationError)
-from .store import WealthStore
+from .store import CONVERSATION_LIMIT, WealthStore
 from .execution import tickets as _tickets
 
 STARTERS = (
@@ -305,6 +313,34 @@ class Chat:
         # A brand-new profile gets the setup cards inline; a returning one gets a single "Continue setup" row.
         # Once the person answers a card in this session, a reload keeps showing the cards.
         self.onboarding_live = not snapshot.get("facts")
+        # The conversation survives a restart: the current one's last messages and its Codex thread.
+        self.conversation_id: str | None = None
+        self._load_conversation()
+
+    # ------------------------------------------------------------------ conversation persistence
+
+    def _load_conversation(self) -> None:
+        with WealthStore(self.db) as store:
+            current = store.conversation(self.client_id, CONVERSATION_LIMIT)
+            self.conversation_id = current["id"] or store.start_conversation(self.client_id)
+        self.messages = current["messages"]
+        self.thread_id = current["thread_id"]
+
+    def _persist(self, messages: list[dict[str, Any]], thread_id: str | None = None) -> None:
+        """Append this turn's messages (redacted by the store) and the thread; a failure never breaks the chat."""
+        try:
+            plain = json.loads(json.dumps(messages, default=str))
+            with WealthStore(self.db) as store:
+                store.append_messages(self.client_id, self.conversation_id, plain, thread_id=thread_id)
+        except (StoreError, sqlite3.Error, OSError, TypeError, ValueError) as exc:
+            print(f"wealth-chat: saving the conversation failed with {type(exc).__name__}", file=sys.stderr)
+
+    def _persist_memory(self, message_id: str, memory: list[dict[str, Any]]) -> None:
+        try:
+            with WealthStore(self.db) as store:
+                store.set_message_memory(self.client_id, message_id, json.loads(json.dumps(memory, default=str)))
+        except (StoreError, sqlite3.Error, OSError, TypeError, ValueError) as exc:
+            print(f"wealth-chat: saving memory receipts failed with {type(exc).__name__}", file=sys.stderr)
 
     # ------------------------------------------------------------------ onboarding
 
@@ -395,6 +431,9 @@ class Chat:
         if not self.lock.acquire(blocking=False):
             raise BlockingIOError("Wait for the current response to finish.")
         try:
+            # A new conversation starts; the old one stays in the database (and in the export).
+            with WealthStore(self.db) as store:
+                self.conversation_id = store.start_conversation(self.client_id)
             self.messages = []
             self.thread_id = None
             self.brief_revision = None
@@ -450,6 +489,7 @@ class Chat:
             pending.join(timeout=MEMORY_WAIT_SECONDS)  # the next turn starts from what the last one saved
         defer = self.defers_memory
         handed_off = False
+        thread_before, thread_saved = self.thread_id, False
         try:
             state = profile_state(self.db, self.client_id)
             brief, revision = situation_brief(self.db, self.client_id, turn.message, self.brief_revision)
@@ -500,7 +540,10 @@ class Chat:
                 reply["views"] = placed
                 turn.emit("views", items=placed, message_id=reply["id"])
             # The reveal's request is Wealth's own; only the answer joins the conversation.
-            self.messages = (self.messages + ([reply] if turn.internal else [user, reply]))[-100:]
+            added = [reply] if turn.internal else [user, reply]
+            self.messages = (self.messages + added)[-CONVERSATION_LIMIT:]
+            self._persist(added, self.thread_id or "")
+            thread_saved = True
             turn.answer = answer
             turn.emit("answer", user=None if turn.internal else user, message=reply)
             status = "done"
@@ -519,6 +562,8 @@ class Chat:
             print(f"wealth-chat: turn failed with {type(exc).__name__}", file=sys.stderr)
             self._fail(turn, exc, "other", "")
         finally:
+            if not thread_saved and self.thread_id != thread_before:
+                self._persist([], self.thread_id or "")  # a failed turn may still have opened the thread
             if not handed_off:
                 turn.finish(status)
             self.lock.release()
@@ -531,6 +576,7 @@ class Chat:
             if items:
                 turn.memory.extend(items)
                 reply["memory"] = list(turn.memory)
+                self._persist_memory(reply["id"], reply["memory"])
                 turn.emit("memory", items=list(turn.memory), message_id=reply["id"])
         except Exception as exc:  # noqa: BLE001 - a failed save must not break the conversation
             print(f"wealth-chat: memory step failed with {type(exc).__name__}", file=sys.stderr)

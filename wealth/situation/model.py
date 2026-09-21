@@ -989,6 +989,8 @@ def _goals(facts: _Facts, fx: _FX, currency: str | None, today: date) -> list[di
         goals.append({
             "id": str(goal.get("id") or index), "name": goal_name(goal), "action": action,
             "object": goal.get("object"), "target_amount": num(target), "currency": goal_currency,
+            # A debt paid faster: the liability.<id> this pay_off goal's monthly_contribution goes to.
+            "liability": goal.get("liability") if isinstance(goal.get("liability"), str) else None,
             "currency_assumed": assumed,
             "target_date": when.isoformat() if when else None, "monthly_contribution": num(monthly),
             "monthly_value": num(fx.convert(monthly, goal_currency, currency)) if monthly is not None else None,

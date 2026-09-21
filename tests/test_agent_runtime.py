@@ -265,6 +265,10 @@ def test_deferred_memory_splits_the_instructions_and_limits_tools(monkeypatch):
     assert "wealth_remember" not in conversation and "## Voice" in conversation
     assert "never say\nthat something was or will be saved" in conversation
     assert memory.startswith("You are the memory step") and "## Continuity" in memory and "## Voice" not in memory
+    # Money the person agreed to direct every month is a goal the plan counts; unagreed advice stays a thread.
+    flat = " ".join(memory.split())
+    assert "agrees to direct money every month" in flat and "action pay_off with liability" in flat
+    assert "Advice they have not agreed to stays a thread" in flat and "pay_off" not in conversation
     commands = []
 
     def fake(command, prompt, timeout, control=None, cwd=None):

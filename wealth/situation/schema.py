@@ -77,6 +77,7 @@ SCHEMA: dict[str, dict[str, str]] = {
         "action?": "|".join(GOAL_ACTIONS), "object?": "what it is for, e.g. 'el S&P 500'",
         "target_amount?": "number", "currency?": "ISO 4217 (required with an amount)",
         "target_date?": "YYYY-MM-DD", "monthly_contribution?": "number",
+        "liability?": "liability.<id> key a pay_off goal pays down",
         "priority?": "|".join(GOAL_PRIORITIES), "status?": "|".join(GOAL_STATUSES) + " (default active)",
         "protect_now?": "true to reserve the target from current capital",
     },
@@ -397,6 +398,10 @@ def _goals(value: Any, key: str) -> None:
         _enum(goal.get("priority"), f"{path}.priority", GOAL_PRIORITIES)
         _enum(goal.get("status"), f"{path}.status", GOAL_STATUSES)
         _bool(goal.get("protect_now"), f"{path}.protect_now")
+        liability = goal.get("liability")
+        if liability is not None and (not isinstance(liability, str) or not liability.startswith("liability.")
+                                      or len(liability) > 120):
+            _fail(f"{path}.liability", "must be the key of a debt, such as 'liability.auto'")
 
 
 def _reserve(value: dict, key: str) -> None:

@@ -247,7 +247,11 @@ investment.<id> for stated balances (statements replace them); goals (id, a
 short name in their language, amounts, target_date, monthly_contribution);
 reserve (target_months); preference.risk (drop_reaction, experience);
 preference.* and constraint.*. One fact per income, account and debt. Save
-stated spending every time. A write that breaks the schema fails with the
+stated spending every time. When the person agrees to direct money every month
+(to a debt, a goal or an investment), save it as a goal so the plan counts it:
+{id, name, action, monthly_contribution, currency}; paying a debt faster is
+action pay_off with liability: the liability.<id> key. Advice they have not
+agreed to stays a thread. A write that breaks the schema fails with the
 field and the fix; correct it and retry. Do not write plan.resources or
 income.schedule for the person's picture.
 

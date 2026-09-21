@@ -202,6 +202,49 @@ _MARKET_SCHEMA = (
 )""",
     "CREATE INDEX IF NOT EXISTS market_fetches_symbol ON market_fetches(symbol, kind, retrieved_at)",
 )
+# The chat conversation (wealth/web.py): what the person and Wealth said, so a restart keeps
+# the conversation and its Codex thread.  Additive and created on open like ``orders``; the
+# schema version does not change.  ``conversations`` holds one row per conversation (the
+# newest is current; "Nueva conversación" starts another and keeps the old one).
+# ``conversation_messages`` is append-only: once written, a message's words, attachments and
+# views never change (a trigger refuses it); only its memory receipts, which arrive after the
+# reply is on screen, are filled in later.  Content and attachment names are redacted with
+# ``ingest.redact.redact_text`` before they are written (RFC, CURP and SSN removed; CLABE,
+# card and account numbers masked to their last four digits).  Rows disappear only with
+# their client (``delete_client`` cascades) and travel in ``export_client``.
+_CONVERSATION_SCHEMA = (
+    """CREATE TABLE IF NOT EXISTS conversations (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    id TEXT NOT NULL,
+    thread_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (client_id, id)
+)""",
+    """CREATE TABLE IF NOT EXISTS conversation_messages (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    conversation_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('user','assistant')),
+    content TEXT NOT NULL,
+    attachments_json TEXT,
+    memory_json TEXT,
+    views_json TEXT,
+    created_at TEXT NOT NULL
+)""",
+    "CREATE INDEX IF NOT EXISTS conversation_messages_client "
+    "ON conversation_messages(client_id, conversation_id, seq)",
+    """CREATE TRIGGER IF NOT EXISTS conversation_messages_append_only_update
+BEFORE UPDATE OF seq, client_id, conversation_id, message_id, role, content, attachments_json, views_json,
+    created_at ON conversation_messages
+BEGIN SELECT RAISE(ABORT, 'conversation messages are append-only'); END""",
+    """CREATE TRIGGER IF NOT EXISTS conversation_messages_append_only_delete BEFORE DELETE ON conversation_messages
+WHEN EXISTS (SELECT 1 FROM clients WHERE id = OLD.client_id)
+BEGIN SELECT RAISE(ABORT, 'conversation messages are append-only'); END""",
+)
+CONVERSATION_LIMIT = 100  # messages of the current conversation loaded on startup
 _ORDER_EVENTS = frozenset({"ticket", "checks", "confirm", "blocked", "request", "response", "status",
                            "cancel", "fill_posted", "live_acknowledged", "discarded", "nonce_rejected", "error"})
 _AUXILIARY = frozenset({"embeddings", "monitor", "ingest", "execution"})
@@ -875,6 +918,8 @@ class WealthStore:
                     self._migrate_orders()
                 if not self._has_market():
                     self._migrate_market()
+                if not self._has_conversations():
+                    self._migrate_conversations()
                 return
             self._db.execute("BEGIN IMMEDIATE")
             try:
@@ -886,6 +931,26 @@ class WealthStore:
                 raise
             self._migrate_orders()
             self._migrate_market()
+            self._migrate_conversations()
+
+    def _has_conversations(self) -> bool:
+        return self._db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'conversation_messages_append_only_delete'"
+        ).fetchone() is not None
+
+    def _migrate_conversations(self) -> None:
+        """Add the chat conversation tables (idempotent and additive; no version change)."""
+
+        self._db.execute("BEGIN IMMEDIATE")
+        try:
+            if not self._has_conversations():
+                for statement in _CONVERSATION_SCHEMA:
+                    self._db.execute(statement)
+            self._db.execute("COMMIT")
+        except Exception:
+            if self._db.in_transaction:
+                self._db.execute("ROLLBACK")
+            raise
 
     def _has_market(self) -> bool:
         return self._db.execute(
@@ -2030,6 +2095,7 @@ class WealthStore:
                     },
                     "ledger": self._ledger_rows(client_id, include_batches=True),
                     "orders": self._order_rows(client_id),
+                    "conversations": self._conversation_rows(client_id),
                 }
 
     # ---- market-data cache (shared, not client data; see wealth/prices.py)
@@ -2190,6 +2256,139 @@ class WealthStore:
             with self._read_transaction():
                 self._client_row(client_id)
                 return self._order_rows(client_id, ticket_id)
+
+    # -- chat conversation (wealth/web.py) ------------------------------------
+
+    @staticmethod
+    def _message_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        message: dict[str, Any] = {"id": row["message_id"], "role": row["role"], "content": row["content"]}
+        for field, column in (("attachments", "attachments_json"), ("memory", "memory_json"),
+                              ("views", "views_json")):
+            value = json.loads(row[column]) if row[column] else None
+            if value:
+                message[field] = value
+        return message
+
+    def _conversation_rows(self, client_id: str) -> list[dict[str, Any]]:
+        result = []
+        for conv in self._db.execute(
+            "SELECT * FROM conversations WHERE client_id = ? ORDER BY seq", (client_id,)
+        ).fetchall():
+            messages = [
+                {**self._message_from_row(row), "created_at": row["created_at"]}
+                for row in self._db.execute(
+                    "SELECT * FROM conversation_messages WHERE client_id = ? AND conversation_id = ? ORDER BY seq",
+                    (client_id, conv["id"]),
+                )
+            ]
+            result.append({"id": conv["id"], "thread_id": conv["thread_id"], "created_at": conv["created_at"],
+                           "updated_at": conv["updated_at"], "messages": messages})
+        return result
+
+    def conversation(self, client_id: str, limit: int = CONVERSATION_LIMIT) -> dict[str, Any]:
+        """The current (newest) conversation: its id, Codex thread and last ``limit`` messages, oldest first.
+
+        With no conversation yet, ``id`` and ``thread_id`` are None and there are no messages.
+        """
+        client_id = _required_text(client_id, "client_id")
+        with self._lock:
+            with self._read_transaction():
+                self._client_row(client_id)
+                conv = self._db.execute(
+                    "SELECT * FROM conversations WHERE client_id = ? ORDER BY seq DESC LIMIT 1", (client_id,)
+                ).fetchone()
+                if conv is None:
+                    return {"id": None, "thread_id": None, "messages": []}
+                rows = self._db.execute(
+                    "SELECT * FROM conversation_messages WHERE client_id = ? AND conversation_id = ? "
+                    "ORDER BY seq DESC LIMIT ?", (client_id, conv["id"], max(0, int(limit))),
+                ).fetchall()
+                return {"id": conv["id"], "thread_id": conv["thread_id"],
+                        "messages": [self._message_from_row(row) for row in reversed(rows)]}
+
+    def start_conversation(self, client_id: str) -> str:
+        """Start a new current conversation; earlier ones are kept."""
+        client_id = _required_text(client_id, "client_id")
+        conversation_id = uuid.uuid4().hex
+        now = _utc_now()
+        with self._lock:
+            self._begin()
+            try:
+                self._client_row(client_id)
+                self._db.execute(
+                    "INSERT INTO conversations(client_id, id, thread_id, created_at, updated_at) "
+                    "VALUES (?, ?, NULL, ?, ?)", (client_id, conversation_id, now, now))
+                self._commit()
+            except Exception:
+                self._rollback()
+                raise
+        return conversation_id
+
+    def append_messages(self, client_id: str, conversation_id: str, messages: Sequence[Mapping[str, Any]],
+                        thread_id: str | None = None) -> None:
+        """Append messages, redacted, to a conversation and record its Codex thread, in one write.
+
+        ``thread_id`` None leaves the stored thread as it is; an empty string clears it.
+        """
+        from .ingest.redact import redact_text
+
+        client_id = _required_text(client_id, "client_id")
+        conversation_id = _required_text(conversation_id, "conversation_id")
+        rows = []
+        for message in messages:
+            if not isinstance(message, Mapping) or message.get("role") not in ("user", "assistant"):
+                raise ValidationError("a conversation message needs role user or assistant")
+            attachments = [
+                {**item, "name": redact_text(str(item["name"]))} if isinstance(item, Mapping) and "name" in item
+                else item for item in (message.get("attachments") or [])
+            ]
+            extras = (attachments, list(message.get("memory") or []), list(message.get("views") or []))
+            for extra in extras:
+                _validate_json(extra, "message")
+            rows.append((_required_text(message.get("id"), "message id"), message["role"],
+                         redact_text(str(message.get("content") or "")),
+                         *(_json(extra) if extra else None for extra in extras)))
+        now = _utc_now()
+        with self._lock:
+            self._begin()
+            try:
+                self._client_row(client_id)
+                self._db.execute(
+                    "INSERT OR IGNORE INTO conversations(client_id, id, thread_id, created_at, updated_at) "
+                    "VALUES (?, ?, NULL, ?, ?)", (client_id, conversation_id, now, now))
+                for row in rows:
+                    self._db.execute(
+                        "INSERT INTO conversation_messages(client_id, conversation_id, message_id, role, content, "
+                        "attachments_json, memory_json, views_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (client_id, conversation_id, *row, now))
+                if thread_id is not None:
+                    self._db.execute(
+                        "UPDATE conversations SET thread_id = ?, updated_at = ? WHERE client_id = ? AND id = ?",
+                        (thread_id or None, now, client_id, conversation_id))
+                elif rows:
+                    self._db.execute("UPDATE conversations SET updated_at = ? WHERE client_id = ? AND id = ?",
+                                     (now, client_id, conversation_id))
+                self._commit()
+            except Exception:
+                self._rollback()
+                raise
+
+    def set_message_memory(self, client_id: str, message_id: str, memory: Sequence[Mapping[str, Any]]) -> None:
+        """Attach the memory receipts that arrived after a reply was saved (the one column that changes)."""
+        client_id = _required_text(client_id, "client_id")
+        message_id = _required_text(message_id, "message_id")
+        items = list(memory or [])
+        _validate_json(items, "memory")
+        with self._lock:
+            self._begin()
+            try:
+                self._db.execute(
+                    "UPDATE conversation_messages SET memory_json = ? WHERE client_id = ? AND message_id = ?",
+                    (_json(items) if items else None, client_id, message_id))
+                self._commit()
+            except Exception:
+                self._rollback()
+                raise
 
     # -- transaction ledger ------------------------------------------------
 
@@ -2552,6 +2751,7 @@ class WealthStore:
 
 
 __all__ = [
+    "CONVERSATION_LIMIT",
     "DEFAULT_REVIEW_DAYS",
     "DUPLICATE_SIMILARITY",
     "DUPLICATE_WINDOW_DAYS",
