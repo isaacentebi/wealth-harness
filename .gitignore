@@ -1,0 +1,26 @@
+# Local runtime and generated files
+.cache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+dist/
+build/
+*.egg-info/
+.DS_Store
+
+# Credentials and private client artifacts
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+/secrets/
+/private/
+/profiles/
+/portfolios/
+/docs/archive/handoff-v0.md
