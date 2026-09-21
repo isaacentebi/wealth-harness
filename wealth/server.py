@@ -54,7 +54,9 @@ def _safe_reason(error: Exception) -> str:
     return (reason or "Input failed the operation contract; check field names and types.")[:600]
 
 
-def build_server(db_path: str | None = None, *, include_behavior: bool = True) -> MCPServer:
+def build_server(db_path: str | None = None, *, include_behavior: bool = True,
+                 tools: frozenset[str] | None = None) -> MCPServer:
+    """Build the MCP server; ``tools`` limits it to those tool names (all when None)."""
     service = WealthService(db_path)
     registered_tools: list[Tool] = []
 
@@ -234,6 +236,11 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = True) -
         """create: inputs.display_name (once, at setup). index: inputs.fact_id, embedding, model."""
         return service.client(action=action, client_id=client_id, inputs=inputs)
 
+    if tools is not None:
+        unknown = tools - {t.name for t in registered_tools}
+        if unknown:
+            raise ValueError(f"unknown Wealth tools: {sorted(unknown)}")
+        registered_tools[:] = [t for t in registered_tools if t.name in tools]
     return MCPServer(
         "Wealth",
         version="0.2.0",
@@ -259,7 +266,11 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = True) -
 
 
 def main() -> None:
-    build_server(include_behavior=os.environ.get("WEALTH_BEHAVIOR_IN_HOST") != "1").run(transport="stdio")
+    allowed = os.environ.get("WEALTH_MCP_TOOLS")
+    build_server(
+        include_behavior=os.environ.get("WEALTH_BEHAVIOR_IN_HOST") != "1",
+        tools=frozenset(name.strip() for name in allowed.split(",") if name.strip()) if allowed else None,
+    ).run(transport="stdio")
 
 
 if __name__ == "__main__":

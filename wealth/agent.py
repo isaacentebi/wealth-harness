@@ -353,8 +353,9 @@ def build_prompt(
             size_text = f", {int(size):,} bytes" if isinstance(size, int) else ""
             described.append(f"- {name} ({kind}{size_text}) stored at {path}")
         sections.append(
-            "<attachments>\nThe person attached these files. Their contents are not yet "
-            "readable in this session.\n" + "\n".join(described) + "\n</attachments>"
+            "<attachments>\nThe person attached these files. Read statements (PDF, CSV) with "
+            "wealth_ingest action=file and the stored path; images need the host to read them.\n"
+            + "\n".join(described) + "\n</attachments>"
         )
     if not resumed:
         history = list(history)

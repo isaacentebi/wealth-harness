@@ -279,3 +279,13 @@ def test_watch_once_prints_only_monitor_events(tmp_path):
         }
     ]
     assert completed.stderr == ""
+
+
+def test_tool_allowlist_limits_the_server(tmp_path):
+    from wealth.server import build_server
+
+    server = build_server(str(tmp_path / "w.sqlite3"), tools=frozenset({"wealth_remember", "wealth_inspect"}))
+    names = {tool.name for tool in asyncio.run(server.list_tools())}
+    assert names == {"wealth_remember", "wealth_inspect"}
+    with pytest.raises(ValueError):
+        build_server(str(tmp_path / "w.sqlite3"), tools=frozenset({"wealth_nope"}))
