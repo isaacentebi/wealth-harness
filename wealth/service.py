@@ -34,12 +34,13 @@ TASK_MODULES = {
     "mx_holdings": "mexico", "mx_interest": "mexico", "mx_deductions": "mexico", "mx_foreign": "mexico",
     "mx_calendar": "mexico", "estate": "estate",
     "ledger": "ledger", "performance": "ledger", "spending": "cashflow", "dca": "dca",
+    "rebalance": "rebalance", "asset_location": "rebalance",
 }
 # Tasks answered by the service itself rather than one module.
 SERVICE_TASKS = ("plan", "calendar", "monitor", "debt_payoff")
 TASKS = (*TASK_MODULES, *SERVICE_TASKS)
 # Tasks whose module reads the client's transaction ledger from context["ledger"].
-LEDGER_TASKS = frozenset({"ledger", "performance", "spending", "dca"})
+LEDGER_TASKS = frozenset({"ledger", "performance", "spending", "dca", "rebalance"})
 INGEST_ACTIONS = ("file", "extraction", "chat", "confirm", "confirm_duplicates", "diff")
 _KEEP_PROPOSALS = 20
 
@@ -255,6 +256,7 @@ class WealthService:
             "ledger": "account household", "performance": "account household",
             "mx_holdings": "household tax", "mx_interest": "tax", "mx_deductions": "tax",
             "mx_foreign": "household tax", "mx_calendar": "tax", "estate": "household tax",
+            "rebalance": "household account tax goals reserve constraint", "asset_location": "household account tax",
         }
         from .recall import recall
         with WealthStore(self.db_path) as store:
