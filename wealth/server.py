@@ -194,7 +194,7 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = True,
         file: path (name or path inside the upload dir), optional owner_id, currency, as_of, source_text (image text).
         extraction: extraction_id, payload (extraction_request.schema filled from its page text only).
         chat: items [{kind, label, amount, currency, ..., quote: the person's own words}], optional as_of, currency.
-        confirm: proposal_id, acknowledge_discrepancies? — call ONLY after the person explicitly says yes.
+        confirm: proposal_id, acknowledge_discrepancies?, settle_differences? — call ONLY after the person explicitly says yes.
           Saves the stored proposal and posts it to the ledger.
         confirm_duplicates: proposal_id, entry_ids (held lines the person says are separate transactions).
         diff: proposal_id, previous_proposal_id? — changes since the last confirmed statement.

@@ -359,7 +359,7 @@ def test_confirming_a_statement_that_showed_the_difference_settles_it(tmp_path):
     proposal = service.ingest("ana", "file", {"path": "gbm.pdf"})
     assert any(i["kind"] == "stated_vs_statement" for i in proposal["result"]["insights"])
     done = service.ingest("ana", "confirm", {"proposal_id": proposal["result"]["proposal_id"],
-                                             "acknowledge_discrepancies": True})
+                                             "acknowledge_discrepancies": True, "settle_differences": True})
     assert not done["result"]["needs_user"]
     assert service.contradictions("ana")["contradictions"] == []
     assert not service.situation("ana")["differences"]

@@ -1257,7 +1257,7 @@ class WealthService:
         return self._hold(client_id, proposal)
 
     def _ingest_confirm(self, client_id: str, proposal_id: str, acknowledge_discrepancies: bool = False,
-                        expires_on: str | None = None) -> dict:
+                        expires_on: str | None = None, settle_differences: bool = False) -> dict:
         """Save a held proposal: facts, ledger lines, reconciliation and proposal state in one transaction.
 
         Idempotent: a confirm that already succeeded (including one that won a
@@ -1349,10 +1349,10 @@ class WealthService:
                     return state
 
                 store.update_auxiliary(client_id, "ingest", update)
-        # The summary the person said yes to led with "you told me X; the statement shows Y" (the agent is
-        # required to show that insight first), so their yes settles that difference in favour of the statement.
+        # When the person's yes covered "you told me X; the statement shows Y" (the agent passes
+        # settle_differences), the statement wins that difference instead of asking again.
         seen = {i.get("key") for i in situation_module.statement_insights(proposal.get("result") or {}, before)
-                if i.get("kind") == "stated_vs_statement" and i.get("key")}
+                if i.get("kind") == "stated_vs_statement" and i.get("key")} if settle_differences else set()
         waiting = report["result"].get("needs_user") or []
         settled = [item for item in waiting if item.get("key") in seen and item.get("id")]
         for item in settled:

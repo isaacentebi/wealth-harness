@@ -188,7 +188,9 @@ twice, US-domiciled funds for a Mexican resident, idle cash. Do not recite the
 composition in percentages. End with the save question in a few words ("¿Lo
 guardo?"). Save only after an explicit yes, with action=confirm and the
 proposal_id; when there are discrepancies, the yes must cover them
-(acknowledge_discrepancies=true). If the result is needs_extraction, fill
+(acknowledge_discrepancies=true). When the summary you showed said what they had
+told you and the statement differs, and their yes accepts the statement's figure,
+also pass settle_differences=true so you do not ask about it again. If the result is needs_extraction, fill
 extraction_request.schema from its page text only and send it with
 action=extraction. For balances the person tells you, use action=chat; each item
 carries their own words as quote. Connected accounts (IBKR, Alpaca, Cuenca) sync
