@@ -172,6 +172,34 @@ def same_institution(a: Any, b: Any) -> bool:
 # ------------------------------------------------------------------ facts
 
 
+def _summarize_value(value: Any) -> str | None:
+    """A short reading of a stale fact's value, so the adviser can reconfirm it instead of asking afresh."""
+    if isinstance(value, Mapping):
+        currency = value.get("currency") or ""
+        for field in ("amount", "monthly_take_home", "total", "essential", "monthly_essentials", "balance",
+                      "target_amount", "available_capital"):
+            number = D(value.get(field))
+            if number is not None:
+                frequency = value.get("frequency")
+                return " ".join(p for p in (f"{number:,.0f}", currency, frequency or "") if p)
+        return None
+    if isinstance(value, (int, float, Decimal)):
+        return f"{Decimal(str(value)):,.0f}"
+    if isinstance(value, str):
+        return value[:40]
+    return None
+
+
+def _stale_values(facts: "_Facts") -> list[dict]:
+    out = []
+    for key in facts.stale:
+        fact = facts.all[key]
+        source = fact.get("source") if isinstance(fact.get("source"), dict) else {}
+        out.append({"key": key, "value": _summarize_value(fact.get("value")),
+                    "observed_on": source.get("observed_on")})
+    return out
+
+
 class _Facts:
     """Current facts split into eligible (drive numbers) and the rest (listed)."""
 
@@ -811,6 +839,7 @@ def _holdings(accounts: list[dict], fx: _FX, currency: str | None) -> dict:
             symbol = position.get("symbol") or position.get("instrument_id")
             asset_class = position.get("asset_class") or ("cash" if str(position.get("instrument_id", "")).startswith("CASH:") else None)
             rows.append({"account": account["id"], "institution": account.get("institution"), "symbol": symbol,
+                         "as_of": account.get("as_of"),
                          "value": value, "quantity": num(D(position.get("quantity")), 4),
                          "underlying": underlying_of(position.get("underlying_symbol") or symbol) or symbol,
                          "venue": position.get("venue"), "domicile": position.get("issuer_domicile"),
@@ -838,7 +867,7 @@ def _holdings(accounts: list[dict], fx: _FX, currency: str | None) -> dict:
         "venue": split("venue"), "domicile": split("domicile"),
         "positions": len(rows),
         "saved": [{"ticker": ticker_of(r["symbol"]), "symbol": r["symbol"], "quantity": r["quantity"],
-                   "value": num(r["value"]), "institution": r["institution"]}
+                   "value": num(r["value"]), "institution": r["institution"], "as_of": r.get("as_of")}
                   for r in rows if r["asset_class"] != "cash" and ticker_of(r["symbol"])],
         "largest": [{"symbol": r["symbol"], "value": num(r["value"]), "quantity": r["quantity"],
                      "institution": r["institution"]}
@@ -1246,7 +1275,7 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
         "commitments": commitments, "reserve": reserve, "goals": goals, "dca": dca, "holdings": holdings,
         "threads": {"open": [t for t in threads if t["status"] == "open"],
                     "closed": [t for t in threads if t["status"] != "open"][:5]},
-        "stale": facts.stale, "inferred": facts.inferred, "unknowns": unknowns,
+        "stale": facts.stale, "stale_values": _stale_values(facts), "inferred": facts.inferred, "unknowns": unknowns,
         "patterns": [{"key": f["key"], "value": f.get("value"), "id": f.get("id"),
                       "confidence": f.get("confidence"), "observed_on": (f.get("source") or {}).get("observed_on"),
                       "valid_from": f.get("valid_from")} for f in sorted(facts.patterns, key=lambda f: f["key"])],

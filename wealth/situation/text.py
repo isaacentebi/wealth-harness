@@ -70,7 +70,7 @@ _B = {
            "nw": "Patrimonio neto {t} = líquido {l} + ilíquido {i} − deudas {o}", "nw_none": "Patrimonio neto: desconocido",
            "unconv": "sin convertir {x}", "unvalued": "sin valuar {x}",
            "flow": "Mes: ingreso {i}{net} − gasto {s} ({src}) − deudas {d} = excedente {x}", "net": " neto",
-           "src_stated": "declarado", "src_ledger": "movimientos {n} meses", "without": " (sin pago de {x})",
+           "src_stated": "declarado", "src_ledger": "movimientos {n} meses", "essential_only": ", solo esenciales; el excedente aún cubre otros gastos", "without": " (sin pago de {x})",
            "commit": "Excedente comprometido {t} ({items}); sin asignar {u}", "over": " · sobrecomprometido",
            "reserve": "Reserva {a} = {m} meses de gasto {b}; meta {t}", "unset": "sin definir",
            "b_essential": "esencial", "b_total": "total",
@@ -80,7 +80,7 @@ _B = {
            "inv": "Inversiones: {x}", "invalid": "Datos guardados que no se pudieron leer (pide el valor correcto): {x}", "pos": "Posiciones: {x}", "units": "títulos", "top": "mayor exposición {u} {w} ({s})",
            "diff": "Diferencia {inst}: dijiste {s}; estado {x} ({d})",
            "thread": "Pendiente [{k}, {d}]: {t}", "k_advice": "consejo", "k_question": "pregunta", "k_commitment": "compromiso",
-           "stale": "Por reconfirmar: {x}", "inferred": "Sin confirmar: {x}", "unknown": "Desconocido: {x}",
+           "stale": "Por reconfirmar (confirma el valor, no lo pidas de nuevo): {x}", "inferred": "Sin confirmar: {x}", "unknown": "Desconocido: {x}",
            "changes": "Cambios desde r{r}: {x}", "more": "+{n} más", "st_active": "activa", "st_paused": "pausada",
            "st_done": "cumplida", "st_dropped": "descartada", "c_goal": "metas", "c_dca": "planes periódicos",
            "m_rate": "tasa", "m_payment": "pago o plazo", "u_income": "ingreso mensual", "u_spending": "gasto mensual",
@@ -90,7 +90,7 @@ _B = {
            "nw": "Net worth {t} = liquid {l} + illiquid {i} − debts {o}", "nw_none": "Net worth: unknown",
            "unconv": "unconverted {x}", "unvalued": "unvalued {x}",
            "flow": "Month: income {i}{net} − spending {s} ({src}) − debt payments {d} = surplus {x}", "net": " net",
-           "src_stated": "stated", "src_ledger": "{n} months of transactions", "without": " (excludes {x} payment)",
+           "src_stated": "stated", "src_ledger": "{n} months of transactions", "essential_only": ", essentials only; the surplus still covers other spending", "without": " (excludes {x} payment)",
            "commit": "Surplus committed {t} ({items}); unallocated {u}", "over": " · overcommitted",
            "reserve": "Reserve {a} = {m} months of {b} spending; target {t}", "unset": "not set",
            "b_essential": "essential", "b_total": "total",
@@ -100,7 +100,7 @@ _B = {
            "inv": "Investments: {x}", "invalid": "Saved data that could not be read (ask for the correct value): {x}", "pos": "Positions: {x}", "units": "units", "top": "largest exposure {u} {w} ({s})",
            "diff": "Difference {inst}: stated {s}; statement {x} ({d})",
            "thread": "Open [{k}, {d}]: {t}", "k_advice": "advice", "k_question": "question", "k_commitment": "commitment",
-           "stale": "Reconfirm: {x}", "inferred": "Unconfirmed: {x}", "unknown": "Unknown: {x}",
+           "stale": "Reconfirm (read the value back, do not ask afresh): {x}", "inferred": "Unconfirmed: {x}", "unknown": "Unknown: {x}",
            "changes": "Changed since r{r}: {x}", "more": "+{n} more", "st_active": "active", "st_paused": "paused",
            "st_done": "done", "st_dropped": "dropped", "c_goal": "goals", "c_dca": "recurring plans",
            "m_rate": "rate", "m_payment": "payment or term", "u_income": "monthly income", "u_spending": "monthly spending",
@@ -151,6 +151,8 @@ def brief(sit: Mapping[str, Any], language: str | None = None) -> str:
     if flow["income"] is not None or flow["spending"] is not None:
         src = sit["spending"]["source"]
         src_text = t["src_ledger"].format(n=sit["spending"].get("ledger_months")) if src == "ledger" else t["src_stated"]
+        if sit["spending"].get("monthly_basis") == "essential":
+            src_text += t["essential_only"]
         debts = fmt(flow["debt_payments_known"]) if not flow["debt_payments_unknown"] else (
             f"{fmt(flow['debt_payments_known'])}+?" if flow["debt_payments_known"] else "?")
         line = t["flow"].format(i=fmt(flow["income"]), net=t["net"] if sit["income"].get("net") else "",
@@ -233,16 +235,23 @@ def brief(sit: Mapping[str, Any], language: str | None = None) -> str:
         lines.append((9, t["thread"].format(k=t.get("k_" + str(thread["kind"]), thread["kind"]), d=thread["created"] or "?",
                                             t=" ".join(thread["text"].split())[:160])))
     unknown = []
+    stale_keys = set(sit.get("stale") or [])
+    # A value waiting to be reconfirmed is not unknown: it appears on the reconfirm line instead.
+    covered = {"income": any(k.startswith("income.") for k in stale_keys),
+               "spending": bool(stale_keys & {"spending.monthly", "plan.resources", "client.profile"})}
     for item in sit["unknowns"]:
-        if item["code"].startswith("liability"):
-            continue  # already on the debt line
+        if item["code"].startswith("liability") or covered.get(item["code"]):
+            continue  # already on the debt line, or on the reconfirm line
         unknown.append(t["u_" + item["code"]].format(c=item.get("residence"), p=item.get("pair"), g=item.get("goal")))
     if unknown:
         lines.append((10, t["unknown"].format(x="; ".join(unknown[:4]))))
     if sit.get("invalid_facts"):
         lines.append((4, t["invalid"].format(x=", ".join(i["key"] for i in sit["invalid_facts"][:4]))))
     if sit["stale"]:
-        lines.append((11, t["stale"].format(x=", ".join(sit["stale"][:6]))))
+        stale = sit.get("stale_values") or [{"key": k} for k in sit["stale"]]
+        shown = [f"{s['key']} = {s['value']} ({s.get('observed_on') or '?'})" if s.get("value") else s["key"]
+                 for s in stale[:6]]
+        lines.append((11, t["stale"].format(x="; ".join(shown))))
     if sit["inferred"]:
         lines.append((12, t["inferred"].format(x=", ".join(sit["inferred"][:6]))))
     from ..onboarding import brief_line  # lazy: onboarding imports this package's schema

@@ -100,13 +100,23 @@ def statement_insights(result: Mapping[str, Any], before: Mapping[str, Any] | No
                 had = D(row.get("quantity"))
                 if had is None or quantity is None or had == quantity:
                     continue
+                saved_on = str(row.get("as_of") or "")[:10] or None
+                statement_on = str(result.get("as_of") or household.get("as_of") or "")[:10] or None
+                older = bool(saved_on and statement_on and statement_on < saved_on)
+                if older:
+                    text = (f"{ticker}: this statement is from {statement_on}, older than what was saved on {saved_on}. "
+                            f"It showed {fmt(num(quantity))} units then; {fmt(num(had))} are saved now, so the holding "
+                            f"{'grew' if had > quantity else 'shrank'} after {statement_on}. Ask whether that is right; "
+                            "the saved, newer figure stays current.")
+                else:
+                    text = (f"{ticker}: {fmt(num(had))} units were saved" + (f" as of {saved_on}" if saved_on else "")
+                            + f"; the statement ({statement_on or 'undated'}) shows {fmt(num(quantity))} "
+                            f"({'more' if quantity > had else 'fewer'}). Ask whether they bought or sold since.")
                 out.append({"kind": "position_change", "symbol": ticker, "institution": institution or None,
-                            "saved": {"quantity": num(had), "value": row.get("value")},
+                            "saved": {"quantity": num(had), "value": row.get("value"), "as_of": saved_on},
                             "statement": {"quantity": num(quantity), "value": num(D(position.get("value"))),
-                                          "currency": position.get("currency")},
-                            "text": f"{ticker}: {fmt(num(had))} units were saved; the statement shows {fmt(num(quantity))} "
-                                    f"({'more' if quantity > had else 'fewer'}). Ask whether they bought or sold since, "
-                                    "or which figure is current."})
+                                          "currency": position.get("currency"), "as_of": statement_on},
+                            "statement_is_older": older, "text": text})
 
     # 2. A single holding over 25% of its account.
     for account_id, account in sorted(accounts.items()):
