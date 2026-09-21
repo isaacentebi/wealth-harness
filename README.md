@@ -46,6 +46,9 @@ the implementation manual in its prompt.
 If Codex CLI is installed and you are signed in with ChatGPT:
 
 ```sh
+uv run wealth-chat --client isaac --model sol
+# Open http://127.0.0.1:8765
+# Or a fictional terminal demo:
 uv run wealth-agent --demo --model sol
 ```
 

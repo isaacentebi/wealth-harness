@@ -4,7 +4,27 @@ The optional `wealth-agent` terminal connects your existing Codex login to
 Wealth's six MCP tools. Choose Sol or Luna and talk naturally. The financial
 server remains independent of the model provider.
 
-## Start
+## Browser chat
+
+```sh
+uv run wealth-chat --client isaac --model sol
+```
+
+Open [Wealth chat](http://127.0.0.1:8765). This uses the same client database as
+`wealth-agent`. Live web search is enabled by default in both launchers, using
+[Codex web search](https://learn.chatgpt.com/docs/web-search?surface=cli).
+The page shows working status, source links, and retryable errors. Client facts
+persist across restarts; the visible transcript lasts for the server session.
+The server binds only to localhost and validates request origins and a session
+token. It is a local personal interface, not a hosted multi-user application.
+
+Python tools perform correlations, factor regressions, historical risk, stress,
+construction and simulations. The model has access to those implemented
+calculations, live market-data fetching and web research; it does not have an
+unrestricted Python shell. Paste holdings or a question into chat. File uploads
+are not implemented in this small browser interface.
+
+## Start in the terminal
 
 Install Codex CLI if it is not already on your PATH, then use its normal login:
 

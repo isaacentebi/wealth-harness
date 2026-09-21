@@ -65,7 +65,7 @@ def test_run_turn_builds_isolated_codex_command_without_extracting_auth(
     assert "features.plugins=false" in command
     assert "features.multi_agent=false" in command
     assert "features.skip_host_skill_discovery=true" in command
-    assert 'web_search="disabled"' in command
+    assert 'web_search="live"' in command
     assert "mcp_servers.wealth.command=" in joined
     assert "mcp_servers.wealth.env.WEALTH_DB=" in joined
     assert "mcp_servers.wealth.default_tools_approval_mode=" in joined

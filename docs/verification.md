@@ -140,3 +140,18 @@ live onboarding run saved canonical `client.profile` and incomplete `goals`,
 used the 30-day review deadline, invented no budget, and asked one financing
 question. Interrupted demo initialization is now repaired without replacing
 recorded client state.
+
+## Local browser chat (2026-09-21)
+
+`wealth-chat` serves a dependency-free HTML chat on loopback with origin and
+session-token checks, serialized turns, retryable errors, safe text/source-link
+rendering, and the same client memory as the terminal. Native live web search is
+enabled by default in both launchers. Python analytics remain implemented tool
+functions; arbitrary shell execution is not enabled.
+
+Verified browser input → real Sol response → clickable Vanguard source link.
+A separate live turn emitted an actual `web.search` event. HTTP regression
+checks covered request rejection, busy handling, history and agent arguments.
+The full suite passed 353 checks; wheel build includes the HTML and server.
+Facts persist in SQLite; the browser transcript persists only for the running
+server session. File upload is not implemented.

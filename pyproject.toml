@@ -18,6 +18,7 @@ dev = ["pytest>=8,<10", "scikit-learn>=1.5"]
 wealth = "wealth.cli:main"
 wealth-mcp = "wealth.server:main"
 wealth-agent = "wealth.agent:main"
+wealth-chat = "wealth.web:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["wealth"]

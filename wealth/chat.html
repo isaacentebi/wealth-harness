@@ -1,0 +1,512 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Wealth</title>
+  <style>
+    :root {
+      --ink: #18312a;
+      --muted: #6c756f;
+      --line: #dfe4df;
+      --paper: #faf9f5;
+      --surface: #ffffff;
+      --accent: #27614f;
+      --accent-soft: #edf4f0;
+      --danger: #9b3f38;
+      --shadow: 0 18px 50px rgba(25, 49, 42, .08);
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body { height: 100%; }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 15% 0%, rgba(212, 225, 216, .5), transparent 30rem),
+        var(--paper);
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    button, textarea { font: inherit; }
+
+    .app {
+      min-height: 100%;
+      width: min(860px, 100%);
+      margin: 0 auto;
+      padding: 30px 24px 24px;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+      gap: 22px;
+    }
+
+    header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 0 4px;
+    }
+
+    .brand { min-width: 0; }
+
+    h1 {
+      margin: 0;
+      font-family: Iowan Old Style, Baskerville, "Times New Roman", serif;
+      font-size: clamp(2rem, 6vw, 3.25rem);
+      font-weight: 500;
+      letter-spacing: -.045em;
+      line-height: .95;
+    }
+
+    .tagline {
+      margin: 9px 0 0;
+      color: var(--muted);
+      font-size: .9rem;
+    }
+
+    .identity {
+      flex: none;
+      text-align: right;
+      color: var(--muted);
+      font-size: .75rem;
+      line-height: 1.5;
+    }
+
+    .identity strong {
+      display: block;
+      max-width: 18rem;
+      overflow: hidden;
+      color: var(--ink);
+      font-size: .82rem;
+      font-weight: 600;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .conversation {
+      min-height: 0;
+      overflow-y: auto;
+      scroll-behavior: smooth;
+      scrollbar-width: thin;
+      padding: 20px 4px 8px;
+    }
+
+    .messages {
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .message {
+      max-width: 76%;
+      animation: arrive .22s ease-out;
+    }
+
+    .message.assistant { align-self: flex-start; }
+    .message.user { align-self: flex-end; }
+
+    .message-label {
+      margin: 0 0 6px;
+      color: var(--muted);
+      font-size: .68rem;
+      font-weight: 700;
+      letter-spacing: .09em;
+      text-transform: uppercase;
+    }
+
+    .message.user .message-label { text-align: right; }
+
+    .bubble {
+      padding: 14px 17px;
+      border: 1px solid var(--line);
+      border-radius: 5px 18px 18px 18px;
+      background: rgba(255, 255, 255, .86);
+      box-shadow: 0 5px 18px rgba(25, 49, 42, .035);
+      font-size: .96rem;
+      line-height: 1.62;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    .bubble a {
+      color: inherit;
+      text-decoration-color: currentColor;
+      text-decoration-thickness: 1px;
+      text-underline-offset: 3px;
+    }
+
+    .message.user .bubble {
+      border-color: transparent;
+      border-radius: 18px 5px 18px 18px;
+      color: white;
+      background: var(--accent);
+    }
+
+    .message.failed .bubble {
+      border-color: rgba(155, 63, 56, .35);
+      color: var(--ink);
+      background: #fff8f6;
+    }
+
+    .retry {
+      display: inline-flex;
+      margin-top: 7px;
+      padding: 0;
+      border: 0;
+      color: var(--danger);
+      background: transparent;
+      cursor: pointer;
+      font-size: .75rem;
+      font-weight: 650;
+    }
+
+    .status {
+      min-height: 18px;
+      margin: 3px 0 -7px;
+      color: var(--muted);
+      font-size: .76rem;
+    }
+
+    .status:empty { display: none; }
+
+    .composer-wrap {
+      position: relative;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: rgba(255, 255, 255, .9);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(14px);
+    }
+
+    .composer {
+      display: flex;
+      align-items: flex-end;
+      gap: 12px;
+    }
+
+    textarea {
+      min-height: 48px;
+      max-height: 180px;
+      width: 100%;
+      resize: none;
+      padding: 12px 10px;
+      border: 0;
+      outline: none;
+      color: var(--ink);
+      background: transparent;
+      line-height: 1.45;
+    }
+
+    textarea::placeholder { color: #929b95; }
+    textarea:disabled { opacity: .62; }
+
+    .send {
+      flex: none;
+      width: 46px;
+      height: 46px;
+      border: 0;
+      border-radius: 50%;
+      color: white;
+      background: var(--accent);
+      cursor: pointer;
+      transition: transform .16s ease, opacity .16s ease, background .16s ease;
+    }
+
+    .send:hover:not(:disabled) { transform: translateY(-1px); background: #1e5141; }
+    .send:active:not(:disabled) { transform: scale(.96); }
+    .send:disabled { cursor: default; opacity: .4; }
+
+    .composer-meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 9px 6px 0;
+      color: var(--muted);
+      font-size: .68rem;
+      line-height: 1.35;
+    }
+
+    details { text-align: right; }
+    summary { cursor: pointer; list-style: none; }
+    summary::-webkit-details-marker { display: none; }
+    details p { margin: 5px 0 0; }
+
+    .fatal {
+      margin: auto;
+      max-width: 32rem;
+      padding: 22px;
+      border: 1px solid rgba(155, 63, 56, .25);
+      border-radius: 16px;
+      background: #fff8f6;
+      text-align: center;
+    }
+
+    @keyframes arrive {
+      from { opacity: 0; transform: translateY(5px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @media (max-width: 620px) {
+      .app { padding: 22px 14px 12px; gap: 14px; }
+      header { padding: 0 4px; }
+      .identity { max-width: 45%; }
+      .message { max-width: 90%; }
+      .conversation { padding-top: 12px; }
+      .composer-wrap { border-radius: 18px; padding: 10px; }
+      .composer-meta { flex-direction: column; gap: 3px; }
+      details { text-align: left; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; animation: none !important; transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header>
+      <div class="brand">
+        <h1>Wealth</h1>
+        <p class="tagline">A private space to think clearly about money.</p>
+      </div>
+      <div class="identity" aria-label="Session details">
+        <strong id="client">Connecting…</strong>
+        <span id="model"></span>
+      </div>
+    </header>
+
+    <section class="conversation" id="conversation" aria-label="Conversation" aria-live="polite">
+      <div class="messages" id="messages"></div>
+      <p class="status" id="status" role="status"></p>
+    </section>
+
+    <form class="composer-wrap" id="chat-form">
+      <div class="composer">
+        <textarea id="input" rows="1" placeholder="Ask about your finances…" aria-label="Message" disabled></textarea>
+        <button class="send" id="send" type="submit" aria-label="Send message" disabled>
+          <svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true">
+            <path d="M5 12h14M13 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </div>
+      <div class="composer-meta">
+        <span id="capabilities">Python analytics · Persistent memory · Live market data</span>
+        <details>
+          <summary>Privacy &amp; capabilities</summary>
+          <p>Client memory is stored on this computer. Chat history lasts while this server is running. Messages and selected context are sent to the model provider; research uses external search and market-data services. <span id="web-search-status">Web search status is loading.</span></p>
+        </details>
+      </div>
+    </form>
+  </main>
+
+  <script>
+    (() => {
+      const conversation = document.getElementById('conversation');
+      const messages = document.getElementById('messages');
+      const form = document.getElementById('chat-form');
+      const input = document.getElementById('input');
+      const send = document.getElementById('send');
+      const status = document.getElementById('status');
+      const client = document.getElementById('client');
+      const model = document.getElementById('model');
+      const capabilities = document.getElementById('capabilities');
+      const webSearchStatus = document.getElementById('web-search-status');
+
+      let token = '';
+      let busy = false;
+      let timer = null;
+      let startedAt = 0;
+
+      function scrollToLatest() {
+        requestAnimationFrame(() => {
+          conversation.scrollTop = conversation.scrollHeight;
+        });
+      }
+
+      function addMessage(role, content, options = {}) {
+        const article = document.createElement('article');
+        article.className = `message ${role}${options.failed ? ' failed' : ''}`;
+
+        const label = document.createElement('p');
+        label.className = 'message-label';
+        label.textContent = role === 'user' ? 'You' : 'Wealth';
+
+        const bubble = document.createElement('div');
+        bubble.className = 'bubble';
+        renderMessage(bubble, String(content ?? ''));
+
+        article.append(label, bubble);
+
+        if (options.failed) markFailed(article, String(content ?? ''));
+
+        messages.append(article);
+        scrollToLatest();
+        return article;
+      }
+
+      function renderMessage(container, text) {
+        const tokenPattern = /\*\*([^*\n]+)\*\*|\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/gi;
+        let cursor = 0;
+        let match;
+
+        while ((match = tokenPattern.exec(text)) !== null) {
+          if (match.index > cursor) container.append(document.createTextNode(text.slice(cursor, match.index)));
+
+          if (match[1] !== undefined) {
+            const strong = document.createElement('strong');
+            strong.textContent = match[1];
+            container.append(strong);
+          } else {
+            try {
+              const url = new URL(match[3]);
+              if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('Unsupported link');
+              const link = document.createElement('a');
+              link.textContent = match[2];
+              link.href = url.href;
+              link.target = '_blank';
+              link.rel = 'noopener noreferrer';
+              container.append(link);
+            } catch (_) {
+              container.append(document.createTextNode(match[0]));
+            }
+          }
+
+          cursor = tokenPattern.lastIndex;
+        }
+
+        if (cursor < text.length) container.append(document.createTextNode(text.slice(cursor)));
+      }
+
+      function markFailed(article, content) {
+        article.classList.add('failed');
+        const prior = article.querySelector('.retry');
+        if (prior) prior.remove();
+        const retry = document.createElement('button');
+        retry.type = 'button';
+        retry.className = 'retry';
+        retry.textContent = 'Could not send · Retry';
+        retry.addEventListener('click', () => submitMessage(content, article));
+        article.append(retry);
+      }
+
+      function setBusy(value) {
+        busy = value;
+        input.disabled = value;
+        send.disabled = value || !input.value.trim();
+
+        clearInterval(timer);
+        if (!value) {
+          status.textContent = '';
+          input.focus();
+          return;
+        }
+
+        startedAt = Date.now();
+        const tick = () => {
+          const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+          status.textContent = `Working… ${elapsed}s`;
+          scrollToLatest();
+        };
+        tick();
+        timer = setInterval(tick, 1000);
+      }
+
+      async function submitMessage(text, failedNode = null) {
+        const message = text.trim();
+        if (!message || busy) return;
+
+        const userNode = failedNode || addMessage('user', message);
+        userNode.classList.remove('failed');
+        const retry = userNode.querySelector('.retry');
+        if (retry) retry.remove();
+
+        input.value = '';
+        resizeInput();
+        setBusy(true);
+
+        try {
+          const response = await fetch('/api/chat', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Wealth-Token': token
+            },
+            body: JSON.stringify({ message })
+          });
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok || typeof data.answer !== 'string') {
+            throw new Error(data.error || `Request failed (${response.status})`);
+          }
+          addMessage('assistant', data.answer);
+        } catch (error) {
+          markFailed(userNode, message);
+          userNode.querySelector('.retry').title = error instanceof Error ? error.message : 'Could not send message.';
+        } finally {
+          setBusy(false);
+        }
+      }
+
+      function resizeInput() {
+        input.style.height = 'auto';
+        input.style.height = `${Math.min(input.scrollHeight, 180)}px`;
+        send.disabled = busy || !input.value.trim();
+      }
+
+      input.addEventListener('input', resizeInput);
+      input.addEventListener('keydown', event => {
+        if (event.key === 'Enter' && !event.shiftKey) {
+          event.preventDefault();
+          form.requestSubmit();
+        }
+      });
+
+      form.addEventListener('submit', event => {
+        event.preventDefault();
+        submitMessage(input.value);
+      });
+
+      async function initialize() {
+        try {
+          const response = await fetch('/api/state', { credentials: 'same-origin' });
+          const state = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(state.error || `Could not load session (${response.status})`);
+
+          token = String(state.csrf_token || '');
+          client.textContent = state.client_id ? `Client ${state.client_id}` : 'Private session';
+          model.textContent = state.model ? `Model · ${state.model}` : '';
+          const webSearchEnabled = state.capabilities && state.capabilities.web_search === true;
+          capabilities.textContent = `Python analytics · Persistent memory · Live market data${webSearchEnabled ? ' · Web search' : ''}`;
+          webSearchStatus.textContent = webSearchEnabled ? 'Web search is enabled.' : 'Web search is currently disabled.';
+
+          const history = Array.isArray(state.messages) ? state.messages : [];
+          history.forEach(item => {
+            if (item && (item.role === 'user' || item.role === 'assistant')) {
+              addMessage(item.role, item.content);
+            }
+          });
+          if (!history.length && state.welcome) addMessage('assistant', state.welcome);
+
+          input.disabled = false;
+          resizeInput();
+          input.focus();
+        } catch (error) {
+          const box = document.createElement('div');
+          box.className = 'fatal';
+          box.textContent = error instanceof Error ? error.message : 'Could not connect to Wealth.';
+          messages.append(box);
+          client.textContent = 'Unavailable';
+        }
+      }
+
+      initialize();
+    })();
+  </script>
+</body>
+</html>
