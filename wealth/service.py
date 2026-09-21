@@ -38,12 +38,15 @@ TASK_MODULES = {
     "rebalance": "rebalance", "asset_location": "rebalance",
 }
 # Tasks answered by the service itself rather than one module.
-SERVICE_TASKS = ("plan", "calendar", "monitor", "debt_payoff", "policy_draft", "policy_check", "today", "weekly")
+SERVICE_TASKS = ("plan", "calendar", "monitor", "debt_payoff", "policy_draft", "policy_check", "today", "weekly",
+                 "quarterly_review", "fee_audit")
 # Investment policy tasks (wealth/policy.py) read the canonical picture, so the service runs them.
 POLICY_TASKS = frozenset({"policy_draft", "policy_check"})
 # Proactive tasks (wealth/proactive.py) read the whole picture and keep dismissals in the monitor namespace.
 PROACTIVE_TASKS = frozenset({"today", "weekly"})
 PROACTIVE_STATE = "_proactive"  # key inside the ``monitor`` auxiliary namespace
+# The quarterly review and fee audit (wealth/review.py) read the picture, ledger, decisions and fact history.
+REVIEW_TASKS = frozenset({"quarterly_review", "fee_audit"})
 TASKS = (*TASK_MODULES, *SERVICE_TASKS)
 # Tasks whose module reads the client's transaction ledger from context["ledger"].
 LEDGER_TASKS = frozenset({"ledger", "performance", "spending", "dca", "rebalance"})
@@ -334,7 +337,7 @@ class WealthService:
             with WealthStore(self.db_path) as store:
                 snapshot = store.snapshot(client_id)
                 if (task in LEDGER_TASKS or task in {"plan", "calendar", "debt_payoff"} or task in POLICY_TASKS
-                        or task in PROACTIVE_TASKS) and "ledger" not in inputs:
+                        or task in PROACTIVE_TASKS or task in REVIEW_TASKS) and "ledger" not in inputs:
                     ledger = store.ledger(client_id)
         eligible = [f for f in snapshot["facts"] if f["confidence"] != "inferred"
                     and (not f.get("expires_on") or f["expires_on"] >= today)]
@@ -357,6 +360,9 @@ class WealthService:
             derived_evidence = report.pop("_evidence", [])
         elif task in PROACTIVE_TASKS:
             report = self._proactive(task, inputs, client_id, snapshot, ledger, today)
+            derived_evidence = report.pop("_evidence", [])
+        elif task in REVIEW_TASKS:
+            report = self._review(task, inputs, client_id, snapshot, ledger, today)
             derived_evidence = report.pop("_evidence", [])
         elif task in {"plan", "calendar"}:
             # Direct inputs may supply the same canonical facts without requiring a profile.
@@ -411,7 +417,7 @@ class WealthService:
         else:
             module = importlib.import_module("." + TASK_MODULES[task], __package__)
             report = module.run(task, inputs, context)
-        if task in {"plan", "calendar", "debt_payoff"} or task in POLICY_TASKS or task in PROACTIVE_TASKS:
+        if task in {"plan", "calendar", "debt_payoff"} or task in POLICY_TASKS or task in PROACTIVE_TASKS or task in REVIEW_TASKS:
             used_ids = set(packet["evidence_ids"] if task in {"plan", "calendar"} else []) | set(derived_evidence)
             consumed = [f for f in eligible if f["id"] in used_ids and f["key"] not in inputs]
         elif task == "monitor":
@@ -426,9 +432,10 @@ class WealthService:
                                        for f in snapshot["facts"] if f not in eligible]
         if task == "debt_payoff":
             relevant = {f["key"] for f in snapshot["facts"] if f["key"].startswith("liability.")}
-        elif task in POLICY_TASKS:
+        elif task in POLICY_TASKS or task in REVIEW_TASKS:
             from .policy import POLICY_FACT_KEYS
-            relevant = {f["key"] for f in snapshot["facts"] if f["key"].startswith(POLICY_FACT_KEYS)}
+            keys_read = POLICY_FACT_KEYS + (("planning.dca", "thread.") if task == "quarterly_review" else ())
+            relevant = {f["key"] for f in snapshot["facts"] if f["key"].startswith(keys_read)}
         elif task in {"plan", "calendar"}:
             relevant = set(keys)
         elif task in PROACTIVE_TASKS:
@@ -554,6 +561,17 @@ class WealthService:
                                 "result.unknown and does not fire.",
                                 "Calendar dates are statutory defaults; weekends, holidays and SAT/IRS relief can move them."],
                 "_evidence": [sit["evidence"][k] for k in sorted(sit["evidence"])]}
+    def _review(self, task: str, inputs: dict, client_id: str | None, snapshot: dict, ledger, today: str) -> dict:
+        """quarterly_review / fee_audit; the review also reads the revision history of facts changed in the period."""
+        from . import review
+        history = None
+        start = inputs.get("period_start")
+        if task == "quarterly_review" and client_id and isinstance(start, str) and "facts" not in inputs:
+            with WealthStore(self.db_path) as store:
+                keys = sorted({f["key"] for f in snapshot["facts"]
+                               if max(str(f.get("recorded_at") or "")[:10], str(f.get("valid_from") or "")) >= start})
+                history = {key: store.history(client_id, key) for key in keys}
+        return review.run_task(task, inputs, snapshot, ledger, today, fact_history=history)
 
     def client(self, action: str, client_id: str, inputs: dict | None = None) -> dict:
         """CLI client actions. MCP exposes create/index here and reads via wealth_inspect."""

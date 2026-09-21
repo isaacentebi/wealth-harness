@@ -173,6 +173,158 @@ _REBAL_MX_HOUSEHOLD: dict[str, Any] = {
 }
 
 
+_MX_OWNER = [{"person_id": "ana", "share": "1"}]
+
+
+def _mx_entry(i: int, account: str, kind: str, day: str, amount: str | None = None, currency: str = "MXN",
+              **extra: Any) -> dict[str, Any]:
+    row = {"id": f"mx{i:03d}", "account_id": account, "kind": kind, "date": day, "currency": currency,
+           "confidence": "reported", "source": _MX_SOURCE, **extra}
+    if amount is not None:
+        row["amount"] = amount
+    return row
+
+
+def _mx_entries() -> list[dict[str, Any]]:
+    rows = [
+        _mx_entry(1, "bbva", "opening_balance", "2025-12-31", "120000"),
+        _mx_entry(2, "gbm", "opening_balance", "2025-12-31", "20000"),
+        _mx_entry(3, "gbm", "opening_balance", "2025-12-31", instrument_id="CSPXN", quantity="30",
+                  cost_basis="285000", acquired_on="2025-06-02"),
+        _mx_entry(4, "gbm", "opening_balance", "2025-12-31", instrument_id="CETES", quantity="20000",
+                  cost_basis="196000", acquired_on="2025-12-01"),
+        _mx_entry(5, "ibkr", "opening_balance", "2025-12-31", instrument_id="VOO", quantity="20",
+                  cost_basis="11000", acquired_on="2025-03-03", currency="USD"),
+        _mx_entry(6, "ibkr", "opening_balance", "2025-12-31", "1000", currency="USD"),
+        _mx_entry(7, "afore", "opening_balance", "2025-12-31", "450000"),
+    ]
+    i = 8
+    for month in ("01", "02", "03", "04", "05", "06"):
+        q2 = month in ("04", "05", "06")
+        rows += [
+            _mx_entry(i, "bbva", "income", f"2026-{month}-01", "60000", subtype="salary", description="PAGO DE NOMINA ACME"),
+            _mx_entry(i + 1, "bbva", "expense", f"2026-{month}-01", "-18000", description="RENTA DEPARTAMENTO"),
+            _mx_entry(i + 2, "bbva", "expense", f"2026-{month}-01", "-9000" if q2 else "-8000", description="WALMART SUPERCENTER"),
+            _mx_entry(i + 3, "bbva", "expense", f"2026-{month}-01", "-6000" if q2 else "-4000", description="RESTAURANTE EL CARDENAL"),
+        ]
+        i += 4
+    for month, price in (("04", "10000"), ("05", "10300")):
+        rows += [
+            _mx_entry(i, "bbva", "transfer", f"2026-{month}-01", "-10050", description="SPEI A GBM", transfer_group=f"t{month}"),
+            _mx_entry(i + 1, "gbm", "transfer", f"2026-{month}-01", "10050", description="SPEI DE BBVA", transfer_group=f"t{month}"),
+            _mx_entry(i + 2, "gbm", "buy", f"2026-{month}-01", f"-{price}", instrument_id="CSPXN", quantity="1"),
+            _mx_entry(i + 3, "gbm", "fee", f"2026-{month}-01", "-25", description="COMISION COMPRA CSPXN"),
+            _mx_entry(i + 4, "gbm", "fee", f"2026-{month}-01", "-4", description="IVA COMISION"),
+        ]
+        i += 5
+    rows += [
+        _mx_entry(i, "gbm", "sell", "2026-05-14", "50000", instrument_id="CETES", quantity="5000"),
+        _mx_entry(i + 1, "ibkr", "dividend", "2026-06-15", "30", currency="USD", instrument_id="VOO"),
+        _mx_entry(i + 2, "ibkr", "tax_withheld", "2026-06-15", "-3", currency="USD", instrument_id="VOO"),
+    ]
+    return rows
+
+
+_MX_REVIEW_LEDGER: dict[str, Any] = {
+    "accounts": [
+        {"id": "bbva", "institution": "BBVA", "type": "checking", "currency": "MXN", "owners": _MX_OWNER},
+        {"id": "gbm", "institution": "GBM", "type": "brokerage", "currency": "MXN", "owners": _MX_OWNER},
+        {"id": "ibkr", "institution": "Interactive Brokers", "type": "brokerage", "currency": "USD", "owners": _MX_OWNER},
+        {"id": "afore", "institution": "Afore XXI Banorte", "type": "afore", "currency": "MXN", "owners": _MX_OWNER},
+    ],
+    "instruments": [
+        {"id": "CSPXN", "symbol": "CSPXN", "currency": "MXN", "listing_currency": "MXN", "asset_class": "fund",
+         "underlying_symbol": "CSPX", "venue": "sic", "issuer_domicile": "IE"},
+        {"id": "CETES", "symbol": "CETES", "currency": "MXN", "listing_currency": "MXN", "asset_class": "fixed_income",
+         "underlying_symbol": "CETES", "venue": "bmv", "issuer_domicile": "MX"},
+        {"id": "VOO", "symbol": "VOO", "currency": "USD", "listing_currency": "USD", "asset_class": "fund",
+         "underlying_symbol": "VOO", "venue": "us", "issuer_domicile": "US"},
+    ],
+    "entries": _mx_entries(),
+    "fx": [{"date": d, "base": "USD", "quote": "MXN", "rate": r, "source": "Banxico FIX (fictional example)"}
+           for d, r in (("2025-12-31", "18.40"), ("2026-03-31", "18.60"), ("2026-04-30", "18.50"),
+                        ("2026-05-14", "18.30"), ("2026-05-31", "18.20"), ("2026-06-15", "18.10"),
+                        ("2026-06-30", "18.00"), ("2025-03-03", "20.30"), ("2025-06-02", "19.40"),
+                        ("2025-12-01", "18.30"))],
+    "assertions": [], "labels": [], "category_rules": [],
+}
+
+
+_MX_REVIEW_PRICES = {
+    "CSPXN": [{"date": "2025-12-31", "price": "9800"}, {"date": "2026-03-31", "price": "10000"},
+              {"date": "2026-04-30", "price": "10300"}, {"date": "2026-05-31", "price": "10100"},
+              {"date": "2026-06-30", "price": "10500"}],
+    "CETES": [{"date": "2025-12-31", "price": "9.80"}, {"date": "2026-03-31", "price": "9.90"},
+              {"date": "2026-04-30", "price": "9.97"}, {"date": "2026-05-31", "price": "10.04"},
+              {"date": "2026-06-30", "price": "10.11"}],
+    "VOO": [{"date": "2025-12-31", "price": "470"}, {"date": "2026-03-31", "price": "480"},
+            {"date": "2026-04-30", "price": "490"}, {"date": "2026-05-31", "price": "495"},
+            {"date": "2026-06-30", "price": "505"}],
+}
+
+
+_MX_REVIEW_IPS = {"currency": "MXN", "decision_id": "ips-example", "risk": {"profile": "balanced"},
+                  "allocation": {"model": "balanced", "sleeves": [
+                      {"id": "global_equity", "name": "Global equity", "asset": "equity", "target": 0.6, "min": 0.55, "max": 0.65},
+                      {"id": "mx_fixed_income", "name": "Mexican government fixed income", "asset": "fixed_income",
+                       "target": 0.35, "min": 0.3, "max": 0.4},
+                      {"id": "cash", "name": "Cash (MXN)", "asset": "cash", "target": 0.05, "min": 0.0375, "max": 0.0625}]}}
+
+
+_MX_EQUITY_INDEX = {"name": "MSCI ACWI in MXN (fictional levels)",
+                    "series": [{"date": "2026-03-31", "value": "100"}, {"date": "2026-06-30", "value": "104.2"}]}
+
+
+_MX_FEE_OPTIONS: dict[str, Any] = {
+    "instruments": {
+        "CSPXN": {"expense_ratio": {"value": "0.07", "unit": "percent",
+                                    "source": "iShares Core S&P 500 UCITS factsheet (fictional example)"}},
+        "VOO": {"expense_ratio": {"value": "0.0003", "source": "Vanguard VOO prospectus (fictional example)"}},
+        "CETES": {"expense_ratio": {"value": "0", "source": "Government security held directly: no management fee"}},
+    },
+    "alternatives": [{"symbol": "CSPX", "underlying_symbol": "CSPX", "issuer_domicile": "IE",
+                      "expense_ratio": {"value": "0.07", "unit": "percent",
+                                        "source": "iShares CSPX factsheet (fictional example)"}}],
+    "cash_reference_rate": {"low": "7.0", "high": "7.5", "unit": "percent", "source": "CETES 28 days (fictional example)"},
+}
+
+
+_MX_REVIEW_FACTS = [
+    {"key": "client.profile", "value": {"name": "Ana", "language": "es", "residence": {"country": "MX"},
+                                        "tax_residence": ["MX"], "us_person": False, "birth_year": 1988}},
+    {"key": "income.salary", "value": {"amount": 60000, "currency": "MXN", "frequency": "monthly", "kind": "salary"}},
+    {"key": "spending.monthly", "value": {"essential": 30000, "total": 33000, "currency": "MXN"}},
+    {"key": "cash.nu", "value": {"amount": 90000, "currency": "MXN", "purpose": "reserve", "institution": "Nu"}},
+    {"key": "reserve", "value": {"target_months": 6}},
+    {"key": "goals", "value": [{"id": "retiro", "name": "Retiro", "target_amount": 8000000, "currency": "MXN",
+                                "target_date": "2055-01-01", "monthly_contribution": 10000}]},
+    {"key": "thread.voo", "value": {"kind": "advice", "text": "Revisar si conviene pasar VOO a CSPX por situs sucesorio.",
+                                    "status": "open", "created": "2026-05-20"}},
+    {"key": "planning.dca", "value": {"plans": [{"id": "sp500", "currency": "MXN", "cadence": "monthly",
+                                                 "start_date": "2026-04-01", "account_id": "gbm",
+                                                 "legs": [{"instrument_id": "CSPXN", "amount": "10000"}]}]}},
+]
+
+
+_MX_REVIEW_EXAMPLE: dict[str, Any] = {
+    "period_start": "2026-04-01", "period_end": "2026-06-30", "currency": "MXN",
+    "ledger": _MX_REVIEW_LEDGER, "prices": _MX_REVIEW_PRICES, "facts": _MX_REVIEW_FACTS, "ips": _MX_REVIEW_IPS,
+    "benchmarks": {"ips": {"global_equity": _MX_EQUITY_INDEX,
+                           "mx_fixed_income": {"name": "CETES 364 days", "annual_rate": "0.075",
+                                               "source": "Banxico auction yield (fictional example)"},
+                           "cash": {"name": "CETES 28 days", "annual_rate": "0.07",
+                                    "source": "Banxico auction yield (fictional example)"}},
+                   "reference_60_40": {"equity": _MX_EQUITY_INDEX,
+                                       "bonds": {"name": "Global aggregate bonds in MXN (fictional levels)",
+                                                 "series": [{"date": "2026-03-31", "value": "100"},
+                                                            {"date": "2026-06-30", "value": "100.9"}]}}},
+    "tax": {"jurisdiction": "MX", "mx_marginal_rate": "0.30"}, "sic_listed": {"VOO": True},
+    "goal_accounts": {"retiro": ["gbm", "ibkr"]},
+    "ppr": {"tax_year": 2026, "accumulable_income_mxn": "720000", "contributed_mxn": "20000", "marginal_rate": "0.30"},
+    "fees": _MX_FEE_OPTIONS,
+}
+
+
 CATALOG: dict[str, dict[str, Any]] = {
     "import": {
         "purpose": "Validate and reconcile a household from canonical JSON, CSV, or XLSX without inventing accounts, lots, or values.",
@@ -637,6 +789,65 @@ CATALOG: dict[str, dict[str, Any]] = {
         "required": ["client_id (or facts [{key, value}] and an optional ledger)"],
         "optional": ["as_of", "jurisdiction", "timezone"],
         "example": {"as_of": "2026-12-18", "facts": _PROACTIVE_FACTS, "ledger": _PROACTIVE_LEDGER},
+    },
+    "quarterly_review": {
+        "purpose": "The quarterly report a private bank sends: net worth start to end decomposed into contributions "
+                   "and growth, TWR and XIRR per account against the IPS benchmark and a global 60/40, allocation and "
+                   "drift against the IPS bands, cash flow and savings rate vs the prior quarter, goal progress and "
+                   "pace, the decision journal with what happened since, DCA adherence, realised gains and estimated "
+                   "MX/US tax (period and YTD), fees paid, the timeline of changed facts, open threads, and two "
+                   "ranked decisions for next quarter. Every section has status, missing, sources and assumptions; "
+                   "narrative_inputs are the only numbers a letter may use.",
+        "required": ["period_start, period_end (inclusive; the opening value is the end of the day before)",
+                     "client_id with a posted ledger (or ledger)", "prices {instrument_id: [{date, price}]}"],
+        "optional": ["currency (default: the picture's)", "ips (default: the accepted policy.ips)",
+                     "benchmarks {ips: {sleeve_id: {name, series [{date, value}]} | {name, annual_rate, source}}, "
+                     "reference_60_40: {equity, bonds}}",
+                     "tax {jurisdiction: MX|US, mx_marginal_rate, us_rates {short_term, long_term}}",
+                     "sic_listed {instrument_id: true|false} (MX regime of foreign-venue sales)",
+                     "fees {instruments {id: {expense_ratio {value, unit: decimal|percent|bps, source}}}, alternatives, "
+                     "cash_reference_rate {low, high, unit, source}, cash_yield, advisory, afore, accounts, return_range}",
+                     "goal_accounts {goal_id: [account_id]}", "goal_return_assumption (0.05)",
+                     "dca_plans (default planning.dca)",
+                     "ppr {tax_year, accumulable_income_mxn, contributed_mxn, marginal_rate}",
+                     "sleeve_map {instrument_id: sleeve_id}", "facts [{key, value}] to run without a profile",
+                     "max_price_age_days (5)", "max_fx_age_days (5)"],
+        "notes": "Result: sections {net_worth, performance, allocation, cash_flow, goals, decisions, dca, taxes, fees, "
+                 "changes, threads, next_quarter} each {status, data, missing, sources, assumptions, warnings}, and "
+                 "narrative_inputs. net_worth.data.identity satisfies start + contributions + growth = end.",
+        "example": _MX_REVIEW_EXAMPLE,
+    },
+    "fee_audit": {
+        "purpose": "All-in annual cost audit: fund expense ratios (sourced only; ambiguous units stay unknown), broker "
+                   "commissions plus IVA from the ledger, AFORE comisión (CONSAR, dated; fails closed), advisory/wrap "
+                   "fees and idle-cash drag as a range. Annual cost in money and basis points, top 3 sources, neutral "
+                   "cheaper equivalents (same index lower TER; for Mexico residents the Irish UCITS route and estate "
+                   "situs) and the 10/20-year compounding cost of the fee gap as a range.",
+        "required": ["holdings [{account_id, instrument_id, value}] in currency, or client_id/ledger + prices",
+                     "instruments {id: {expense_ratio {value, unit?, source}}} for fund costs"],
+        "optional": ["as_of (default today)", "currency", "accounts [{id, type, afore_name?}]",
+                     "window_start (commissions window; default one year)", "residence (MX|US)",
+                     "advisory [{name, rate {value, unit, source}, account_ids?}]",
+                     "cash_reference_rate {low, high, unit, source}", "cash_yield",
+                     "alternatives [{symbol, underlying_symbol|index, issuer_domicile, expense_ratio {value, unit, source}}]",
+                     "afore [{name, balance}]", "return_range [low, high] (0.04, 0.07)"],
+        "example": {"as_of": "2026-06-30", "currency": "MXN", "residence": "MX", "ledger": _MX_REVIEW_LEDGER,
+                    "prices": _MX_REVIEW_PRICES, "window_start": "2026-01-01", **_MX_FEE_OPTIONS},
+        "variants": {"holdings_only": {
+            "as_of": "2026-06-30", "currency": "USD", "residence": "US",
+            "holdings": [{"account_id": "brk", "instrument_id": "FUNDX", "value": 100000},
+                         {"account_id": "brk", "instrument_id": "cash:USD", "kind": "cash", "value": 5000}],
+            "instruments": {"FUNDX": {"symbol": "FUNDX", "index": "US total market",
+                                      "expense_ratio": {"value": "0.45", "unit": "percent",
+                                                        "source": "fund prospectus (fictional)"}}},
+            "accounts": [{"id": "brk", "type": "taxable"}],
+            "alternatives": [{"symbol": "VTI", "underlying_symbol": "VTI",
+                              "expense_ratio": {"value": "3", "unit": "bps", "source": "Vanguard VTI (fictional example)"}}],
+            "advisory": [{"name": "Advisor wrap", "rate": {"value": "1", "unit": "percent",
+                                                          "source": "advisory agreement (fictional)"}}],
+            "cash_reference_rate": {"low": "4.0", "high": "4.5", "unit": "percent",
+                                    "source": "3-month T-bill (fictional example)"},
+        }},
     },
     "monitor": {
         "purpose": "Evaluate opt-in review, expiry, drift, goal, threshold, or thesis rules and return only state changes to the caller.",
