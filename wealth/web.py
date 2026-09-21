@@ -402,7 +402,8 @@ SECURITY_HEADERS = (
     ("X-Content-Type-Options", "nosniff"),
     ("Referrer-Policy", "no-referrer"),
     ("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; "
-     "style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; "
+     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; "
+     "img-src 'self' data:; connect-src 'self'; "
      "frame-ancestors 'none'; base-uri 'none'; form-action 'self'"),
 )
 

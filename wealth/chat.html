@@ -3,65 +3,30 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
-  <meta name="color-scheme" content="light dark">
+  <meta name="color-scheme" content="light">
   <meta name="referrer" content="no-referrer">
   <title>Wealth</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500&display=swap">
   <style>
+    /* Dot design language: light only, flat paper, hairlines that separate, one vermilion primary. */
     :root {
-      --paper: #f6f3ea;
-      --paper-deep: #efeadd;
-      --surface: #fffdf8;
-      --ink: #15271f;
-      --ink-soft: #33443c;
-      --muted: #5d6760;
-      --line: #e1dccd;
-      --line-strong: #cfc8b5;
-      --accent: #1f5a47;
-      --accent-hover: #184a3a;
-      --accent-ink: #fbf8f0;
-      --accent-soft: #e6eee7;
-      --brass: #7a5c24;
-      --brass-soft: #efe4cc;
-      --user: #e9e5d8;
-      --danger: #a3432f;
-      --danger-soft: #f8ebe5;
-      --neg: #a3432f;
-      --code: #efeadc;
-      --focus: #1f5a47;
-      --shadow: 0 1px 0 rgba(21, 39, 31, .04), 0 12px 32px -12px rgba(21, 39, 31, .18);
-      --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
-      --sans: "Avenir Next", Avenir, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
-      --mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
-      --column: 46rem;
-      --gutter: clamp(16px, 4vw, 32px);
+      --canvas: #FBF8F2;
+      --surface: #FFFCF7;
+      --blush: #F4DED9;
+      --vermilion: #C84335;
+      --pressed: #A9372E;
+      --cobalt: #4358C7;           /* live information only: the working state */
+      --ink: #2B2522;
+      --ink-soft: #4A413C;         /* warm-ink tints for secondary text */
+      --muted: #6E625B;
+      --hairline: #D9CEC6;
+      --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      --mono: "Roboto Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      --column: 44rem;
+      --gutter: 24px;
       color-scheme: light;
-    }
-
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --paper: #0f1a15;
-        --paper-deep: #0b1410;
-        --surface: #16231d;
-        --ink: #ece6d6;
-        --ink-soft: #d3cdbd;
-        --muted: #9aa59e;
-        --line: #26362e;
-        --line-strong: #34463c;
-        --accent: #8fc0a8;
-        --accent-hover: #a6cfba;
-        --accent-ink: #0f1a15;
-        --accent-soft: #1b2e25;
-        --brass: #c9a96a;
-        --brass-soft: #2a2819;
-        --user: #1d2c25;
-        --danger: #e59a88;
-        --danger-soft: #2b1b17;
-        --neg: #e59a88;
-        --code: #1b2922;
-        --focus: #8fc0a8;
-        --shadow: 0 1px 0 rgba(0, 0, 0, .2), 0 14px 36px -14px rgba(0, 0, 0, .6);
-        color-scheme: dark;
-      }
     }
 
     * { box-sizing: border-box; }
@@ -69,8 +34,9 @@
 
     body {
       color: var(--ink);
-      background: var(--paper);
-      font: 400 16px/1.6 var(--sans);
+      background: var(--canvas);
+      font: 400 16px/24px var(--sans);
+      font-feature-settings: "cv11", "ss01";
       -webkit-font-smoothing: antialiased;
       text-rendering: optimizeLegibility;
       overflow: hidden;
@@ -78,7 +44,9 @@
 
     button, textarea, input { font: inherit; color: inherit; }
     button { cursor: pointer; }
-    :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 6px; }
+    :focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; border-radius: 4px; }
+    .text-control:focus-visible { outline-offset: -2px; }
+    .send:focus-visible { outline-offset: 3px; border-radius: 8px; }
 
     .sr-only {
       position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
@@ -96,74 +64,40 @@
 
     .column { width: min(var(--column), 100%); margin: 0 auto; padding: 0 var(--gutter); }
 
-    .topbar {
-      border-bottom: 1px solid var(--line);
-      background: color-mix(in srgb, var(--paper) 92%, transparent);
-      padding-top: env(safe-area-inset-top);
-    }
+    .topbar { padding-top: env(safe-area-inset-top); border-bottom: 1px solid transparent; }
+    .topbar.scrolled { border-bottom-color: var(--hairline); }
 
     .topbar .column {
-      width: min(64rem, 100%);
       display: flex;
       align-items: center;
-      gap: 16px;
-      min-height: 60px;
+      gap: 8px;
+      min-height: 56px;
     }
 
     .wordmark {
-      display: flex;
-      align-items: baseline;
-      gap: 12px;
-      min-width: 0;
       flex: 1;
-    }
-
-    .wordmark h1 {
       margin: 0;
-      font: 500 1.45rem/1 var(--serif);
+      font: 600 17px/1 var(--sans);
       letter-spacing: -.01em;
     }
 
-    .wordmark h1::after {
-      content: "";
-      display: inline-block;
-      width: 5px; height: 5px;
-      margin-left: 3px;
-      border-radius: 50%;
-      background: var(--brass);
-      vertical-align: .08em;
-    }
-
-    .profile {
-      min-width: 0;
-      overflow: hidden;
-      color: var(--muted);
-      font-size: .8125rem;
-      white-space: nowrap;
-      text-overflow: ellipsis;
-    }
-
-    .profile strong { color: var(--ink-soft); font-weight: 600; }
-
-    .ghost {
+    .text-control {
       display: inline-flex;
       align-items: center;
-      gap: 8px;
-      min-height: 36px;
-      padding: 0 12px;
-      border: 1px solid var(--line-strong);
-      border-radius: 999px;
+      min-height: 44px;
+      padding: 0 8px;
+      border: 0;
       background: transparent;
       color: var(--ink-soft);
-      font-size: .8125rem;
-      font-weight: 600;
+      font-size: 15px;
+      font-weight: 500;
+      text-decoration: none;
       white-space: nowrap;
-      transition: background .15s ease, border-color .15s ease;
     }
-
-    .ghost:hover:not(:disabled) { background: var(--surface); border-color: var(--muted); }
-    .ghost:disabled { opacity: .5; cursor: default; }
-    .ghost svg { flex: none; }
+    .text-control:last-child { margin-right: -8px; }
+    .text-control:hover:not(:disabled) { color: var(--ink); text-decoration: underline; text-decoration-color: var(--hairline); text-underline-offset: 6px; }
+    .text-control:disabled { opacity: .45; cursor: default; }
+    .text-control[hidden] { display: none; }
 
     .conversation {
       min-height: 0;
@@ -171,313 +105,308 @@
       overscroll-behavior: contain;
       scrollbar-gutter: stable;
       scrollbar-width: thin;
-      scrollbar-color: var(--line-strong) transparent;
+      scrollbar-color: var(--hairline) transparent;
     }
 
-    .conversation .column { padding-top: clamp(24px, 6vh, 56px); padding-bottom: 32px; }
+    .conversation .column { padding-top: 24px; padding-bottom: 32px; }
 
-    .messages { display: flex; flex-direction: column; gap: 28px; }
+    .messages { display: flex; flex-direction: column; gap: 32px; }
 
-    /* ---------- messages ---------- */
+    /* ---------- turns ---------- */
 
-    .message { animation: arrive .28s cubic-bezier(.2, .7, .2, 1); min-width: 0; }
+    .message { animation: arrive .24s cubic-bezier(.2, .7, .2, 1); min-width: 0; }
 
-    .message.user { align-self: flex-end; max-width: min(85%, 36rem); }
+    .message.user { align-self: flex-end; max-width: min(85%, 34rem); }
 
     .message.user .bubble {
       padding: 11px 16px;
-      border-radius: 18px 18px 6px 18px;
-      background: var(--user);
+      border: 1px solid var(--hairline);
+      border-radius: 8px;
+      background: var(--surface);
       color: var(--ink);
       white-space: pre-wrap;
       overflow-wrap: anywhere;
     }
 
-    .who {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      margin: 0 0 8px;
-      color: var(--muted);
-      font-size: .75rem;
-      font-weight: 600;
-      letter-spacing: .12em;
-      text-transform: uppercase;
-    }
-
-    .who::before {
-      content: "W";
-      display: grid;
-      place-items: center;
-      width: 22px; height: 22px;
-      border: 1px solid var(--line-strong);
-      border-radius: 50%;
-      color: var(--accent);
-      font: 500 .75rem/1 var(--serif);
-      letter-spacing: 0;
-    }
-
     .answer { color: var(--ink); overflow-wrap: break-word; }
     .answer > :first-child { margin-top: 0; }
     .answer > :last-child { margin-bottom: 0; }
-    .answer p { margin: 0 0 .85em; }
+    .answer p { margin: 0 0 12px; }
     .answer h2, .answer h3, .answer h4, .answer h5 {
-      margin: 1.5em 0 .5em;
-      font-family: var(--serif);
+      margin: 32px 0 8px;
       font-weight: 600;
-      line-height: 1.25;
-      letter-spacing: -.005em;
+      line-height: 1.3;
+      letter-spacing: -.01em;
     }
-    .answer h2 { font-size: 1.3rem; }
-    .answer h3 { font-size: 1.12rem; }
-    .answer h4, .answer h5 { font-size: 1rem; }
-    .answer ul, .answer ol { margin: 0 0 .9em; padding-left: 1.4em; }
-    .answer li { margin: .25em 0; padding-left: .2em; }
+    .answer h2 { font-size: 20px; }
+    .answer h3 { font-size: 17px; }
+    .answer h4, .answer h5 { font-size: 16px; }
+    .answer ul, .answer ol { margin: 0 0 16px; padding-left: 20px; }
+    .answer li { margin: 4px 0; padding-left: 4px; }
     .answer li::marker { color: var(--muted); }
     .answer ol li::marker { font-variant-numeric: tabular-nums; }
-    .answer strong { font-weight: 650; }
+    .answer strong { font-weight: 600; }
     .answer a, .message.user a {
-      color: var(--accent);
+      color: inherit;
       text-decoration: underline;
       text-decoration-thickness: 1px;
       text-underline-offset: 3px;
-      text-decoration-color: color-mix(in srgb, currentColor 40%, transparent);
+      text-decoration-color: var(--hairline);
     }
-    .answer a:hover { text-decoration-color: currentColor; }
-    .answer hr { border: 0; border-top: 1px solid var(--line); margin: 1.5em 0; }
+    .answer a:hover { text-decoration-color: var(--ink); }
+    .answer hr { border: 0; border-top: 1px solid var(--hairline); margin: 24px 0; }
 
     .answer code {
-      padding: .1em .35em;
-      border-radius: 5px;
-      background: var(--code);
-      font: .88em/1.4 var(--mono);
+      padding: 1px 4px;
+      border-radius: 4px;
+      background: var(--blush);
+      font: .875em/1.4 var(--mono);
     }
 
     .answer pre {
-      margin: 0 0 1em;
-      padding: 14px 16px;
+      margin: 0 0 16px;
+      padding: 12px 16px;
       overflow-x: auto;
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      background: var(--code);
+      border: 1px solid var(--hairline);
+      border-radius: 8px;
+      background: var(--surface);
     }
-    .answer pre code { padding: 0; background: none; font-size: .85rem; line-height: 1.55; }
+    .answer pre code { padding: 0; background: none; font-size: 13px; line-height: 1.6; }
 
     .answer blockquote {
-      margin: 0 0 1em;
-      padding: 2px 0 2px 16px;
-      border-left: 2px solid var(--brass);
+      margin: 0 0 16px;
+      padding: 0 0 0 16px;
+      border-left: 1.5px solid var(--hairline);
       color: var(--ink-soft);
     }
 
-    .table-wrap {
-      margin: 0 0 1.1em;
-      overflow-x: auto;
-      border: 1px solid var(--line);
-      border-radius: 10px;
+    .answer .provenance { color: var(--muted); font: 400 12px/1.5 var(--mono); }
+
+    /* Ticket: a two-column table read as ruled label / value rows. */
+    .ticket {
+      margin: 0 0 16px;
+      padding: 4px 16px;
+      border: 1px solid var(--hairline);
+      border-radius: 8px;
       background: var(--surface);
     }
+    .ticket dl { margin: 0; }
+    .ticket .row {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 12px 0 11px;
+      border-top: 1px solid var(--hairline);
+    }
+    .ticket .row:first-child { border-top: 0; }
+    .ticket .caption { padding: 12px 0 8px; color: var(--muted); font-size: 13px; }
+    .ticket .caption + .row { border-top: 1px solid var(--hairline); }
+    .ticket dt { min-width: 0; color: var(--ink-soft); font-size: 15px; line-height: 24px; }
+    .ticket dd { margin: 0; text-align: right; font-size: 15px; overflow-wrap: anywhere; }
+    .ticket dd.num { font: 400 15px/24px var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .ticket .row.total { border-top: 1.5px solid var(--ink); margin-top: 4px; }
+    .ticket .row.total dt, .ticket .row.total dd { color: var(--ink); font-weight: 600; }
+    .ticket .row.total dd.num { font-weight: 500; }
 
+    /* Multi-column tables stay typographic: hairline rows, right-aligned tabular numbers. */
+    .table-wrap { margin: 0 0 16px; overflow-x: auto; }
     .answer table {
       width: 100%;
       border-collapse: collapse;
-      font-size: .9rem;
+      font-size: 15px;
       font-variant-numeric: tabular-nums lining-nums;
     }
-
     .answer th, .answer td {
-      padding: 9px 14px;
-      border-bottom: 1px solid var(--line);
+      padding: 12px 16px 12px 0;
+      border-bottom: 1px solid var(--hairline);
       text-align: left;
       vertical-align: top;
       white-space: nowrap;
     }
+    .answer th:last-child, .answer td:last-child { padding-right: 0; }
     .answer td:first-child, .answer th:first-child { white-space: normal; min-width: 7rem; }
-    .answer tr:last-child td { border-bottom: 0; }
+    .answer tbody tr:last-child td { border-bottom: 0; }
     .answer th {
+      padding-top: 0;
+      padding-bottom: 8px;
+      border-bottom: 1.5px solid var(--ink);
       color: var(--muted);
-      font-size: .75rem;
-      font-weight: 600;
-      letter-spacing: .06em;
-      text-transform: uppercase;
-      background: var(--paper);
+      font-size: 13px;
+      font-weight: 500;
     }
     .answer .num { text-align: right; }
-    .answer .neg { color: var(--neg); }
     .answer .center { text-align: center; }
 
+    /* Assumptions sit on plain surface; missing inputs on a quiet blush plane. */
     .callout {
-      margin: 0 0 1em;
-      padding: 12px 16px 4px;
-      border: 1px solid var(--line);
-      border-left: 3px solid var(--brass);
-      border-radius: 4px 10px 10px 4px;
-      background: color-mix(in srgb, var(--brass-soft) 55%, var(--surface));
-      font-size: .94rem;
+      margin: 0 0 16px;
+      padding: 16px 16px 4px;
+      border: 1px solid var(--hairline);
+      border-radius: 8px;
+      background: var(--surface);
+      font-size: 15px;
     }
-    .callout[data-kind="missing"] { border-left-color: var(--danger); background: color-mix(in srgb, var(--danger-soft) 70%, var(--surface)); }
+    .callout[data-kind="missing"] { border-color: transparent; background: var(--blush); }
     .callout > :is(h2, h3, h4, h5):first-child {
-      margin: 0 0 .4em;
-      font: 600 .75rem/1.4 var(--sans);
-      letter-spacing: .1em;
-      text-transform: uppercase;
-      color: var(--brass);
+      margin: 0 0 8px;
+      color: var(--ink);
+      font: 600 15px/1.4 var(--sans);
+      letter-spacing: 0;
     }
-    .callout[data-kind="missing"] > :first-child { color: var(--danger); }
+    .callout ul, .callout ol { margin-bottom: 12px; }
 
+    /* Remembering: one quiet line. */
     .memory {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      margin-top: 14px;
-      padding: 5px 12px 5px 10px;
-      border: 1px solid var(--line);
-      border-radius: 999px;
+      margin: 16px 0 0;
       color: var(--muted);
-      font-size: .8125rem;
+      font-size: 13px;
     }
-    .memory svg { color: var(--brass); flex: none; }
 
-    .attachments { display: flex; flex-wrap: wrap; gap: 6px; }
-    .message.user .attachments { justify-content: flex-end; margin-bottom: 6px; }
+    .attachments { display: flex; flex-wrap: wrap; gap: 8px; }
+    .message.user .attachments { justify-content: flex-end; margin-bottom: 8px; }
 
     .chip {
       display: inline-flex;
       align-items: center;
-      gap: 7px;
+      gap: 8px;
       max-width: 100%;
-      min-height: 32px;
-      padding: 4px 10px;
-      border: 1px solid var(--line-strong);
+      min-height: 44px;
+      padding: 0 12px;
+      border: 1px solid var(--hairline);
       border-radius: 8px;
       background: var(--surface);
-      font-size: .8125rem;
+      font-size: 14px;
     }
+    .chip svg { color: var(--muted); flex: none; }
     .chip .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 14rem; }
-    .chip .meta { color: var(--muted); font-size: .75rem; white-space: nowrap; }
-    .chip.error { border-color: var(--danger); color: var(--danger); }
+    .chip .meta { color: var(--muted); font: 400 12px var(--mono); white-space: nowrap; }
+    .chip.error { background: var(--blush); border-color: transparent; }
+    .chip.error .meta { color: var(--ink-soft); font-family: var(--sans); }
     .chip button {
       display: grid; place-items: center;
-      width: 22px; height: 22px; margin-right: -4px;
-      padding: 0; border: 0; border-radius: 50%;
+      width: 44px; height: 44px; margin: 0 -12px 0 -8px;
+      padding: 0; border: 0; border-radius: 8px;
       background: transparent; color: var(--muted);
     }
-    .chip button:hover { background: var(--paper-deep); color: var(--ink); }
-    .chip .spin { width: 12px; height: 12px; border: 1.5px solid var(--line-strong); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
+    .chip button:hover { color: var(--ink); }
 
-    /* pending */
+    /* ---------- presence and worktrace ---------- */
 
-    .pending .status-line {
+    .presence { display: block; flex: none; width: 24px; height: 24px; }
+    .presence .live { animation: seam 1.6s ease-in-out infinite; }
+
+    /* Same 24px line box as the answer's first line, so nothing moves when the answer replaces it. */
+    .worktrace {
       display: flex;
       align-items: center;
       gap: 12px;
-      min-height: 28px;
-      color: var(--ink-soft);
-      font-size: .94rem;
+      min-height: 24px;
     }
-    .pulse { position: relative; width: 28px; height: 2px; overflow: hidden; border-radius: 2px; background: var(--line); flex: none; }
-    .pulse::after {
-      content: ""; position: absolute; inset: 0; width: 40%;
-      border-radius: 2px; background: var(--brass);
-      animation: sweep 1.4s cubic-bezier(.45, 0, .55, 1) infinite;
-    }
-    .elapsed { color: var(--muted); font-size: .8125rem; font-variant-numeric: tabular-nums; }
+    .worktrace .step { color: var(--ink-soft); font-size: 16px; line-height: 24px; min-width: 0; }
 
-    /* errors */
+    /* ---------- failure: statement, cause, recovery ---------- */
 
     .alert {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 6px 14px;
-      margin-top: 10px;
-      padding: 10px 14px;
-      border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
-      border-radius: 12px;
-      background: var(--danger-soft);
+      display: grid;
+      grid-template-columns: 24px minmax(0, 1fr);
+      gap: 0 12px;
+      margin-top: 8px;
+      padding: 16px 16px 4px;
+      border: 1px solid var(--hairline);
+      border-radius: 8px;
+      background: var(--surface);
       color: var(--ink);
-      font-size: .875rem;
+      font-size: 15px;
+      line-height: 24px;
       text-align: left;
     }
-    .alert.quiet { border-color: var(--line); background: var(--surface); }
-    .alert p { margin: 0; flex: 1 1 16rem; }
-    .alert .detail { display: block; margin-top: 2px; color: var(--muted); font-size: .75rem; overflow-wrap: anywhere; }
-    .alert code { font: .85em var(--mono); }
+    .alert.quiet { grid-template-columns: minmax(0, 1fr); }
+    .alert p { margin: 0; text-wrap: pretty; }
+    .alert code { font: .875em var(--mono); }
+    .alert .detail { grid-column: -2 / -1; color: var(--muted); font-size: 13px; }
+    .alert .detail summary { display: inline-flex; align-items: center; min-height: 44px; cursor: pointer; list-style: none; }
+    .alert .detail summary::-webkit-details-marker { display: none; }
+    .alert .detail summary:hover { color: var(--ink); }
+    .alert .detail code { display: block; margin-bottom: 8px; font: 400 12px/1.5 var(--mono); overflow-wrap: anywhere; }
+    .alert .detail + button { margin-top: -8px; }
     .alert button {
-      min-height: 32px;
-      padding: 0 12px;
-      border: 1px solid var(--line-strong);
-      border-radius: 999px;
-      background: var(--surface);
-      font-size: .8125rem;
+      grid-column: -2 / -1;
+      justify-self: start;
+      min-height: 44px;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: var(--ink);
+      font-size: 15px;
       font-weight: 600;
+      text-decoration: underline;
+      text-decoration-color: var(--hairline);
+      text-decoration-thickness: 1.5px;
+      text-underline-offset: 6px;
     }
+    .alert button:hover { text-decoration-color: var(--ink); }
 
-    /* empty state */
+    /* ---------- welcome ---------- */
 
-    .intro { padding-bottom: 8px; }
+    .intro { padding-top: 16px; }
     .intro .greeting {
-      margin: 0 0 14px;
-      font: 400 clamp(1.9rem, 5vw, 2.6rem)/1.1 var(--serif);
+      margin: 0;
+      max-width: 36rem;
+      font: 600 32px/40px var(--sans);
       letter-spacing: -.02em;
+      text-wrap: balance;
     }
-    .intro .lede { margin: 0; max-width: 36rem; color: var(--ink-soft); font-size: 1.02rem; }
-    .starters { display: grid; gap: 8px; margin-top: 28px; }
+    .intro .greeting .stop { color: var(--vermilion); }
+    .starters { margin: 32px 0 0; padding: 0; list-style: none; border-top: 1px solid var(--hairline); }
+    .starters li { border-bottom: 1px solid var(--hairline); }
     .starter {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 16px;
+      display: block;
       width: 100%;
-      min-height: 52px;
-      padding: 12px 16px;
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      background: var(--surface);
+      min-height: 56px;
+      padding: 16px 0;
+      border: 0;
+      background: transparent;
+      color: var(--ink);
+      font-size: 16px;
+      font-weight: 500;
       text-align: left;
-      transition: border-color .15s ease, transform .15s ease, box-shadow .15s ease;
     }
-    .starter:hover { border-color: var(--line-strong); box-shadow: var(--shadow); transform: translateY(-1px); }
-    .starter span { font-weight: 500; }
-    .starter svg { color: var(--muted); flex: none; }
+    .starter:hover { color: var(--pressed); }
+    .privacy { margin-top: 24px; color: var(--muted); font-size: 13px; }
+    .privacy summary { display: inline-flex; align-items: center; min-height: 44px; cursor: pointer; list-style: none; }
+    .privacy summary::-webkit-details-marker { display: none; }
+    .privacy summary:hover { color: var(--ink); }
+    .privacy p { margin: 0 0 8px; max-width: 34rem; }
 
     /* ---------- composer ---------- */
 
-    .dock {
-      position: relative;
-      padding: 0 0 max(12px, env(safe-area-inset-bottom));
-      background: linear-gradient(to bottom, transparent, var(--paper) 22px);
-      margin-top: -22px;
-      padding-top: 22px;
-    }
+    .dock { padding: 8px 0 max(16px, env(safe-area-inset-bottom)); background: var(--canvas); }
 
+    /* The edge is drawn inside the box (outline, offset -1) so the composer sits exactly on the 8px grid. */
     .composer {
-      border: 1px solid var(--line-strong);
-      border-radius: 20px;
+      border-radius: 8px;
+      outline: 1px solid var(--hairline);
+      outline-offset: -1px;
       background: var(--surface);
-      box-shadow: var(--shadow);
-      transition: border-color .15s ease, box-shadow .15s ease;
     }
-    .composer:focus-within {
-      border-color: var(--focus);
-      box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 22%, transparent), var(--shadow);
-    }
+    .composer:focus-within { outline: 1.5px solid var(--ink); outline-offset: -1.5px; }
 
-    .composer .attachments { padding: 10px 12px 0; }
+    .composer .attachments { padding: 8px 8px 0; }
     .composer .attachments:empty { display: none; }
 
     textarea {
       display: block;
       width: 100%;
-      min-height: 52px;
+      min-height: 40px;
       max-height: 40vh;
-      padding: 15px 18px 6px;
+      padding: 12px 16px 4px;
       resize: none;
       border: 0;
       outline: none;
       background: transparent;
       color: var(--ink);
-      font-size: 1rem;
+      font-size: 16px;
       line-height: 1.5;
     }
     textarea:focus-visible { outline: none; }
@@ -486,113 +415,95 @@
     .toolbar {
       display: flex;
       align-items: center;
-      gap: 8px;
-      padding: 6px 8px 8px 10px;
+      gap: 4px;
+      padding: 0 4px 4px;
     }
 
     .icon-button {
       display: grid;
       place-items: center;
-      width: 36px; height: 36px;
+      width: 44px; height: 44px;
       padding: 0;
       border: 0;
-      border-radius: 50%;
+      border-radius: 8px;
       background: transparent;
       color: var(--muted);
       flex: none;
     }
-    .icon-button:hover:not(:disabled) { background: var(--paper); color: var(--ink); }
-    .icon-button:disabled { opacity: .45; cursor: default; }
+    .icon-button:hover:not(:disabled) { color: var(--ink); }
+    .icon-button:disabled { opacity: .4; cursor: default; }
 
-    .depth { display: flex; align-items: center; gap: 10px; min-width: 0; margin: 0; padding: 0; border: 0; }
-    .segmented {
-      display: inline-flex;
-      padding: 2px;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      background: var(--paper);
-    }
+    .depth { display: flex; min-width: 0; margin: 0; padding: 0; border: 0; }
+    .segmented { display: inline-flex; }
     .segmented input { position: absolute; opacity: 0; pointer-events: none; }
     .segmented label {
-      padding: 4px 11px;
-      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      min-height: 44px;
+      padding: 0 8px;
       color: var(--muted);
-      font-size: .8125rem;
-      font-weight: 600;
+      font-size: 14px;
+      font-weight: 500;
       cursor: pointer;
       user-select: none;
-      transition: background .15s ease, color .15s ease;
+      position: relative;
     }
-    .segmented input:checked + label { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgba(0, 0, 0, .12); }
-    .segmented input:focus-visible + label { outline: 2px solid var(--focus); outline-offset: 1px; }
-    .segmented input:disabled + label { cursor: default; opacity: .6; }
-    .depth-hint { color: var(--muted); font-size: .75rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .segmented label::after { content: ""; position: absolute; left: 8px; right: 8px; bottom: 10px; height: 1.5px; background: var(--ink); opacity: 0; }
+    .segmented input:checked + label { color: var(--ink); }
+    .segmented input:checked + label::after { opacity: 1; }
+    .segmented input:focus-visible + label { outline: 2px solid var(--ink); outline-offset: -4px; border-radius: 4px; }
+    .segmented input:disabled + label { cursor: default; opacity: .55; }
 
     .send {
       display: grid;
       place-items: center;
-      width: 40px; height: 40px;
+      width: 44px; height: 44px;
       margin-left: auto;
       padding: 0;
       border: 0;
-      border-radius: 50%;
-      background: var(--accent);
-      color: var(--accent-ink);
+      border-radius: 8px;
+      background: var(--vermilion);
+      color: var(--surface);
       flex: none;
-      transition: background .15s ease, opacity .15s ease, transform .1s ease;
     }
-    .send:hover:not(:disabled) { background: var(--accent-hover); }
-    .send:active:not(:disabled) { transform: scale(.95); }
-    .send:disabled { opacity: .35; cursor: default; }
+    .send:hover:not(:disabled), .send:active:not(:disabled) { background: var(--pressed); }
+    .send:disabled { background: var(--blush); color: var(--surface); cursor: default; }
     .send .stop-icon { display: none; }
     .send.stopping .stop-icon { display: block; }
     .send.stopping .send-icon { display: none; }
 
-    .footnote {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      padding: 8px 6px 0;
-      color: var(--muted);
-      font-size: .75rem;
-    }
-    .footnote details { text-align: right; }
-    .footnote summary { cursor: pointer; list-style: none; }
-    .footnote summary::-webkit-details-marker { display: none; }
-    .footnote summary:hover { color: var(--ink); }
-    .footnote details p { margin: 6px 0 0; max-width: 30rem; text-align: left; }
-
     .drop {
       position: fixed;
-      inset: 12px;
+      inset: 16px;
       z-index: 10;
       display: none;
       place-items: center;
-      border: 2px dashed var(--accent);
-      border-radius: 20px;
-      background: color-mix(in srgb, var(--paper) 88%, transparent);
-      color: var(--accent);
-      font: 500 1.2rem var(--serif);
+      border: 1.5px dashed var(--ink);
+      border-radius: 8px;
+      background: var(--canvas);
+      color: var(--ink);
+      font: 500 17px var(--sans);
       pointer-events: none;
     }
     .drop.active { display: grid; }
 
-    .fatal { margin: 12vh auto 0; max-width: 28rem; text-align: center; color: var(--ink-soft); }
-    .fatal h2 { font: 400 1.6rem var(--serif); margin: 0 0 8px; color: var(--ink); }
+    .fatal { margin: 12vh 0 0; max-width: 28rem; color: var(--ink-soft); }
+    .fatal h2 { margin: 0 0 8px; color: var(--ink); font: 600 24px/1.2 var(--sans); letter-spacing: -.01em; }
+    .fatal code { font: .9em var(--mono); }
 
-    @keyframes arrive { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
-    @keyframes sweep { from { transform: translateX(-110%); } to { transform: translateX(260%); } }
-    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes arrive { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+    @keyframes seam { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 
-    @media (max-width: 640px) {
-      .profile .model { display: none; }
-      .ghost .label { display: none; }
-      .ghost { width: 36px; padding: 0; justify-content: center; }
+    @media (min-width: 768px) {
+      .conversation .column { padding-top: 48px; }
+      .intro .greeting { font-size: 40px; line-height: 48px; }
+    }
+
+    @media (max-width: 420px) {
       .message.user { max-width: 92%; }
-      .depth-hint { display: none; }
-      .footnote { flex-direction: column; gap: 2px; }
-      .footnote details { text-align: left; }
-      .answer th, .answer td { padding: 8px 10px; }
+      .segmented label { padding: 0 6px; }
+      .answer th, .answer td { padding-right: 12px; }
+      .segmented label::after { left: 6px; right: 6px; }
     }
 
     @media (prefers-reduced-motion: reduce) {
@@ -604,15 +515,9 @@
   <div class="app" id="app">
     <header class="topbar">
       <div class="column">
-        <div class="wordmark">
-          <h1>Wealth</h1>
-          <span class="profile" id="profile">Connecting…</span>
-        </div>
-        <button class="ghost" id="new-chat" type="button" disabled title="Start a new conversation. Saved memory is kept.">
-          <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-          <span class="label">New conversation</span>
-          <span class="sr-only">New conversation</span>
-        </button>
+        <h1 class="wordmark">Wealth</h1>
+        <a class="text-control" id="profile-link" href="/profile" hidden>Profile</a>
+        <button class="text-control" id="new-chat" type="button" disabled>New conversation</button>
       </div>
     </header>
 
@@ -626,40 +531,33 @@
       <div class="column">
         <form class="composer" id="chat-form" novalidate>
           <div class="attachments" id="tray" aria-label="Attachments"></div>
-          <label class="sr-only" for="input">Message</label>
-          <textarea id="input" rows="1" placeholder="Ask about your finances…" disabled></textarea>
+          <label class="sr-only" for="input" id="input-label">Message</label>
+          <textarea id="input" rows="1" placeholder="Ask me something…" disabled></textarea>
           <div class="toolbar">
-            <button class="icon-button" id="attach" type="button" aria-label="Attach a file (PDF, CSV or image)" title="Attach PDF, CSV or image" disabled>
-              <svg width="19" height="19" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 11.5 12.4 19.6a5 5 0 0 1-7.1-7.1l8.3-8.3a3.3 3.3 0 0 1 4.7 4.7l-8.2 8.2a1.7 1.7 0 0 1-2.4-2.4l7.5-7.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <button class="icon-button" id="attach" type="button" aria-label="Attach a file (PDF, CSV or image)" disabled>
+              <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 11.5 12.4 19.6a5 5 0 0 1-7.1-7.1l8.3-8.3a3.3 3.3 0 0 1 4.7 4.7l-8.2 8.2a1.7 1.7 0 0 1-2.4-2.4l7.5-7.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </button>
             <input type="file" id="file" hidden multiple accept=".pdf,.csv,.png,.jpg,.jpeg,.webp,application/pdf,text/csv,image/png,image/jpeg,image/webp">
             <fieldset class="depth" id="depth">
-              <legend class="sr-only">Response depth</legend>
+              <legend class="sr-only" id="depth-legend">Response depth</legend>
               <div class="segmented">
                 <input type="radio" name="depth" id="depth-low" value="low" checked><label for="depth-low">Fast</label>
                 <input type="radio" name="depth" id="depth-medium" value="medium"><label for="depth-medium">Balanced</label>
                 <input type="radio" name="depth" id="depth-high" value="high"><label for="depth-high">Deep</label>
               </div>
-              <span class="depth-hint" id="depth-hint" aria-live="off"></span>
             </fieldset>
             <button class="send" id="send" type="submit" aria-label="Send message" disabled>
-              <svg class="send-icon" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-              <svg class="stop-icon" width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2.5" fill="currentColor"/></svg>
+              <svg class="send-icon" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter"/></svg>
+              <svg class="stop-icon" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect width="12" height="12" fill="currentColor"/></svg>
             </button>
           </div>
         </form>
-        <div class="footnote">
-          <span id="capabilities">Memory stays on this computer</span>
-          <details>
-            <summary>Privacy &amp; capabilities</summary>
-            <p id="privacy">Client memory and attachments are stored on this computer. Messages and selected context are sent to the model provider; research uses external search and market-data services.</p>
-          </details>
-        </div>
       </div>
     </div>
   </div>
   <div class="drop" id="drop" aria-hidden="true">Drop PDF, CSV or image to attach</div>
   <div class="sr-only" id="live" aria-live="polite" aria-atomic="true"></div>
+
 
   <script>
   (() => {
@@ -667,17 +565,204 @@
     const $ = id => document.getElementById(id);
     const conversation = $('conversation'), messages = $('messages'), form = $('chat-form');
     const input = $('input'), send = $('send'), attachButton = $('attach'), fileInput = $('file');
-    const tray = $('tray'), live = $('live'), profile = $('profile'), newChat = $('new-chat');
-    const depthHint = $('depth-hint'), capabilities = $('capabilities'), privacy = $('privacy'), drop = $('drop');
+    const tray = $('tray'), live = $('live'), profileLink = $('profile-link'), newChat = $('new-chat');
+    const drop = $('drop');
     const coarse = window.matchMedia('(pointer: coarse)');
 
-    const HINTS = { low: 'Usually under a minute', medium: 'Often a few minutes', high: 'Can take several minutes' };
-    const CLIENT_ERRORS = {
-      connection: 'Lost connection to Wealth. Make sure the local server is still running, then retry.',
-      gone: 'This response was interrupted when the server restarted. Retry to ask again.',
-      busy: 'Another response is still in progress.',
-      forbidden: 'This page lost its session. Reload to reconnect.'
+    // ------------------------------------------------------------------ language (UI chrome only)
+
+    const STRINGS = {
+      en: {
+        message: 'Message', placeholder: 'Ask me something…', attach: 'Attach a file (PDF, CSV or image)',
+        depth: 'Response depth', low: 'Fast', medium: 'Balanced', high: 'Deep',
+        send: 'Send message', stopResponse: 'Stop response', newChat: 'New conversation', profile: 'Profile',
+        conversation: 'Conversation', attachments: 'Attachments', drop: 'Drop PDF, CSV or image to attach',
+        you: 'You', wealth: 'Wealth', replied: 'Wealth replied.', table: 'Table', welcome: 'Welcome',
+        firstRun: 'Start with a rough picture of your finances.', returning: 'What’s on your mind?',
+        privacy: 'How your data is handled',
+        privacyText: 'Client memory and attachments are stored on this computer. Messages and selected context are sent to the model provider; research uses external search and market-data services.',
+        webOn: 'Web search is on.', webOff: 'Web search is off.',
+        working: 'Working on it', inProgress: 'Response in progress', stopping: 'Stopping…',
+        remembered: 'Remembered', attachedOnly: 'I’ve attached a file.',
+        retry: 'Retry', askAgain: 'Ask again', details: 'Details', uploading: 'Uploading…',
+        badType: 'Use PDF, CSV or image', tooBig: 'Over 25 MB', empty: 'Empty file', uploadFailed: 'Upload failed',
+        remove: name => `Remove ${name}`,
+        offlineTitle: 'Wealth isn’t reachable', offlineText: 'Start it again with `uv run wealth-chat`, then reload this page.',
+        errors: {
+          connection: 'Lost connection to Wealth. Make sure the local server is still running, then retry.',
+          gone: 'This response was interrupted when the server restarted. Retry to ask again.',
+          busy: 'Another response is still in progress.',
+          forbidden: 'This page lost its session. Reload to reconnect.',
+          other: 'Something went wrong.'
+        },
+        steps: {}, starters: {}
+      },
+      es: {
+        message: 'Mensaje', placeholder: 'Pídeme algo…', attach: 'Adjuntar un archivo (PDF, CSV o imagen)',
+        depth: 'Profundidad de la respuesta', low: 'Rápido', medium: 'Equilibrado', high: 'A fondo',
+        send: 'Enviar mensaje', stopResponse: 'Detener respuesta', newChat: 'Nueva conversación', profile: 'Perfil',
+        conversation: 'Conversación', attachments: 'Adjuntos', drop: 'Suelta un PDF, CSV o imagen para adjuntarlo',
+        you: 'Tú', wealth: 'Wealth', replied: 'Wealth respondió.', table: 'Tabla', welcome: 'Bienvenida',
+        firstRun: 'Empieza con una idea general de tus finanzas.', returning: '¿Qué tienes en mente?',
+        privacy: 'Cómo se manejan tus datos',
+        privacyText: 'La memoria y los adjuntos se guardan en esta computadora. Los mensajes y el contexto seleccionado se envían al proveedor del modelo; la investigación usa servicios externos de búsqueda y datos de mercado.',
+        webOn: 'La búsqueda web está activada.', webOff: 'La búsqueda web está desactivada.',
+        working: 'Trabajando en ello', inProgress: 'Respuesta en curso', stopping: 'Deteniendo…',
+        remembered: 'Recordado', attachedOnly: 'Adjunté un archivo.',
+        retry: 'Reintentar', askAgain: 'Preguntar de nuevo', details: 'Detalles', uploading: 'Subiendo…',
+        badType: 'Usa PDF, CSV o imagen', tooBig: 'Más de 25 MB', empty: 'Archivo vacío', uploadFailed: 'No se pudo subir',
+        remove: name => `Quitar ${name}`,
+        offlineTitle: 'Wealth no responde', offlineText: 'Vuelve a iniciarlo con `uv run wealth-chat` y recarga esta página.',
+        errors: {
+          connection: 'Se perdió la conexión con Wealth. Revisa que el servidor local siga activo y reintenta.',
+          gone: 'La respuesta se interrumpió porque el servidor se reinició. Reintenta para preguntar de nuevo.',
+          busy: 'Todavía hay otra respuesta en curso.',
+          forbidden: 'Esta página perdió su sesión. Recarga para reconectar.',
+          not_installed: 'Codex no está instalado en esta computadora. Instala Codex CLI y reintenta.',
+          not_logged_in: 'Codex no tiene sesión iniciada. Ejecuta `codex login` en una terminal y reintenta.',
+          timeout: 'Tardó demasiado y se detuvo. Intenta de nuevo o elige Rápido.',
+          model_error: 'El modelo configurado fue rechazado. Reinicia Wealth con un --model compatible.',
+          cancelled: 'Detenido. Lo que ya se guardó en memoria se conserva.',
+          storage: 'No se pudo leer la memoria local. Revisa la ruta de la base de datos y el disco, y reintenta.',
+          other: 'Algo salió mal al responder. Lo que ya se guardó en memoria se conserva.'
+        },
+        steps: {
+          'Checking your saved profile': 'Revisando tu perfil guardado',
+          'Recalling what you have shared': 'Recordando lo que compartiste',
+          'Reviewing your saved details': 'Revisando tus datos guardados',
+          'Reviewing your profile': 'Revisando tu perfil',
+          'Saving to memory': 'Guardando en memoria',
+          'Recording the decision': 'Registrando la decisión',
+          'Running the numbers': 'Haciendo las cuentas',
+          'Reviewing your holdings': 'Revisando tus posiciones',
+          'Reviewing your exposures': 'Revisando tus exposiciones',
+          'Analyzing historical risk': 'Analizando el riesgo histórico',
+          'Running a stress test': 'Corriendo una prueba de estrés',
+          'Comparing allocations': 'Comparando asignaciones',
+          'Building an allocation': 'Armando una asignación',
+          'Checking factor exposures': 'Revisando exposición a factores',
+          'Researching the investment': 'Investigando la inversión',
+          'Running a valuation': 'Haciendo una valuación',
+          'Checking your plan': 'Revisando tu plan',
+          'Mapping your cash calendar': 'Trazando tu calendario de efectivo',
+          'Projecting your finances': 'Proyectando tus finanzas',
+          'Comparing income strategies': 'Comparando estrategias de ingreso',
+          'Matching cash flows': 'Empatando flujos de efectivo',
+          'Estimating tax effects': 'Estimando efectos fiscales',
+          'Checking your monitors': 'Revisando tus alertas',
+          'Using a Wealth tool': 'Usando una herramienta de Wealth',
+          'Writing the answer': 'Redactando la respuesta',
+          'Thinking it through': 'Pensándolo',
+          'Searching the web': 'Buscando en la web'
+        },
+        starters: {
+          'Share my situation': ['Compartir mi situación', 'Esta es una idea general de mis finanzas: '],
+          'How big should my emergency fund be?': ['¿De qué tamaño debe ser mi fondo de emergencia?', '¿Cuánto debería tener en un fondo de emergencia y dónde conviene guardarlo?'],
+          'Help me evaluate an investment': ['Ayúdame a evaluar una inversión', 'Estoy considerando una inversión y quiero entender los riesgos antes de comprar.']
+        }
+      }
     };
+    const LANG = /^es\b/i.test(navigator.language || '') ? 'es' : 'en';
+    const T = STRINGS[LANG];
+    const stepText = text => T.steps[text] || text;
+    const errorText = error => (LANG === 'es' && T.errors[error.kind]) || error.message || T.errors[error.kind] || T.errors.other;
+
+    function localizeChrome() {
+      if (LANG === 'en') return;
+      document.documentElement.lang = 'es-MX';
+      $('input-label').textContent = T.message;
+      input.placeholder = T.placeholder;
+      attachButton.setAttribute('aria-label', T.attach);
+      $('depth-legend').textContent = T.depth;
+      ['low', 'medium', 'high'].forEach(level => { form.querySelector(`label[for="depth-${level}"]`).textContent = T[level]; });
+      send.setAttribute('aria-label', T.send);
+      newChat.textContent = T.newChat;
+      profileLink.textContent = T.profile;
+      conversation.setAttribute('aria-label', T.conversation);
+      tray.setAttribute('aria-label', T.attachments);
+      drop.textContent = T.drop;
+    }
+
+    // ------------------------------------------------------------------ presence (Dot family, compact 24)
+
+    // Each state is drawn on the native 40-unit grid. Cobalt (class "live") appears only in live states.
+    const INK = '#2B2522', VERMILION = '#C84335', BLUSH = '#F4DED9', COBALT = '#4358C7', PAPER = '#FFFCF7';
+    const aperture = (x, y) => ['path', { d: `M${x} ${y + .6}l2.6-.6v2.4l-2.6.4z`, fill: PAPER }];
+    const trace = (d, stroke, extra = {}) => ['path', Object.assign({ d, fill: 'none', stroke, 'stroke-width': 1.5 }, extra)];
+    const PRESENCE = {
+      listening: [
+        ['path', { d: 'M8 11l6 2.5v13L8 29z', fill: VERMILION }],
+        ['rect', { x: 15.5, y: 14, width: 3, height: 12, fill: BLUSH }],
+        ['rect', { x: 19.25, y: 13, width: 1.5, height: 14, fill: COBALT, class: 'live' }],
+        ['path', { d: 'M23 13.5l7-2.5v18l-7-2.5z', fill: INK }],
+        aperture(25.2, 18)
+      ],
+      understanding: [
+        trace('M6 13h8l5 6.25M6 20h11M6 27h8l5-6.25', INK),
+        trace('M17 20h2l1.5-1.5L22 20', COBALT, { class: 'live' }),
+        ['path', { d: 'M23 10l6-1.5v23L23 30z', fill: INK }],
+        ['rect', { x: 29, y: 12, width: 4, height: 16, fill: VERMILION }],
+        aperture(24.8, 18)
+      ],
+      working: [
+        ['rect', { x: 6, y: 10, width: 5, height: 8.5, fill: VERMILION }],
+        ['rect', { x: 6, y: 21.5, width: 5, height: 8.5, fill: VERMILION }],
+        ['rect', { x: 12, y: 10, width: 5, height: 20, fill: BLUSH }],
+        ['rect', { x: 6, y: 19.25, width: 17, height: 1.5, fill: COBALT, class: 'live' }],
+        ['rect', { x: 23, y: 9, width: 1.5, height: 22, fill: INK }],
+        ['path', { d: 'M26.5 10.5l6.5-2v23l-6.5-2z', fill: INK }],
+        aperture(28.6, 18)
+      ],
+      remembering: [
+        ['rect', { x: 4.75, y: 4.75, width: 30.5, height: 30.5, fill: 'none', stroke: BLUSH, 'stroke-width': 1.5 }],
+        ['rect', { x: 9, y: 9, width: 22, height: 22, fill: 'none', stroke: VERMILION, 'stroke-width': 2 }],
+        ['rect', { x: 12, y: 12, width: 16, height: 16, fill: BLUSH }],
+        ['path', { d: 'M15.5 14.5l6-1.5v14l-6-1.5z', fill: INK }],
+        aperture(17, 18.2),
+        ['rect', { x: 24, y: 15.5, width: 1.5, height: 9, fill: COBALT, class: 'live' }]
+      ],
+      exception: [
+        trace('M6 13.5h13M6 18h13', INK),
+        trace('M6 28.5h3M10.5 27.5l3-2M15 24.5l3-2', VERMILION),
+        ['path', { d: 'M22 11.5l7-3v23l-7-3z', fill: INK }],
+        aperture(24.2, 18.6)
+      ],
+      quiet: [
+        ['rect', { x: 8, y: 11.5, width: 13, height: 17, fill: INK }],
+        ['rect', { x: 22.5, y: 12.5, width: 2, height: 15, fill: INK }],
+        ['path', { d: 'M26 14l5 1.5v9L26 26z', fill: BLUSH }]
+      ]
+    };
+
+    function presence(state) {
+      const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      s.setAttribute('class', 'presence');
+      s.setAttribute('viewBox', '0 0 40 40');
+      s.setAttribute('aria-hidden', 'true');
+      setPresence(s, state);
+      return s;
+    }
+
+    function setPresence(node, state) {
+      if (node.dataset.state === state) return;
+      node.dataset.state = state;
+      node.replaceChildren(...PRESENCE[state].map(([tag, attrs]) => {
+        const shape = document.createElementNS('http://www.w3.org/2000/svg', tag);
+        Object.entries(attrs).forEach(([k, v]) => shape.setAttribute(k, v));
+        return shape;
+      }));
+    }
+
+    // Listening: reading your files or profile. Understanding: reconciling. Working: running a calculation.
+    // Remembering: saving a fact. Quiet: stopping.
+    function presenceFor(step) {
+      const text = String(step || '');
+      if (/stopping/i.test(text)) return 'quiet';
+      if (/saving to memory|remember/i.test(text)) return 'remembering';
+      if (/saved profile|recalling|saved details|reviewing your (profile|holdings)|searching the web|reading|attach/i.test(text)) return 'listening';
+      if (/thinking|comparing|writing the answer|exposures|matching|working on it|in progress/i.test(text)) return 'understanding';
+      return 'working';
+    }
     const UPLOAD_TYPES = { pdf: 'application/pdf', csv: 'text/csv', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp' };
 
     let token = '';
@@ -709,7 +794,11 @@
     };
 
     const nearBottom = () => conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight < 96;
-    conversation.addEventListener('scroll', () => { stick = nearBottom(); }, { passive: true });
+    const topbar = document.querySelector('.topbar');
+    conversation.addEventListener('scroll', () => {
+      stick = nearBottom();
+      topbar.classList.toggle('scrolled', conversation.scrollTop > 0);
+    }, { passive: true });
     const follow = (force = false) => {
       if (!force && !stick) return;
       requestAnimationFrame(() => { conversation.scrollTop = conversation.scrollHeight; stick = true; });
@@ -777,6 +866,43 @@
     };
     const isDivider = line => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(line) && line.includes('-');
 
+    // Negative numbers keep ink colour; a leading hyphen becomes a true minus sign.
+    const minus = cell => cell.replace(/^(\s*(?:\*\*)?\s*)-(?=\s*[$€£¥₹]?\s*\d)/, '$1−').replace(/^(\s*(?:\*\*)?\s*[$€£¥₹])\s*-(?=\s*\d)/, '$1−');
+    const TOTAL = /^(\*\*)?\s*(total|subtotal|net\b|grand total|sum\b|remaining|left over|leftover|surplus|shortfall|monthly surplus|free cash|neto|saldo|restante|sobrante|faltante|suma)/i;
+
+    // A two-column table reads as a ticket: ruled label / value rows with a clear total.
+    function ticket(head, rows, numeric) {
+      const box = el('section', 'ticket');
+      const label = head.map(c => c.replace(/[*_`]/g, '').trim()).filter(Boolean).join(' · ');
+      box.setAttribute('aria-label', label || T.table);
+      const list = el('dl');
+      const generic = /^(item|label|category|metric|field|concept|concepto|rubro|partida)?$/i;
+      // The caption names the ticket; a generic value header ("Amount") adds nothing and is dropped.
+      const plain = c => c.replace(/[*_`]/g, '').trim();
+      const showLeft = plain(head[0]) && !generic.test(plain(head[0]));
+      const showRight = plain(head[1]) && !/^(value|values|amount|amounts|monto|importe|valor|cantidad|usd|mxn|\$)$/i.test(plain(head[1]));
+      if (showLeft || showRight) {
+        const caption = el('div', 'row caption');
+        caption.setAttribute('aria-hidden', 'true');
+        const left = el('span'); if (showLeft) inline(left, head[0]);
+        const right = el('span'); if (showRight) inline(right, head[1]);
+        caption.append(left, right);
+        list.append(caption);
+      }
+      rows.forEach(row => {
+        const [name = '', value = ''] = row;
+        const bold = /^\s*\*\*[\s\S]+\*\*\s*$/.test(name) || /^\s*\*\*[\s\S]+\*\*\s*$/.test(value);
+        const line = el('div', TOTAL.test(name.trim()) || (bold && row === rows[rows.length - 1]) ? 'row total' : 'row');
+        const dt = el('dt'); inline(dt, name.replace(/^\s*\*\*([\s\S]+)\*\*\s*$/, '$1'));
+        const dd = el('dd', numeric[1] || NUMERIC.test(value.replace(/\*\*/g, '')) ? 'num' : '');
+        inline(dd, minus(value.replace(/^\s*\*\*([\s\S]+)\*\*\s*$/, '$1')));
+        line.append(dt, dd);
+        list.append(line);
+      });
+      box.append(list);
+      return box;
+    }
+
     function table(head, divider, rows) {
       const aligns = splitRow(divider).map(c => c.startsWith(':') && c.endsWith(':') ? 'center' : c.endsWith(':') ? 'num' : '');
       const width = head.length;
@@ -784,10 +910,11 @@
         const cells = rows.map(r => (r[i] || '').replace(/\*\*/g, '')).filter(c => c && c !== '—' && c !== '-' && c.toLowerCase() !== 'n/a');
         return cells.length > 0 && cells.filter(c => NUMERIC.test(c)).length >= Math.ceil(cells.length * 0.6);
       });
+      if (width === 2 && rows.length && rows.every(r => r.length <= 2)) return ticket(head, rows, numeric);
       const wrap = el('div', 'table-wrap');
       wrap.tabIndex = 0;
       wrap.setAttribute('role', 'region');
-      wrap.setAttribute('aria-label', 'Table');
+      wrap.setAttribute('aria-label', T.table);
       const t = el('table');
       const thead = el('thead'), tr = el('tr');
       head.forEach((cell, i) => {
@@ -806,9 +933,10 @@
           const classes = [];
           const cls = aligns[i] || (numeric[i] && i > 0 ? 'num' : '');
           if (cls) classes.push(cls);
-          if ((numeric[i] || aligns[i] === 'num') && NEGATIVE.test(cell.replace(/\*\*/g, ''))) classes.push('neg');
+          const negative = (numeric[i] || aligns[i] === 'num') && NEGATIVE.test(cell.replace(/\*\*/g, ''));
+          if (negative) classes.push('neg');
           if (classes.length) td.className = classes.join(' ');
-          inline(td, cell); r.append(td);
+          inline(td, negative ? minus(cell) : cell); r.append(td);
         }
         tbody.append(r);
       });
@@ -854,7 +982,8 @@
       return [node, i];
     }
 
-    const CALLOUT = /^(key\s+)?(assumptions?|missing\s+(data|information|inputs?)|what(?:'|’)?s\s+missing|data\s+gaps?)\b[:\s]*$/i;
+    const CALLOUT = /^(key\s+)?(assumptions?|missing\s+(data|information|inputs?)|what(?:'|’)?s\s+missing|data\s+gaps?|supuestos?|datos\s+faltantes|informaci[oó]n\s+faltante|lo\s+que\s+falta)\b[:\s]*$/i;
+    const PROVENANCE = /^(sources?|fuentes?|data as of|as of|datos al|al corte)\b/i;
 
     function markdown(container, source) {
       const lines = String(source ?? '').replace(/\r\n?/g, '\n').split('\n');
@@ -907,7 +1036,7 @@
         }
         // A bold-only line such as "**Assumptions**" acts as a heading for callouts.
         const boldOnly = para.length === 1 && para[0].match(/^\*\*([^*]+?):?\*\*:?$/);
-        const p = el('p'); inlineLines(p, para);
+        const p = el('p', PROVENANCE.test(para[0].replace(/[*_]/g, '')) ? 'provenance' : ''); inlineLines(p, para);
         blocks.push(boldOnly ? { node: p, heading: 6, text: boldOnly[1].trim() } : { node: p });
       }
       // Group "Assumptions" / "Missing data" sections into callouts.
@@ -915,7 +1044,7 @@
         const block = blocks[b];
         if (block.heading && CALLOUT.test(block.text)) {
           const aside = el('aside', 'callout');
-          aside.dataset.kind = /assum/i.test(block.text) ? 'assumptions' : 'missing';
+          aside.dataset.kind = /assum|supuest/i.test(block.text) ? 'assumptions' : 'missing';
           aside.setAttribute('aria-label', block.text);
           let node = block.node;
           if (block.heading === 6) { node = el('h4'); node.textContent = block.text; }
@@ -952,7 +1081,7 @@
 
     function userMessage(text, attachments = []) {
       const article = el('article', 'message user');
-      article.setAttribute('aria-label', 'You');
+      article.setAttribute('aria-label', T.you);
       if (attachments.length) article.append(attachmentChips(attachments));
       article.append(el('div', 'bubble', text));
       messages.append(article);
@@ -961,46 +1090,43 @@
 
     function assistantMessage(content, options = {}) {
       const article = el('article', 'message assistant');
-      article.setAttribute('aria-label', 'Wealth');
-      article.append(el('p', 'who', 'Wealth'));
+      article.setAttribute('aria-label', T.wealth);
       const body = el('div', 'answer');
       markdown(body, content);
       article.append(body);
       if (options.memory && options.memory.length) {
-        const chip = el('div', 'memory');
-        chip.append(svg('M5 12.5 10 17 19 7', 14));
-        chip.append(document.createTextNode(`Saved to memory: ${options.memory.join(', ')}`));
-        article.append(chip);
+        // Remembering, settled: one quiet line, no mark.
+        article.append(el('p', 'memory', `${T.remembered}: ${options.memory.join(', ')}`));
       }
       messages.append(article);
       if (options.announce) {
         live.textContent = '';
-        setTimeout(() => { live.textContent = `Wealth replied. ${(body.innerText || body.textContent).slice(0, 1200)}`; }, 50);
+        setTimeout(() => { live.textContent = `${T.replied} ${(body.innerText || body.textContent).slice(0, 1200)}`; }, 50);
       }
       return article;
     }
 
-    function pendingMessage(stepText = '') {
+    // Worktrace row: live presence mapped to the step, the step itself, elapsed time.
+    function pendingMessage(raw = '') {
       const article = el('article', 'message assistant pending');
-      article.append(el('p', 'who', 'Wealth'));
-      const line = el('div', 'status-line');
-      line.append(el('span', 'pulse'));
-      const step = el('span', 'step', stepText || 'Working on it');
+      article.setAttribute('aria-label', T.wealth);
+      const line = el('div', 'worktrace');
+      const mark = presence(presenceFor(raw || 'Working on it'));
+      const step = el('span', 'step', raw ? stepText(raw) : T.working);
       step.setAttribute('role', 'status');
-      const elapsed = el('span', 'elapsed');
-      elapsed.setAttribute('aria-hidden', 'true');
-      line.append(step, elapsed);
+      line.append(mark, step);
       article.append(line);
       messages.append(article);
-      const started = Date.now() - (current && current.elapsed ? current.elapsed * 1000 : 0);
-      const tick = () => {
-        const s = Math.floor((Date.now() - started) / 1000);
-        elapsed.textContent = s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
-      };
-      tick();
-      article._timer = setInterval(tick, 1000);
       article._step = step;
+      article._mark = mark;
       return article;
+    }
+
+    function setStep(node, raw, state) {
+      if (!node) return;
+      const text = stepText(raw);
+      if (node._step.textContent !== text) node._step.textContent = text;
+      setPresence(node._mark, state || presenceFor(raw));
     }
 
     function clearPending(node) {
@@ -1016,16 +1142,23 @@
       const kind = error.kind || 'other';
       const box = el('div', kind === 'cancelled' ? 'alert quiet' : 'alert');
       box.setAttribute('role', 'alert');
+      // Failure statement, cause, recovery. The route-broke mark replaces any warning glyph.
+      if (kind !== 'cancelled') box.append(presence('exception'));
       const p = el('p');
-      const message = error.message || CLIENT_ERRORS[kind] || 'Something went wrong.';
+      const message = errorText(Object.assign({}, error, { kind }));
       // Render `codex login` style hints as code without using innerHTML.
       message.split(/(`[^`]+`)/).forEach(part => {
         p.append(part.startsWith('`') && part.endsWith('`') ? el('code', '', part.slice(1, -1)) : document.createTextNode(part));
       });
-      if (error.detail && kind !== 'cancelled') p.append(el('span', 'detail', error.detail));
       box.append(p);
+      if (error.detail && kind !== 'cancelled') {
+        // The raw cause is for diagnosis, not the first read: behind a tap.
+        const more = el('details', 'detail');
+        more.append(el('summary', '', T.details), el('code', '', error.detail));
+        box.append(more);
+      }
       if (retry) {
-        const button = el('button', '', kind === 'cancelled' ? 'Ask again' : 'Retry');
+        const button = el('button', '', kind === 'cancelled' ? T.askAgain : T.retry);
         button.type = 'button';
         button.addEventListener('click', () => { box.remove(); retry(); });
         box.append(button);
@@ -1036,30 +1169,37 @@
 
     function renderIntro(state) {
       const box = el('section', 'intro');
-      box.setAttribute('aria-label', 'Welcome');
-      const hour = new Date().getHours();
-      const greeting = hour < 5 ? 'Good evening.' : hour < 12 ? 'Good morning.' : hour < 18 ? 'Good afternoon.' : 'Good evening.';
-      box.append(el('h2', 'greeting', greeting));
-      box.append(el('p', 'lede', state.welcome || 'Welcome back. What’s on your mind today?'));
+      box.setAttribute('aria-label', T.welcome);
+      // One headline: the invitation itself. First run asks for the rough picture; later visits ask what's next.
+      const headline = state.welcome ? T.firstRun : T.returning;
+      const title = el('h2', 'greeting', headline.replace(/\.$/, ''));
+      if (headline.endsWith('.')) title.append(el('span', 'stop', '.'));
+      box.append(title);
       const starters = Array.isArray(state.starters) ? state.starters.slice(0, 3) : [];
       if (starters.length) {
-        const grid = el('div', 'starters');
+        const rows = el('ul', 'starters');
         starters.forEach(item => {
-          const button = el('button', 'starter');
+          const [label, prompt] = T.starters[item.label] || [String(item.label || item.prompt), String(item.prompt)];
+          const row = el('li');
+          const button = el('button', 'starter', label);
           button.type = 'button';
-          button.append(el('span', '', String(item.label || item.prompt)));
-          button.append(svg('M5 12h14M13 6l6 6-6 6', 16));
           button.addEventListener('click', () => {
-            if (item.send) { submit(String(item.prompt)); return; }
-            input.value = String(item.prompt);
+            if (item.send) { submit(prompt); return; }
+            input.value = prompt;
             resize();
             input.focus();
             input.setSelectionRange(input.value.length, input.value.length);
           });
-          grid.append(button);
+          row.append(button);
+          rows.append(row);
         });
-        box.append(grid);
+        box.append(rows);
       }
+      const privacy = el('details', 'privacy');
+      privacy.append(el('summary', '', T.privacy));
+      const web = state.capabilities && state.capabilities.web_search === true;
+      privacy.append(el('p', '', `${T.privacyText} ${web ? T.webOn : T.webOff}`));
+      box.append(privacy);
       messages.append(box);
     }
 
@@ -1081,7 +1221,7 @@
         response = await fetch(path, Object.assign({ credentials: 'same-origin', cache: 'no-store' }, options, { headers }));
       } catch (err) {
         if (err && err.name === 'AbortError') throw err;
-        const e = new Error(CLIENT_ERRORS.connection); e.kind = 'connection'; throw e;
+        const e = new Error(T.errors.connection); e.kind = 'connection'; throw e;
       }
       if (response.status === 403 && !retried) {
         // The server may have restarted with a new session token.
@@ -1133,7 +1273,7 @@
     function setBusy(value) {
       busy = value;
       send.classList.toggle('stopping', value);
-      send.setAttribute('aria-label', value ? 'Stop response' : 'Send message');
+      send.setAttribute('aria-label', value ? T.stopResponse : T.send);
       send.type = value ? 'button' : 'submit';
       newChat.disabled = value;
       form.querySelectorAll('input[name="depth"]').forEach(r => { r.disabled = value; });
@@ -1161,7 +1301,9 @@
     function handle(turn, event) {
       turn.after = Math.max(turn.after || 0, event.seq || 0);
       if (event.type === 'progress' && turn.pendingNode) {
-        if (turn.pendingNode._step.textContent !== event.text) turn.pendingNode._step.textContent = event.text;
+        if (!turn.stopping) setStep(turn.pendingNode, event.text);
+      } else if (event.type === 'memory' && turn.pendingNode && !turn.stopping) {
+        setPresence(turn.pendingNode._mark, 'remembering');
       } else if (event.type === 'answer') {
         clearPending(turn.pendingNode);
         turn.pendingNode = null;
@@ -1194,7 +1336,7 @@
       }
       if (current === turn) {
         clearPending(turn.pendingNode);
-        showError(turn.userNode, { kind: 'gone', message: CLIENT_ERRORS.gone }, () => submit(turn.message, turn.attachments, turn.userNode));
+        showError(turn.userNode, { kind: 'gone', message: T.errors.gone }, () => submit(turn.message, turn.attachments, turn.userNode));
         finish(turn);
       }
     }
@@ -1229,7 +1371,7 @@
       const files = attachments || pendingUploads.filter(u => u.state === 'ready').map(u => u.meta);
       if (busy || (!message && !files.length)) return;
       removeIntro();
-      const userNode = existingNode || userMessage(message || 'I’ve attached a file.', files);
+      const userNode = existingNode || userMessage(message || T.attachedOnly, files);
       const alert = userNode.querySelector('.alert');
       if (alert) alert.remove();
       if (!attachments) {
@@ -1264,7 +1406,7 @@
       const turn = current;
       if (!turn || !turn.id || turn.stopping) return;
       turn.stopping = true;
-      if (turn.pendingNode) turn.pendingNode._step.textContent = 'Stopping…';
+      if (turn.pendingNode) { turn.pendingNode._step.textContent = T.stopping; setPresence(turn.pendingNode._mark, 'quiet'); }
       try { await api(`/api/turns/${turn.id}/cancel`, { method: 'POST' }); } catch (_) { /* the stream reports the outcome */ }
     }
 
@@ -1279,13 +1421,12 @@
       tray.replaceChildren();
       pendingUploads.forEach(upload => {
         const chip = el('span', `chip${upload.state === 'error' ? ' error' : ''}`);
-        if (upload.state === 'uploading') chip.append(el('span', 'spin'));
-        else chip.append(svg(upload.state === 'error' ? 'M12 8v5M12 16.5v.5M4 20h16L12 4z' : 'M7 3h7l5 5v13H7zM14 3v5h5', 15));
+        chip.append(svg('M7 3h7l5 5v13H7zM14 3v5h5', 15));
         chip.append(el('span', 'name', upload.name));
-        chip.append(el('span', 'meta', upload.state === 'error' ? upload.error : formatSize(upload.size)));
+        chip.append(el('span', 'meta', upload.state === 'error' ? upload.error : upload.state === 'uploading' ? T.uploading : formatSize(upload.size)));
         const remove = el('button');
         remove.type = 'button';
-        remove.setAttribute('aria-label', `Remove ${upload.name}`);
+        remove.setAttribute('aria-label', T.remove(upload.name));
         remove.append(svg('M6 6l12 12M18 6 6 18', 12));
         remove.addEventListener('click', () => { pendingUploads = pendingUploads.filter(u => u !== upload); renderTray(); refreshSend(); });
         chip.append(remove);
@@ -1300,9 +1441,9 @@
         const upload = { name: file.name, size: file.size, state: 'uploading' };
         pendingUploads.push(upload);
         const type = typeFor(file);
-        if (!type) { Object.assign(upload, { state: 'error', error: 'Use PDF, CSV or image' }); continue; }
-        if (file.size > uploadLimit) { Object.assign(upload, { state: 'error', error: 'Over 25 MB' }); continue; }
-        if (!file.size) { Object.assign(upload, { state: 'error', error: 'Empty file' }); continue; }
+        if (!type) { Object.assign(upload, { state: 'error', error: T.badType }); continue; }
+        if (file.size > uploadLimit) { Object.assign(upload, { state: 'error', error: T.tooBig }); continue; }
+        if (!file.size) { Object.assign(upload, { state: 'error', error: T.empty }); continue; }
         renderTray();
         try {
           const response = await api('/api/upload', {
@@ -1312,7 +1453,7 @@
           const data = await json(response);
           Object.assign(upload, { state: 'ready', meta: data.upload, name: data.upload.name });
         } catch (err) {
-          Object.assign(upload, { state: 'error', error: err.message && err.message.length < 60 ? err.message : 'Upload failed' });
+          Object.assign(upload, { state: 'error', error: err.message && err.message.length < 60 && LANG === 'en' ? err.message : T.uploadFailed });
         }
         renderTray();
       }
@@ -1345,7 +1486,6 @@
     });
     form.addEventListener('submit', event => { event.preventDefault(); if (!busy) submit(input.value); });
     send.addEventListener('click', event => { if (busy) { event.preventDefault(); stop(); } });
-    form.querySelectorAll('input[name="depth"]').forEach(radio => radio.addEventListener('change', () => { depthHint.textContent = HINTS[depth()]; }));
 
     newChat.addEventListener('click', async () => {
       if (busy) return;
@@ -1366,29 +1506,37 @@
 
     // ------------------------------------------------------------------ start
 
+    // The profile is a sibling view; show its link only when the server has it.
+    async function revealProfile() {
+      try {
+        const response = await fetch('/profile', { credentials: 'same-origin', cache: 'no-store' });
+        profileLink.hidden = !response.ok;
+      } catch (_) { profileLink.hidden = true; }
+    }
+
     async function initialize() {
+      localizeChrome();
       let state;
       try {
         state = await refreshToken();
         if (!token) throw new Error(state.error || 'Could not load your session.');
       } catch (err) {
         const box = el('div', 'fatal');
-        box.append(el('h2', '', 'Wealth isn’t reachable'));
-        box.append(el('p', '', 'Start it again with uv run wealth-chat, then reload this page.'));
+        box.setAttribute('role', 'alert');
+        box.append(el('h2', '', T.offlineTitle));
+        const p = el('p');
+        T.offlineText.split(/(`[^`]+`)/).forEach(part => {
+          p.append(part.startsWith('`') ? el('code', '', part.slice(1, -1)) : document.createTextNode(part));
+        });
+        box.append(p);
         messages.append(box);
-        profile.textContent = 'Offline';
         return;
       }
-      profile.replaceChildren();
-      profile.append(el('strong', '', state.display_name || 'Personal'), document.createTextNode(' · Private profile'));
-      if (state.model) { const m = el('span', 'model', ` · ${state.model}`); profile.append(m); }
-      const web = state.capabilities && state.capabilities.web_search === true;
-      capabilities.textContent = `Memory stays on this computer · Web search ${web ? 'on' : 'off'}`;
-      privacy.append(document.createTextNode(web ? ' Web search is enabled.' : ' Web search is disabled.'));
+      if (state.display_name) document.title = `Wealth · ${state.display_name}`;
       if (state.uploads && state.uploads.max_bytes) uploadLimit = state.uploads.max_bytes;
       const level = form.querySelector(`input[name="depth"][value="${state.reasoning}"]`);
       if (level) level.checked = true;
-      depthHint.textContent = HINTS[depth()];
+      revealProfile();
 
       const history = Array.isArray(state.messages) ? state.messages : [];
       if (!history.length && !(state.turn && state.turn.message)) renderIntro(state);
@@ -1411,6 +1559,7 @@
           current = record;
           setBusy(true);
           record.pendingNode = pendingMessage(turn.progress ? turn.progress : 'Response in progress');
+          if (!turn.progress) record.pendingNode._step.textContent = T.inProgress;
           track(record);
         } else if (turn.error) {
           showError(node, turn.error, retry);
