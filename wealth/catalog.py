@@ -617,7 +617,47 @@ CONNECTORS: dict[str, dict[str, Any]] = {
         "resync": "Transactions carry IBKR trade/transaction ids, so a re-sync posts only new lines; "
                   "result.changes lists what moved since the last confirmed sync.",
     },
+    "alpaca": {
+        "purpose": "Pull an Alpaca brokerage account (Trading API v2: account, positions with average cost, open "
+                   "orders, fills, dividends, NRA withholding, interest, fees, cash transfers, portfolio history) into "
+                   "a reconciled ingest proposal. Read-only: only GET on read endpoints; it cannot trade or move money.",
+        "action": "ingest action=connector",
+        "required": ["name: alpaca",
+                     "key id and secret in the OS keychain (service wealth-alpaca, accounts key_id and secret) or "
+                     "WEALTH_ALPACA_KEY_ID/WEALTH_ALPACA_SECRET; never an input"],
+        "optional": ["owner_id", "paper: true for the paper host (or WEALTH_ALPACA_PAPER=1)",
+                     "since: YYYY-MM-DD (default 365 days ago)",
+                     "sic_listed: [symbols] or {symbol: true|false} (Mexican SIC listing; unknown otherwise)"],
+        "example": {"name": "alpaca", "since": "2026-01-01"},
+        "status": "ingest action=connector_status (optional name): whether keys are available and the last sync",
+        "resync": "Lines carry Alpaca activity ids, so a re-sync posts only new lines; result.changes lists what moved.",
+        "limits": "Alpaca reports average entry price, not tax lots (lots are marked unavailable), and no ISIN.",
+    },
+    "cuenca": {
+        "purpose": "Pull a Cuenca account (MXN): balance and apartados as balance checks, SPEI and internal transfers, "
+                   "deposits, card purchases (merchant, categorised like statement lines), ATM withdrawals and "
+                   "commissions into a reconciled ingest proposal. Read-only: only GET; it cannot transfer or pay.",
+        "action": "ingest action=connector",
+        "required": ["name: cuenca",
+                     "API key and secret issued by Cuenca, in the OS keychain (service wealth-cuenca, accounts api_key "
+                     "and api_secret) or WEALTH_CUENCA_API_KEY/WEALTH_CUENCA_API_SECRET; never an input"],
+        "optional": ["owner_id", "since: YYYY-MM-DD (default 365 days ago)"],
+        "example": {"name": "cuenca", "since": "2026-08-01"},
+        "status": "ingest action=connector_status (optional name): whether keys are available and the last sync",
+        "resync": "SPEI lines carry their clave de rastreo and others their Cuenca id, so a re-sync posts only new lines.",
+        "limits": "Cuenca does not publish whether individual app users can get API keys; without one, upload the "
+                  "monthly estado de cuenta with ingest action=file.",
+    },
+}
+# Providers without an API for individuals: statements come in through ingest action=file.
+STATEMENT_ONLY: dict[str, dict[str, Any]] = {
+    "vest": {
+        "why": "Vest (vest.investments) offers no API for individual users; its app provides monthly statements, "
+               "trade confirmations and 1042-S/1099 tax reports, with no documented export layout.",
+        "action": "ingest action=file with preset=vest (a generic US-broker CSV layout, labelled as such), or upload "
+                  "the monthly statement PDF.",
+    },
 }
 
 
-__all__ = ["CATALOG", "CONNECTORS"]
+__all__ = ["CATALOG", "CONNECTORS", "STATEMENT_ONLY"]

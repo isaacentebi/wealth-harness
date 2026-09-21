@@ -11,7 +11,17 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any, Callable, Mapping
 
-_REGISTRY = {"ibkr_flex": "wealth.connectors.ibkr_flex"}
+_REGISTRY = {
+    "alpaca": "wealth.connectors.alpaca",
+    "cuenca": "wealth.connectors.cuenca",
+    "ibkr_flex": "wealth.connectors.ibkr_flex",
+}
+# Non-secret options each connector accepts (the credential is never an option).
+OPTIONS = {
+    "alpaca": ("paper", "since", "sic_listed"),
+    "cuenca": ("since",),
+    "ibkr_flex": ("query_id", "sic_listed"),
+}
 
 
 def names() -> tuple[str, ...]:
@@ -25,10 +35,17 @@ def _module(name: str):
 
 
 def connector(name: str, **options: Any):
-    """Instantiate a connector; ``options`` are its non-secret settings (for IBKR: ``query_id``)."""
+    """Instantiate a connector; ``options`` are its non-secret settings (see :data:`OPTIONS`)."""
     module = _module(name)
+    unknown = sorted(set(options) - set(OPTIONS[name]))
+    if unknown:
+        raise ValueError(f"connector {name} does not take {', '.join(unknown)}; it takes {', '.join(OPTIONS[name]) or 'nothing'}")
     if name == "ibkr_flex":
         return module.IbkrFlexConnector(**options)
+    if name == "alpaca":
+        return module.AlpacaConnector(**options)
+    if name == "cuenca":
+        return module.CuencaConnector(**options)
     raise ValueError(f"connector {name!r} has no constructor")  # pragma: no cover
 
 
@@ -46,4 +63,4 @@ def batch_mapper(proposal: Mapping[str, Any]) -> Callable[..., dict[str, Any]] |
     return None
 
 
-__all__ = ["batch_mapper", "connector", "names", "status"]
+__all__ = ["OPTIONS", "batch_mapper", "connector", "names", "status"]

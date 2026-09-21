@@ -63,7 +63,7 @@ def upload_dir(client_id: str, db_path: str | Path | None = None) -> Path:
 
 
 def capabilities() -> dict:
-    from .catalog import CATALOG, CONNECTORS
+    from .catalog import CATALOG, CONNECTORS, STATEMENT_ONLY
     return {
         "product": "wealth-harness", "release": "0.2.0", "tasks": CATALOG,
         "example_policy": "Catalog examples are fictional dated inputs, not current market evidence, recommended assumptions, or facts about this person. Missing fund constituents mean partial look-through coverage.",
@@ -77,6 +77,7 @@ def capabilities() -> dict:
         "ingest": "wealth_ingest turns an uploaded statement, host extraction or chat facts into a reconciled "
                   "proposal. Nothing is saved until the person says yes and the host calls action=confirm.",
         "connectors": CONNECTORS,
+        "statement_only_providers": STATEMENT_ONLY,
         "monitoring": "Saved opt-in rules evaluated by the host or wealth watch. Unchanged checks stay quiet; no process starts automatically.",
         "fact_contract": fact_contract(),
     }
@@ -760,20 +761,31 @@ class WealthService:
                 "missing": [], "warnings": receipt.get("warnings", []), "sources": [], "assumptions": []}
 
     def _ingest_connector(self, client_id: str, name: str, query_id: str | None = None, owner_id: str = "self",
-                          sic_listed: list | dict | None = None) -> dict:
-        """Pull a read-only connector (e.g. IBKR Flex) into a held proposal; confirm saves it, as for a file.
+                          sic_listed: list | dict | None = None, paper: bool | None = None,
+                          since: str | None = None) -> dict:
+        """Pull a read-only connector (IBKR Flex, Alpaca, Cuenca) into a held proposal; confirm saves it, as for a file.
 
         The credential is read by the connector from the OS keychain or its
-        environment variable; it is never an input, never stored and never shown.
+        environment variables; it is never an input, never stored and never shown.
         """
         from . import connectors
         if not isinstance(name, str) or name not in connectors.names():
             raise ValueError(f"name must be one of {', '.join(connectors.names())}")
-        if query_id is None:
+        if name == "ibkr_flex" and query_id is None:
             raise ValueError(f"connector {name} needs query_id (the Activity Flex Query id from the IBKR portal)")
         if sic_listed is not None and not isinstance(sic_listed, (list, dict)):
             raise ValueError("sic_listed must be a list of symbols or {symbol: true|false}")
-        instance = connectors.connector(name, query_id=query_id, sic_listed=sic_listed)
+        if paper is not None and not isinstance(paper, bool):
+            raise ValueError("paper must be true or false")
+        if since is not None and not isinstance(since, str):
+            raise ValueError("since must be an ISO date (YYYY-MM-DD)")
+        given = {"query_id": query_id, "sic_listed": sic_listed, "paper": paper, "since": since}
+        options = {key: value for key, value in given.items() if value is not None}
+        extra = sorted(set(options) - set(connectors.OPTIONS[name]))
+        if extra:
+            raise ValueError(f"connector {name} does not take {', '.join(extra)}; it takes "
+                             f"{', '.join(connectors.OPTIONS[name])}")
+        instance = connectors.connector(name, **options)
         state = self._ingest_state(client_id)
         earlier = [(record.get("created_at", ""), record["proposal"]) for record in (state.get("confirmed") or {}).values()
                    if (record["proposal"].get("result", {}).get("provenance") or {}).get("ref") == instance.ref]
@@ -799,7 +811,8 @@ class WealthService:
                     provenance = result.get("provenance") or {}
                     if provenance.get("provider") == entry["name"]:
                         synced.append({"proposal_id": pid, "as_of": result.get("as_of"), "confirmed": bucket == "confirmed",
-                                       "query_id": provenance.get("query_id"), "pulled_at": record.get("created_at")})
+                                       "query_id": provenance.get("query_id"), "ref": provenance.get("ref"),
+                                       "pulled_at": record.get("created_at")})
             synced.sort(key=lambda item: item["pulled_at"] or "")
             rows.append({**entry, "last_sync": synced[-1] if synced else None})
         return {"status": "ready", "result": {"connectors": rows}, "missing": [], "warnings": [], "sources": [],

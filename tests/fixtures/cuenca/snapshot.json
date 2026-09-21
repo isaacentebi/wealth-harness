@@ -1,0 +1,85 @@
+{
+  "balance_entries": {
+    "default": [
+      {"id": "LE01", "created_at": "2026-08-01T15:00:00.120000", "user_id": "USficticio01", "name": "EMPRESA FICTICIA SA DE CV",
+       "amount": 2500000, "descriptor": "PAGO DE NOMINA QUINCENA 15", "rolling_balance": 2600000, "type": "credit",
+       "related_transaction_uri": "/deposits/SP01", "funding_instrument_uri": "/accounts/AC01", "wallet_id": "default"},
+      {"id": "LE02", "created_at": "2026-08-02T18:30:00.000000", "user_id": "USficticio01", "name": "OXXO INSURGENTES CDMX MX",
+       "amount": 45050, "descriptor": "", "rolling_balance": 2554950, "type": "debit",
+       "related_transaction_uri": "/card_transactions/CT01", "funding_instrument_uri": "/cards/CA01", "wallet_id": "default"},
+      {"id": "LE03", "created_at": "2026-08-03T16:10:00.000000", "user_id": "USficticio01", "name": "Arrendador Ficticio",
+       "amount": 1200000, "descriptor": "Renta agosto", "rolling_balance": 1354950, "type": "debit",
+       "related_transaction_uri": "/transfers/TR01", "funding_instrument_uri": "/accounts/AC02", "wallet_id": "default"},
+      {"id": "LE04", "created_at": "2026-08-03T16:10:01.000000", "user_id": "USficticio01", "name": "Cuenca",
+       "amount": 580, "descriptor": "Comisión (outgoing_spei)", "rolling_balance": 1354370, "type": "debit",
+       "related_transaction_uri": "/commissions/CO01", "funding_instrument_uri": "/accounts/AC02", "wallet_id": "default"},
+      {"id": "LE05", "created_at": "2026-08-05T09:00:00.000000", "user_id": "USficticio01", "name": "NETFLIX.COM",
+       "amount": 32900, "descriptor": "", "rolling_balance": 1321470, "type": "debit",
+       "related_transaction_uri": "/card_transactions/CT02", "funding_instrument_uri": "/cards/CA02", "wallet_id": "default"},
+      {"id": "LE06", "created_at": "2026-08-06T12:00:00.000000", "user_id": "USficticio01", "name": "OXXO INSURGENTES CDMX MX",
+       "amount": 5000, "descriptor": "", "rolling_balance": 1326470, "type": "credit",
+       "related_transaction_uri": "/card_transactions/CT03", "funding_instrument_uri": "/cards/CA01", "wallet_id": "default"},
+      {"id": "LE07", "created_at": "2026-08-10T20:00:00.000000", "user_id": "USficticio01", "name": "Viaje a Japón",
+       "amount": 200000, "descriptor": "Apartado", "rolling_balance": 1126470, "type": "debit",
+       "related_transaction_uri": "/wallet_transactions/WT01", "funding_instrument_uri": "/savings/SV01", "wallet_id": "default"},
+      {"id": "LE08", "created_at": "2026-08-12T23:30:00.000000", "user_id": "USficticio01", "name": "CAJERO BANORTE REFORMA",
+       "amount": 100000, "descriptor": "", "rolling_balance": 1026470, "type": "debit",
+       "related_transaction_uri": "/card_transactions/CT04", "funding_instrument_uri": "/cards/CA01", "wallet_id": "default"},
+      {"id": "LE09", "created_at": "2026-08-15T17:45:00.000000", "user_id": "USficticio01", "name": "Juan Amigo Ficticio",
+       "amount": 50000, "descriptor": "tacos del viernes", "rolling_balance": 1076470, "type": "credit",
+       "related_transaction_uri": "/deposits/SP02", "funding_instrument_uri": "/accounts/AC03", "wallet_id": "default"}
+    ],
+    "SV01": [
+      {"id": "LE10", "created_at": "2026-08-10T20:00:00.000000", "user_id": "USficticio01", "name": "Cuenta Cuenca",
+       "amount": 200000, "descriptor": "Apartado", "rolling_balance": 200000, "type": "credit",
+       "related_transaction_uri": "/wallet_transactions/WT01", "funding_instrument_uri": "/accounts/AC01", "wallet_id": "SV01"}
+    ]
+  },
+  "savings": [
+    {"id": "SV01", "created_at": "2026-07-20T10:00:00.000000", "user_id": "USficticio01", "balance": 200000,
+     "name": "Viaje a Japón", "category": "travel", "goal_amount": 5000000, "goal_date": "2027-03-01T00:00:00",
+     "deactivated_at": null, "updated_at": "2026-08-10T20:00:00.000000"}
+  ],
+  "deposits": [
+    {"id": "SP01", "created_at": "2026-08-01T15:00:00.100000", "amount": 2500000, "status": "succeeded",
+     "descriptor": "PAGO DE NOMINA QUINCENA 15", "source_uri": "/accounts/AC01", "network": "spei",
+     "tracking_key": "2026080140014TRAC0000123", "user_id": "USficticio01"},
+    {"id": "SP02", "created_at": "2026-08-15T17:45:00.000000", "amount": 50000, "status": "succeeded",
+     "descriptor": "tacos del viernes", "source_uri": "/accounts/AC03", "network": "spei",
+     "tracking_key": "MBAN01002608150000456", "user_id": "USficticio01"}
+  ],
+  "transfers": [
+    {"id": "TR01", "created_at": "2026-08-03T16:09:59.000000", "updated_at": "2026-08-03T16:10:30.000000",
+     "account_number": "072180001234567897", "recipient_name": "Arrendador Ficticio", "amount": 1200000,
+     "descriptor": "Renta agosto", "idempotency_key": "TR01", "status": "succeeded", "network": "spei",
+     "destination_uri": "/accounts/AC02", "tracking_key": "CUENCA1234567890", "user_id": "USficticio01",
+     "reference_number": null}
+  ],
+  "card_transactions": [
+    {"id": "CT01", "created_at": "2026-08-02T18:29:59.000000", "user_id": "USficticio01", "amount": 45050,
+     "status": "succeeded", "descriptor": "OXXO INSURGENTES CDMX MX", "type": "auth", "network": "visa",
+     "related_card_transaction_uris": [], "card_last4": "1470", "card_type": "physical", "card_uri": "/cards/CA01",
+     "metadata": {"currency_code": "484", "commission": 0}, "error_type": null},
+    {"id": "CT03", "created_at": "2026-08-06T12:00:00.000000", "user_id": "USficticio01", "amount": 5000,
+     "status": "succeeded", "descriptor": "OXXO INSURGENTES CDMX MX", "type": "refund", "network": "visa",
+     "related_card_transaction_uris": ["/card_transactions/CT01"], "card_last4": "1470", "card_type": "physical",
+     "card_uri": "/cards/CA01", "metadata": {"currency_code": "484"}, "error_type": null},
+    {"id": "CT04", "created_at": "2026-08-12T23:30:00.000000", "user_id": "USficticio01", "amount": 100000,
+     "status": "succeeded", "descriptor": "CAJERO BANORTE REFORMA", "type": "auth", "network": "atm",
+     "related_card_transaction_uris": [], "card_last4": "1470", "card_type": "physical", "card_uri": "/cards/CA01",
+     "metadata": {"currency_code": "484", "atm_fee": null}, "error_type": null}
+  ],
+  "card_transaction_lookup": {
+    "CT02": {"id": "CT02", "created_at": "2026-08-05T09:00:00.000000", "user_id": "USficticio01", "amount": 32900,
+             "status": "succeeded", "descriptor": "NETFLIX.COM", "type": "auth", "network": "visa",
+             "related_card_transaction_uris": [], "card_last4": "0359", "card_type": "virtual", "card_uri": "/cards/CA02",
+             "metadata": {"currency_code": "484"}, "error_type": null}
+  },
+  "commissions": [
+    {"id": "CO01", "created_at": "2026-08-03T16:10:01.000000", "user_id": "USficticio01", "amount": 580,
+     "status": "succeeded", "descriptor": "Comisión (outgoing_spei)", "type": "outgoing_spei",
+     "related_transaction_uri": "/transfers/TR01"}
+  ],
+  "bill_payments": [],
+  "statements": [{"id": "ST01", "created_at": "2026-09-01T06:00:00.000000", "year": 2026, "month": 8}]
+}
