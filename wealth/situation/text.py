@@ -261,8 +261,30 @@ def _compose(template: str, **values: Any) -> tuple[str, list[list[int]]]:
     return text, spans
 
 
+def _money_text(value: Any, currency: str | None, show_code: bool) -> str:
+    """$85,000 · $1,234.50 · $217,838 (cents only below a thousand; notes, not ledgers)."""
+    number = Decimal(str(value))
+    places = 0 if abs(number) >= 1000 else None
+    return f"${fmt(number.quantize(Decimal(1)) if places == 0 else number, places)}" + (
+        f" {currency}" if show_code and currency else "")
+
+
 def _amount(value: Any, currency: str | None, show_code: bool) -> _Emph:
-    return _Emph(f"${fmt(value)}" + (f" {currency}" if show_code and currency else ""))
+    return _Emph(_money_text(value, currency, show_code))
+
+
+def _instrument(name: str, lang: str) -> str:
+    """An instrument as people say it, with the article Spanish and English need for index names and bonds."""
+    clean = _clean_symbol(name)
+    if re.match(r"(?i)^(s&p|nasdaq|dow|udibono|bono|cetes|ipc)\b", clean):
+        return ("el " if lang == "es" else "the ") + clean
+    return clean
+
+
+def _clean_symbol(name: str) -> str:
+    """'S UDIBONO 351122' -> 'Udibono 351122': a series letter and shouting are not how people say it."""
+    name = re.sub(r"^[SMB]\s+(?=(?:UDIBONO|BONO|CETES)\b)", "", str(name).strip())
+    return re.sub(r"\b(UDIBONO|BONO|CETES)\b", lambda m: m.group(1).capitalize() if m.group(1) != "CETES" else "Cetes", name)
 
 
 _INCOME_KIND = {
@@ -291,12 +313,15 @@ def sentences(sit: Mapping[str, Any], language: str | None = None) -> list[dict]
     reporting = sit.get("currency")
     out: list[dict] = []
 
-    def add(topic: str, key: str | None, template: str, **values: Any) -> None:
+    def add(topic: str, key: str | None, template: str, *, ref: str | None = None, extra: Mapping[str, Any] | None = None,
+            **values: Any) -> None:
+        # ``ref`` names the item inside the fact (a field, list item or goal id) so the page can edit
+        # or forget exactly that thing; ``extra`` carries display context (institution, statement date).
         text, spans = _compose(template, **values)
         info = meta.get(key or "", {})
-        out.append({"topic": topic, "text": text, "emphasis": spans, "key": key, "source": info.get("source"),
-                    "age_days": info.get("age_days"), "stale": bool(info.get("stale")),
-                    "unconfirmed": bool(info.get("inferred"))})
+        out.append({"topic": topic, "text": text, "emphasis": spans, "key": key, "ref": ref,
+                    "source": info.get("source"), "age_days": info.get("age_days"), "stale": bool(info.get("stale")),
+                    "unconfirmed": bool(info.get("inferred")), **(extra or {})})
 
     def about(approximate: bool) -> str:
         return ("unos " if es else "about ") if approximate else ""
@@ -307,27 +332,27 @@ def sentences(sit: Mapping[str, Any], language: str | None = None) -> list[dict]
     profile = sit["profile"]
     key = profile.get("key")
     if profile.get("name"):
-        add("about", key, "Te llamas {n}." if es else "You go by {n}.", n=_Emph(profile["name"]))
+        add("about", key, "Te llamas {n}." if es else "You go by {n}.", ref="name", n=_Emph(profile["name"]))
     residence = profile.get("residence") or {}
     if residence:
         country = _COUNTRY_NAMES[lang].get(residence.get("country"), residence.get("country") or "")
         place = ", ".join(p for p in (residence.get("city"), residence.get("region") if residence.get("region") != residence.get("city") else None, country) if p)
         if place:
-            add("about", key, "Vives en {p}." if es else "You live in {p}.", p=_Emph(place))
+            add("about", key, "Vives en {p}." if es else "You live in {p}.", ref="residence", p=_Emph(place))
     if profile.get("tax_residence"):
         names = [_COUNTRY_NAMES[lang].get(c, c) for c in profile["tax_residence"]]
         joined = (" y " if es else " and ").join(names)
-        add("about", key, "Eres residente fiscal en {c}." if es else "You're a tax resident of {c}.", c=_Emph(joined))
+        add("about", key, "Eres residente fiscal en {c}." if es else "You're a tax resident of {c}.", ref="tax_residence", c=_Emph(joined))
     if profile.get("birth_year"):
-        add("about", key, "Naciste en {y}." if es else "You were born in {y}.", y=_Emph(str(profile["birth_year"])))
+        add("about", key, "Naciste en {y}." if es else "You were born in {y}.", ref="birth_year", y=_Emph(str(profile["birth_year"])))
     dependents = profile.get("dependents")
     if dependents is not None:
         if dependents == 0:
-            add("about", key, "Nadie depende económicamente de ti." if es else "No one depends on you financially.")
+            add("about", key, "Nadie depende económicamente de ti." if es else "No one depends on you financially.", ref="dependents")
         elif dependents == 1:
-            add("about", key, "Una persona depende de ti." if es else "One person depends on you.")
+            add("about", key, "Una persona depende económicamente de ti." if es else "One person depends on you financially.", ref="dependents")
         else:
-            add("about", key, "{n} personas dependen de ti." if es else "{n} people depend on you.", n=_Emph(str(dependents)))
+            add("about", key, "{n} personas dependen económicamente de ti." if es else "{n} people depend on you financially.", ref="dependents", n=_Emph(str(dependents)))
 
     income = sit["income"]
     for item in income["items"]:
@@ -343,7 +368,7 @@ def sentences(sit: Mapping[str, Any], language: str | None = None) -> list[dict]
             template = f"Recibes {approx}{{a}} {period_es}, netos." if es else f"You take home {approx}{{a}} {period_en}."
         else:
             template = f"Recibes {approx}{{a}} {period_es}." if es else f"You receive {approx}{{a}} {period_en}."
-        add("money_in", item["key"], template, a=amount)
+        add("money_in", item["key"], template, ref=_item_ref(item, "items"), extra=_since(item), a=amount)
     for item in income["extras"]:
         amount = _amount(item["amount"], item["currency"], True)
         approx = about(item["approximate"])
@@ -355,21 +380,25 @@ def sentences(sit: Mapping[str, Any], language: str | None = None) -> list[dict]
             when = ""
         template = (f"Recibes {approx}{{a}}" + (f" {what}" if what else "") + f"{when}.") if es else \
             (f"You receive {approx}{{a}}" + (f" {what}" if what else "") + f"{when}.")
-        add("money_in", item["key"], template, a=amount)
+        add("money_in", item["key"], template, ref=_item_ref(item, "items"), extra=_since(item), a=amount)
 
     spending = sit["spending"]
     if spending["source"] == "ledger" and spending["total"] is not None:
         add("money_out", None, "Según tus movimientos, gastas {a} al mes." if es else
-            "Your transactions show {a} of spending a month.", a=_amount(spending["total"], reporting, False))
+            "Your transactions show {a} of spending a month.", extra={"origin": "transactions"},
+            a=_amount(spending["total"], reporting, False))
     elif spending["stated"]:
         stated = spending["stated"]
         approx = about(spending["approximate"])
+        ref_total = "total" if spending["key"] == "spending.monthly" else "monthly_spending"
         if stated.get("total") is not None:
             add("money_out", spending["key"], f"Gastas {approx}{{a}} al mes." if es else f"You spend {approx}{{a}} a month.",
-                a=_amount(stated["total"], stated["currency"], code(stated["currency"])))
+                ref=ref_total, a=_amount(stated["total"], stated["currency"], code(stated["currency"])))
         if stated.get("essential") is not None:
             add("money_out", spending["key"], f"Tus gastos básicos son de {approx}{{a}} al mes." if es else
-                f"Your essentials cost {approx}{{a}} a month.", a=_amount(stated["essential"], stated["currency"], code(stated["currency"])))
+                f"Your essentials cost {approx}{{a}} a month.",
+                ref="essential" if spending["key"] == "spending.monthly" else "monthly_essentials",
+                a=_amount(stated["essential"], stated["currency"], code(stated["currency"])))
 
     for row in sit["cash"]:
         approx = about(row["approximate"])
@@ -379,33 +408,52 @@ def sentences(sit: Mapping[str, Any], language: str | None = None) -> list[dict]
         if row.get("purpose") == "reserve":
             purpose = ", como fondo de emergencia" if es else ", set aside as your emergency fund"
         add("own", row["key"], (f"Tienes {approx}{{a}} en efectivo{where}{purpose}." if es else
-                                f"You have {approx}{{a}} in cash{where}{purpose}."), a=amount)
+                                f"You have {approx}{{a}} in cash{where}{purpose}."), ref=_item_ref(row, "cash"), a=amount)
+    # One sentence per institution: two sub-accounts at GBM are one relationship to the person.
+    by_institution: dict[str, list[Mapping[str, Any]]] = {}
     for account in sit["accounts"]:
         if account["source"] == "ledger" or not account.get("native"):
             continue
-        parts = [f"${fmt(v)} {c}" for c, v in sorted(account["native"].items())]
-        joined = _Emph((" y " if es else " and ").join(parts))
-        institution = account.get("institution") or account["label"]
-        kind = {"brokerage": ("una cuenta de inversión", "a brokerage account"), "checking": ("tu cuenta de cheques", "your checking account"),
-                "savings": ("tu cuenta de ahorro", "your savings account")}.get(account.get("type") or "", ("una cuenta", "an account"))
-        date_text = _day(account.get("as_of"), lang)
-        add("own", account["key"], (f"En {institution} tienes {{a}} en {kind[0]} (estado al {date_text})." if es else
-                                    f"At {institution} you have {{a}} in {kind[1]} (statement of {date_text})."), a=joined)
+        by_institution.setdefault(account.get("institution") or account["label"], []).append(account)
+    for institution, group in by_institution.items():
+        totals: dict[str, Decimal] = {}
+        for account in group:
+            for cur, value in account["native"].items():
+                totals[cur] = totals.get(cur, Decimal(0)) + Decimal(str(value))
+        ordered = sorted(totals.items(), key=lambda kv: (kv[0] != reporting, kv[0]))
+        group.sort(key=lambda a: (a.get("currency") != reporting, a["key"]))
+        parts = {f"a{i}": _amount(v, c, code(c)) for i, (c, v) in enumerate(ordered)}
+        joined = (" y " if es else " and ").join(f"{{{name}}}" for name in parts)
+        types = {a.get("type") for a in group}
+        kind = {"brokerage": ("tu cuenta de inversión", "your brokerage account"),
+                "checking": ("tu cuenta de cheques", "your checking account"),
+                "savings": ("tu cuenta de ahorro", "your savings account")}.get(
+            next(iter(types)) if len(types) == 1 else "", ("tus cuentas", "your accounts"))
+        as_of = max((a.get("as_of") or "" for a in group), default="") or None
+        add("own", group[0]["key"], (f"En {institution} tienes {joined} en {kind[0]}." if es else
+                                     f"At {institution} you have {joined} in {kind[1]}."),
+            extra={"institution": institution, "as_of": as_of, "keys": [a["key"] for a in group]}, **parts)
     for item in sit["investments"]:
         if not item["counted"]:
             continue
         approx = about(item["approximate"])
         where = (f" en {item['institution']}" if es else f" at {item['institution']}") if item.get("institution") else ""
         add("own", item["key"], (f"Tienes {approx}{{a}} invertidos{where}." if es else f"You have {approx}{{a}} invested{where}."),
-            a=_amount(item["amount"], item["currency"], code(item["currency"])))
+            ref=_item_ref(item, "investments"), a=_amount(item["amount"], item["currency"], code(item["currency"])))
     for diff in sit["differences"]:
         if not diff.get("statement"):
             continue
         approx = about(diff.get("stated_approximate"))
-        add("own", diff["key"], (f"Dijiste {approx}{{s}} en {diff['institution']}; el estado de cuenta muestra {{x}}." if es else
-                                 f"You said {approx}{{s}} at {diff['institution']}; the statement shows {{x}}."),
-            s=_amount(diff["stated"]["amount"], diff["stated"]["currency"], code(diff["stated"]["currency"])),
-            x=_Emph(" + ".join(f"${fmt(v)} {c}" for c, v in sorted(diff["statement"].items()))))
+        if diff.get("statement_value") is not None and diff.get("currency"):
+            shown = _amount(diff["statement_value"], diff["currency"], code(diff["currency"]))
+        else:
+            shown = _Emph(" + ".join(_money_text(v, c, True) for c, v in sorted(diff["statement"].items())))
+        item = next((i for i in sit["investments"] if i["key"] == diff["key"] and i.get("institution") == diff["institution"]), {})
+        add("own", diff["key"], (f"Dijiste {approx}{{s}} en {diff['institution']}; tu estado de cuenta dice {{x}}." if es else
+                                 f"You said {approx}{{s}} at {diff['institution']}; your statement says {{x}}."),
+            ref=_item_ref(item, "investments") if item else None,
+            extra={"kind": "difference", "institution": diff["institution"], "as_of": diff.get("as_of")},
+            s=_amount(diff["stated"]["amount"], diff["stated"]["currency"], code(diff["stated"]["currency"])), x=shown)
 
     for row in sit["liabilities"]:
         amount = _amount(row["balance"], row["currency"], code(row["currency"]))
@@ -428,7 +476,9 @@ def sentences(sit: Mapping[str, Any], language: str | None = None) -> list[dict]
         if row["monthly_payment"] is not None and row["payment_basis"] == "stated":
             template += "; pagas {p} al mes" if es else ", {p} a month"
             values["p"] = _amount(row["monthly_payment"], row["currency"], code(row["currency"]))
-        add("owe", row["key"], template + ".", **values)
+        extra = {"origin": "statement", "institution": lender, "as_of": row.get("as_of")} \
+            if row.get("source") in ("statement", "household") else _since(row)
+        add("owe", row["key"], template + ".", ref=_item_ref(row, "debts"), extra=extra, **values)
 
     for goal in sit["goals"]:
         if goal["status"] in ("done", "dropped"):
@@ -449,23 +499,27 @@ def sentences(sit: Mapping[str, Any], language: str | None = None) -> list[dict]
             values["n"] = goal["name"]
             if goal["target_date"]:
                 values["d"] = _Emph(_month_year(goal["target_date"], lang))
-                template = "Tu meta «{n}»: {a} para {d}." if es else "Your goal “{n}”: {a} by {d}."
+                template = "Quieres juntar {a} para «{n}» antes de {d}." if es else "You want {a} for “{n}” by {d}."
             else:
-                template = "Tu meta «{n}»: {a}." if es else "Your goal “{n}”: {a}."
+                template = "Quieres juntar {a} para «{n}»." if es else "You want {a} for “{n}”."
         elif goal["monthly_contribution"] is not None:
             values.update(a=_amount(goal["monthly_contribution"], cur, code(cur)), n=goal["name"])
-            template = "Tu meta «{n}»: {a} al mes." if es else "Your goal “{n}”: {a} a month."
+            template = "Apartas {a} al mes para «{n}»." if es else "You set aside {a} a month for “{n}”."
         else:
             values["n"] = goal["name"]
-            template = "Tu meta: {n}." if es else "Your goal: {n}."
-        add("goals", "goals", template, **values)
+            template = "Quieres {n}." if es else "You want to {n}."
+            if not re.match(r"(?i)^(ahorrar|invertir|comprar|pagar|juntar|save|invest|buy|pay)\b", goal["name"]):
+                template = "Tienes una meta: «{n}»." if es else "One of your goals: “{n}”."
+            else:
+                values["n"] = goal["name"][:1].lower() + goal["name"][1:]
+        add("goals", "goals", template, ref=str(goal["id"]), **values)
     reserve = sit["reserve"]
     if reserve["target_months"] is not None:
         months = reserve["target_months"]
         unit = ("mes" if months == 1 else "meses") if es else ("month" if months == 1 else "months")
         add("goals", "reserve" if "reserve" in meta else "plan.resources",
             "Quieres un fondo de emergencia de {m} de gastos." if es else "You want an emergency fund of {m} of expenses.",
-            m=_Emph(f"{fmt(months)} {unit}"))
+            ref="target_months" if "reserve" in meta else "reserve_months", m=_Emph(f"{fmt(months)} {unit}"))
 
     risk = profile.get("risk") or {}
     if risk.get("drop_reaction") in _DROP[lang]:
@@ -473,6 +527,107 @@ def sentences(sit: Mapping[str, Any], language: str | None = None) -> list[dict]
             r=_Emph(_DROP[lang][risk["drop_reaction"]]))
     if risk.get("experience") in _EXPERIENCE[lang]:
         add("invest", "preference.risk", _EXPERIENCE[lang][risk["experience"]])
+    # What the statement shows about how the money is invested (patterns, not things the person said).
+    holdings = sit.get("holdings") or {}
+    statement_key = next((a["key"] for a in sit["accounts"] if a["source"] == "statement" and a.get("key")), None)
+    top = (holdings.get("top") or [None])[0]
+    if statement_key and top and top.get("weight") is not None and len(holdings.get("top") or []) > 1:
+        institution = next((a.get("institution") for a in sit["accounts"] if a["key"] == statement_key), None)
+        add("invest", statement_key, "Tu posición más grande es {u}: {w} de lo que tienes invertido." if es else
+            "Your largest position is {u}: {w} of what you have invested.",
+            extra={"institution": institution, "readonly": True},
+            u=_Emph(_instrument(top["underlying"], lang)), w=_Emph(pct(round(Decimal(str(top["weight"])), 2))))
+    for overlap in (holdings.get("overlaps") or [])[:2]:
+        symbols = (" y " if es else " and ").join(overlap["symbols"])
+        add("invest", statement_key, "Tienes {u} dos veces: a través de {s}." if es else
+            "You own {u} twice: through {s}.", extra={"readonly": True},
+            u=_Emph(_instrument(overlap["underlying"], lang)), s=symbols)
+    return out
+
+
+def _item_ref(item: Mapping[str, Any], list_name: str) -> str | None:
+    """Where one item lives inside its fact: a legacy list entry, a profile field, or the whole key."""
+    key = item.get("key") or ""
+    if key in ("plan.resources", "income.schedule"):
+        return f"{list_name}:{item['id']}"
+    if key == "client.profile":
+        return str(item.get("id"))
+    return None
+
+
+def _since(item: Mapping[str, Any]) -> dict:
+    for name in ("since", "valid_from", "start_date", "started_on"):
+        value = item.get(name)
+        if isinstance(value, str) and re.match(r"^\d{4}-\d{2}", value):
+            return {"since": value[:10]}
+    return {}
+
+
+_PAYMENT_ES = {"auto": "del coche", "mortgage": "de la hipoteca", "card": "de la tarjeta", "personal": "del préstamo",
+               "student": "del crédito educativo", "other": "del préstamo"}
+_PAYMENT_EN = {"auto": "car", "mortgage": "mortgage", "card": "card", "personal": "loan", "student": "student loan",
+               "other": "loan"}
+
+
+def summaries(sit: Mapping[str, Any], language: str | None = None) -> dict[str, dict]:
+    """One human line that opens each memory group, or nothing when it would only repeat a fact."""
+    lang = _lang(language)
+    es = lang == "es"
+    cur = sit.get("currency")
+    flow, out = sit["cash_flow"], {}
+
+    def put(topic: str, template: str, **values: Any) -> None:
+        text, spans = _compose(template, **values)
+        out[topic] = {"text": text, "emphasis": spans}
+
+    def money(value: Any) -> _Emph:
+        return _amount(abs(Decimal(str(value))), cur, False)
+
+    approx = sit["income"].get("approximate") or sit["spending"].get("approximate")
+    unknown_debts = [r for r in sit["liabilities"] if r["id"] in (flow.get("debt_payments_unknown") or [])]
+    about = ("unos " if es else "about ") if approx or unknown_debts else ""
+    surplus = flow.get("surplus")
+    if surplus is not None and Decimal(str(surplus)) > 0:
+        tail = ""
+        if len(unknown_debts) == 1:
+            kind = unknown_debts[0]["kind"]
+            tail = f", sin contar el pago {_PAYMENT_ES.get(kind, _PAYMENT_ES['other'])}" if es else \
+                f", before your {_PAYMENT_EN.get(kind, _PAYMENT_EN['other'])} payment"
+        elif unknown_debts:
+            tail = ", sin contar los pagos de tus deudas" if es else ", before your debt payments"
+        put("money_in", (f"Te sobran {about}{{x}} al mes{tail}." if es else f"{about.capitalize()}{{x}} a month is left over{tail}."),
+            x=money(surplus))
+    elif surplus is not None and Decimal(str(surplus)) < 0:
+        put("money_in", "Cada mes sale {x} más de lo que entra." if es else "Each month {x} more goes out than comes in.",
+            x=money(surplus))
+    income, spending = flow.get("income"), flow.get("spending")
+    if income and spending is not None and Decimal(str(income)) > 0:
+        share = (Decimal(str(spending)) / Decimal(str(income)) * 100).quantize(Decimal(1))
+        put("money_out", "Gastas el {p} de lo que entra." if es else "You spend {p} of what comes in.", p=_Emph(f"{share}%"))
+    nw = sit["net_worth"]
+    owned = [r for r in sit["cash"] if r["counted"]] + [r for r in sit["investments"] if r["counted"]]
+    institutions = {a.get("institution") or a["label"] for a in sit["accounts"] if a["source"] != "ledger" and a.get("native")}
+    if nw.get("assets") is not None and not nw.get("unconverted") and len(owned) + len(institutions) >= 2:
+        put("own", "En total tienes {x}." if es else "In all, you have {x}.", x=money(nw["assets"]))
+    debts = sit["liabilities"]
+    if len(debts) >= 2 and nw.get("liabilities") is not None:
+        put("owe", "Debes {x} en total." if es else "You owe {x} in all.", x=money(nw["liabilities"]))
+    elif len(debts) == 1 and debts[0]["missing"]:
+        kind = debts[0]["kind"]
+        put("owe", f"Aún no sé cuánto pagas {_PAYMENT_ES.get(kind, _PAYMENT_ES['other'])} al mes." if es else
+            f"I don’t know your monthly {_PAYMENT_EN.get(kind, _PAYMENT_EN['other'])} payment yet.")
+    elif len(debts) == 1 and debts[0]["payoff"].get("status") == "ready" and debts[0]["payoff"].get("date"):
+        put("owe", "Terminas de pagar en {d}." if es else "It's paid off by {d}.",
+            d=_Emph(_month_year(debts[0]["payoff"]["date"], lang)))
+    commitments = sit["commitments"]
+    if commitments["items"] and commitments.get("total"):
+        if commitments.get("overcommitted"):
+            put("goals", "Tus metas piden {t} al mes, más de lo que te sobra." if es else
+                "Your goals ask for {t} a month, more than you have left over.", t=money(commitments["total"]))
+        elif commitments.get("unallocated") is not None:
+            put("goals", "Apartas {t} al mes para tus metas; te quedan {u} libres." if es else
+                "You set aside {t} a month for your goals; {u} stays free.",
+                t=money(commitments["total"]), u=money(commitments["unallocated"]))
     return out
 
 
@@ -492,4 +647,4 @@ def _day(iso: str | None, lang: str) -> str:
     return f"{day.day} de {month} de {day.year}" if lang == "es" else f"{month} {day.day}, {day.year}"
 
 
-__all__ = ["brief", "sentences", "fmt", "pct", "BRIEF_MAX_LINES", "liability_name"]
+__all__ = ["brief", "sentences", "summaries", "fmt", "pct", "BRIEF_MAX_LINES", "liability_name"]
