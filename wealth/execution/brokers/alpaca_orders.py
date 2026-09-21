@@ -100,6 +100,8 @@ WINDOW_BUDGET = RATE_LIMIT_PER_MINUTE - 20  # per client, leaving room for the r
 TIMEOUT_SECONDS = 20.0
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 MAX_CLIENT_ORDER_ID = 128
+FILL_PAGE_SIZE = 100   # Alpaca's maximum page_size for account activities
+MAX_FILL_PAGES = 50
 # Optional dedicated paper keys; the shared keys belong to the read connector.
 PAPER_ENV = ("WEALTH_ALPACA_PAPER_KEY_ID", "WEALTH_ALPACA_PAPER_SECRET")
 PAPER_KEYCHAIN = "wealth-alpaca-paper"
@@ -391,11 +393,22 @@ class AlpacaOrders:
         value = self._ok("GET", "/v2/orders", query={"status": "open", "limit": 100})
         return value if isinstance(value, list) else []
 
-    def last_price(self, symbol: str) -> str | None:
+    def latest_trade(self, symbol: str) -> dict[str, Any] | None:
+        """``{price, at}`` of the latest trade (``trade.p`` and its RFC 3339 time ``trade.t``), or ``None``.
+
+        The time matters: a halted or thinly traded symbol's "latest" trade can be
+        days old, and a limit collared around it is no protection.
+        """
         body = self._ok("GET", f"/v2/stocks/{_symbol(symbol)}/trades/latest", data_host=True)
         trade = body.get("trade") if isinstance(body, Mapping) else None
         price = (trade or {}).get("p")
-        return str(price) if price not in (None, "") else None
+        if price in (None, ""):
+            return None
+        return {"price": str(price), "at": (trade or {}).get("t")}
+
+    def last_price(self, symbol: str) -> str | None:
+        trade = self.latest_trade(symbol)
+        return trade["price"] if trade else None
 
     def order(self, order_id: str) -> dict[str, Any]:
         if not _ORDER_ID.match(str(order_id)):
@@ -413,12 +426,40 @@ class AlpacaOrders:
                 return None
             raise
 
-    def fills(self, after: str | None = None) -> list[dict[str, Any]]:
-        query: dict[str, Any] = {"direction": "asc", "page_size": 100}
+    def fills(self, after: str | None = None, page_token: str | None = None) -> list[dict[str, Any]]:
+        """One page (at most ``FILL_PAGE_SIZE``) of FILL activities, oldest first."""
+        query: dict[str, Any] = {"direction": "asc", "page_size": FILL_PAGE_SIZE}
         if after:
             query["after"] = after
+        if page_token:
+            query["page_token"] = page_token
         value = self._ok("GET", "/v2/account/activities/FILL", query=query)
-        return value if isinstance(value, list) else []
+        if not isinstance(value, list):
+            raise BrokerError("Alpaca's fill list was not a list.", retryable=True)
+        return value
+
+    def all_fills(self, after: str | None = None, max_pages: int = MAX_FILL_PAGES) -> list[dict[str, Any]]:
+        """Every FILL activity since ``after``, following ``page_token`` (the last activity id of each page).
+
+        The activities endpoint has no order filter, so an account with other
+        trading can hold many fills; stopping at one page would lose them.  A
+        read error raises :class:`BrokerError` (never read as "no fills").
+        """
+        seen: set[str] = set()
+        out: list[dict[str, Any]] = []
+        token = None
+        for _ in range(max_pages):
+            page = self.fills(after, token)
+            fresh = [a for a in page if isinstance(a, Mapping) and str(a.get("id")) not in seen]
+            for activity in fresh:
+                seen.add(str(activity.get("id")))
+            out += fresh
+            if len(page) < FILL_PAGE_SIZE:
+                return out
+            token = str(fresh[-1].get("id") or "") if fresh else ""
+            if not token:
+                raise BrokerError("Alpaca's fill pages did not advance; try again later.", retryable=True)
+        raise BrokerError(f"More than {max_pages} pages of fills; try again later.", retryable=True)
 
     # writes: reachable only from tickets.confirm / tickets.cancel, i.e. the person's tap in the app
     def submit(self, order: Mapping[str, Any]) -> dict[str, Any]:

@@ -580,3 +580,47 @@ def test_monitor_without_a_user_agent_reports_unchecked(monkeypatch, tmp_path):
     report = evaluate(snapshot, {}, {"rules": [{"id": "f", "kind": "manager_filing"}], "timezone": "UTC"})
     check = report["result"]["checks"][0]
     assert check["status"] == "unknown" and managers.SEC_UA_ENV in check["detail"]["unchecked"]["0002045724"]
+
+
+# -- QA round 2: the summary-page check follows the filings actually applied --------------------------
+
+def _summary_check(filings):
+    cik = "0009990001"
+    pages = managers.build_snapshot([{"cik": cik, "name": "X", "filings": filings}])
+    pages["openfigi"] = {}
+    client = managers.Edgar(user_agent="qa qa@example.com", transport=managers.Snapshot(pages))
+    out = managers.holdings(cik, None, client=client, tickers={f"00000000{c}": f"T{c}" for c in "123"})
+    return out["result"], out["warnings"]
+
+
+def _row(c, value, shares):
+    return {"issuer": f"ISSUER {c}", "class": "COM", "cusip": f"00000000{c}", "value": value, "shares": shares}
+
+
+@pytest.mark.parametrize("amendment, original, rows, total", [
+    # a thousands-of-dollars original (filed 2022) restated in whole dollars (filed 2023)
+    ("RESTATEMENT", [_row(1, 1000, 10000), _row(2, 500, 5000)], [_row(1, 1000000, 10000), _row(2, 600000, 5000)],
+     1600000),
+    # a NEW HOLDINGS amendment's summary page covers only the rows it adds
+    ("NEW HOLDINGS", [_row(1, 1000, 10000)], [_row(3, 2000000, 20000)], 3000000),
+])
+def test_summary_check_uses_each_filings_units_and_the_amended_quarter(amendment, original, rows, total):
+    period = "2022-09-30"
+    result, warnings = _summary_check([
+        {"accession": "0009990001-22-000001", "form": "13F-HR", "filing_date": "2022-11-14", "period": period,
+         "rows": original},
+        {"accession": "0009990001-23-000001", "form": "13F-HR/A", "filing_date": "2023-02-01", "period": period,
+         "amendment_type": amendment, "rows": rows}])
+    assert result["total_reported_value"] == total
+    assert result["summary_total_check"] == {"summary_page": total, "parsed": total, "matches": True}
+    assert not any("summary page" in w for w in warnings)
+
+
+def test_summary_check_still_flags_a_table_that_misses_rows():
+    period = "2022-12-31"
+    primary = managers._primary_xml("X", period, entries=2, total=2000000)  # the summary says two holdings
+    result, warnings = _summary_check([
+        {"accession": "0009990001-23-000001", "form": "13F-HR", "filing_date": "2023-02-14", "period": period,
+         "rows": [_row(1, 1000000, 10000)], "primary_xml": primary}])
+    assert result["summary_total_check"] == {"summary_page": 2000000, "parsed": 1000000, "matches": False}
+    assert any("summary page" in w for w in warnings)

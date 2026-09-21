@@ -51,6 +51,8 @@ class FakeAlpaca:
         self.activities: list[dict] = []
         self.calls: list[dict] = []
         self.lose_next_response = False
+        self.trade_time = None  # None: the last trade is fresh (this instant); Alpaca always sends trade.t
+        self.fail_fills = False
 
     def __call__(self, method, url, headers, body, timeout):
         parts = urlsplit(url)
@@ -62,7 +64,8 @@ class FakeAlpaca:
         path, query = parts.path, {k: v[0] for k, v in parse_qs(parts.query).items()}
         if parts.hostname == "data.alpaca.markets":
             symbol = path.split("/")[3]
-            return self._json(200, {"symbol": symbol, "trade": {"p": float(self.prices[symbol])}}) \
+            traded_at = self.trade_time or max(datetime.now(timezone.utc), NOW).isoformat()
+            return self._json(200, {"symbol": symbol, "trade": {"p": float(self.prices[symbol]), "t": traded_at}}) \
                 if symbol in self.prices else self._json(404, {"message": "not found"})
         if method == "GET" and path == "/v2/account":
             return self._json(200, self.account)
@@ -97,8 +100,13 @@ class FakeAlpaca:
                 return self._json(404, {"message": "order not found"})
             order["status"] = "canceled"
             return 204, b""
-        if method == "GET" and path == "/v2/account/activities/FILL":
-            return self._json(200, self.activities)
+        if method == "GET" and path == "/v2/account/activities/FILL":  # paged like Alpaca: page_size, page_token
+            if self.fail_fills:
+                return self._json(500, {"message": "internal error"})
+            rows = sorted(self.activities, key=lambda a: a["id"])
+            if query.get("page_token"):
+                rows = [a for a in rows if a["id"] > query["page_token"]]
+            return self._json(200, rows[: int(query.get("page_size", 100))])
         return self._json(404, {"message": f"unexpected {method} {path}"})
 
     @staticmethod

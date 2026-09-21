@@ -343,7 +343,7 @@ def _surplus(run: _Run) -> None:
                                f"¿A dónde mando los {amount} que me sobran en la cuenta?"),
                     data={"idle": num(idle), "currency": run.currency, "monthly_spending": num(spend),
                           "month_end_balances": {e.isoformat(): num(b) for e, b in zip(ends, balances)},
-                          "multiple": num(SURPLUS_BALANCE_MULTIPLE)},
+                          "multiple": num(SURPLUS_BALANCE_MULTIPLE), "accounts": sorted(checking)},
                     sources=["ledger", run.sit["spending"].get("key") or "ledger"],
                     trigger=[ends[0].isoformat(), _sig2(idle)]))
                 return
@@ -395,24 +395,37 @@ def _reserve(run: _Run) -> None:
             next_step=("How do I fill my emergency fund fastest?", "¿Cómo lleno mi fondo de emergencia más rápido?"),
             data={"months": num(months, 1), "target_months": num(target, 1), "amount": num(amount),
                   "gap": num(gap), "currency": run.currency},
-            sources=sources, trigger=["below", str(target), int(months)]))
+            # The condition (below the target, how urgently), not the exact months: a dismissed nudge stays
+            # dismissed while the fund inches up or down, and comes back if the target or urgency changes.
+            sources=sources, trigger=["below", str(target), urgent]))
     drag_at = max(CASH_DRAG_MONTHS, target or Decimal(0))
     if months > drag_at:
+        # Excess over the person's target amount, or, with no target set, over the stated default of
+        # CASH_DRAG_MONTHS of essential spending; never over an unknown.
         essential = D(run.sit["spending"].get("essential_for_reserve"))
-        keep = D(reserve.get("target_amount")) if target is not None else (CASH_DRAG_MONTHS * essential if essential else None)
+        if target is not None:
+            keep, basis = D(reserve.get("target_amount")), "target"
+        else:
+            keep, basis = (CASH_DRAG_MONTHS * essential if essential and essential > 0 else None), "default"
         excess = amount - keep if keep is not None else None
         if excess is None or excess <= 0:
             return
         text = run.money(excess)
+        default_en = (f" You haven't set a reserve target, so this uses a default of {int(CASH_DRAG_MONTHS)} months "
+                      "of essential spending." if basis == "default" else "")
+        default_es = (f" No has fijado una meta de reserva; uso por defecto {int(CASH_DRAG_MONTHS)} meses de gasto "
+                      "esencial." if basis == "default" else "")
         run.items.append(_item(
             "cash_drag", None, severity="consider", priority="opportunity",
             title=(f"{text} more cash than your reserve needs", f"Tienes {text} de más en efectivo"),
-            why=(f"Your reserve covers {num(months, 1)} months; past {int(drag_at)} months the extra loses to inflation.",
-                 f"Tu reserva cubre {num(months, 1)} meses; arriba de {int(drag_at)} el excedente pierde contra la inflación."),
+            why=(f"Your reserve covers {num(months, 1)} months; past {int(drag_at)} months the extra loses to inflation."
+                 + default_en,
+                 f"Tu reserva cubre {num(months, 1)} meses; arriba de {int(drag_at)} el excedente pierde contra la inflación."
+                 + default_es),
             next_step=(f"Where could the extra {text} of cash earn more?", f"¿Dónde pongo a trabajar los {text} de más?"),
             data={"months": num(months, 1), "threshold_months": num(drag_at, 1), "excess": num(excess),
-                  "currency": run.currency},
-            sources=sources, trigger=["drag", int(months // 6)]))
+                  "currency": run.currency, "keep_basis": basis, "keep_amount": num(keep)},
+            sources=sources, trigger=["drag", str(drag_at), basis]))
 
 
 _WINDFALL_NAMES = {"aguinaldo": ("aguinaldo", "aguinaldo"), "ptu": ("profit share (PTU)", "PTU"),
@@ -1017,6 +1030,81 @@ def _threads(run: _Run) -> None:
         trigger=[thread["id"], [(k, meta[k]["revision"]) for k in sorted(newer)]]))
 
 
+def _cohere(run: _Run) -> None:
+    """Items that talk about the same money must not contradict each other.
+
+    "Emergency fund: 3.7 of 6 months" next to "$312,712 idle in checking" reads
+    as a contradiction: if cash is idle, why is the reserve short?  So:
+
+    * idle checking cash that covers the reserve gap becomes ONE item that does
+      the arithmetic ("$312,712 unassigned; $X of it fills your 6-month
+      reserve"), whose next step is to set that amount aside;
+    * idle cash that covers only part of the gap keeps both items, each saying
+      how much is still missing after the idle cash;
+    * idle cash already counted in the reserve is not "idle": that item goes;
+    * a monthly amount with no job, next to a short reserve, says how many
+      months of it fill the gap.
+    """
+    reserve = next((i for i in run.items if i["kind"] == "reserve_low"), None)
+    surplus = next((i for i in run.items if i["kind"] == "surplus"), None)
+    if reserve is None or surplus is None:
+        return
+    gap = D(reserve["data"].get("gap"))
+    target = D(reserve["data"].get("target_months"))
+    target_text = num(target, 1)
+    idle = D(surplus["data"].get("idle"))
+    if idle is not None:
+        counted = set(surplus["data"].get("accounts") or []) & set(run.sit["reserve"].get("sources") or [])
+        if counted:  # the "idle" balance is the reserve itself
+            run.items.remove(surplus)
+            reserve["data"]["checking_counted_in_reserve"] = sorted(counted)
+            return
+        if gap is None or gap <= 0:
+            return
+        idle_text, gap_text = run.money(idle), run.money(gap)
+        if idle >= gap:
+            left = idle - gap
+            merged = _item(
+                "reserve_low", None, severity=reserve["severity"], priority=reserve["priority"],
+                title=(f"You have {idle_text} unassigned; {gap_text} of it fills your {target_text}-month reserve",
+                       f"Tienes {idle_text} sin destino: con {gap_text} completas tu fondo de {target_text} meses"),
+                why=(f"Your emergency fund covers {reserve['data']['months']} of {target_text} months, and checking "
+                     f"has held more than you need for {SURPLUS_CYCLES} months. Moving {gap_text} closes the gap"
+                     + (f" and still leaves {run.money(left)} to put to work." if left > 0 else "."),
+                     f"Tu fondo cubre {reserve['data']['months']} de {target_text} meses y tu cuenta lleva "
+                     f"{SURPLUS_CYCLES} meses con más de lo que necesitas. Con {gap_text} lo completas"
+                     + (f" y aún te quedan {run.money(left)} para invertir." if left > 0 else ".")),
+                next_step=(f"Help me set aside {gap_text} from checking as my emergency fund.",
+                           f"Ayúdame a apartar {gap_text} de mi cuenta como fondo de emergencia."),
+                data={**reserve["data"], "idle": num(idle), "fills_gap": num(gap), "left_after": num(left),
+                      "funded_from": "idle_checking", "accounts": surplus["data"].get("accounts")},
+                sources=[*reserve["sources"], *surplus["sources"]],
+                trigger=["below_covered_by_idle", str(target)])
+            run.items[run.items.index(reserve)] = merged
+            run.items.remove(surplus)
+            return
+        missing = gap - idle
+        missing_text = run.money(missing)
+        reserve["why"] = {
+            "en": f"Your idle {idle_text} in checking covers part of it; {missing_text} is still missing after that.",
+            "es": f"Los {idle_text} sin destino en tu cuenta cubren una parte; aún faltan {missing_text}."}
+        reserve["data"].update(idle=num(idle), still_missing=num(missing))
+        surplus["why"] = {
+            "en": f"Your emergency fund is short by {gap_text}; this covers part of it and {missing_text} is still missing.",
+            "es": f"A tu fondo de emergencia le faltan {gap_text}; esto cubre una parte y aún faltan {missing_text}."}
+        surplus["next_step"] = {"en": f"Help me move the {idle_text} to my emergency fund.",
+                                "es": f"Ayúdame a pasar los {idle_text} a mi fondo de emergencia."}
+        surplus["data"]["reserve_still_missing"] = num(missing)
+        return
+    monthly = D(surplus["data"].get("unallocated_monthly"))
+    if monthly and monthly > 0 and gap is not None and gap > 0:
+        months = gap / monthly
+        reserve["data"]["months_to_fill_from_surplus"] = num(months, 1)
+        surplus["why"] = {
+            "en": surplus["why"]["en"] + f" At that pace your emergency fund is full in about {num(months, 1)} months.",
+            "es": surplus["why"]["es"] + f" A ese ritmo completas tu fondo de emergencia en unos {num(months, 1)} meses."}
+
+
 TRIGGERS = (_scam, _reserve, _concentration, _harvest, _ppr, _windfall, _drift, _surplus, _dca, _fee_creep,
             _threads, _guilt_free, _statements, _stale)
 
@@ -1358,6 +1446,7 @@ def evaluate(situation: Mapping[str, Any], ledger: Mapping[str, Any] | None, sna
     run = _Run(situation, ledger, snapshot, day, codes)
     for trigger in TRIGGERS:
         trigger(run)
+    _cohere(run)  # before ranking, so no ranking can show two items that contradict each other
     entries = calendar(situation, day, jurisdiction=jurisdiction, ledger=ledger, snapshot=snapshot)
     triggered_kinds = {i["kind"] for i in run.items}
     active, future = [], []
