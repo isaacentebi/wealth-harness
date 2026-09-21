@@ -9,6 +9,8 @@ import sys
 import time
 from pathlib import Path
 
+from .cli_text import COMMANDS as TEXT_COMMANDS
+from .cli_text import main as text_main
 from .service import OPERATIONS, WealthService, dispatch
 
 
@@ -44,10 +46,27 @@ def _confirm_forget(payload: dict) -> None:
         raise PermissionError("forget was not confirmed; nothing was deleted")
 
 
+def _command(argv: list[str]) -> str | None:
+    """The first positional argument, skipping the value of a leading --db."""
+    skip = False
+    for arg in argv:
+        if skip:
+            skip = False
+        elif arg == "--db":
+            skip = True
+        elif not arg.startswith("-"):
+            return arg
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if _command(argv) in TEXT_COMMANDS:  # text-channel helpers, see docs/openclaw.md
+        return text_main(argv)
     parser = argparse.ArgumentParser(description="Wealth JSON CLI: one JSON object in (stdin or --input), JSON out")
     parser.add_argument("operation", choices=(*OPERATIONS, "watch"),
-                        help="context | run | remember | recall | decision | ingest | client | forget | watch")
+                        help="context | run | remember | recall | decision | ingest | client | forget | watch "
+                             "(text channels: onboarding | today | view, see docs/openclaw.md)")
     parser.add_argument("--db", help="SQLite path (default WEALTH_DB or user data directory)")
     parser.add_argument("--input", default="-", help="JSON argument file; '-' reads stdin")
     parser.add_argument("--client", help="explicit client identifier for wealth watch or forget")
