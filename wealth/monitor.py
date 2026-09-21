@@ -1,10 +1,19 @@
-"""Opt-in, caller-driven monitoring. Returns events; never sends messages or trades."""
+"""Opt-in, caller-driven monitoring. Returns events; never sends messages or trades.
+
+Dates are judged in the client's timezone: ``inputs.timezone`` (IANA name),
+else ``client.profile.timezone``, else the machine's local timezone.
+
+Thesis rules compare the watched value with an acknowledged baseline.  A change
+stays active until the caller acknowledges it with ``inputs.acknowledge``
+(a list of rule ids); the baseline never moves on its own.
+"""
 from __future__ import annotations
 
 import hashlib
 import json
 import math
-from datetime import date, datetime, timezone
+from datetime import date, datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 def _number(value):
@@ -16,8 +25,37 @@ def _number(value):
     return number
 
 
+def _client_today(snapshot: dict, inputs: dict) -> tuple[date, str]:
+    name = inputs.get("timezone")
+    basis = "inputs.timezone"
+    if name is None:
+        for fact in snapshot.get("facts", []):
+            value = fact.get("value")
+            if fact.get("key") == "client.profile" and fact.get("confidence") != "inferred" and isinstance(value, dict) and value.get("timezone"):
+                name, basis = value["timezone"], "client.profile.timezone"
+                break
+    if name is None:
+        local = datetime.now().astimezone()
+        return local.date(), f"local timezone ({local.tzname()})"
+    if not isinstance(name, str):
+        raise ValueError("timezone must be an IANA timezone name")
+    try:
+        zone = ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise ValueError(f"unknown timezone {name!r}; use an IANA name such as America/Mexico_City") from None
+    return datetime.now(zone).date(), f"{basis} ({name})"
+
+
+def _acknowledged(inputs: dict) -> set[str]:
+    raw = inputs.get("acknowledge", [])
+    if not isinstance(raw, list) or any(not isinstance(item, str) or not item for item in raw):
+        raise ValueError("acknowledge must be a list of monitor rule ids")
+    return set(raw)
+
+
 def evaluate(snapshot: dict, previous: dict, inputs: dict) -> dict:
-    today = datetime.now(timezone.utc).date()
+    today, timezone_basis = _client_today(snapshot, inputs)
+    acknowledged = _acknowledged(inputs)
     records = {fact["key"]: fact for fact in snapshot["facts"]}
     eligible = {key: fact["value"] for key, fact in records.items()
                 if fact["confidence"] != "inferred" and
@@ -25,7 +63,7 @@ def evaluate(snapshot: dict, previous: dict, inputs: dict) -> dict:
     rules = inputs.get("rules", eligible.get("monitor.rules", []))
     if not isinstance(rules, list):
         raise ValueError("monitor rules must be a list")
-    results, events, state, seen = [], [], {}, set()
+    results, events, state, seen, warnings = [], [], {}, set(), []
     for rule in rules:
         if not isinstance(rule, dict) or not isinstance(rule.get("id"), str) or not rule["id"]:
             raise ValueError("each monitor rule needs an id")
@@ -40,6 +78,8 @@ def evaluate(snapshot: dict, previous: dict, inputs: dict) -> dict:
             continue
         kind = rule.get("kind")
         status, detail, identity = "clear", {}, []
+        old = previous.get(rid) or {}
+        baseline = None
         if kind == "review":
             changed = [d["id"] for d in snapshot["decisions"] if d["needs_review"] and d["status"] != "dismissed"]
             status = "active" if changed else "clear"
@@ -67,14 +107,16 @@ def evaluate(snapshot: dict, previous: dict, inputs: dict) -> dict:
             if household:
                 from .household import run
                 dimension = rule.get("dimension", "instrument")
-                report = run("exposure", {"household": household}, {})
+                household_as_of = household.get("as_of") if isinstance(household, dict) else None
+                evaluation = max(today.isoformat(), household_as_of) if isinstance(household_as_of, str) else today.isoformat()
+                report = run("exposure", {"household": household, "evaluation_date": evaluation}, {})
                 exposure = report["result"]
                 coverage = exposure["coverage"]
                 if dimension not in exposure["exposures"]:
                     raise ValueError("drift dimension must be a household exposure dimension")
-                if (not coverage["household_complete"] or coverage["unknown_sections"]
+                if (not coverage["household_complete"] or coverage["unknown_sections"] or coverage["household_stale"]
                         or coverage["excluded_value_records"] or not coverage["lookthrough_complete"]):
-                    status, detail = "unknown", {"missing": "complete household and look-through coverage", "coverage": coverage}
+                    status, detail = "unknown", {"missing": "complete, current household and look-through coverage", "coverage": coverage}
                 else:
                     values = {r["name"]: _number(r["value"]) for r in exposure["exposures"][dimension]}
                     total = _number(exposure["known_assets"])
@@ -107,17 +149,31 @@ def evaluate(snapshot: dict, previous: dict, inputs: dict) -> dict:
             goals = eligible.get("goals")
             if goals is None:
                 status, detail = "unknown", {"missing": "fresh goals"}
+            elif not isinstance(goals, list):
+                status, detail = "unknown", {"missing": "goals must be a list"}
             else:
-                due = [g for g in goals if (date.fromisoformat(g["due"]) - today).days <= days]
-                status = "active" if due else "clear"
-                detail = {"goals": [{"id": g["id"], "name": g["name"], "due": g["due"]} for g in due]}
-                identity = sorted((g["id"], g["due"]) for g in due)
+                due, undated = [], []
+                for index, goal in enumerate(goals):
+                    goal = goal if isinstance(goal, dict) else {}
+                    label = {"id": goal.get("id", f"goals[{index}]"), "name": goal.get("name")}
+                    try:
+                        due_on = date.fromisoformat(goal["due"])
+                    except (KeyError, TypeError, ValueError):
+                        undated.append(label)
+                        continue
+                    if (due_on - today).days <= days:
+                        due.append({**label, "due": due_on.isoformat()})
+                status = "active" if due else ("unknown" if undated else "clear")
+                detail = {"goals": due, "goals_without_valid_due_date": undated}
+                identity = sorted((str(g["id"]), g["due"]) for g in due) + sorted(("undated", str(g["id"])) for g in undated)
         elif kind in {"threshold", "thesis"}:
             key = rule.get("fact_key")
             if not isinstance(key, str):
                 raise ValueError("monitor rule needs fact_key")
             if key not in eligible:
                 status, detail = "unknown", {"missing": key}
+                if kind == "thesis":
+                    baseline = old.get("value_hash")
             else:
                 value = eligible[key]
                 path = rule.get("field", [])
@@ -129,14 +185,18 @@ def evaluate(snapshot: dict, previous: dict, inputs: dict) -> dict:
                 except (KeyError, TypeError):
                     value = None
                 if kind == "thesis":
+                    baseline = old.get("value_hash")
                     if value is None:
                         status, detail = "unknown", {"missing": [key, *path]}
                     else:
                         digest = hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
-                        baseline = previous.get(rid, {}).get("value_hash")
-                        status = "active" if baseline and baseline != digest else "clear"
-                        detail = {"fact_key": key, "changed": status == "active"}
-                        identity = [digest]
+                        if baseline is None or rid in acknowledged:
+                            baseline = digest
+                        changed = baseline != digest
+                        status = "active" if changed else "clear"
+                        detail = {"fact_key": key, "changed": changed, "acknowledgement_required": changed,
+                                  "acknowledged": rid in acknowledged}
+                        identity = [baseline, digest]
                 elif value is None:
                     status, detail = "unknown", {"missing": [key, *path]}
                 else:
@@ -149,24 +209,23 @@ def evaluate(snapshot: dict, previous: dict, inputs: dict) -> dict:
                     detail = {"fact_key": key, "observed": left, "threshold": right, "op": op}
         else:
             raise ValueError("monitor kind must be review, expiry, drift, goal_due, threshold, or thesis")
+        if kind == "thesis" and rid in acknowledged and status == "unknown":
+            warnings.append(f"Acknowledgement for {rid} was not applied because the watched value is unavailable.")
         fingerprint = hashlib.sha256(json.dumps([rule, status, identity], sort_keys=True).encode()).hexdigest()
-        old = previous.get(rid)
         item = {"rule_id": rid, "kind": kind, "status": status, "detail": detail}
         results.append(item)
         if not old:
             if status in {"active", "unknown"}:
                 events.append({**item, "event": "review_needed"})
         elif old.get("status") != status:
-            events.append({**item, "event": "resolved" if status == "clear" else "review_needed"})
+            resolved = "acknowledged" if kind == "thesis" and rid in acknowledged else "resolved"
+            events.append({**item, "event": resolved if status == "clear" else "review_needed"})
         elif status in {"active", "unknown"} and old.get("fingerprint") != fingerprint:
             events.append({**item, "event": "review_needed"})
         state[rid] = {"fingerprint": fingerprint, "status": status}
-        if kind == "thesis":
-            if status != "unknown":
-                state[rid]["value_hash"] = digest
-            elif old and old.get("value_hash"):
-                state[rid]["value_hash"] = old["value_hash"]
+        if kind == "thesis" and baseline is not None:
+            state[rid]["value_hash"] = baseline
     return {"status": "ready", "result": {"checks": results, "events": events,
-            "checked_on": today.isoformat(), "configured_rules": len(rules),
+            "checked_on": today.isoformat(), "date_basis": timezone_basis, "configured_rules": len(rules),
             "delivery": "returned to caller only; no external messages or trades"},
-            "missing": [], "warnings": [], "sources": [], "assumptions": [], "state": state}
+            "missing": [], "warnings": warnings, "sources": [], "assumptions": [], "state": state}

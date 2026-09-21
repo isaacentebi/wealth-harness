@@ -596,7 +596,8 @@ class WealthStore:
         if kind == "web" and not ref.startswith(("https://", "http://")):
             raise ValidationError(f"{key}.source.ref must be the page URL for a web source")
         observed = _iso_date(source.get("observed_on"), f"{key}.source.observed_on")
-        if observed > _today():
+        # The earliest local date anywhere (UTC+14) is at most one day past UTC.
+        if observed > _today() + timedelta(days=1):
             raise ValidationError(f"{key}.source.observed_on must not be in the future")
         if kind != "tool":
             found = _sensitive(value, f"{key}.value")

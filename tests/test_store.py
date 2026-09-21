@@ -155,7 +155,7 @@ def test_correction_preserves_immutable_history_and_marks_decision_stale(store):
 
 def test_validation_rejects_future_untrusted_or_nonfinite_evidence(store):
     store.create_client("c", "Client")
-    future = (TODAY + timedelta(days=1)).isoformat()
+    future = (TODAY + timedelta(days=2)).isoformat()
     invalid = [
         fact("x", math.nan),
         fact("x", {"nested": math.inf}),
