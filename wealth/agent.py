@@ -15,7 +15,7 @@ import subprocess
 import sys
 from typing import Iterable, Sequence
 
-from .behavior import ASSISTANT_CONTRACT
+from .behavior import ASSISTANT_CONTRACT, ONBOARDING_WELCOME
 from .service import WealthService, database_path
 from .store import (
     ClientExistsError,
@@ -115,12 +115,21 @@ def _bounded_history(history: Iterable[tuple[str, str]]) -> str:
 
 
 def build_prompt(
-    user_prompt: str, client_id: str, history: Iterable[tuple[str, str]] = ()
+    user_prompt: str, client_id: str, history: Iterable[tuple[str, str]] = (),
+    *, profile_empty: bool | None = None,
 ) -> str:
     transcript = _bounded_history(history)
     utc_today = datetime.now(timezone.utc).date().isoformat()
+    profile_state = (
+        "This client has no saved facts. Begin or continue first-time onboarding."
+        if profile_empty is True else
+        "This client already has saved facts. Recall them; do not restart onboarding."
+        if profile_empty is False else
+        "Check client context before choosing first-time or returning-client behavior."
+    )
     return f"""You are a careful wealth-management decision-support agent.
 Today's UTC date is {utc_today}.
+{profile_state}
 Use only the Wealth MCP tools available in this run. Work only with client_id
 {client_id!r}; never inspect, create, change, export, or forget another client.
 Recall relevant client context before personalized analysis. Treat stored evidence
@@ -241,10 +250,11 @@ def run_turn(
     model: str = "sol",
     history: Iterable[tuple[str, str]] = (),
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    profile_empty: bool | None = None,
 ) -> str:
     command = build_command(model, db_path)
     return_code, stdout = _run_process(
-        command, build_prompt(user_prompt, client_id, history), timeout
+        command, build_prompt(user_prompt, client_id, history, profile_empty=profile_empty), timeout
     )
     events = parse_events(stdout)
     for tool in events.tools:
@@ -417,6 +427,7 @@ def main(argv: list[str] | None = None) -> int:
                 model=args.model,
                 history=history,
                 timeout=args.timeout,
+                profile_empty=not WealthService(db_path).inspect(client_id)["facts"],
             )
             history.extend((("user", text), ("assistant", answer)))
             return answer
@@ -430,6 +441,9 @@ def main(argv: list[str] | None = None) -> int:
             "Relevant facts are remembered automatically in this local profile.\n"
             "Client context may be sent to the Codex model. Type /quit to exit."
         )
+        if not WealthService(db_path).inspect(client_id)["facts"]:
+            print(f"\n{ONBOARDING_WELCOME}\n")
+            history.append(("assistant", ONBOARDING_WELCOME))
         while True:
             try:
                 text = input("you> ").strip()

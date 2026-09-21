@@ -226,3 +226,27 @@ def test_demo_seed_preserves_client_with_recorded_state(tmp_path):
     snapshot = service.inspect(agent.DEMO_CLIENT_ID)
     assert [fact["key"] for fact in snapshot["facts"]] == ["client.profile"]
     assert snapshot["facts"][0]["value"] == {"note": "user-written"}
+
+
+def test_interactive_onboarding_starts_before_input_and_only_for_empty_profile(monkeypatch, tmp_path, capsys):
+    database = tmp_path / "onboarding.sqlite3"
+    captured = []
+    replies = iter(["hey", "/quit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(replies))
+    def turn(text, **kwargs):
+        captured.append((text, kwargs))
+        return "What would you like to achieve financially?"
+    monkeypatch.setattr(agent, "run_turn", turn)
+    args = ["--client", "opaque-id", "--db", str(database)]
+    assert agent.main(args) == 0
+    assert agent.ONBOARDING_WELCOME in capsys.readouterr().out
+    assert captured[0][1]["profile_empty"] is True
+    assert ("assistant", agent.ONBOARDING_WELCOME) in captured[0][1]["history"]
+    service = WealthService(database)
+    service.remember("opaque-id", [{"key": "preference.focus", "value": "retirement",
+        "source": {"kind": "user", "ref": "conversation", "observed_on": "2026-09-21"},
+        "confidence": "confirmed"}], 0)
+    replies = iter(["hey", "/quit"])
+    assert agent.main(args) == 0
+    assert agent.ONBOARDING_WELCOME not in capsys.readouterr().out
+    assert captured[-1][1]["profile_empty"] is False

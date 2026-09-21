@@ -46,7 +46,10 @@ uv run wealth-agent --client my-profile --model sol
 ```
 
 A new identifier creates an empty local profile; the same identifier resumes it.
-Start with your question. The assistant saves relevant facts automatically and
+An empty interactive profile immediately gets a brief introduction and its first
+onboarding question, before you type. A greeting also starts onboarding in
+one-shot mode. Profiles with saved facts resume without the first-time introduction.
+You can instead start with a specific question. The assistant saves relevant facts automatically and
 asks only for missing details needed for that question. You can say not to save
 a detail. It distinguishes real facts from hypothetical scenarios. No separate
 setup questionnaire or “remember this” command is required.
