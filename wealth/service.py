@@ -40,7 +40,8 @@ TASK_MODULES = {
 }
 # Tasks answered by the service itself rather than one module.
 SERVICE_TASKS = ("plan", "calendar", "monitor", "debt_payoff", "policy_draft", "policy_check", "today", "weekly",
-                 "quarterly_review", "fee_audit")
+                 "quarterly_review", "fee_audit", "speculation_check", "panic_check", "scam_check",
+                 "protection_review", "life_event")
 # Investment policy tasks (wealth/policy.py) read the canonical picture, so the service runs them.
 POLICY_TASKS = frozenset({"policy_draft", "policy_check"})
 # Proactive tasks (wealth/proactive.py) read the whole picture and keep dismissals in the monitor namespace.
@@ -48,6 +49,8 @@ PROACTIVE_TASKS = frozenset({"today", "weekly"})
 PROACTIVE_STATE = "_proactive"  # key inside the ``monitor`` auxiliary namespace
 # The quarterly review and fee audit (wealth/review.py) read the picture, ledger, decisions and fact history.
 REVIEW_TASKS = frozenset({"quarterly_review", "fee_audit"})
+# Guardrail and protection tasks (wealth/guardrails.py, wealth/protection.py) also read the picture.
+GUARDRAIL_TASKS = frozenset({"speculation_check", "panic_check", "scam_check", "protection_review", "life_event"})
 TASKS = (*TASK_MODULES, *SERVICE_TASKS)
 # Tasks whose module reads the client's transaction ledger from context["ledger"].
 LEDGER_TASKS = frozenset({"ledger", "performance", "spending", "dca", "rebalance"})
@@ -272,6 +275,9 @@ class WealthService:
             "mx_foreign": "household tax", "mx_calendar": "tax", "estate": "household tax",
             "policy_draft": "goals reserve preference constraint client.profile policy",
             "policy_check": "policy constraint goals reserve",
+            "speculation_check": "reserve liability policy preference constraint", "panic_check": "goals reserve preference",
+            "scam_check": "account payee", "protection_review": "client.profile insurance estate goals",
+            "life_event": "client.profile goals",
             "rebalance": "household account tax goals reserve constraint", "asset_location": "household account tax",
             "today": "reserve goals income spending policy thread", "weekly": "reserve goals income spending",
             "retirement_mx": "client.profile income account goals retire afore",
@@ -342,7 +348,7 @@ class WealthService:
             with WealthStore(self.db_path) as store:
                 snapshot = store.snapshot(client_id)
                 if (task in LEDGER_TASKS or task in {"plan", "calendar", "debt_payoff"} or task in POLICY_TASKS
-                        or task in PROACTIVE_TASKS or task in REVIEW_TASKS) and "ledger" not in inputs:
+                        or task in PROACTIVE_TASKS or task in REVIEW_TASKS or task in GUARDRAIL_TASKS) and "ledger" not in inputs:
                     ledger = store.ledger(client_id)
         eligible = [f for f in snapshot["facts"] if f["confidence"] != "inferred"
                     and (not f.get("expires_on") or f["expires_on"] >= today)]
@@ -368,6 +374,9 @@ class WealthService:
             derived_evidence = report.pop("_evidence", [])
         elif task in REVIEW_TASKS:
             report = self._review(task, inputs, client_id, snapshot, ledger, today)
+            derived_evidence = report.pop("_evidence", [])
+        elif task in GUARDRAIL_TASKS:
+            report = self._guardrail(task, inputs, snapshot, ledger, today)
             derived_evidence = report.pop("_evidence", [])
         elif task in {"plan", "calendar"}:
             # Direct inputs may supply the same canonical facts without requiring a profile.
@@ -422,7 +431,7 @@ class WealthService:
         else:
             module = importlib.import_module("." + TASK_MODULES[task], __package__)
             report = module.run(task, inputs, context)
-        if task in {"plan", "calendar", "debt_payoff"} or task in POLICY_TASKS or task in PROACTIVE_TASKS or task in REVIEW_TASKS:
+        if task in {"plan", "calendar", "debt_payoff"} or task in POLICY_TASKS or task in PROACTIVE_TASKS or task in REVIEW_TASKS or task in GUARDRAIL_TASKS:
             used_ids = set(packet["evidence_ids"] if task in {"plan", "calendar"} else []) | set(derived_evidence)
             consumed = [f for f in eligible if f["id"] in used_ids and f["key"] not in inputs]
         elif task == "monitor":
@@ -441,6 +450,9 @@ class WealthService:
             from .policy import POLICY_FACT_KEYS
             keys_read = POLICY_FACT_KEYS + (("planning.dca", "thread.") if task == "quarterly_review" else ())
             relevant = {f["key"] for f in snapshot["facts"] if f["key"].startswith(keys_read)}
+        elif task in GUARDRAIL_TASKS:
+            from .guardrails import GUARDRAIL_FACT_KEYS
+            relevant = {f["key"] for f in snapshot["facts"] if f["key"].startswith(GUARDRAIL_FACT_KEYS)}
         elif task in {"plan", "calendar"}:
             relevant = set(keys)
         elif task in PROACTIVE_TASKS:
@@ -577,6 +589,29 @@ class WealthService:
                                if max(str(f.get("recorded_at") or "")[:10], str(f.get("valid_from") or "")) >= start})
                 history = {key: store.history(client_id, key) for key in keys}
         return review.run_task(task, inputs, snapshot, ledger, today, fact_history=history)
+
+    def _guardrail(self, task: str, inputs: dict, snapshot: dict, ledger, today: str) -> dict:
+        """Guardrail and protection tasks read the canonical picture (or inline ``facts``) and never write."""
+        from . import guardrails, policy, protection
+        inputs = dict(inputs)
+        as_of = inputs.pop("as_of", None) or today
+        if "facts" in inputs:
+            snapshot = policy.snapshot_from_facts(inputs.pop("facts"), as_of)
+        sit = situation_module.build(snapshot, ledger, as_of)
+        if task in protection.TASKS:
+            report = protection.run_task(task, inputs, sit)
+        else:
+            ips = policy.current(snapshot, as_of)
+            if ips is not None:
+                ips.pop("_fact_id", None)
+            report = guardrails.run_task(task, inputs, sit, ips, policy.preferences_from_snapshot(snapshot, as_of))
+        # The picture's evidence, plus the profile (residence and dependants steer every guardrail).
+        read = set(sit["evidence"].values())
+        read |= {f["id"] for f in snapshot.get("facts") or []
+                 if f.get("key") == "client.profile"
+                 or (task == "speculation_check" and f.get("key") in ("preference.speculation", "policy.ips"))}
+        report["_evidence"] = sorted(i for i in read if i and not str(i).startswith("request:"))
+        return report
 
     def client(self, action: str, client_id: str, inputs: dict | None = None) -> dict:
         """CLI client actions. MCP exposes create/index here and reads via wealth_inspect."""
