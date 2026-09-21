@@ -21,8 +21,13 @@ Paper trading is the default.
 3. **Confirmation.** The tap sends `POST /api/orders/<ticket_id>/confirm` with
    the card's code. The server checks the session token and local Host/Origin
    (as for every write), the code, that the ticket is unexpired (10 minutes)
-   and unused, then runs every check again on fresh data. Only then does it
-   send the orders. A "yes" in chat never places anything.
+   and unused, then runs every check again on fresh data. The tap confirms
+   what the card showed, not just the ticket id: if re-pricing moved a line's
+   limit by more than the collar, or its quantity or amount by more than 2%,
+   or pushed a live amount over the per-order limit, nothing is sent. The
+   request fails with `price_moved` (409), the card shows the new lines with a
+   quiet note, and a fresh tap places them. Only then does it send the
+   orders. A "yes" in chat never places anything.
 4. **After.** Each line shows its state (Sent / Enviada, Partly filled, Filled /
    Ejecutada, Rejected / Rechazada, Cancelled). The page refreshes open orders
    every 5 seconds, and **Cancel open orders** cancels the ones still working.
@@ -30,6 +35,11 @@ Paper trading is the default.
 
 The model reads a ticket's state with `order_ticket` and only `ticket_id`. It
 must not say an order was placed or filled until the line state says so.
+
+A pending ticket past its 10 minutes is settled as `expired` (its code is
+dropped) when the tickets are next listed or a new ticket is stored. The
+stored list keeps at most 60 tickets, dropping the oldest settled ones first;
+the `orders` audit table keeps their history.
 
 ## Pre-trade checks
 
@@ -143,7 +153,9 @@ statement or web page it read) **can:**
    variables) *without* `WEALTH_ALPACA_PAPER`.
 2. Opt in for this broker in the server's environment:
    `export WEALTH_TRADING_LIVE=alpaca`. Without it, every ticket is paper, and
-   a pending live ticket can no longer be placed.
+   a pending live ticket can no longer be placed. Orders already sent live
+   stay reachable: refresh and cancel still reconcile them, post their fills
+   and can cancel one that is still open.
 3. Optional limits (USD, live only): `WEALTH_TRADING_MAX_ORDER_USD` (default
    1000) and `WEALTH_TRADING_MAX_DAILY_USD` (default 5000).
    `WEALTH_TRADING_COLLAR` (default 0.01) sets how far a limit may sit through

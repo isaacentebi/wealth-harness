@@ -54,10 +54,13 @@ TICKET_TTL = timedelta(minutes=10)
 SOURCES = ("rebalance", "manager_mirror", "user_request")
 MAX_ORDERS = 20
 MAX_NONCE_FAILURES = 5
-KEEP_TICKETS = 60
+KEEP_TICKETS = 60                     # stored history: the oldest settled (incl. expired) tickets go first
 DEFAULT_MAX_ORDER = Decimal("1000")
 DEFAULT_MAX_DAILY = Decimal("5000")
 DEFAULT_COLLAR = Decimal("0.01")      # a limit may sit at most 1% through the last price
+# At confirm, a line whose re-priced amount or quantity moved more than this from what the card showed (or whose
+# limit moved more than the collar) is not sent: the card shows the new lines and waits for a fresh tap.
+PRICE_MOVE_TOLERANCE = Decimal("0.02")
 # A last trade older than this is no price at all (a halted or illiquid symbol): while the market is open,
 # 15 minutes; while it is closed, one trading day (weekdays; exchange holidays are not modelled, so the first
 # session after a holiday may need a fresh trade first).  WEALTH_TRADING_MAX_TRADE_AGE_MINUTES and
@@ -121,8 +124,17 @@ def limits(environ: Mapping[str, str] | None = None) -> dict[str, Decimal]:
             "trade_age_days": _env_decimal(environ, "WEALTH_TRADING_MAX_TRADE_AGE_DAYS", DEFAULT_TRADE_AGE_DAYS)}
 
 
-def broker_for(mode: str, environ: Mapping[str, str] | None = None) -> AlpacaOrders | None:
-    """The broker client for ``mode`` when keys exist; the base URL follows the mode, never an input."""
+def broker_for(mode: str, environ: Mapping[str, str] | None = None, *, existing: bool = False) -> AlpacaOrders | None:
+    """The broker client for ``mode`` when keys exist; the base URL follows the mode, never an input.
+
+    A live client for new work (pricing or confirming a ticket) needs the live opt-in (``WEALTH_TRADING_LIVE``);
+    without it there is none.  ``existing=True`` is only for tickets already sent to the live broker:
+    :func:`refresh` and :func:`cancel` may still reach them after the opt-in is withdrawn, so their orders can be
+    reconciled, their fills posted, and an open order cancelled.  Nothing new is ever placed that way.
+    """
+    environ = os.environ if environ is None else environ
+    if mode == "live" and not existing and trading_mode(environ) != "live":
+        return None
     return alpaca_orders.client(mode, environ=environ)
 
 
@@ -655,6 +667,8 @@ def run_checks(lines: list[dict], *, mode: str, broker: AlpacaOrders | None, sna
         for other in (state.get("tickets") or {}).values():
             if other.get("id") == ticket_id or other.get("status") not in ("pending", "submitted", "submitting"):
                 continue
+            if other["status"] == "pending" and _parse(other["expires_at"]) <= now:
+                continue
             if _parse(other["created_at"]) < recent:
                 continue
             for line in lines:
@@ -663,6 +677,48 @@ def run_checks(lines: list[dict], *, mode: str, broker: AlpacaOrders | None, sna
                                          f"{line['symbol']}.", line["index"], symbol=line["symbol"]))
     checks += _guardrail_rows(snapshot, now)
     return lines, _condense_policy(checks)
+
+
+def _relative_move(shown: Decimal, fresh: Decimal) -> Decimal:
+    return abs(fresh - shown) / abs(shown) if shown else (Decimal(0) if fresh == shown else Decimal(1))
+
+
+def _price_moves(shown_lines: list[dict], fresh_lines: list[dict], *, config: Mapping[str, Decimal],
+                 mode: str) -> list[dict]:
+    """``price_moved`` notices for lines re-priced beyond tolerance since the card showed them.
+
+    A line moved when its limit moved more than the collar, its quantity or amount more than
+    :data:`PRICE_MOVE_TOLERANCE`, its amount crossed the live per-order limit, or the card showed no
+    limit, quantity or amount where one now exists (the person never saw a price).
+    """
+    shown_by_index = {l["index"]: l for l in shown_lines}
+    rows: list[dict] = []
+    for fresh in fresh_lines:
+        shown = shown_by_index.get(fresh["index"], {})
+        reasons: list[str] = []
+        for field, tolerance in (("limit_price", config["collar"]), ("order_qty", PRICE_MOVE_TOLERANCE),
+                                 ("estimated_amount", PRICE_MOVE_TOLERANCE)):
+            before, after = _opt(shown.get(field)), _opt(fresh.get(field))
+            if after is None:
+                continue  # an unknown fresh value is already a blocking check
+            if before is None or _relative_move(before, after) > tolerance:
+                reasons.append(field)
+        before, after = _opt(shown.get("estimated_amount")), _opt(fresh.get("estimated_amount"))
+        if mode == "live" and after is not None and after > config["max_order"] and "estimated_amount" not in reasons \
+                and (before is None or before <= config["max_order"]):
+            reasons.append("estimated_amount")
+        if reasons:
+            symbol = fresh["symbol"]
+            rows.append(_check("price_moved", "warn",
+                               f"{symbol} was re-priced since the card was shown: limit {shown.get('limit_price') or '-'}"
+                               f" -> {fresh.get('limit_price') or '-'}, quantity {shown.get('order_qty') or '-'} -> "
+                               f"{fresh.get('order_qty') or '-'}, about USD {shown.get('estimated_amount') or '-'} -> "
+                               f"{fresh.get('estimated_amount') or '-'}. Tap again to place it at the new price.",
+                               fresh["index"], symbol=symbol, fields=reasons,
+                               shown_limit=shown.get("limit_price"), limit=fresh.get("limit_price"),
+                               shown_qty=shown.get("order_qty"), qty=fresh.get("order_qty"),
+                               shown_amount=shown.get("estimated_amount"), amount=fresh.get("estimated_amount")))
+    return rows
 
 
 def _blocking(checks: list[dict], override: bool) -> list[dict]:
@@ -689,6 +745,32 @@ def _totals(lines: list[dict]) -> dict[str, Any]:
         values = [_opt(l.get(name)) for l in lines if l.get(name) is not None]
         result[name] = _s(sum(values, Decimal(0))) if values else None
     return result
+
+
+_SETTLED_OPEN = ("pending", "submitting", "submitted")  # everything else is settled
+
+
+def _settle_expired(tickets: Mapping[str, Any], now: datetime) -> tuple[dict[str, Any], bool]:
+    """Pending tickets past ``expires_at`` become ``expired`` (their card code is dropped); ``(tickets, changed)``."""
+    out, changed = dict(tickets), False
+    for tid, item in tickets.items():
+        if item.get("status") == "pending" and _parse(item["expires_at"]) <= now:
+            out[tid] = {**item, "status": "expired", "nonce": None, "nonce_hash": None}
+            changed = True
+    return out, changed
+
+
+def _prune(tickets: dict[str, Any], now: datetime) -> dict[str, Any]:
+    """Settle expired tickets, then keep at most KEEP_TICKETS, dropping the oldest settled first.
+
+    The append-only ``orders`` audit table keeps every dropped ticket's history.
+    """
+    tickets, _ = _settle_expired(tickets, now)
+    if len(tickets) > KEEP_TICKETS:
+        settled = sorted((t["created_at"], tid) for tid, t in tickets.items() if t["status"] not in _SETTLED_OPEN)
+        for _, tid in settled[:len(tickets) - KEEP_TICKETS]:
+            tickets.pop(tid)
+    return tickets
 
 
 def public_ticket(ticket: Mapping[str, Any], *, include_nonce: bool = False, now: datetime | None = None,
@@ -823,12 +905,7 @@ def create_ticket(store: Any, client_id: str | None, inputs: Mapping[str, Any], 
         def update(state: dict) -> dict:
             tickets = dict(state.get("tickets") or {})
             tickets[ticket_id] = ticket
-            if len(tickets) > KEEP_TICKETS:  # oldest settled tickets go first; the audit trail keeps them
-                settled = sorted((t["created_at"], tid) for tid, t in tickets.items()
-                                 if t["status"] not in ("pending", "submitting", "submitted"))
-                for _, tid in settled[:len(tickets) - KEEP_TICKETS]:
-                    tickets.pop(tid)
-            return {**state, "tickets": tickets}
+            return {**state, "tickets": _prune(tickets, now)}
 
         store.update_auxiliary(client_id, "execution", update)
         _audit(store, client_id, ticket, "ticket", {"source": source, "rationale": ticket["rationale"],
@@ -881,6 +958,10 @@ def list_tickets(store: Any, client_id: str, *, include_nonce: bool = False, now
     """
     now = _now(now)
     state = store.auxiliary(client_id, "execution")
+    if _settle_expired(state.get("tickets") or {}, now)[1]:  # mark expired tickets on read, once
+        state = store.update_auxiliary(client_id, "execution",
+                                       lambda current: {**current, "tickets": _prune(dict(current.get("tickets") or {}),
+                                                                                     now)})
     acknowledged = bool((state.get("live_ack") or {}).get(BROKER))
     horizon = now - timedelta(hours=since_hours)
     rows = [t for t in (state.get("tickets") or {}).values()
@@ -910,9 +991,9 @@ def confirm(store: Any, client_id: str, ticket_id: str, *, nonce: Any, override:
     if ticket is None:
         raise ConfirmError("missing", "That order ticket is no longer there.", 404)
     acknowledged = bool((state.get("live_ack") or {}).get(BROKER))
-    if ticket["status"] != "pending":
+    if ticket["status"] not in ("pending", "expired"):
         raise ConfirmError("used", "This ticket was already handled.", 409, public_ticket(ticket, now=now))
-    if _parse(ticket["expires_at"]) <= now:
+    if ticket["status"] == "expired" or _parse(ticket["expires_at"]) <= now:
         raise ConfirmError("expired", "This ticket expired. Ask for a new one.", 410, public_ticket(ticket, now=now))
     if not isinstance(nonce, str) or not ticket.get("nonce_hash") or not secrets.compare_digest(
             _nonce_hash(ticket_id, nonce.strip().upper()), ticket["nonce_hash"]):
@@ -960,6 +1041,28 @@ def confirm(store: Any, client_id: str, ticket_id: str, *, nonce: Any, override:
         _audit(store, client_id, ticket, "blocked", {"reasons": [c["code"] for c in blocking]})
         fresh = {**ticket, "lines": lines, "checks": checks}
         raise ConfirmError("blocked", blocking[0]["message"], 409,
+                           public_ticket(fresh, include_nonce=True, now=now, live_acknowledged=acknowledged,
+                                         nonce=nonce.strip().upper()))
+
+    # The tap confirms what the card showed, not the ticket id: if re-pricing moved a line beyond tolerance,
+    # nothing is sent; the card shows the new lines and waits for a fresh tap.
+    moved = _price_moves(ticket["lines"], lines, config=limits(environ), mode=mode)
+    if moved:
+        shown = checks + moved
+
+        def reprice(current: dict) -> dict:
+            tickets = dict(current.get("tickets") or {})
+            if tickets.get(ticket_id, {}).get("status") != "pending":
+                raise ConfirmError("used", "This ticket was already handled.", 409)
+            tickets[ticket_id] = {**tickets[ticket_id], "lines": lines, "checks": shown}
+            return {**current, "tickets": tickets}
+        store.update_auxiliary(client_id, "execution", reprice)
+        _audit(store, client_id, ticket, "blocked", {
+            "reasons": ["price_moved"], "at": _iso(now),
+            "moved": [{"line": c["line"], **(c.get("params") or {})} for c in moved]})
+        fresh = {**ticket, "lines": lines, "checks": shown}
+        raise ConfirmError("price_moved", "The price moved since this card was shown, so nothing was sent. Review "
+                           "the new amounts and tap again to place them.", 409,
                            public_ticket(fresh, include_nonce=True, now=now, live_acknowledged=acknowledged,
                                          nonce=nonce.strip().upper()))
 
@@ -1181,7 +1284,8 @@ def refresh(store: Any, client_id: str, ticket_ids: list[str] | None = None, *, 
     for ticket in targets:
         mode = ticket["mode"]
         if mode not in clients:
-            clients[mode] = broker if broker is not None and broker.mode == mode else broker_for(mode, environ)
+            clients[mode] = broker if broker is not None and broker.mode == mode \
+                else broker_for(mode, environ, existing=True)
         api = clients[mode]
         if api is None:
             continue
@@ -1260,6 +1364,8 @@ def cancel(store: Any, client_id: str, target: str, *, environ: Mapping[str, str
         ticket = tickets.get(target)
         if ticket is None:
             raise ConfirmError("missing", "That order ticket is no longer there.", 404)
+        if ticket["status"] == "expired":
+            return ticket_status(store, client_id, target, now=now)  # nothing was sent; nothing to discard
         if ticket["status"] != "pending":
             raise ConfirmError("used", "This ticket was already handled.", 409)
 
@@ -1276,7 +1382,8 @@ def cancel(store: Any, client_id: str, target: str, *, environ: Mapping[str, str
             if line.get("broker_order_id") and line["broker_order_id"] == target:
                 if line.get("state") in _FINAL:
                     raise ConfirmError("final", "This order is already final.", 409)
-                api = broker if broker is not None and broker.mode == ticket["mode"] else broker_for(ticket["mode"], environ)
+                api = broker if broker is not None and broker.mode == ticket["mode"] \
+                    else broker_for(ticket["mode"], environ, existing=True)
                 if api is None:
                     raise ConfirmError("broker", "Alpaca keys are not configured.", 503)
                 api.audit = lambda kind, payload, _line=line: _audit(store, client_id, ticket, kind, payload, _line)

@@ -365,3 +365,100 @@ def test_ley73_cesantia_applies_the_percentage_after_assignments_and_the_cap():
     salary = 400 * 365 / 12
     assert vejez < salary < vejez * 1.35
     assert capped["monthly_pension_mxn"] == pytest.approx(salary * 0.85 * 1.11, abs=0.01)
+
+
+# --- audit findings ---------------------------------------------------------
+
+def _ley73_plain(**ley73):
+    return {"as_of": "2026-09-21", "age": 60, "first_cotizacion_date": "1990-01-01", "weeks_cotizadas": 1000,
+            "retirement_age": 65, "target_monthly_spending_mxn": 30000, "ley73": {"average_daily_salary_mxn": 600, **ley73}}
+
+
+def _has_negative_zero(value):
+    if isinstance(value, float):
+        return value == 0 and str(value).startswith("-")
+    if isinstance(value, dict):
+        return any(_has_negative_zero(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_has_negative_zero(v) for v in value)
+    return False
+
+
+def test_unknown_dependants_default_to_the_15_percent_ayuda_asistencial():
+    unknown = R.ley73_pension(500, 1000, 65, 315.04, dependants=None, params=P())
+    none = R.ley73_pension(500, 1000, 65, 315.04, dependants={}, params=P())
+    assert unknown["family_assignments_share"] == 0.15 and unknown["family_assignments_assumed"] is True
+    assert unknown["monthly_pension_mxn"] == none["monthly_pension_mxn"]
+    assert none["family_assignments_assumed"] is False
+    report = R.retirement_mx(_ley73_plain())
+    assert report["result"]["ley73"]["pension_at_retirement_age"]["family_assignments_share"] == 0.15
+    assert any("ayuda asistencial" in a for a in report["assumptions"])
+    assert any("ley73.dependants" in m for m in report["missing"])
+
+
+def test_ley73_average_salary_is_capped_at_25_uma():
+    ceiling = 25 * 117.31
+    report = R.retirement_mx(_ley73_plain(average_daily_salary_mxn=5000, dependants={}))
+    pension = report["result"]["ley73"]["pension_at_retirement_age"]
+    assert pension["average_daily_salary_mxn"] == pytest.approx(ceiling, abs=0.01)
+    assert any("art. 28 ceiling" in w for w in report["warnings"])
+    at_cap = R.retirement_mx(_ley73_plain(average_daily_salary_mxn=ceiling, dependants={}))
+    assert not any("art. 28 ceiling" in w for w in at_cap["warnings"])
+
+
+def test_pension_garantizada_is_flagged_as_an_estimate_with_unchanged_values():
+    warnings: list[str] = []
+    pg = R.pension_garantizada(2026, 60, 875, 1.5, P(), warnings)
+    assert pg["estimate"] is True and pg["monthly_dec2020_mxn"] == 2622
+    assert any("estimate pending the official IMSS table" in w for w in warnings)
+
+
+def test_unclosable_readiness_gap_is_none_with_a_reason():
+    report = R.retirement_readiness({"currency": "USD", "current_age": 65, "retirement_age": 65, "plan_to_age": 95,
+                                     "target_annual_spending": 80000, "guaranteed_annual_income": 30000,
+                                     "current_savings": 100000, "annual_contribution": 0, "real_return": [0.0, 0.03]})
+    res = report["result"]
+    assert res["worst_case_extra_monthly"] is None and res["worst_case_extra_monthly_reason"]
+    assert res["best_case_extra_monthly"] is None
+    closable = R.retirement_readiness({"currency": "USD", "current_age": 45, "retirement_age": 65, "plan_to_age": 95,
+                                       "target_annual_spending": 80000, "guaranteed_annual_income": 30000,
+                                       "current_savings": 100000, "annual_contribution": 10000, "real_return": 0.0,
+                                       "withdrawal_rates": [0.04]})["result"]
+    assert closable["worst_case_extra_monthly"] == pytest.approx(950000 / 240, abs=0.01)
+    assert "worst_case_extra_monthly_reason" not in closable
+
+
+def test_by_age_adds_52_weeks_per_working_year_while_contributing():
+    held = R.retirement_mx(_ley73_plain(dependants={}))
+    working = R.retirement_mx(_ley73_plain(dependants={}, still_contributing=True))
+    for age in range(60, 66):
+        direct = R.ley73_pension(600, 1000 + 52 * (age - 60), age, 315.04, dependants={}, params=P())
+        assert working["result"]["ley73"]["by_age"][str(age)] == direct["monthly_pension_mxn"]
+    assert working["result"]["ley73"]["by_age"]["65"] > held["result"]["ley73"]["by_age"]["65"]
+    assert working["result"]["ley73"]["pension_at_retirement_age"]["weeks"] == 1260
+    assert held["result"]["ley73"]["pension_at_retirement_age"]["weeks"] == 1000
+    assert any("still_contributing" in a for a in held["assumptions"])
+    with pytest.raises(ValueError):
+        R.retirement_mx(_ley73_plain(dependants={}, still_contributing="yes"))
+
+
+def test_ley97_after_the_last_known_fee_year_falls_back_or_uses_the_callers_fee():
+    base = {"as_of": "2027-03-01", "age": 60, "first_cotizacion_date": "2000-01-01", "weeks_cotizadas": 1000,
+            "retirement_age": 65, "target_monthly_spending_mxn": 20000,
+            "parameters": {"salario_minimo_general_daily_mxn": {"value": 340, "source": "fictional 2027 figure"},
+                           "uma_daily_mxn": {"value": 120, "source": "fictional 2027 figure"}}}
+    ley97 = {"sbc_daily_mxn": 500, "afore_balance_mxn": 100000, "average_career_sbc_daily_mxn": 300}
+    fallback = R.retirement_mx({**base, "ley97": ley97})
+    assert fallback["result"]["ley97"]["fee"] == 0.0054
+    assert any("No CONSAR maximum AFORE fee is recorded for 2027" in w for w in fallback["warnings"])
+    assert not any("afore_fee_max" in m for m in fallback["missing"])
+    supplied = R.retirement_mx({**base, "ley97": {**ley97, "fee": 0.005}})
+    assert supplied["result"]["ley97"]["fee"] == 0.005
+    assert not any("AFORE fee is recorded" in w for w in supplied["warnings"])
+
+
+def test_retirement_outputs_have_no_negative_zero():
+    assert str(R._r(-0.001)) == "0.0"
+    for task in ("retirement_mx", "retirement_us", "retirement_readiness"):
+        report = R.run(task, CATALOG[task]["example"], {})
+        assert not _has_negative_zero(report["result"]), task
