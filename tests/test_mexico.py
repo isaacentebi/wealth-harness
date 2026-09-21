@@ -123,6 +123,23 @@ def test_real_interest_loss_and_marginal_rate():
     assert totals["real_interest_mxn"] == "0.00"
     assert totals["real_interest_loss_mxn"] == "3000.00"
     assert report["result"]["annual_isr_effect"]["net_isr_after_retention_mxn"] == "-900.00"
+
+
+def test_art135_definitive_option_tests_real_interest():
+    # Nominal 105,000 exceeds the 100,000 limit, but real interest (105,000 - 4% of 250,000 = 95,000) does not.
+    report = mexico.real_interest({"tax_year": 2026, "marginal_rate": "0.30",
+                                   "accounts": [_account(nominal_interest_mxn=105000, average_daily_balance_mxn=250000)]})
+    option = report["result"]["definitive_retention_option"]
+    assert option["tested_amount_mxn"] == "95000.00"
+    assert option["within_limit"] is True and "basis_note" not in option
+    # An account without inflation inputs falls back to nominal, with a note.
+    no_inpc = {"id": "bank", "nominal_interest_mxn": 20000, "average_daily_balance_mxn": 1, "days": 365}
+    mixed = mexico.real_interest({"tax_year": 2026, "marginal_rate": "0.30",
+                                  "accounts": [_account(nominal_interest_mxn=105000, average_daily_balance_mxn=250000), no_inpc]})
+    option = mixed["result"]["definitive_retention_option"]
+    assert option["tested_amount_mxn"] == "115000.00"
+    assert option["within_limit"] is False
+    assert "bank" in option["basis_note"] and "nominal" in option["basis_note"]
     assert any("Chapters I" in w for w in report["warnings"])
 
 
@@ -184,9 +201,29 @@ def test_personal_deductions_caps_and_ppr_saving():
     expected = mexico.isr_annual_tax(700000, TARIFF_2026) - mexico.isr_annual_tax(660000, TARIFF_2026)
     assert ppr["estimated_isr_saving_mxn"] == format(expected.quantize(Decimal("0.01")), "f")
     assert ppr["deadline"] == "2026-12-31"
+    # Art. 185 shares the Art. 151 global cap (150,000), which general deductions (200,000) already fill.
     art185 = report["result"]["contribution_scenarios"]["art185"]
-    assert art185["deductible_mxn"] == "152000.00"
+    assert art185["deductible_mxn"] == "0.00"
+    assert art185["non_deductible_excess_mxn"] == "200000.00"
+    assert art185["estimated_isr_saving_mxn"] == "0.00"
+    assert report["result"]["remaining_room"]["art185_mxn"] == "0.00"
+    assert report["result"]["remaining_room"]["global_cap_mxn"] == "0.00"
     assert "Deferral" in art185["tradeoff"]
+
+
+def test_art185_is_limited_by_remaining_global_cap_room():
+    # 150,000 global cap - 50,000 general = 100,000 room, below the 152,000 Art. 185 limit; fr. V is outside the cap.
+    report = mexico.personal_deductions(_deduction_inputs(deductions={"general_mxn": 50000, "retirement_151v_mxn": 50000, "art185_mxn": 0}))
+    assert report["result"]["remaining_room"]["art185_mxn"] == "100000.00"
+    art185 = report["result"]["contribution_scenarios"]["art185"]
+    assert art185["deductible_mxn"] == "100000.00" and art185["non_deductible_excess_mxn"] == "100000.00"
+    expected = mexico.isr_annual_tax(700000, TARIFF_2026) - mexico.isr_annual_tax(600000, TARIFF_2026)
+    assert art185["estimated_isr_saving_mxn"] == format(expected.quantize(Decimal("0.01")), "f")
+    # Existing Art. 185 deposits consume the shared room too.
+    existing = mexico.personal_deductions(_deduction_inputs(deductions={"general_mxn": 50000, "retirement_151v_mxn": 0, "art185_mxn": 30000}))
+    assert existing["result"]["allowed"]["art185_mxn"] == "30000.00"
+    assert existing["result"]["remaining_room"]["art185_mxn"] == "70000.00"
+    assert existing["result"]["remaining_room"]["global_cap_mxn"] == "70000.00"
 
 
 def test_personal_deductions_fail_closed():
@@ -267,12 +304,50 @@ def test_sic_listing_not_the_broker_decides_the_ten_percent_rate():
     assert rows["microcap-ibkr"]["regime"] == "progressive"
     totals = report["result"]["totals"]
     assert totals["article_129_net_gain_or_loss_mxn"] == "72000.00"
-    assert totals["article_129_tax_mxn"] == "7200.00"
+    # Without the year's other Art. 129 results and carryforwards, only the scenario-only figure is shown.
+    assert totals["article_129_tax_before_other_results_mxn"] == "7200.00"
+    assert totals["article_129_tax_mxn"] is None
+    assert report["status"] == "partial"
+    assert "article_129_realized_gain_or_loss_mxn" in report["missing"]
+    assert "article_129_loss_carryforwards" in report["missing"]
+    assert report["result"]["net_estimated_mexican_tax_mxn"] is None
+    assert "article_129_incremental_tax_mxn" in report["result"]["unknown_tax_components"]
     assert totals["progressive_net_gain_or_loss_mxn"] == "36000.00"  # only the non-SIC sale is progressive income
     assert any("contested" in w for w in report["warnings"])
     assert any("constancia" in w for w in report["warnings"])
     missing = mexico.foreign_securities({"tax_year": 2026, "marginal_rate": "0.3", "sales": [{**sale, "id": "x"}]})
     assert "sales[0].sic_listed" in missing["missing"]
+
+
+def test_sic_sale_nets_against_other_article_129_results_and_carryforwards():
+    sale = {"id": "aapl-ibkr", "currency": "USD", "proceeds": 12000, "fx_sale": "18", "cost": 10000, "fx_acquisition": "18",
+            "acquired_on": "2022-01-10", "sold_on": "2026-05-01", "sic_listed": True}  # 36,000 MXN gain
+    report = mexico.foreign_securities({"tax_year": 2026, "marginal_rate": "0.3", "sales": [sale],
+                                        "article_129_realized_gain_or_loss_mxn": -10000,
+                                        "article_129_loss_carryforwards": [
+                                            {"origin_year": 2020, "available_updated_mxn": 6000, "updated_through": "2026-04"},
+                                            {"origin_year": 2014, "available_updated_mxn": 50000, "updated_through": "2026-04"}]})
+    assert report["status"] == "ready", report["missing"]
+    totals = report["result"]["totals"]
+    assert totals["article_129_tax_before_other_results_mxn"] == "3600.00"
+    assert totals["article_129_tax_mxn"] == "2000.00"  # (36,000 - 10,000 - 6,000) x 10%; the 2014 loss has expired
+    netting = report["result"]["article_129_netting"]
+    assert netting["after_scenario"]["carry_used_mxn"] == "6000.00"
+    assert [c["eligible_this_year"] for c in netting["loss_carryforwards"]] == [True, False]
+    assert report["result"]["known_tax_components"]["article_129_incremental_tax_mxn"] == "2000.00"
+    assert report["result"]["net_estimated_mexican_tax_mxn"] == "2000.00"
+
+
+def test_dividend_paid_on_is_parsed_and_scoped_to_tax_year():
+    dividend = {"id": "d1", "currency": "USD", "gross": 100, "withheld": 10, "fx": 18, "source_country": "US", "w8ben_on_file": True}
+    with pytest.raises(ValueError, match="paid_on"):
+        mexico.foreign_securities({"tax_year": 2026, "marginal_rate": "0.3", "dividends": [{**dividend, "paid_on": "2026-13-01"}]})
+    report = mexico.foreign_securities({"tax_year": 2026, "marginal_rate": "0.3", "dividends": [
+        {**dividend, "paid_on": "2025-12-31"}, {**dividend, "id": "d2", "paid_on": "2026-06-30"}]})
+    assert [row["id"] for row in report["result"]["dividends"]] == ["d2"]
+    assert report["result"]["dividends"][0]["paid_on"] == "2026-06-30"
+    assert report["result"]["totals"]["dividends_gross_mxn"] == "1800.00"
+    assert any("d1" in w and "outside tax_year" in w for w in report["warnings"])
 
 
 # --- calendar ------------------------------------------------------------------
