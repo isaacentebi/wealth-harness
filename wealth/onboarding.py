@@ -568,9 +568,10 @@ def _money_writer(answer: dict, ctx: dict) -> list[tuple[str, Any]]:
         detail = detail if isinstance(detail, dict) else {"amount": detail}
         key, kind, currency = _MONEY_KEYS[option]
         amount = _money(detail.get("amount"), currency or ctx["home"], "that balance", required=False)
-        if amount is None:
-            continue  # "I'll upload it" or not sure: stays unknown until a statement arrives
         name = _money_labels(ctx)[option][ctx.get("language") or "es"]
+        if amount is None:
+            # They have it but did not say how much: remember that it exists, with an unknown balance.
+            amount = {"currency": currency or ctx["home"], "balance_unknown": True}
         if key.startswith("cash."):
             facts.append((key, {**amount, "liquid": True, "name": name, "approximate": True}))
         else:
@@ -836,7 +837,7 @@ def _risk_summary(answer: dict, lang: str, ctx: dict) -> str:
     exp = {o["id"]: o["label"][lang] for o in _EXPERIENCE}.get(answer.get("experience"))
     head = f"Ante una caída de 20%: {drop.lower()}" if lang == "es" else f"After a 20% fall: {drop.lower()}"
     if exp:
-        head += f" · {exp.lower() if lang == 'en' else exp[:1].lower() + exp[1:]}"
+        head += (f" · experiencia: {exp[:1].lower() + exp[1:]}" if lang == "es" else f" · experience: {exp.lower()}")
     return head
 
 
@@ -975,21 +976,23 @@ def picture(sit: Mapping[str, Any], language: str | None = None) -> dict:
     m = lambda value: money_text(value, currency, home)  # noqa: E731
     if nw.get("total") is not None:
         parts.append(f"Patrimonio neto {m(nw['total'])}" if lang == "es" else f"Net worth {m(nw['total'])}")
+    elif nw.get("unknown_balances"):
+        names = ", ".join(nw["unknown_balances"])
+        parts.append(f"falta el saldo de {names}" if lang == "es" else f"balance still needed for {names}")
     if flow.get("surplus") is not None:
         surplus = flow["surplus"]
         if surplus >= 0:
             parts.append(f"te quedan {m(surplus)} al mes" if lang == "es" else f"{m(surplus)} left each month")
         else:
             parts.append(f"te faltan {m(-surplus)} al mes" if lang == "es" else f"{m(-surplus)} short each month")
-    elif flow.get("income") is not None:
-        parts.append(f"recibes {m(flow['income'])} al mes" if lang == "es" else f"{m(flow['income'])} coming in each month")
     if reserve.get("months") is not None and flow.get("spending") is not None:
         months = reserve["months"]
         shown = f"{months:g}"  # es-MX writes decimals with a point, like en
         parts.append(f"reserva de {shown} meses" if lang == "es" else f"{shown} months of reserve")
     line = " · ".join(parts)
     return {
-        "currency": currency, "net_worth": nw.get("total"), "liquid": nw.get("liquid"), "illiquid": nw.get("illiquid"),
+        "currency": currency, "net_worth": nw.get("total"), "unknown_balances": nw.get("unknown_balances") or [],
+        "liquid": nw.get("liquid"), "illiquid": nw.get("illiquid"),
         "debt": nw.get("liabilities"), "income": flow.get("income"), "spending": flow.get("spending"),
         "surplus": flow.get("surplus"), "reserve_months": reserve.get("months"), "debts": debts,
         "line": line[:1].upper() + line[1:] if line else "",

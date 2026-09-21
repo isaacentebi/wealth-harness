@@ -1125,10 +1125,11 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
         row = {"id": item["id"], "key": item["key"], "institution": item.get("institution"), "name": item.get("name"),
                "amount": num(amount), "currency": item.get("currency"), "purpose": item.get("purpose"),
                "liquid": item.get("liquid") is not False, "approximate": bool(item.get("approximate")),
-               "legacy": bool(item.get("legacy")), "counted": True, "value": None}
+               "legacy": bool(item.get("legacy")), "counted": True, "value": None,
+               "balance_unknown": amount is None}
         if item["key"] not in keeping and _covered(item.get("institution"), statements):
             row["counted"] = False
-        else:
+        elif amount is not None:
             row["value"] = num(value_of(amount, item.get("currency")))
         cash_rows.append(row)
 
@@ -1180,7 +1181,8 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
         row = {"id": item["id"], "key": item["key"], "institution": institution, "kind": item.get("kind"),
                "name": item.get("name"), "amount": num(amount), "currency": item.get("currency"),
                "approximate": bool(item.get("approximate")), "legacy": bool(item.get("legacy")),
-               "liquid": (item.get("kind") or "").lower() not in _ILLIQUID_TYPES, "counted": True, "value": None}
+               "liquid": (item.get("kind") or "").lower() not in _ILLIQUID_TYPES, "counted": True, "value": None,
+               "balance_unknown": amount is None}
         covered = item["key"] not in keeping and (_covered(institution, statements) or (not institution and has_statement))
         if covered:
             row["counted"] = False
@@ -1233,15 +1235,20 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
     illiquid = sum((D(r["value"]) for r in counted if not r.get("liquid", True)), Decimal(0))
     owed = sum((D(r["value"]) or Decimal(0) for r in liabilities if r["value"] is not None), Decimal(0))
     unvalued_accounts = [a["label"] for a in accounts if a["source"] == "ledger" and a.get("valued_by") != "prices"]
+    # Accounts they have but whose balance nobody gave: the total is unknown, never computed as if they were 0.
+    unknown_balances = [r.get("institution") or r.get("name") or humanize(r["id"])
+                        for r in (*cash_rows, *investments) if r.get("balance_unknown") and r.get("counted")]
     any_assets = bool(counted)
     net_worth = {
         "currency": currency, "currency_basis": currency_basis,
-        "total": num(liquid + illiquid - owed) if (any_assets or liabilities) and currency else None,
+        "total": num(liquid + illiquid - owed) if (any_assets or liabilities) and currency and not unknown_balances
+        else None,
+        "unknown_balances": unknown_balances,
         "assets": num(liquid + illiquid) if any_assets else None, "liquid": num(liquid) if any_assets else None,
         "illiquid": num(illiquid) if any_assets else None, "liabilities": num(owed),
         "by_currency": {c: num(v) for c, v in sorted(by_currency.items())},
         "unconverted": unconverted, "unvalued_accounts": unvalued_accounts,
-        "complete": not unconverted and not unvalued_accounts and bool(any_assets),
+        "complete": not unconverted and not unvalued_accounts and not unknown_balances and bool(any_assets),
     }
     if market is not None:
         net_worth["price_sources"] = sorted({(r["source"], r["date"]) for r in price_rows if r["source"]})
@@ -1314,6 +1321,8 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
                       and (r["purpose"] in (None, "general"))]
         basis = "all undesignated cash" if designated else None
     reserve_amount = sum((D(r["value"]) for r in designated), Decimal(0)) if designated else None
+    if any(r["balance_unknown"] and r["counted"] and r["liquid"] for r in cash_rows):
+        reserve_amount = None  # money they hold but did not size: the reserve is unknown, not empty
     essential = D(spending["essential_for_reserve"])
     months = reserve_amount / essential if reserve_amount is not None and essential else None
     target_amount = D(reserve_fact.get("target_amount"))

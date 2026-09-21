@@ -55,7 +55,8 @@ SCHEMA: dict[str, dict[str, str]] = {
         "currency": "ISO 4217", "approximate?": "true|false",
     },
     "cash.<id>": {
-        "amount": "number", "currency": "ISO 4217", "institution?": "bank or fintech name",
+        "amount": "number (omit only with balance_unknown: true)", "currency": "ISO 4217",
+        "institution?": "bank or fintech name", "balance_unknown?": "true when they have it but the amount is not known",
         "purpose?": "reserve|general|goal:<goal id>", "liquid?": "true (default for cash) | false",
         "name?": "their words", "approximate?": "true|false",
     },
@@ -315,8 +316,10 @@ def _spending(value: dict, key: str) -> None:
 
 
 def _cash(value: dict, key: str) -> None:
-    _object(value, key, {"amount", "currency", "institution", "purpose", "liquid", "name", "approximate", "note"})
-    _number(value.get("amount"), f"{key}.amount")
+    _object(value, key, {"amount", "currency", "institution", "purpose", "liquid", "name", "approximate", "note",
+                         "balance_unknown"})
+    _bool(value.get("balance_unknown"), f"{key}.balance_unknown")
+    _number(value.get("amount"), f"{key}.amount", required=value.get("balance_unknown") is not True)
     _currency(value.get("currency"), f"{key}.currency")
     _text(value.get("institution"), f"{key}.institution", limit=80)
     purpose = value.get("purpose")
@@ -354,8 +357,10 @@ def _liability(value: dict, key: str) -> None:
 
 
 def _investment(value: dict, key: str) -> None:
-    _object(value, key, {"amount", "currency", "institution", "kind", "name", "approximate", "note"})
-    _number(value.get("amount"), f"{key}.amount")
+    _object(value, key, {"amount", "currency", "institution", "kind", "name", "approximate", "note",
+                         "balance_unknown"})
+    _bool(value.get("balance_unknown"), f"{key}.balance_unknown")
+    _number(value.get("amount"), f"{key}.amount", required=value.get("balance_unknown") is not True)
     _currency(value.get("currency"), f"{key}.currency")
     _text(value.get("institution"), f"{key}.institution", limit=80)
     _enum(value.get("kind"), f"{key}.kind", ("brokerage", "retirement", "afore", "fund", "other"))

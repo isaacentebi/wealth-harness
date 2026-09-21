@@ -113,7 +113,10 @@ def test_every_writer_produces_valid_canonical_facts(service, country):
     if country == "MX":
         assert {"income.aguinaldo", "cash.bank", "investment.cetes", "investment.brokerage", "investment.ppr",
                 "investment.us_broker", "liability.auto", "liability.card"} <= keys
-        assert "income.ptu" not in keys and "investment.afore" not in keys  # chosen without an amount: unknown
+        assert "income.ptu" not in keys  # extra income chosen without an amount stays unknown
+        afore = next(f for f in service.inspect("ana")["facts"] if f["key"] == "investment.afore")
+        assert afore["value"]["balance_unknown"] is True and "amount" not in afore["value"]  # held, amount unknown
+        assert sit["net_worth"]["total"] is None and "AFORE" in " ".join(sit["net_worth"]["unknown_balances"])
         assert sit["income"]["monthly"] == 85000 and sit["spending"]["monthly"] == 45000
         auto = next(r for r in sit["liabilities"] if r["id"] == "auto")
         assert auto["annual_rate"] == 0.13 and auto["monthly_payment"] == 6000 and auto["payoff"]["status"] == "ready"
@@ -122,7 +125,8 @@ def test_every_writer_produces_valid_canonical_facts(service, country):
         assert sit["profile"]["language"] == "es" and sit["profile"]["dependents"] == 2
     else:
         assert sit["profile"]["residence"] == {"country": "US", "region": "California", "city": None}
-        assert "investment.brokerage" not in keys
+        brokerage = next(f for f in service.inspect("ana")["facts"] if f["key"] == "investment.brokerage")
+        assert brokerage["value"]["balance_unknown"] is True
         student = next(r for r in sit["liabilities"] if r["id"] == "student")
         assert student["annual_rate"] == 0.055 and student["currency"] == "USD"
     assert ob.next_step(sit)["step"] == "statements"
@@ -335,7 +339,8 @@ def test_flow_to_completion_triggers_exactly_one_reveal_turn(tmp_path, monkeypat
         assert not calls
         done = json.load(_post(base, "/api/onboarding", token, {"step": "statements", "skip": True, "lang": "es"}))
         assert done["complete"] and done["card"] is None and done["reveal"]["internal"] is True
-        assert done["reveal"]["message"] == "" and done["picture"]["net_worth"] is not None
+        # The AFORE was chosen without a balance, so net worth is unknown rather than computed as if it were 0.
+        assert done["reveal"]["message"] == "" and done["picture"]["net_worth"] is None
         chat.turn.wait(10)
         # Answering again after completion never starts another reveal.
         again = json.load(_post(base, "/api/onboarding", token, {"step": "risk", "answer": {"drop_reaction": "sell"}}))

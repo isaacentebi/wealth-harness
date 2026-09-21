@@ -68,6 +68,7 @@ def _month_year(iso: str | None, lang: str) -> str:
 _B = {
     "es": {"empty": "Situación: sin datos guardados (primera conversación).", "head": "Situación al {d} ({c})",
            "nw": "Patrimonio neto {t} = líquido {l} + ilíquido {i} − deudas {o}", "nw_none": "Patrimonio neto: desconocido",
+           "nw_unknown": "Patrimonio neto: desconocido; saldos sin dar en {x} (no son cero; pregúntalos); deudas {o}",
            "unconv": "sin convertir {x}", "unvalued": "sin valuar {x}",
            "flow": "Mes: ingreso {i}{net} − gasto {s} ({src}) − deudas {d} = excedente {x}", "net": " neto",
            "src_stated": "declarado", "src_ledger": "movimientos {n} meses", "essential_only": ", solo esenciales; el excedente aún cubre otros gastos", "without": " (sin pago de {x})",
@@ -88,6 +89,7 @@ _B = {
            "u_reserve_target": "meta de reserva", "u_goal_amount": "monto de «{g}»"},
     "en": {"empty": "Situation: nothing saved yet (first conversation).", "head": "Situation on {d} ({c})",
            "nw": "Net worth {t} = liquid {l} + illiquid {i} − debts {o}", "nw_none": "Net worth: unknown",
+           "nw_unknown": "Net worth: unknown; balances not given at {x} (not zero; ask for them); debts {o}",
            "unconv": "unconverted {x}", "unvalued": "unvalued {x}",
            "flow": "Month: income {i}{net} − spending {s} ({src}) − debt payments {d} = surplus {x}", "net": " net",
            "src_stated": "stated", "src_ledger": "{n} months of transactions", "essential_only": ", essentials only; the surplus still covers other spending", "without": " (excludes {x} payment)",
@@ -147,7 +149,8 @@ def brief(sit: Mapping[str, Any], language: str | None = None) -> str:
             extra.append(t["unvalued"].format(x=", ".join(nw["unvalued_accounts"])))
         lines.append((1, line + ("; " + "; ".join(extra) if extra else "")))
     else:
-        lines.append((1, t["nw_none"]))
+        lines.append((1, t["nw_unknown"].format(x=", ".join(nw["unknown_balances"]), o=fmt(nw["liabilities"] or 0))
+                      if nw.get("unknown_balances") else t["nw_none"]))
     if flow["income"] is not None or flow["spending"] is not None:
         src = sit["spending"]["source"]
         src_text = t["src_ledger"].format(n=sit["spending"].get("ledger_months")) if src == "ledger" else t["src_stated"]
