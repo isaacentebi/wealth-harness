@@ -40,7 +40,7 @@ TASK_MODULES = {
 }
 # Tasks answered by the service itself rather than one module.
 SERVICE_TASKS = ("plan", "calendar", "monitor", "debt_payoff", "policy_draft", "policy_check", "today", "weekly",
-                 "quarterly_review", "fee_audit")
+                 "quarterly_review", "fee_audit", "order_ticket")
 # Investment policy tasks (wealth/policy.py) read the canonical picture, so the service runs them.
 POLICY_TASKS = frozenset({"policy_draft", "policy_check"})
 # Proactive tasks (wealth/proactive.py) read the whole picture and keep dismissals in the monitor namespace.
@@ -48,6 +48,9 @@ PROACTIVE_TASKS = frozenset({"today", "weekly"})
 PROACTIVE_STATE = "_proactive"  # key inside the ``monitor`` auxiliary namespace
 # The quarterly review and fee audit (wealth/review.py) read the picture, ledger, decisions and fact history.
 REVIEW_TASKS = frozenset({"quarterly_review", "fee_audit"})
+# order_ticket (wealth/execution) only PROPOSES orders: it stores a ticket the person confirms on its card in
+# the app.  Nothing in this service submits orders; the only submit path is the local web confirmation route.
+EXECUTION_TASKS = frozenset({"order_ticket"})
 TASKS = (*TASK_MODULES, *SERVICE_TASKS)
 # Tasks whose module reads the client's transaction ledger from context["ledger"].
 LEDGER_TASKS = frozenset({"ledger", "performance", "spending", "dca", "rebalance"})
@@ -77,7 +80,9 @@ def capabilities() -> dict:
         "workflow": "Recall the client; run a financial task; remember verified results; record the decision.",
         "memory": "Sourced facts, revisions, correction history, bounded keyword/concept recall and optional host-supplied semantic vectors.",
         "privacy": "Local plaintext SQLite. Retrieved context may reach the host's model provider. No credentials are stored.",
-        "execution": "Analysis and decision support only; no trading, transfers, or external messaging.",
+        "execution": "Wealth never trades on its own. order_ticket prepares an order ticket (Alpaca; paper by default) "
+                     "with pre-trade checks; only the person can place it, by confirming its card in the app. No "
+                     "transfers or external messaging.",
         "tax_scope": "US federal (2025/2026 brackets, LTCG stacking, NIIT, lots, wash sales, harvesting); Mexico "
                      "(Art. 129 BMV/SIC, real interest, deductions/PPR, foreign securities outside the SIC, calendar); "
                      "US estate exposure for non-residents; retirement (IMSS Ley 73/97 and AFORE, Modalidad 40, Social "
@@ -369,6 +374,8 @@ class WealthService:
         elif task in REVIEW_TASKS:
             report = self._review(task, inputs, client_id, snapshot, ledger, today)
             derived_evidence = report.pop("_evidence", [])
+        elif task in EXECUTION_TASKS:
+            report = self._order_ticket(inputs, client_id, snapshot)
         elif task in {"plan", "calendar"}:
             # Direct inputs may supply the same canonical facts without requiring a profile.
             keys = ("plan.resources", "goals") if task == "plan" else ("income.schedule",)
@@ -566,6 +573,48 @@ class WealthService:
                                 "result.unknown and does not fire.",
                                 "Calendar dates are statutory defaults; weekends, holidays and SAT/IRS relief can move them."],
                 "_evidence": [sit["evidence"][k] for k in sorted(sit["evidence"])]}
+    def _order_ticket(self, inputs: dict, client_id: str | None, snapshot: dict) -> dict:
+        """Propose an order ticket, or read one (inputs {ticket_id}).  Never submits, never refreshes."""
+        from .execution import tickets
+        if set(inputs) == {"ticket_id"}:
+            if not client_id:
+                raise ValueError("reading a ticket needs client_id")
+            with WealthStore(self.db_path) as store:
+                try:
+                    view = tickets.ticket_status(store, client_id, str(inputs["ticket_id"]))
+                except LookupError:
+                    raise ValueError("unknown ticket_id for this client") from None
+            return {"status": "ready", "result": {"ticket": view}, "missing": [], "warnings": [], "sources": [],
+                    "assumptions": ["Stored status; the app refreshes it from the broker. Say an order was placed "
+                                    "or filled only when its line state says so."]}
+        if not client_id:
+            return tickets.create_ticket(None, None, inputs, snapshot=snapshot)
+        with WealthStore(self.db_path) as store:
+            return tickets.create_ticket(store, client_id, inputs, snapshot=snapshot)
+
+    def execution_status(self, client_id: str | None = None) -> dict:
+        """Trading mode (paper unless opted in), whether keys exist (never the keys), limits and usage."""
+        from .execution import tickets
+        if not client_id:
+            return tickets.execution_status(None, None)
+        with WealthStore(self.db_path) as store:
+            return tickets.execution_status(store, client_id)
+
+    def order_status(self, client_id: str, ticket_id: str | None = None, refresh: bool = False) -> dict:
+        """Recent order tickets and their per-line state; ``refresh`` reads the broker and posts fills.
+
+        This reads and reconciles only; it cannot submit, confirm or cancel an order.
+        """
+        from .execution import tickets
+        if not isinstance(refresh, bool):
+            raise ValueError("refresh must be true or false")
+        with WealthStore(self.db_path) as store:
+            if refresh:
+                tickets.refresh(store, client_id, [ticket_id] if ticket_id else None)
+            if ticket_id:
+                return {"tickets": [tickets.ticket_status(store, client_id, ticket_id)]}
+            return {"tickets": tickets.list_tickets(store, client_id)}
+
     def _review(self, task: str, inputs: dict, client_id: str | None, snapshot: dict, ledger, today: str) -> dict:
         """quarterly_review / fee_audit; the review also reads the revision history of facts changed in the period."""
         from . import review
@@ -947,8 +996,9 @@ def _ledger_summary(receipt: dict | None, mapping: dict) -> dict:
             "not_posted": mapping["not_posted"], "reconciliation": recon, "plain": text}
 
 
+# No operation here submits, confirms or cancels an order: that happens only on the web confirmation route.
 OPERATIONS = ("context", "run", "remember", "recall", "decision", "ingest", "client", "forget",
-              "history", "contradictions", "resolve_contradiction")
+              "history", "contradictions", "resolve_contradiction", "execution_status", "order_status")
 
 
 def dispatch(operation: str, arguments: dict, db_path: str | Path | None = None) -> dict:

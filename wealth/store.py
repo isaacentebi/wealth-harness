@@ -152,6 +152,33 @@ CREATE INDEX IF NOT EXISTS contradictions_client_key
 CREATE INDEX IF NOT EXISTS facts_client_valid
     ON facts(client_id, key, valid_from);
 """
+# The order audit trail (wealth/execution): append-only by trigger.  It is additive and
+# created on open for any version-3 database, so the schema version does not change.
+# Rows disappear only with their client (``delete_client`` cascades).
+_ORDERS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS orders (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    ticket_id TEXT NOT NULL,
+    event TEXT NOT NULL,
+    broker TEXT NOT NULL,
+    mode TEXT NOT NULL CHECK (mode IN ('paper','live')),
+    line INTEGER,
+    client_order_id TEXT,
+    broker_order_id TEXT,
+    payload_json TEXT NOT NULL,
+    recorded_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS orders_client_ticket ON orders(client_id, ticket_id, seq);
+CREATE TRIGGER IF NOT EXISTS orders_append_only_update BEFORE UPDATE ON orders
+BEGIN SELECT RAISE(ABORT, 'the orders audit trail is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS orders_append_only_delete BEFORE DELETE ON orders
+WHEN EXISTS (SELECT 1 FROM clients WHERE id = OLD.client_id)
+BEGIN SELECT RAISE(ABORT, 'the orders audit trail is append-only'); END;
+"""
+_ORDER_EVENTS = frozenset({"ticket", "checks", "confirm", "blocked", "request", "response", "status",
+                           "cancel", "fill_posted", "live_acknowledged", "discarded", "nonce_rejected", "error"})
+_AUXILIARY = frozenset({"embeddings", "monitor", "ingest", "execution"})
 # Candidate duplicates from a different statement: same account/kind/amount
 # within this many days and similar descriptions.
 DUPLICATE_WINDOW_DAYS = 3
@@ -219,6 +246,15 @@ class DecisionNotFoundError(StoreError):
 
 class IneligibleEvidenceError(StoreError):
     """Evidence cannot support the requested decision operation."""
+
+
+def _exportable(namespace: str, value: Any) -> Any:
+    """Auxiliary state as exported: order tickets never carry their confirmation nonce out."""
+    if namespace != "execution" or not isinstance(value, dict):
+        return value
+    tickets = {tid: {k: v for k, v in ticket.items() if k not in ("nonce", "nonce_hash")}
+               for tid, ticket in (value.get("tickets") or {}).items() if isinstance(ticket, dict)}
+    return {**value, "tickets": tickets}
 
 
 def _utc_now() -> str:
@@ -485,6 +521,20 @@ class WealthStore:
             raise StoreError("store is closed")
 
     def _create_schema(self) -> None:
+        self._create_core_schema()
+        self._migrate_orders()
+
+    def _migrate_orders(self) -> None:
+        """Add the append-only ``orders`` audit table (idempotent; no version change)."""
+
+        with self._lock:
+            present = self._db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'orders_append_only_delete'"
+            ).fetchone()
+            if present is None:
+                self._db.executescript("BEGIN IMMEDIATE;" + _ORDERS_SCHEMA + "COMMIT;")
+
+    def _create_core_schema(self) -> None:
         with self._lock:
             existing_tables = {
                 row["name"]
@@ -1592,19 +1642,20 @@ class WealthStore:
                         )
                     ],
                     "auxiliary": {
-                        row["namespace"]: json.loads(row["value_json"])
+                        row["namespace"]: _exportable(row["namespace"], json.loads(row["value_json"]))
                         for row in self._db.execute(
                             "SELECT namespace, value_json FROM auxiliary WHERE client_id = ?", (client_id,)
                         )
                     },
                     "ledger": self._ledger_rows(client_id, include_batches=True),
+                    "orders": self._order_rows(client_id),
                 }
 
     def auxiliary(self, client_id: str, namespace: str) -> dict:
         """Read derived state without taking a write lock or creating a row."""
         client_id = _required_text(client_id, "client_id")
         namespace = _required_text(namespace, "namespace")
-        if namespace not in {"embeddings", "monitor", "ingest"}:
+        if namespace not in _AUXILIARY:
             raise ValidationError("unknown auxiliary namespace")
         with self._lock:
             with self._read_transaction():
@@ -1620,7 +1671,7 @@ class WealthStore:
         """Serialize derived-state read/modify/write across processes."""
         client_id = _required_text(client_id, "client_id")
         namespace = _required_text(namespace, "namespace")
-        if namespace not in {"embeddings", "monitor", "ingest"}:
+        if namespace not in _AUXILIARY:
             raise ValidationError("unknown auxiliary namespace")
         with self._lock:
             self._begin()
@@ -1644,6 +1695,56 @@ class WealthStore:
                 if self._db.in_transaction:
                     self._db.execute("ROLLBACK")
                 raise
+
+    # -- order audit trail (wealth/execution) -------------------------------
+
+    def record_order_event(self, client_id: str, event: Mapping[str, Any]) -> int:
+        """Append one redacted audit row; rows are never updated or deleted."""
+        client_id = _required_text(client_id, "client_id")
+        if not isinstance(event, Mapping):
+            raise ValidationError("an order event must be an object")
+        kind = event.get("event")
+        if kind not in _ORDER_EVENTS:
+            raise ValidationError("unknown order event")
+        if event.get("mode") not in ("paper", "live"):
+            raise ValidationError("order events need mode paper or live")
+        payload = event.get("payload") or {}
+        _validate_json(payload, "payload")
+        line = event.get("line")
+        if line is not None and (isinstance(line, bool) or not isinstance(line, int)):
+            raise ValidationError("line must be an integer")
+        with self._lock:
+            self._begin()
+            try:
+                self._client_row(client_id)
+                cursor = self._db.execute(
+                    "INSERT INTO orders(client_id, ticket_id, event, broker, mode, line, client_order_id, "
+                    "broker_order_id, payload_json, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (client_id, _required_text(event.get("ticket_id"), "ticket_id"), kind,
+                     _required_text(event.get("broker"), "broker"), event["mode"], line,
+                     event.get("client_order_id"), event.get("broker_order_id"), _json(payload), _utc_now()),
+                )
+                self._db.execute("COMMIT")
+                return int(cursor.lastrowid)
+            except Exception:
+                if self._db.in_transaction:
+                    self._db.execute("ROLLBACK")
+                raise
+
+    def _order_rows(self, client_id: str, ticket_id: str | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM orders WHERE client_id = ?" + (" AND ticket_id = ?" if ticket_id else "") + " ORDER BY seq"
+        rows = self._db.execute(sql, (client_id, ticket_id) if ticket_id else (client_id,)).fetchall()
+        return [{"seq": row["seq"], "ticket_id": row["ticket_id"], "event": row["event"], "broker": row["broker"],
+                 "mode": row["mode"], "line": row["line"], "client_order_id": row["client_order_id"],
+                 "broker_order_id": row["broker_order_id"], "payload": json.loads(row["payload_json"]),
+                 "recorded_at": row["recorded_at"]} for row in rows]
+
+    def order_events(self, client_id: str, ticket_id: str | None = None) -> list[dict[str, Any]]:
+        client_id = _required_text(client_id, "client_id")
+        with self._lock:
+            with self._read_transaction():
+                self._client_row(client_id)
+                return self._order_rows(client_id, ticket_id)
 
     # -- transaction ledger ------------------------------------------------
 

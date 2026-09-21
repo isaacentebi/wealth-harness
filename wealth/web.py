@@ -32,7 +32,8 @@ from .agent import (
 from .views import placed_ids, png_available, render_png, render_svg
 from .service import WealthService, database_path, upload_dir
 from .profile import fact_action, fact_detail, form_facts, profile_view
-from .store import ClientExistsError, ClientNotFoundError, StaleRevisionError, StoreError
+from .store import ClientExistsError, ClientNotFoundError, StaleRevisionError, StoreError, WealthStore
+from .execution import tickets as _tickets
 
 STARTERS = (
     {"label": "Upload a statement", "prompt": "", "send": False, "attach": True},
@@ -80,6 +81,8 @@ _CONTRADICTION_PATH = re.compile(r"^/api/profile/contradictions/([A-Za-z0-9_-]{1
 _FACT_PATH = re.compile(r"^/api/facts/([^/]{1,200})$")
 _TURN_PATH = re.compile(r"^/api/turns/([0-9a-f]{16})(/events|/cancel)?$")
 _VIEW_PATH = re.compile(r"^/api/views/([a-z][a-z0-9_]{0,31}-[0-9a-f]{10})\.(svg|png)$")
+# Order tickets: confirm takes a ticket id; cancel takes a ticket id (discard) or an Alpaca order id.
+_ORDER_PATH = re.compile(r"^/api/orders/([A-Za-z0-9-]{1,64})/(confirm|cancel)$")
 
 
 def friendly_name(client_id: str, display_name: str | None = None) -> str:
@@ -665,6 +668,10 @@ def create_server(chat, port=8765, host="127.0.0.1"):
                     if not self.authorized():
                         return self.respond(403, {"error": "Reload to reconnect.", "kind": "forbidden"})
                     return self.render_view(view.group(1), view.group(2), url.query)
+                if url.path == "/api/orders":
+                    if not self.authorized():
+                        return self.respond(403, {"error": "Reload to reconnect.", "kind": "forbidden"})
+                    return self.orders_list()
                 match = _TURN_PATH.match(url.path)
                 if match and match.group(2) == "/events":
                     if not self.authorized():
@@ -753,6 +760,9 @@ def create_server(chat, port=8765, host="127.0.0.1"):
                 fact = _FACT_PATH.match(path)
                 if fact:
                     return self.profile_write(self.read_json(), key=unquote(fact.group(1)))
+                order = _ORDER_PATH.match(path)
+                if order:
+                    return self.order_action(order.group(1), order.group(2))
                 match = _TURN_PATH.match(path)
                 if match and match.group(2) == "/cancel":
                     if not chat.cancel(match.group(1)):
@@ -761,6 +771,29 @@ def create_server(chat, port=8765, host="127.0.0.1"):
             except Exception as exc:  # noqa: BLE001 - every failure returns JSON
                 return self.handle_failure(exc)
             self.respond(404, {"error": "Not found."})
+
+        def orders_list(self):
+            """Recent order tickets for the cards; open orders are refreshed from the broker first."""
+            with WealthStore(chat.db) as store:
+                _tickets.refresh(store, chat.client_id)
+                state = _tickets.execution_status(store, chat.client_id)
+                items = _tickets.list_tickets(store, chat.client_id, include_nonce=True)
+            return self.respond(200, {"mode": state["mode"], "tickets": items})
+
+        def order_action(self, target, action):
+            """The only place an order is placed: the person's tap on the card (token + local origin + nonce)."""
+            body = self.read_json() if action == "confirm" else {}
+            try:
+                with WealthStore(chat.db) as store:
+                    if action == "confirm":
+                        ticket = _tickets.confirm(store, chat.client_id, target, nonce=body.get("nonce"),
+                                                  override=body.get("override", False), typed=body.get("typed"),
+                                                  snapshot=store.snapshot(chat.client_id))
+                    else:
+                        ticket = _tickets.cancel(store, chat.client_id, target)
+            except _tickets.ConfirmError as exc:
+                return self.respond(exc.status, {"error": str(exc), "kind": exc.kind, "ticket": exc.ticket})
+            return self.respond(200, {"ticket": ticket})
 
         def profile_write(self, body, *, key=None, form=False):
             service = WealthService(chat.db)

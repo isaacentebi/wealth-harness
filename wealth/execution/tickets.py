@@ -1,0 +1,1029 @@
+"""Order tickets: the model proposes, the person confirms in the app, the broker executes.
+
+Principle, enforced here rather than in prompts:
+
+* :func:`create_ticket` (service task ``order_ticket``) stores the exact orders
+  plus their pre-trade checks and returns a ticket id and a short summary.  It
+  only ever *reads* from the broker.  Its result never contains the nonce.
+* :func:`confirm` is the only function that submits orders.  It is called only
+  by the local web route ``POST /api/orders/<ticket_id>/confirm`` (session token
+  plus local Host/Origin) and needs the one-time nonce shown on the card and an
+  unexpired ticket; it re-runs every check on fresh broker data first.  It is
+  not a :class:`~wealth.service.WealthService` method, not a CLI operation and
+  not an MCP tool, so a model — or a "yes" typed in chat — cannot reach it.
+* :func:`refresh` reconciles order status and posts fills to the ledger through
+  :func:`wealth.ledger.post` with Alpaca fill ids as external ids, the same ids
+  the read-only Alpaca connector uses, so a later sync dedupes them.
+* Every request and response is written, redacted, to the append-only
+  ``orders`` audit table.
+
+Paper trading is the default.  Live trading needs ``WEALTH_TRADING_LIVE=alpaca``
+in the server's environment, a typed confirmation the first time, and stays
+under per-order and daily notional limits (USD 1,000 and 5,000 by default;
+``WEALTH_TRADING_MAX_ORDER_USD`` and ``WEALTH_TRADING_MAX_DAILY_USD``).
+Broker facts are cited in :mod:`wealth.execution.brokers.alpaca_orders`.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import importlib
+import importlib.util
+import os
+import re
+import secrets
+from datetime import datetime, timedelta, timezone
+from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_FLOOR, Decimal, InvalidOperation
+from typing import Any, Callable, Mapping
+from zoneinfo import ZoneInfo
+
+from .brokers import alpaca_orders
+from .brokers.alpaca_orders import AlpacaOrders, BrokerError
+
+BROKER = "alpaca"
+TICKET_TTL = timedelta(minutes=10)
+SOURCES = ("rebalance", "manager_mirror", "user_request")
+MAX_ORDERS = 20
+MAX_NONCE_FAILURES = 5
+KEEP_TICKETS = 60
+DEFAULT_MAX_ORDER = Decimal("1000")
+DEFAULT_MAX_DAILY = Decimal("5000")
+DEFAULT_COLLAR = Decimal("0.01")      # a limit may sit at most 1% through the last price
+FAR_FROM_MARKET = Decimal("0.05")     # a passive limit 5% away may never fill: said quietly
+LIVE_ENV = "WEALTH_TRADING_LIVE"
+TYPED_LIVE = ("LIVE", "EN VIVO")
+_EASTERN = ZoneInfo("America/New_York")
+_TICKET_ID = re.compile(r"^t[0-9a-f]{16}$")
+_ORDER_FIELDS = frozenset({
+    "symbol", "instrument_id", "side", "qty", "quantity", "notional", "estimated_amount", "type", "limit_price",
+    "time_in_force", "account_id", "account", "estimated_tax", "estimated_cost", "asset_class", "sleeve",
+    "domicile", "tags", "reason", "lots", "tax_regime",
+})
+_LINE_STATE = {
+    "new": "sent", "accepted": "sent", "pending_new": "sent", "accepted_for_bidding": "sent", "calculated": "sent",
+    "held": "sent", "pending_replace": "sent", "pending_cancel": "sent", "done_for_day": "sent", "stopped": "sent",
+    "suspended": "sent", "partially_filled": "partial", "filled": "filled", "canceled": "canceled",
+    "expired": "expired", "rejected": "rejected", "replaced": "canceled",
+}
+_FINAL = frozenset({"filled", "canceled", "expired", "rejected", "failed"})
+
+
+class ConfirmError(Exception):
+    """Why a confirmation or cancellation did not go through; ``status`` is the HTTP status."""
+
+    def __init__(self, kind: str, message: str, status: int = 409, ticket: dict | None = None):
+        super().__init__(message)
+        self.kind, self.status, self.ticket = kind, status, ticket
+
+
+# -- configuration ---------------------------------------------------------------
+
+def trading_mode(environ: Mapping[str, str] | None = None) -> str:
+    """'live' only when ``WEALTH_TRADING_LIVE`` names this broker; paper otherwise."""
+    environ = os.environ if environ is None else environ
+    opted = {part.strip().lower() for part in (environ.get(LIVE_ENV) or "").split(",")}
+    return "live" if BROKER in opted else "paper"
+
+
+def _env_decimal(environ: Mapping[str, str], name: str, default: Decimal) -> Decimal:
+    try:
+        value = Decimal(str(environ.get(name) or default))
+    except InvalidOperation:
+        return default
+    return value if value.is_finite() and value > 0 else default
+
+
+def limits(environ: Mapping[str, str] | None = None) -> dict[str, Decimal]:
+    environ = os.environ if environ is None else environ
+    return {"max_order": _env_decimal(environ, "WEALTH_TRADING_MAX_ORDER_USD", DEFAULT_MAX_ORDER),
+            "max_daily": _env_decimal(environ, "WEALTH_TRADING_MAX_DAILY_USD", DEFAULT_MAX_DAILY),
+            "collar": min(_env_decimal(environ, "WEALTH_TRADING_COLLAR", DEFAULT_COLLAR), Decimal("0.1"))}
+
+
+def broker_for(mode: str, environ: Mapping[str, str] | None = None) -> AlpacaOrders | None:
+    """The broker client for ``mode`` when keys exist; the base URL follows the mode, never an input."""
+    return alpaca_orders.client(mode, environ=environ)
+
+
+# -- small helpers -----------------------------------------------------------------
+
+def _now(now: datetime | None) -> datetime:
+    return now or datetime.now(timezone.utc)
+
+
+def _iso(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _parse(moment: str) -> datetime:
+    return datetime.fromisoformat(moment.replace("Z", "+00:00"))
+
+
+def _dec(value: Any, field: str, *, positive: bool = True) -> Decimal:
+    if isinstance(value, bool) or value in (None, ""):
+        raise ValueError(f"{field} must be a number")
+    try:
+        number = Decimal(str(value).strip().replace(",", ""))
+    except InvalidOperation:
+        raise ValueError(f"{field} must be a number") from None
+    if not number.is_finite() or (positive and number <= 0):
+        raise ValueError(f"{field} must be a positive number")
+    return number
+
+
+def _opt(value: Any) -> Decimal | None:
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return number if number.is_finite() else None
+
+
+def _s(value: Decimal | None) -> str | None:
+    if value is None:
+        return None
+    text = format(value.normalize(), "f")
+    return "0" if text in ("-0", "") else text
+
+
+def _money(value: Decimal) -> Decimal:
+    return value.quantize(Decimal("0.01"))
+
+
+def _tick(price: Decimal, rounding: str) -> Decimal:
+    """Round to Alpaca's price increment: cents at or above $1, hundredths of a cent below."""
+    step = Decimal("0.01") if price >= 1 else Decimal("0.0001")
+    return price.quantize(step, rounding=rounding)
+
+
+def _valid_tick(price: Decimal) -> bool:
+    return _tick(price, ROUND_DOWN) == price
+
+
+def _whole(qty: Decimal) -> bool:
+    return qty == qty.to_integral_value()
+
+
+def _check(code: str, status: str, message: str, line: int | None = None, **params: Any) -> dict[str, Any]:
+    row: dict[str, Any] = {"code": code, "status": status, "message": message}
+    if line is not None:
+        row["line"] = line
+    if params:
+        row["params"] = {k: (_s(v) if isinstance(v, Decimal) else v) for k, v in params.items()}
+    return row
+
+
+def client_order_id(ticket_id: str, index: int) -> str:
+    """Deterministic per ticket line, so a retried submission can never create a second order."""
+    if not _TICKET_ID.match(ticket_id) or not isinstance(index, int) or index < 0:
+        raise ValueError("ticket id or line is malformed")
+    return f"wealth-{ticket_id}-{index}"
+
+
+def _nonce_hash(ticket_id: str, nonce: str) -> str:
+    return hashlib.sha256(f"{ticket_id}:{nonce}".encode()).hexdigest()
+
+
+# -- normalising the model's proposal --------------------------------------------------
+
+def _normalize_order(raw: Any, index: int) -> dict[str, Any]:
+    field = f"orders[{index}]"
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"{field} must be an object")
+    unknown = sorted(set(raw) - _ORDER_FIELDS)
+    if unknown:
+        raise ValueError(f"{field} has unknown fields {unknown}; orders carry {sorted(_ORDER_FIELDS)}")
+    symbol = str(raw.get("symbol") or raw.get("instrument_id") or "").strip().upper()
+    if not re.fullmatch(r"[A-Z][A-Z0-9.]{0,9}", symbol):
+        raise ValueError(f"{field}.symbol must be a US ticker such as VTI")
+    side = raw.get("side")
+    if side not in ("buy", "sell"):
+        raise ValueError(f"{field}.side must be buy or sell")
+    kind = raw.get("type") or "limit"
+    if kind not in ("limit", "market"):
+        raise ValueError(f"{field}.type must be limit (default) or market")
+    tif = raw.get("time_in_force") or "day"
+    if tif not in ("day", "gtc"):
+        raise ValueError(f"{field}.time_in_force must be day (default) or gtc")
+    qty_raw = raw.get("qty", raw.get("quantity"))
+    notional_raw = raw.get("notional")
+    if qty_raw is None and notional_raw is None and raw.get("estimated_amount") is not None:
+        notional_raw = abs(_dec(raw["estimated_amount"], f"{field}.estimated_amount", positive=False))
+    if (qty_raw is None) == (notional_raw is None):
+        raise ValueError(f"{field} needs exactly one of qty or notional (USD)")
+    line: dict[str, Any] = {"index": index, "symbol": symbol, "side": side, "type": kind, "time_in_force": tif,
+                            "qty": _s(_dec(qty_raw, f"{field}.qty")) if qty_raw is not None else None,
+                            "notional": _s(_money(_dec(notional_raw, f"{field}.notional"))) if notional_raw is not None else None,
+                            "limit_input": None, "state": "proposed"}
+    if raw.get("limit_price") is not None:
+        if kind == "market":
+            raise ValueError(f"{field}: a market order has no limit_price")
+        price = _dec(raw["limit_price"], f"{field}.limit_price")
+        if not _valid_tick(price):
+            raise ValueError(f"{field}.limit_price: at or above $1 use cents; below $1 at most 4 decimals")
+        line["limit_input"] = _s(price)
+    account = raw.get("account_id") or raw.get("account")
+    if account is not None:
+        line["account"] = str(account)[:40]
+    for name in ("estimated_tax", "estimated_cost"):
+        value = _opt(raw.get(name))
+        if value is not None:
+            line[name] = _s(_money(abs(value)))
+    for name in ("asset_class", "sleeve", "domicile"):
+        if isinstance(raw.get(name), str):
+            line[name] = raw[name][:40]
+    if isinstance(raw.get("tags"), list):
+        line["tags"] = [str(t)[:40] for t in raw["tags"][:10]]
+    return line
+
+
+# -- the pre-trade checks ------------------------------------------------------------
+
+def _safe(call: Callable[[], Any]) -> tuple[Any, str | None]:
+    try:
+        return call(), None
+    except BrokerError as exc:
+        return None, str(exc)
+    except ValueError as exc:
+        return None, str(exc)
+
+
+def _live_used_today(store: Any, client_id: str, now: datetime) -> Decimal:
+    """Live notional already confirmed today (US Eastern date), from the append-only audit trail."""
+    if store is None or not client_id:
+        return Decimal(0)
+    today = now.astimezone(_EASTERN).date().isoformat()
+    used = Decimal(0)
+    for row in store.order_events(client_id):
+        payload = row["payload"]
+        if row["event"] == "confirm" and row["mode"] == "live" and payload.get("date_et") == today:
+            used += _opt(payload.get("notional")) or Decimal(0)
+    return used
+
+
+def _policy_rows(snapshot: Mapping[str, Any] | None, line: dict, amount: Decimal | None, positions: list,
+                 account_id: str, now: datetime) -> list[dict]:
+    from .. import policy
+
+    if not snapshot or not snapshot.get("facts"):
+        return [_check("no_policy", "warn", "No accepted investment policy; this order was not checked against one.",
+                       line["index"])]
+    ips = policy.current(snapshot, now.date())
+    if ips is None:
+        return [_check("no_policy", "warn", "No accepted investment policy; this order was not checked against one.",
+                       line["index"])]
+    if amount is None:
+        return [_check("policy_unchecked", "unknown", "The policy check needs the order's amount.", line["index"])]
+    proposal = {"kind": "trade", "action": line["side"], "symbol": line["symbol"], "amount": float(amount),
+                "currency": "USD", "funding": f"cash:{account_id}"}
+    for name in ("asset_class", "sleeve", "domicile", "tags"):
+        if line.get(name) is not None:
+            proposal[name] = line[name]
+    portfolio = {"currency": "USD", "positions": [
+        {"symbol": str(p.get("symbol") or ""), "value": float(_opt(p.get("market_value")) or 0)}
+        for p in positions if p.get("symbol")]} if positions else None
+    try:
+        result = policy.check(ips, proposal, portfolio)
+    except ValueError as exc:
+        return [_check("policy_unchecked", "warn", f"The policy check could not run: {exc}", line["index"])]
+    rows, unchecked = [], 0
+    for rule in result["rules"]:
+        if rule["status"] == "violation":
+            rows.append(_check("policy", "violation", rule["explanation"], line["index"], rule=rule["rule"]))
+        elif rule["status"] == "warn" and rule["explanation"].startswith("Not checked"):
+            unchecked += 1
+        elif rule["status"] == "warn":
+            rows.append(_check("policy", "warn", rule["explanation"], line["index"], rule=rule["rule"]))
+    if unchecked:
+        rows.append(_check("policy_unchecked", "warn",
+                           f"{unchecked} policy rule(s) could not be checked for {line['symbol']}.", line["index"],
+                           count=unchecked))
+    return rows
+
+
+def _guardrail_rows(lines: list[dict], context: Mapping[str, Any]) -> list[dict]:
+    """Run ``wealth.guardrails.check_order(order, context)`` when that module exists."""
+    if importlib.util.find_spec("wealth.guardrails") is None:
+        return []
+    module = importlib.import_module("wealth.guardrails")
+    check = getattr(module, "check_order", None)
+    if not callable(check):
+        return []
+    rows = []
+    for line in lines:
+        try:
+            found = check(dict(line), dict(context)) or []
+        except Exception as exc:  # noqa: BLE001 - a broken guardrail fails closed
+            rows.append(_check("guardrail", "unknown", f"A guardrail could not run ({type(exc).__name__}).",
+                               line["index"]))
+            continue
+        for item in found:
+            status = item.get("status") if item.get("status") in ("warn", "block", "violation") else "warn"
+            rows.append(_check("guardrail", status, str(item.get("message") or "Guardrail"), line["index"]))
+    return rows
+
+
+def run_checks(lines: list[dict], *, mode: str, broker: AlpacaOrders | None, snapshot: Mapping[str, Any] | None,
+               store: Any = None, client_id: str | None = None, ticket_id: str | None = None,
+               environ: Mapping[str, str] | None = None, now: datetime | None = None) -> tuple[list[dict], list[dict]]:
+    """Price every line and return ``(lines, checks)``.
+
+    Check status: ``pass``; ``warn`` (a quiet line); ``violation`` (the IPS; the
+    person may override it on the card, which is recorded); ``block`` (never
+    overridable); ``unknown`` (the fact could not be read: it blocks submission,
+    because an unknown is never assumed to be fine).
+    """
+    now = _now(now)
+    config = limits(environ)
+    lines = [dict(line) for line in lines]
+    checks: list[dict] = []
+    if broker is None:
+        keys = "paper" if mode == "paper" else "live"
+        checks.append(_check("broker_unavailable", "unknown",
+                             f"Alpaca {keys} keys are not configured, so prices, buying power and tradability "
+                             "could not be checked.", mode=mode))
+    account = positions = clock = open_orders = None
+    if broker is not None:
+        account, error = _safe(broker.account)
+        if error:
+            checks.append(_check("account_unknown", "unknown", f"The Alpaca account could not be read: {error}"))
+        positions, _ = _safe(broker.positions)
+        clock, _ = _safe(broker.clock)
+        open_orders, _ = _safe(broker.open_orders)
+    positions = positions or []
+    account_id = _ledger_account_id(store, client_id, account, mode)
+
+    seen: dict[tuple[str, str], int] = {}
+    for line in lines:
+        i, symbol = line["index"], line["symbol"]
+        key = (symbol, line["side"])
+        if key in seen:
+            checks.append(_check("duplicate_line", "block", f"{symbol} {line['side']} appears twice in this ticket.",
+                                 i, symbol=symbol))
+        seen[key] = i
+        asset = last = None
+        if broker is not None:
+            asset, error = _safe(lambda: broker.asset(symbol))
+            if error:
+                checks.append(_check("asset_unknown", "unknown", f"Whether {symbol} is tradable could not be read.",
+                                     i, symbol=symbol))
+            elif asset is None or not asset.get("tradable") or str(asset.get("status", "active")) != "active":
+                checks.append(_check("not_tradable", "block", f"{symbol} is not tradable at Alpaca.", i,
+                                     symbol=symbol))
+            last_text, error = _safe(lambda: broker.last_price(symbol))
+            last = _opt(last_text) if last_text else None
+        line["last_price"] = _s(last)
+        fractionable = bool(asset and asset.get("fractionable"))
+
+        # price: a limit by default, collared around the last trade
+        limit = _opt(line.get("limit_input"))
+        if line["type"] == "market":
+            line["limit_price"] = None
+            if mode == "live":
+                checks.append(_check("live_needs_limit", "block", "Live orders must be limit orders.", i))
+            else:
+                checks.append(_check("market_order", "warn", f"{symbol} is a market order: the price is not capped.",
+                                     i, symbol=symbol))
+        elif limit is None and last is not None:
+            limit = _tick(last * (1 + config["collar"] / 2), ROUND_CEILING) if line["side"] == "buy" \
+                else _tick(last * (1 - config["collar"] / 2), ROUND_FLOOR)
+        if line["type"] == "limit":
+            line["limit_price"] = _s(limit)
+            if limit is None:
+                checks.append(_check("price_unknown", "unknown", f"The last price of {symbol} could not be read, so "
+                                     "no limit price was set.", i, symbol=symbol))
+            elif last is not None:
+                through = (limit - last) / last if line["side"] == "buy" else (last - limit) / last
+                if through > config["collar"]:
+                    checks.append(_check("collar", "block",
+                                         f"The {symbol} limit {limit} is more than {config['collar'] * 100:.1f}% "
+                                         f"through the last price {last}.", i, symbol=symbol, limit=limit,
+                                         last=last, collar=config["collar"]))
+                elif -through > FAR_FROM_MARKET:
+                    checks.append(_check("far_from_market", "warn", f"The {symbol} limit is far from the last price "
+                                         f"{last}; it may not fill.", i, symbol=symbol, last=last))
+            elif line.get("limit_input") is not None:
+                checks.append(_check("price_unknown", "unknown", f"The last price of {symbol} could not be read to "
+                                     "check the limit.", i, symbol=symbol))
+
+        # quantity: dollar amounts become a quantity at the limit price
+        price = limit if limit is not None else last
+        qty = _opt(line.get("qty"))
+        if line.get("notional") is not None:
+            notional = Decimal(line["notional"])
+            if price is None:
+                qty = None
+            else:
+                step = Decimal("0.000001") if fractionable else Decimal(1)
+                qty = (notional / price).quantize(step, rounding=ROUND_DOWN)
+                if qty <= 0:
+                    checks.append(_check("too_small", "block", f"USD {notional} buys less than one {symbol} share.",
+                                         i, symbol=symbol))
+                    qty = None
+        line["order_qty"] = _s(qty)
+        if qty is not None and not _whole(qty):
+            if asset is not None and not fractionable:
+                checks.append(_check("not_fractionable", "block", f"{symbol} trades in whole shares only.", i,
+                                     symbol=symbol))
+            if line["time_in_force"] != "day":
+                checks.append(_check("fractional_day_only", "block", "Fractional orders are day orders only.", i))
+        amount = _money(qty * price) if qty is not None and price is not None else None
+        line["estimated_amount"] = _s(amount)
+        if amount is None and line.get("notional") is None:
+            checks.append(_check("amount_unknown", "unknown", f"The amount of the {symbol} order is unknown.", i,
+                                 symbol=symbol))
+
+        # sells never exceed what is held (no shorting)
+        if line["side"] == "sell" and broker is not None and qty is not None:
+            held = next((p for p in positions if str(p.get("symbol", "")).upper() == symbol), None)
+            held_qty = _opt((held or {}).get("qty_available", (held or {}).get("qty"))) or Decimal(0)
+            if qty > held_qty:
+                checks.append(_check("sell_exceeds_position", "block",
+                                     f"Selling {qty} {symbol} is more than the {held_qty} held.", i, symbol=symbol,
+                                     qty=qty, held=held_qty))
+
+        # live per-order limit
+        if mode == "live" and amount is not None and amount > config["max_order"]:
+            checks.append(_check("live_order_limit", "block", f"USD {amount} is above the live per-order limit of "
+                                 f"USD {config['max_order']}.", i, amount=amount, limit=config["max_order"]))
+
+        # open orders for the same symbol and side
+        for order in open_orders or []:
+            if str(order.get("symbol", "")).upper() == symbol and order.get("side") == line["side"] \
+                    and not str(order.get("client_order_id", "")).startswith(f"wealth-{ticket_id}-"):
+                checks.append(_check("open_order", "warn", f"An open {line['side']} order for {symbol} is already "
+                                     "at Alpaca.", i, symbol=symbol))
+                break
+
+        checks += _policy_rows(snapshot, line, amount, positions, account_id, now)
+
+    # the account as a whole
+    if isinstance(account, Mapping):
+        if str(account.get("status", "")).upper() != "ACTIVE" or any(
+                account.get(flag) for flag in ("trading_blocked", "account_blocked", "trade_suspended_by_user")):
+            checks.append(_check("account_blocked", "block", "The Alpaca account cannot place orders right now."))
+        buys = [Decimal(l["estimated_amount"]) for l in lines if l["side"] == "buy" and l.get("estimated_amount")]
+        power = _opt(account.get("non_marginable_buying_power"))
+        if power is None:
+            power = _opt(account.get("cash"))
+        if buys and power is None:
+            checks.append(_check("buying_power_unknown", "unknown", "Buying power could not be read."))
+        elif buys and sum(buys) > power:
+            checks.append(_check("buying_power", "block", f"The buys need USD {_money(sum(buys))}; cash buying power "
+                                 f"is USD {_money(power)} (Wealth never uses margin).", need=_money(sum(buys)),
+                                 have=_money(power)))
+    if mode == "live":
+        total = sum((Decimal(l["estimated_amount"]) for l in lines if l.get("estimated_amount")), Decimal(0))
+        used = _live_used_today(store, client_id or "", now)
+        if total + used > config["max_daily"]:
+            checks.append(_check("live_daily_limit", "block", f"This would bring today's live orders to USD "
+                                 f"{_money(total + used)}, above the daily limit of USD {config['max_daily']}.",
+                                 total=_money(total + used), limit=config["max_daily"]))
+
+    # market hours
+    if isinstance(clock, Mapping) and clock.get("is_open") is False:
+        checks.append(_check("market_closed", "warn", "The market is closed; day orders wait for the next open.",
+                             next_open=clock.get("next_open")))
+
+    # other tickets proposing the same thing
+    if store is not None and client_id:
+        state = store.auxiliary(client_id, "execution")
+        recent = now - timedelta(hours=24)
+        for other in (state.get("tickets") or {}).values():
+            if other.get("id") == ticket_id or other.get("status") not in ("pending", "submitted", "submitting"):
+                continue
+            if _parse(other["created_at"]) < recent:
+                continue
+            for line in lines:
+                if any(o["symbol"] == line["symbol"] and o["side"] == line["side"] for o in other.get("lines", [])):
+                    checks.append(_check("duplicate_ticket", "warn", f"Another recent ticket also has {line['side']} "
+                                         f"{line['symbol']}.", line["index"], symbol=line["symbol"]))
+    checks += _guardrail_rows(lines, {"mode": mode, "account": account and {
+        k: account.get(k) for k in ("cash", "buying_power", "non_marginable_buying_power")}})
+    return lines, checks
+
+
+def _blocking(checks: list[dict], override: bool) -> list[dict]:
+    return [c for c in checks if c["status"] in ("block", "unknown") or (c["status"] == "violation" and not override)]
+
+
+def _ledger_account_id(store: Any, client_id: str | None, account: Mapping[str, Any] | None, mode: str) -> str:
+    """The ledger account Alpaca fills post to: the connector's ``alpaca-<last4>`` convention."""
+    digits = re.sub(r"\D", "", str((account or {}).get("account_number") or ""))
+    wanted = f"alpaca-{digits[-4:]}" if len(digits) >= 4 else f"alpaca-{mode}"
+    return wanted
+
+
+# -- tickets -------------------------------------------------------------------------
+
+def _totals(lines: list[dict]) -> dict[str, Any]:
+    amounts = [_opt(l.get("estimated_amount")) for l in lines]
+    total = sum(amounts, Decimal(0)) if all(a is not None for a in amounts) else None
+    result: dict[str, Any] = {"amount": _s(total), "currency": "USD"}
+    for name in ("estimated_tax", "estimated_cost"):
+        values = [_opt(l.get(name)) for l in lines if l.get(name) is not None]
+        result[name] = _s(sum(values, Decimal(0))) if values else None
+    return result
+
+
+def public_ticket(ticket: Mapping[str, Any], *, include_nonce: bool = False, now: datetime | None = None,
+                  live_acknowledged: bool = True) -> dict[str, Any]:
+    """What the card and the model see.  The nonce is only for the card (``include_nonce``)."""
+    now = _now(now)
+    status = ticket["status"]
+    if status == "pending" and _parse(ticket["expires_at"]) <= now:
+        status = "expired"
+    checks = ticket.get("checks") or []
+    notices = [c for c in checks if c["status"] != "pass"]
+    lines = []
+    for line in ticket["lines"]:
+        row = {k: line.get(k) for k in ("index", "side", "symbol", "type", "time_in_force", "limit_price",
+                                         "last_price", "estimated_amount", "estimated_tax", "estimated_cost",
+                                         "account", "state", "broker_order_id", "filled_qty", "filled_avg_price",
+                                         "reason")}
+        row["qty"] = line.get("order_qty") or line.get("qty")
+        row["notional"] = line.get("notional")
+        lines.append({k: v for k, v in row.items() if v is not None})
+    view = {"id": ticket["id"], "broker": ticket["broker"], "mode": ticket["mode"], "status": status,
+            "source": ticket["source"], "created_at": ticket["created_at"], "expires_at": ticket["expires_at"],
+            "total": _totals(ticket["lines"]), "lines": lines, "notices": notices,
+            "blocked": bool(_blocking(checks, override=True)),
+            "needs_override": any(c["status"] == "violation" for c in checks),
+            "needs_typed": ticket["mode"] == "live" and not live_acknowledged,
+            "override": ticket.get("override")}
+    if include_nonce and status == "pending":
+        view["nonce"] = ticket.get("nonce")
+    return view
+
+
+def _summary(view: Mapping[str, Any]) -> str:
+    total = view["total"]["amount"]
+    count = len(view["lines"])
+    parts = [f"{'LIVE' if view['mode'] == 'live' else 'PAPER'} ticket {view['id']}: {count} order(s)"]
+    parts.append(f"about USD {total}" if total else "amount not yet known")
+    notes = [n for n in view["notices"] if n["status"] in ("violation", "block", "unknown")]
+    text = ", ".join(parts) + "."
+    if notes:
+        text += f" {len(notes)} issue(s) would stop it: " + "; ".join(n["message"] for n in notes[:3])
+    return (text + " Nothing has been sent. The person reviews it on the order card in the Wealth app and taps "
+            "to place it; it expires at " + view["expires_at"] + ".")
+
+
+def _audit(store: Any, client_id: str, ticket: Mapping[str, Any], event: str, payload: Mapping[str, Any],
+           line: dict | None = None, **extra: Any) -> None:
+    store.record_order_event(client_id, {
+        "ticket_id": ticket["id"], "event": event, "broker": ticket["broker"], "mode": ticket["mode"],
+        "line": line["index"] if line else None,
+        "client_order_id": line.get("client_order_id") if line else None,
+        "broker_order_id": (line or {}).get("broker_order_id") or extra.get("broker_order_id"),
+        "payload": alpaca_orders.redact(dict(payload)),
+    })
+
+
+def create_ticket(store: Any, client_id: str | None, inputs: Mapping[str, Any], *, snapshot: Mapping[str, Any] | None,
+                  environ: Mapping[str, str] | None = None, broker: AlpacaOrders | None = None,
+                  now: datetime | None = None) -> dict[str, Any]:
+    """Store a proposed ticket with its checks (``store`` may be ``None`` for a preview without a client)."""
+    now = _now(now)
+    if not isinstance(inputs, Mapping):
+        raise ValueError("order_ticket inputs must be an object")
+    unknown = sorted(set(inputs) - {"orders", "rationale", "source"})
+    if unknown:
+        raise ValueError(f"order_ticket inputs: unknown {unknown}; expected {{orders, rationale, source}}. "
+                         "Tickets are only proposals: the person confirms them in the app.")
+    orders = inputs.get("orders")
+    if not isinstance(orders, list) or not 1 <= len(orders) <= MAX_ORDERS:
+        raise ValueError(f"orders must be a list of 1-{MAX_ORDERS} orders")
+    source = inputs.get("source") or "user_request"
+    if source not in SOURCES:
+        raise ValueError(f"source must be one of {', '.join(SOURCES)}")
+    rationale = inputs.get("rationale")
+    if not isinstance(rationale, str) or not rationale.strip():
+        raise ValueError("rationale is required: one or two sentences the person will read")
+    lines = [_normalize_order(raw, i) for i, raw in enumerate(orders)]
+    mode = trading_mode(environ)
+    ticket_id = "t" + secrets.token_hex(8)
+    if broker is None and store is not None:  # a preview without a client stays offline
+        broker = broker_for(mode, environ)
+    lines, checks = run_checks(lines, mode=mode, broker=broker, snapshot=snapshot, store=store,
+                               client_id=client_id, ticket_id=ticket_id, environ=environ, now=now)
+    for line in lines:
+        line["client_order_id"] = client_order_id(ticket_id, line["index"])
+    nonce = secrets.token_hex(4).upper()
+    ticket = {"id": ticket_id, "broker": BROKER, "mode": mode, "status": "pending", "source": source,
+              "rationale": rationale.strip()[:600], "created_at": _iso(now), "expires_at": _iso(now + TICKET_TTL),
+              "lines": lines, "checks": checks, "nonce": nonce, "nonce_hash": _nonce_hash(ticket_id, nonce),
+              "failures": 0}
+    warnings: list[str] = []
+    if store is not None and client_id:
+        def update(state: dict) -> dict:
+            tickets = dict(state.get("tickets") or {})
+            tickets[ticket_id] = ticket
+            if len(tickets) > KEEP_TICKETS:  # oldest settled tickets go first; the audit trail keeps them
+                settled = sorted((t["created_at"], tid) for tid, t in tickets.items()
+                                 if t["status"] not in ("pending", "submitting", "submitted"))
+                for _, tid in settled[:len(tickets) - KEEP_TICKETS]:
+                    tickets.pop(tid)
+            return {**state, "tickets": tickets}
+
+        store.update_auxiliary(client_id, "execution", update)
+        _audit(store, client_id, ticket, "ticket", {"source": source, "rationale": ticket["rationale"],
+                                                    "orders": [dict(o) for o in orders]})
+        _audit(store, client_id, ticket, "checks", {"phase": "proposed", "checks": checks,
+                                                    "lines": [_line_audit(l) for l in lines]})
+        state = store.auxiliary(client_id, "execution")
+        acknowledged = bool((state.get("live_ack") or {}).get(BROKER))
+    else:
+        acknowledged = True
+        warnings.append("No client was given, so this ticket is a preview only: it was not stored and cannot be "
+                        "confirmed.")
+    view = public_ticket(ticket, now=now, live_acknowledged=acknowledged)
+    unknown_facts = [c for c in checks if c["status"] == "unknown"]
+    if store is None:
+        view["id"] = None
+    summary = _summary(view) if store is not None else "Preview only; nothing was stored or sent."
+    return {"status": "partial" if unknown_facts or store is None else "ready",
+            "result": {"ticket": view, "summary": summary,
+                       "next_step": "Explain the ticket briefly and tell the person to review and confirm it on the "
+                                    "order card. Never say an order was placed or filled until order status says so."},
+            "missing": [], "warnings": warnings,
+            "sources": [{"title": "Alpaca account, assets and latest trades", "mode": mode}] if broker else [],
+            "assumptions": [f"Limit prices default to within {limits(environ)['collar'] * 50:.1f}% of the last trade; "
+                            "dollar amounts become a quantity at the limit price.",
+                            "Buys must fit cash buying power; Wealth never uses margin or sells short."]}
+
+
+def _line_audit(line: Mapping[str, Any]) -> dict[str, Any]:
+    return {k: line.get(k) for k in ("index", "symbol", "side", "type", "time_in_force", "qty", "notional",
+                                     "order_qty", "limit_price", "last_price", "estimated_amount",
+                                     "client_order_id")}
+
+
+def ticket_status(store: Any, client_id: str, ticket_id: str, *, now: datetime | None = None) -> dict[str, Any]:
+    """The stored ticket as the model may see it (no nonce, no broker calls)."""
+    state = store.auxiliary(client_id, "execution")
+    ticket = (state.get("tickets") or {}).get(ticket_id)
+    if ticket is None:
+        raise LookupError("That order ticket is no longer there.")
+    return public_ticket(ticket, now=now, live_acknowledged=bool((state.get("live_ack") or {}).get(BROKER)))
+
+
+def list_tickets(store: Any, client_id: str, *, include_nonce: bool = False, now: datetime | None = None,
+                 since_hours: int = 24) -> list[dict[str, Any]]:
+    now = _now(now)
+    state = store.auxiliary(client_id, "execution")
+    acknowledged = bool((state.get("live_ack") or {}).get(BROKER))
+    horizon = now - timedelta(hours=since_hours)
+    rows = [t for t in (state.get("tickets") or {}).values()
+            if _parse(t["created_at"]) >= horizon or t["status"] in ("submitting", "submitted")]
+    rows.sort(key=lambda t: t["created_at"])
+    return [public_ticket(t, include_nonce=include_nonce, now=now, live_acknowledged=acknowledged) for t in rows]
+
+
+# -- confirmation: the only path that submits ------------------------------------------
+
+def confirm(store: Any, client_id: str, ticket_id: str, *, nonce: Any, override: bool = False,
+            typed: Any = None, snapshot: Mapping[str, Any] | None = None, environ: Mapping[str, str] | None = None,
+            broker: AlpacaOrders | None = None, now: datetime | None = None) -> dict[str, Any]:
+    """Submit a ticket the person confirmed on its card.
+
+    Called only by the web route ``POST /api/orders/<ticket_id>/confirm`` after
+    its session-token and local-origin checks.  Raises :class:`ConfirmError`.
+    """
+    now = _now(now)
+    if not isinstance(ticket_id, str) or not _TICKET_ID.match(ticket_id):
+        raise ConfirmError("missing", "That order ticket is no longer there.", 404)
+    state = store.auxiliary(client_id, "execution")
+    ticket = (state.get("tickets") or {}).get(ticket_id)
+    if ticket is None:
+        raise ConfirmError("missing", "That order ticket is no longer there.", 404)
+    acknowledged = bool((state.get("live_ack") or {}).get(BROKER))
+    if ticket["status"] != "pending":
+        raise ConfirmError("used", "This ticket was already handled.", 409, public_ticket(ticket, now=now))
+    if _parse(ticket["expires_at"]) <= now:
+        raise ConfirmError("expired", "This ticket expired. Ask for a new one.", 410, public_ticket(ticket, now=now))
+    if not isinstance(nonce, str) or not ticket.get("nonce_hash") or not secrets.compare_digest(
+            _nonce_hash(ticket_id, nonce.strip().upper()), ticket["nonce_hash"]):
+        def fail(current: dict) -> dict:
+            tickets = dict(current.get("tickets") or {})
+            item = dict(tickets[ticket_id])
+            item["failures"] = int(item.get("failures", 0)) + 1
+            if item["failures"] >= MAX_NONCE_FAILURES:
+                item["status"], item["nonce"], item["nonce_hash"] = "void", None, None
+            tickets[ticket_id] = item
+            return {**current, "tickets": tickets}
+        store.update_auxiliary(client_id, "execution", fail)
+        _audit(store, client_id, ticket, "nonce_rejected", {"at": _iso(now)})
+        raise ConfirmError("nonce", "This confirmation does not match the card. Reload the page.", 403)
+    if not isinstance(override, bool):
+        raise ConfirmError("invalid", "override must be true or false.", 400)
+    mode = ticket["mode"]
+    if mode == "live" and trading_mode(environ) != "live":
+        raise ConfirmError("live_disabled", "Live trading is turned off on this computer.", 403,
+                           public_ticket(ticket, now=now, live_acknowledged=acknowledged))
+    typed_ok = isinstance(typed, str) and typed.strip().upper() in TYPED_LIVE
+    if mode == "live" and not acknowledged and not typed_ok:
+        raise ConfirmError("typed", "Type LIVE (or EN VIVO) to place your first live orders.", 400,
+                           public_ticket(ticket, now=now, live_acknowledged=False))
+
+    # Fresh data: every check runs again right before anything is sent.
+    if broker is None:
+        broker = broker_for(mode, environ)
+    lines, checks = run_checks([{k: v for k, v in l.items() if k not in ("limit_price", "order_qty", "last_price",
+                                                                         "estimated_amount")}
+                                for l in ticket["lines"]],
+                               mode=mode, broker=broker, snapshot=snapshot, store=store, client_id=client_id,
+                               ticket_id=ticket_id, environ=environ, now=now)
+    for line in lines:
+        line["client_order_id"] = client_order_id(ticket_id, line["index"])
+    _audit(store, client_id, ticket, "checks", {"phase": "confirm", "checks": checks, "override": override,
+                                                "lines": [_line_audit(l) for l in lines]})
+    blocking = _blocking(checks, override)
+    if blocking:
+        def refresh_checks(current: dict) -> dict:
+            tickets = dict(current.get("tickets") or {})
+            tickets[ticket_id] = {**tickets[ticket_id], "lines": lines, "checks": checks}
+            return {**current, "tickets": tickets}
+        store.update_auxiliary(client_id, "execution", refresh_checks)
+        _audit(store, client_id, ticket, "blocked", {"reasons": [c["code"] for c in blocking]})
+        fresh = {**ticket, "lines": lines, "checks": checks}
+        raise ConfirmError("blocked", blocking[0]["message"], 409,
+                           public_ticket(fresh, include_nonce=True, now=now, live_acknowledged=acknowledged))
+
+    # Claim the ticket atomically so two taps cannot both submit.
+    violations = [c for c in checks if c["status"] == "violation"]
+    record = {"at": _iso(now), "codes": sorted({c.get("params", {}).get("rule", c["code"]) for c in violations})} \
+        if violations and override else None
+
+    def claim(current: dict) -> dict:
+        tickets = dict(current.get("tickets") or {})
+        item = tickets.get(ticket_id)
+        if item is None or item["status"] != "pending":
+            raise ConfirmError("used", "This ticket was already handled.", 409)
+        tickets[ticket_id] = {**item, "status": "submitting", "lines": lines, "checks": checks,
+                              "nonce": None, "nonce_hash": None, "confirmed_at": _iso(now), "override": record}
+        result = {**current, "tickets": tickets}
+        if mode == "live" and not acknowledged:
+            result["live_ack"] = {**(current.get("live_ack") or {}), BROKER: _iso(now)}
+        return result
+
+    store.update_auxiliary(client_id, "execution", claim)
+    ticket = {**ticket, "lines": lines, "checks": checks, "override": record}
+    if mode == "live" and not acknowledged:
+        _audit(store, client_id, ticket, "live_acknowledged", {"typed": True, "at": _iso(now)})
+    notional = sum((Decimal(l["estimated_amount"]) for l in lines if l.get("estimated_amount")), Decimal(0))
+    _audit(store, client_id, ticket, "confirm", {
+        "at": _iso(now), "date_et": now.astimezone(_EASTERN).date().isoformat(), "notional": _s(_money(notional)),
+        "override": record, "lines": [_line_audit(l) for l in lines]})
+
+    submitted = []
+    for line in lines:
+        line = dict(line)
+        body = {"symbol": line["symbol"], "qty": line["order_qty"], "side": line["side"], "type": line["type"],
+                "time_in_force": line["time_in_force"], "client_order_id": line["client_order_id"]}
+        if line["type"] == "limit":
+            body["limit_price"] = line["limit_price"]
+        broker.audit = lambda kind, payload, _line=line: _audit(store, client_id, ticket, kind, payload, _line)
+        try:
+            order = broker.submit(body)
+        except BrokerError as exc:
+            line["state"] = "unknown" if exc.retryable else "failed"
+            line["reason"] = str(exc)[:200]
+        else:
+            line["broker_order_id"] = str(order.get("id") or "") or None
+            line["broker_status"] = order.get("status")
+            line["state"] = _LINE_STATE.get(str(order.get("status")), "sent")
+            line["filled_qty"] = order.get("filled_qty")
+            line["filled_avg_price"] = order.get("filled_avg_price")
+            line["submitted_at"] = order.get("submitted_at") or _iso(now)
+        finally:
+            broker.audit = None
+        submitted.append(line)
+
+    def finish(current: dict) -> dict:
+        tickets = dict(current.get("tickets") or {})
+        tickets[ticket_id] = {**tickets[ticket_id], "status": "submitted", "lines": submitted}
+        return {**current, "tickets": tickets}
+
+    store.update_auxiliary(client_id, "execution", finish)
+    ticket = {**ticket, "status": "submitted", "lines": submitted}
+    if any(l.get("filled_qty") not in (None, "0", 0) for l in submitted):
+        refresh(store, client_id, [ticket_id], broker=broker, environ=environ, now=now)
+    return ticket_status(store, client_id, ticket_id, now=now)
+
+
+# -- status, fills and cancellation --------------------------------------------------------
+
+def _update_line(line: dict, order: Mapping[str, Any]) -> dict:
+    line = dict(line)
+    line["broker_order_id"] = str(order.get("id") or line.get("broker_order_id") or "") or None
+    line["broker_status"] = order.get("status")
+    line["state"] = _LINE_STATE.get(str(order.get("status")), line.get("state", "sent"))
+    line["filled_qty"] = order.get("filled_qty")
+    line["filled_avg_price"] = order.get("filled_avg_price")
+    return line
+
+
+def _external_id(activity: Mapping[str, Any]) -> str | None:
+    """The read connector's id for an Alpaca activity (``ALPACA-A<date>_<uuid>``), so both dedupe."""
+    raw = str(activity.get("id") or "")
+    if not re.fullmatch(r"[0-9]{8,20}::[0-9a-fA-F\-]{8,40}", raw):
+        return None
+    head, tail = raw.split("::")
+    return f"ALPACA-A{head}_{tail.replace('-', '').lower()}"
+
+
+def _fill_date(activity: Mapping[str, Any]) -> str | None:
+    raw = str(activity.get("transaction_time") or "")
+    try:
+        return _parse(raw).astimezone(_EASTERN).date().isoformat()
+    except ValueError:
+        return None
+
+
+def post_fills(store: Any, client_id: str, ticket: Mapping[str, Any], line: Mapping[str, Any],
+               broker: AlpacaOrders, now: datetime) -> tuple[list[str], Decimal]:
+    """Post this order's new fills to the ledger; returns ``(fill ids, quantity)``.
+
+    The ledger skips a fill it already holds under the same external id, e.g. one
+    the read-only Alpaca connector synced first.
+    """
+    from .. import ledger as ledger_module
+
+    order_id = line.get("broker_order_id")
+    if not order_id:
+        return [], Decimal(0)
+    after = (_parse(line["submitted_at"]) - timedelta(days=1)).date().isoformat() if line.get("submitted_at") else None
+    activities, error = _safe(lambda: broker.fills(after))
+    if error or not activities:
+        return [], Decimal(0)
+    fills = [a for a in activities if str(a.get("order_id")) == order_id and _external_id(a)]
+    posted = set(line.get("posted_fills") or [])
+    fresh = [a for a in fills if _external_id(a) not in posted]
+    if not fresh:
+        return [], Decimal(0)
+    account, _ = _safe(broker.account)
+    account_id = _ledger_account_id(store, client_id, account, ticket["mode"])
+    ledger = store.ledger(client_id)
+    existing_account = next((a for a in ledger.get("accounts", []) if a.get("id") == account_id), None)
+    account_row = existing_account or {
+        "id": account_id, "institution": "Alpaca", "type": "brokerage", "currency": "USD",
+        "owners": [{"person_id": "self", "share": "1"}],
+        "name": "Alpaca paper account" if ticket["mode"] == "paper" else "Alpaca brokerage account"}
+    account_row = {k: v for k, v in account_row.items() if k not in ("updated_at",)}
+    symbol = line["symbol"]
+    instrument = next((i for i in ledger.get("instruments", []) if i.get("id") == symbol), None) or \
+        {"id": symbol, "symbol": symbol, "currency": "USD"}
+    transactions = []
+    for activity in fresh:
+        qty, price = _opt(activity.get("qty")), _opt(activity.get("price"))
+        when = _fill_date(activity)
+        if qty is None or price is None or qty <= 0 or when is None:
+            continue
+        gross = _money(qty * price)
+        kind = "buy" if str(activity.get("side", line["side"])).lower() == "buy" else "sell"
+        transactions.append({"kind": kind, "account_id": account_id, "date": when, "instrument_id": instrument["id"],
+                             "quantity": _s(qty), "price": _s(price), "currency": "USD",
+                             "amount": _s(-gross if kind == "buy" else gross), "external_id": _external_id(activity),
+                             "description": f"Alpaca {kind} {_s(qty)} {symbol} (order {order_id[:8]})"})
+    if not transactions:
+        return [], Decimal(0)
+    ids = sorted(t["external_id"] for t in transactions)
+    batch = {"batch_id": "alpaca-orders:" + hashlib.sha256("|".join(ids).encode()).hexdigest()[:24],
+             "source": {"kind": "tool", "ref": f"alpaca-orders:{ticket['mode']}:{order_id}",
+                        "observed_on": now.astimezone(_EASTERN).date().isoformat()},
+             "confidence": "reported", "accounts": [account_row], "instruments": [instrument],
+             "transactions": transactions}
+    receipt = ledger_module.post(store, client_id, batch)
+    _audit(store, client_id, ticket, "fill_posted", {"fill_ids": ids, "posted": len(receipt["posted"]),
+                                                     "duplicates": len(receipt["duplicates"]),
+                                                     "held": len(receipt["held"]), "account_id": account_id}, line)
+    return ids, sum((Decimal(t["quantity"]) for t in transactions), Decimal(0))
+
+
+def refresh(store: Any, client_id: str, ticket_ids: list[str] | None = None, *, broker: AlpacaOrders | None = None,
+            environ: Mapping[str, str] | None = None, now: datetime | None = None) -> list[dict[str, Any]]:
+    """Read open orders' status from the broker, post new fills, and return the updated tickets."""
+    now = _now(now)
+    state = store.auxiliary(client_id, "execution")
+    tickets = state.get("tickets") or {}
+    targets = [t for tid, t in tickets.items() if (ticket_ids is None or tid in ticket_ids)
+               and t["status"] == "submitted"]
+    clients: dict[str, AlpacaOrders | None] = {}
+    for ticket in targets:
+        mode = ticket["mode"]
+        if mode not in clients:
+            clients[mode] = broker if broker is not None and broker.mode == mode else broker_for(mode, environ)
+        api = clients[mode]
+        if api is None:
+            continue
+        lines = []
+        for line in ticket["lines"]:
+            line = dict(line)
+            filled = _opt(line.get("filled_qty")) or Decimal(0)
+            needs_fills = filled > (_opt(line.get("posted_qty")) or Decimal(0))
+            if line.get("state") not in _FINAL or line.get("state") == "unknown" or needs_fills:
+                api.audit = lambda kind, payload, _line=line: _audit(store, client_id, ticket, kind, payload, _line)
+                try:
+                    if line.get("broker_order_id"):
+                        order = api.order(line["broker_order_id"])
+                    else:
+                        order = api.order_by_client_id(line["client_order_id"])
+                    if order:
+                        line = _update_line(line, order)
+                        line.setdefault("submitted_at", order.get("submitted_at") or _iso(now))
+                    elif line.get("state") == "unknown":
+                        line["state"] = "failed"
+                        line["reason"] = "Alpaca has no record of this order; it was not placed."
+                except (BrokerError, ValueError):
+                    pass
+                finally:
+                    api.audit = None
+                if (_opt(line.get("filled_qty")) or Decimal(0)) > (_opt(line.get("posted_qty")) or Decimal(0)):
+                    ids, qty = post_fills(store, client_id, ticket, line, api, now)
+                    if ids:
+                        line["posted_fills"] = sorted(set(line.get("posted_fills") or []) | set(ids))
+                        line["posted_qty"] = _s((_opt(line.get("posted_qty")) or Decimal(0)) + qty)
+            lines.append(line)
+        done = all(l.get("state") in _FINAL for l in lines)
+
+        def update(current: dict, _tid=ticket["id"], _lines=lines, _done=done) -> dict:
+            items = dict(current.get("tickets") or {})
+            if _tid in items:
+                items[_tid] = {**items[_tid], "lines": _lines, "status": "done" if _done else "submitted",
+                               "refreshed_at": _iso(now)}
+            return {**current, "tickets": items}
+
+        store.update_auxiliary(client_id, "execution", update)
+    return list_tickets(store, client_id, now=now)
+
+
+def cancel(store: Any, client_id: str, target: str, *, environ: Mapping[str, str] | None = None,
+           broker: AlpacaOrders | None = None, now: datetime | None = None) -> dict[str, Any]:
+    """Discard a pending ticket (nothing was sent) or cancel one of its submitted orders at the broker."""
+    now = _now(now)
+    state = store.auxiliary(client_id, "execution")
+    tickets = state.get("tickets") or {}
+    if isinstance(target, str) and _TICKET_ID.match(target):
+        ticket = tickets.get(target)
+        if ticket is None:
+            raise ConfirmError("missing", "That order ticket is no longer there.", 404)
+        if ticket["status"] != "pending":
+            raise ConfirmError("used", "This ticket was already handled.", 409)
+
+        def discard(current: dict) -> dict:
+            items = dict(current.get("tickets") or {})
+            items[target] = {**items[target], "status": "discarded", "nonce": None, "nonce_hash": None}
+            return {**current, "tickets": items}
+
+        store.update_auxiliary(client_id, "execution", discard)
+        _audit(store, client_id, ticket, "discarded", {"at": _iso(now)})
+        return ticket_status(store, client_id, target, now=now)
+    for ticket in tickets.values():
+        for line in ticket["lines"]:
+            if line.get("broker_order_id") and line["broker_order_id"] == target:
+                if line.get("state") in _FINAL:
+                    raise ConfirmError("final", "This order is already final.", 409)
+                api = broker if broker is not None and broker.mode == ticket["mode"] else broker_for(ticket["mode"], environ)
+                if api is None:
+                    raise ConfirmError("broker", "Alpaca keys are not configured.", 503)
+                api.audit = lambda kind, payload, _line=line: _audit(store, client_id, ticket, kind, payload, _line)
+                try:
+                    api.cancel(target)
+                except BrokerError as exc:
+                    raise ConfirmError("broker", str(exc)[:200], 502) from None
+                finally:
+                    api.audit = None
+                _audit(store, client_id, ticket, "cancel", {"at": _iso(now)}, line)
+                refresh(store, client_id, [ticket["id"]], broker=api, environ=environ, now=now)
+                return ticket_status(store, client_id, ticket["id"], now=now)
+    raise ConfirmError("missing", "That order is not one Wealth placed.", 404)
+
+
+def execution_status(store: Any, client_id: str | None, *, environ: Mapping[str, str] | None = None,
+                     now: datetime | None = None) -> dict[str, Any]:
+    """Mode, opt-in, whether keys exist (never the keys), limits and today's live usage."""
+    now = _now(now)
+    environ = os.environ if environ is None else environ
+    config = limits(environ)
+    mode = trading_mode(environ)
+    result: dict[str, Any] = {
+        "broker": BROKER, "mode": mode, "live_opt_in": mode == "live",
+        "credentials": {m: alpaca_orders.load_keys(m, environ) is not None for m in ("paper", "live")},
+        "limits": {"per_order_usd": _s(config["max_order"]), "daily_usd": _s(config["max_daily"]),
+                   "collar": _s(config["collar"]), "applies_to": "live"},
+        "ticket_minutes": int(TICKET_TTL.total_seconds() // 60),
+        "submission": "Only the person, on the order card in the Wealth app, can place orders.",
+    }
+    if store is not None and client_id:
+        state = store.auxiliary(client_id, "execution")
+        result["live_acknowledged"] = bool((state.get("live_ack") or {}).get(BROKER))
+        result["live_used_today_usd"] = _s(_money(_live_used_today(store, client_id, now)))
+        result["pending_tickets"] = sum(1 for t in (state.get("tickets") or {}).values()
+                                        if t["status"] == "pending" and _parse(t["expires_at"]) > now)
+    return result
+
+
+__all__ = ["BROKER", "ConfirmError", "SOURCES", "TICKET_TTL", "broker_for", "cancel", "client_order_id", "confirm",
+           "create_ticket", "execution_status", "limits", "list_tickets", "post_fills", "public_ticket", "refresh",
+           "run_checks", "ticket_status", "trading_mode"]
