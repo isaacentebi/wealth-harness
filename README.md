@@ -49,11 +49,13 @@ personal recall. See the [CLI and MCP reference](docs/cli.md).
 
 | Area | Tasks | Current capability |
 | --- | --- | --- |
-| Household | `import`, `exposure` | Reconciled people/accounts/positions/lots; NAV and liquidity; FX and fund look-through coverage; overlap and targets |
-| Markets | `analyze`, `stress`, `compare`, `construct`, `factors` | Historical risk, explicit stress cases, same-sample comparison, constrained equal/inv-vol/min-var/risk-parity/HRP/CVaR/Black–Litterman construction, optional walk-forward validation |
-| Research | `research`, `value` | Dated source packets, prior-case deltas, company/fund metrics, explicit DCF and multiples scenarios |
-| Household policy | `plan`, `calendar`, `project`, `income`, `ladder` | Dated goals and reserves, cash calendar, seeded projections, sequence-risk income comparison, liability cash-flow matching |
-| Tax | `tax` | Explicit scenarios for US federal taxable securities and Mexico Article 129 qualifying listed shares |
+| Statements | `wealth_ingest` | PDF, CSV/XLSX export, image text or chat facts into a reconciled proposal; saved and posted to the ledger only after the person confirms |
+| Household | `import`, `exposure` | Reconciled people/accounts/positions/lots; NAV and liquidity; ownership, lockups and redemption terms; FX and fund look-through coverage; overlap and targets |
+| Ledger | `ledger`, `performance`, `spending`, `dca` | Holdings, lots, realized gains and income from transactions; statement reconciliation; time- and money-weighted returns; spending categories and investable surplus; DCA schedules, adherence and backtests |
+| Markets | `analyze`, `stress`, `compare`, `construct`, `factors`, `sic_premium` | Historical risk with explicit benchmark, risk-free and fees; stress cases; same-sample comparison; constrained equal/inv-vol/min-var/risk-parity/HRP/CVaR/Black–Litterman construction with optional walk-forward validation; SIC price against the home market |
+| Research | `research`, `value` | Dated source packets, prior-case deltas, company/fund metrics, DCF (stub periods, EV bridge, dilution) and multiples scenarios |
+| Household policy | `plan`, `calendar`, `project`, `income`, `ladder` | Dated goals and reserves, cash calendar, seeded projections (parametric, Student-t, bootstrap, block bootstrap; nominal or real), taxed income comparison, liability cash-flow matching |
+| Tax | `tax`, `mx_holdings`, `mx_interest`, `mx_deductions`, `mx_foreign`, `mx_calendar`, `estate` | US federal lots, wash sales, harvesting and 2025/2026 brackets with NIIT; Mexico Art. 129, real interest, deductions/PPR, foreign securities, tax calendar; US estate exposure for non-residents |
 | Monitoring | `monitor` | Caller-driven evaluation of opt-in review, expiry, drift, goal, threshold, and thesis rules |
 
 Get exact required fields and a valid example for every task:
@@ -65,10 +67,11 @@ printf '{}' | uv run wealth context
 ## Boundaries
 
 - No brokerage connection, order placement, transfer, external message, or
-  claim that an accepted decision was executed.
-- Tax scope is limited to the implemented US federal taxable-security and
-  Mexico Article 129 scenarios. It does not prepare a return, cover every tax,
-  or replace jurisdiction-specific professional review.
+  claim that an accepted decision was executed. Statements are read from local
+  uploads; no aggregator connector ships.
+- Tax covers the scenarios listed above. It does not compute state taxes or
+  AFORE/IRA internals, prepare a return, take filing positions, or replace
+  professional review.
 - Research can use supplied sources or an explicit live adapter. Aggregator data
   is identified; stale evidence and missing coverage remain visible.
 - Black–Litterman uses only explicit caller views. Construction always reports a

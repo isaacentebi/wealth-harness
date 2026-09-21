@@ -22,10 +22,12 @@ Documented defaults (each is also stated in the result's ``assumptions``):
 from __future__ import annotations
 
 import csv
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date
 import math
 from pathlib import Path
+import threading
 from typing import Any, Callable
 
 import numpy as np
@@ -35,11 +37,12 @@ from . import legacy
 from ._common import currency as _iso_currency
 from ._common import envelope as _envelope
 from ._common import historical_cvar
+from ._common import iso_date as _iso_date
 from ._common import number as _number
 from ._common import text as _text
 
 
-_TASKS = {"analyze", "stress", "compare", "construct", "factors"}
+_TASKS = {"analyze", "stress", "compare", "construct", "factors", "sic_premium"}
 _METHODS = {"equal", "invvol", "minvar", "riskparity", "hrp", "cvar", "black_litterman"}
 _CASH_PREFIX = "CASH::"
 _WEIGHT_TOLERANCE = 1e-6
@@ -171,6 +174,19 @@ def _stored_portfolio(inputs: dict, context: dict) -> tuple[dict | None, str | N
 
 
 def _portfolio(inputs: dict, context: dict, key: str = "weights") -> tuple[dict | None, dict | None, list[str]]:
+    weights, info, missing = _raw_portfolio(inputs, context, key)
+    if weights and info is not None:
+        info = dict(info)
+        info["warnings"] = list(info.get("warnings", []))
+        info["assumptions"] = list(info.get("assumptions", []))
+        weights = _combine_sic(weights, inputs, info.get("source") or key,
+                               info["assumptions"], info["warnings"])
+        if info.get("weights") is not None:
+            info["weights"] = weights
+    return weights, info, missing
+
+
+def _raw_portfolio(inputs: dict, context: dict, key: str = "weights") -> tuple[dict | None, dict | None, list[str]]:
     if key in inputs:
         currency = _currency(inputs.get("currency"))
         warnings: list[str] = []
@@ -319,6 +335,11 @@ def _price_frame(inputs: dict, tickers: list[str], currency: str, *, need_rf: bo
         px = (_inline_prices(spec, market, optional) if market
               else pd.DataFrame(index=pd.to_datetime([r["date"] for r in spec["rows"]])))
         source = {"kind": "supplied_rows", "ref": str(source_ref)}
+        if declared != SIC_CURRENCY:
+            sic_cols = [t for t in market if is_sic_symbol(t)]
+            if sic_cols:
+                out.warnings.append(f"{', '.join(sic_cols)} quote in {SIC_CURRENCY} on BMV/SIC; the supplied rows are "
+                                    f"taken as already converted into {declared} (no implicit FX is applied).")
     elif "price_csv" in inputs:
         source_ref = inputs.get("price_source")
         if not source_ref:
@@ -335,7 +356,13 @@ def _price_frame(inputs: dict, tickers: list[str], currency: str, *, need_rf: bo
         if isinstance(years, bool) or not isinstance(years, int) or years <= 0:
             raise ValueError("years must be a positive integer")
         requested_years = years
-        px, out.warnings = legacy._load_prices(market, years=years, currency=currency, align=align)
+        sic_notes: list[str] = []
+        if any(is_sic_symbol(t) for t in market):
+            with _sic_quote_currencies(sic_notes):
+                px, out.warnings = legacy._load_prices(market, years=years, currency=currency, align=align)
+        else:
+            px, out.warnings = legacy._load_prices(market, years=years, currency=currency, align=align)
+        out.warnings.extend(sic_notes)
         source = {"kind": "live", "ref": "Yahoo Finance via yfinance adjusted daily closes",
                   "retrieved": px.attrs.get("retrieved")}
         absent = sorted(set(market) - set(px.columns))
@@ -393,6 +420,13 @@ def _price_frame(inputs: dict, tickers: list[str], currency: str, *, need_rf: bo
     out.assumptions.append("Supplied prices are adjusted closes already expressed in the declared currency."
                            if source["kind"].startswith("supplied") else
                            "Live prices use the legacy yfinance adjusted-close adapter.")
+    sic_live = [t for t in market if is_sic_symbol(t)] if source["kind"] == "live" else []
+    if sic_live:
+        source["quote_currencies"] = {t: SIC_CURRENCY for t in sic_live}
+        out.assumptions.append(f"{', '.join(sic_live)} are {SIC_SUFFIX} (BMV/SIC) listings quoted in {SIC_CURRENCY}" +
+                               ("." if currency == SIC_CURRENCY else
+                                f", converted to {currency} at the prior available {SIC_CURRENCY}->{currency} "
+                                "daily close (maximum four calendar days)."))
     if cash:
         out.assumptions.append(f"Stored cash compounds at the {rf_label}." if rf is not None else
                                "Stored cash is a constant-price, zero-return allocation because no "
@@ -419,6 +453,11 @@ def _benchmark(inputs: dict, currency: str, warnings: list[str],
 
 def _metadata(px: pd.DataFrame, currency: str, inputs: dict, warnings: list[str]) -> dict:
     meta: dict[str, dict] = {symbol: {"currency": currency} for symbol in px.columns}
+    quoted = px.attrs.get("quote_currencies") or {}
+    for symbol in meta:
+        native = quote_currency(symbol, quoted.get(symbol))
+        if native:
+            meta[symbol]["quote_currency"] = native
     raw = inputs.get("expense_ratios")
     if raw is None:
         return meta
@@ -442,6 +481,284 @@ def _metadata(px: pd.DataFrame, currency: str, inputs: dict, warnings: list[str]
 
 
 # --------------------------------------------------------------------------
+# SIC (Sistema Internacional de Cotizaciones, Mexico) listings
+# --------------------------------------------------------------------------
+SIC_SUFFIX = ".MX"
+SIC_CURRENCY = "MXN"
+_META_LOCK = threading.RLock()
+
+
+def is_sic_symbol(symbol: Any) -> bool:
+    """True for Yahoo-style BMV/SIC symbols (``AAPL.MX``), which quote in MXN."""
+    return isinstance(symbol, str) and symbol.strip().upper().endswith(SIC_SUFFIX) \
+        and len(symbol.strip()) > len(SIC_SUFFIX)
+
+
+def quote_currency(symbol: str, provider_currency: str | None = None) -> str | None:
+    """A symbol's native quote currency.
+
+    The ``.MX`` exchange suffix (BMV/SIC) is MXN by construction and wins over
+    provider metadata; every other symbol keeps the provider's currency (or
+    ``None`` when unknown -- unknown is never assumed).
+    """
+    if is_sic_symbol(symbol):
+        return SIC_CURRENCY
+    return str(provider_currency).upper() if provider_currency else None
+
+
+def _sic_underlyings(raw: Any) -> dict[str, str]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("sic_underlyings must be an object mapping SIC symbols to home listings")
+    out: dict[str, str] = {}
+    for key, value in raw.items():
+        name = _text(key, "sic_underlyings symbol").upper()
+        if not is_sic_symbol(name):
+            raise ValueError(f"sic_underlyings key {name} must be a {SIC_SUFFIX} symbol")
+        target = _text(value, f"sic_underlyings.{key}").upper()
+        if is_sic_symbol(target):
+            raise ValueError(f"sic_underlyings.{key} must be a home-market listing, not a SIC symbol")
+        out[name] = target
+    return out
+
+
+def sic_underlying(symbol: str, mapping: dict[str, str] | None = None) -> str:
+    """Home-market underlying of a SIC symbol: explicit mapping, else the suffix stripped."""
+    name = _text(symbol, "symbol").upper()
+    if not is_sic_symbol(name):
+        return name
+    explicit = _sic_underlyings(mapping)
+    return explicit.get(name) or name[: -len(SIC_SUFFIX)]
+
+
+def _combine_sic(weights: dict[str, float] | None, inputs: dict, field: str,
+                 assumptions: list[str], warnings: list[str]) -> dict[str, float] | None:
+    """Merge ``XXX.MX`` weights into their home underlying when explicitly asked.
+
+    Off by default: without ``combine_sic_listings=true`` weights are returned
+    unchanged and only a note flags SIC/home pairs held side by side.
+    """
+    if not weights:
+        return weights
+    flag = inputs.get("combine_sic_listings", False)
+    if not isinstance(flag, bool):
+        raise ValueError("combine_sic_listings must be true or false")
+    mapping = _sic_underlyings(inputs.get("sic_underlyings"))
+    sic = [s for s in weights if is_sic_symbol(s)]
+    if not sic:
+        return weights
+    if not flag:
+        pairs = sorted(f"{s}/{sic_underlying(s, mapping)}" for s in sic
+                       if sic_underlying(s, mapping) in weights)
+        if pairs:
+            note = (f"{field} holds SIC and home listings of the same underlying ({', '.join(pairs)}); they are "
+                    "analysed as separate assets. Pass combine_sic_listings=true to treat each pair as one exposure.")
+            if note not in warnings:
+                warnings.append(note)
+        return weights
+    merged: dict[str, float] = {}
+    moved: list[str] = []
+    for symbol, weight in weights.items():
+        target = sic_underlying(symbol, mapping) if is_sic_symbol(symbol) else symbol
+        if target != symbol:
+            moved.append(f"{symbol}->{target}")
+        merged[target] = merged.get(target, 0.0) + weight
+    line = (f"combine_sic_listings=true: SIC listings in {field} are treated as their home-market underlying "
+            f"and merged into one exposure ({', '.join(moved)}); the home listing's price history stands in for "
+            "the SIC line, so the SIC premium/discount and MXN trading frictions are ignored.")
+    if line not in assumptions:
+        assumptions.append(line)
+    return merged
+
+
+def _combined_shocks(shocks: dict, inputs: dict, name: str) -> dict:
+    """Re-key explicit stress shocks onto merged underlyings when combining SIC listings."""
+    if inputs.get("combine_sic_listings") is not True:
+        return shocks
+    mapping = _sic_underlyings(inputs.get("sic_underlyings"))
+    out: dict = {}
+    for symbol, value in shocks.items():
+        key = str(symbol).upper()
+        target = sic_underlying(key, mapping) if is_sic_symbol(key) else symbol
+        if target in out and _number(out[target], f"{name}.{target}") != _number(value, f"{name}.{symbol}"):
+            raise ValueError(f"{name}: conflicting shocks for {symbol} and its underlying {target}")
+        out[target] = value
+    return out
+
+
+@contextmanager
+def _sic_quote_currencies(notes: list[str]):
+    """Make the legacy price adapter treat ``.MX`` symbols as MXN-quoted.
+
+    ``legacy.to_currency`` reads native currencies from provider metadata; for
+    ``.MX`` symbols the exchange suffix fixes the currency at MXN, so a missing or
+    contradictory provider field is replaced (and a contradiction is disclosed).
+    """
+    with _META_LOCK:
+        original = legacy._ticker_meta
+
+        def patched(tickers) -> dict:
+            meta = dict(original(tickers) or {})
+            for symbol in tickers:
+                if not is_sic_symbol(symbol):
+                    continue
+                entry = dict(meta.get(symbol) or {})
+                provider = str(entry.get("currency") or "").upper() or None
+                if provider and provider != SIC_CURRENCY:
+                    notes.append(f"{symbol}: provider reported quote currency {provider}; the {SIC_SUFFIX} "
+                                 f"(BMV/SIC) listing is treated as {SIC_CURRENCY}.")
+                entry["currency"] = SIC_CURRENCY
+                meta[symbol] = entry
+            return meta
+
+        legacy._ticker_meta = patched
+        try:
+            yield
+        finally:
+            legacy._ticker_meta = original
+
+
+def _dated_input(value: Any, as_of: Any, field: str, as_of_field: str) -> tuple[float | None, str | None]:
+    if value is None:
+        return None, None
+    amount = _number(value, field)
+    if amount <= 0:
+        raise ValueError(f"{field} must be positive")
+    if as_of is None:
+        return amount, None
+    if isinstance(as_of, (date, pd.Timestamp)):
+        return amount, pd.Timestamp(as_of).date().isoformat()
+    return amount, _iso_date(as_of, as_of_field).isoformat()
+
+
+def _fetch_quote(symbol: str, expected_ccy: str, field: str,
+                 warnings: list[str]) -> tuple[float | None, str | None, dict | None]:
+    quote = legacy._latest_quote(symbol, warnings)
+    if quote is None:
+        return None, None, None
+    price, qccy, pdate = quote
+    qccy = quote_currency(symbol, qccy)
+    if qccy != expected_ccy:
+        warnings.append(f"{symbol}: quote currency {qccy} is not {expected_ccy}; {field} left unknown.")
+        return None, None, None
+    return float(price), pdate, {"kind": "live", "ref": "Yahoo Finance via yfinance adjusted daily closes",
+                                 "symbol": symbol, "field": field, "currency": qccy, "as_of": pdate,
+                                 "retrieved": date.today().isoformat()}
+
+
+def _fetch_usdmxn(warnings: list[str]) -> tuple[float | None, str | None, dict | None]:
+    try:
+        series = legacy._fx_series("USD", SIC_CURRENCY)
+    except Exception as exc:  # noqa: BLE001 -- provider failure means unknown, not zero
+        warnings.append(f"USDMXN: no usable FX history ({exc})")
+        return None, None, None
+    if series is None or not len(series):
+        warnings.append("USDMXN: no usable FX history")
+        return None, None, None
+    series = series.dropna().sort_index()
+    rate, rdate = float(series.iloc[-1]), str(pd.Timestamp(series.index[-1]).date())
+    return rate, rdate, {"kind": "live", "ref": "Yahoo Finance via yfinance USDMXN=X daily close",
+                         "field": "usdmxn", "as_of": rdate, "retrieved": date.today().isoformat()}
+
+
+def sic_premium(sic_symbol: str, home_symbol: str | None = None, *,
+                sic_price_mxn: float | None = None, sic_price_as_of: str | None = None,
+                home_price: float | None = None, home_price_as_of: str | None = None,
+                usdmxn: float | None = None, usdmxn_as_of: str | None = None,
+                source: str | None = None, fetch_missing: bool = False,
+                sic_underlyings: dict[str, str] | None = None) -> dict:
+    """Premium (+) or discount (-) of a SIC MXN price over the home USD price x USDMXN.
+
+    ``premium = sic_price_mxn / (home_price * usdmxn) - 1``. Every input may be
+    supplied (with its ``*_as_of`` date) or, only when ``fetch_missing`` is true,
+    taken from the existing Yahoo adapter. A missing input is never zero: the
+    result is ``needs_input`` naming the missing field(s). Inputs dated on
+    different days are computed but warned about.
+    """
+    sic = _text(sic_symbol, "sic_symbol").upper()
+    if not is_sic_symbol(sic):
+        raise ValueError(f"sic_symbol must be a {SIC_SUFFIX} (BMV/SIC) symbol, e.g. AAPL.MX")
+    home = (_text(home_symbol, "home_symbol").upper() if home_symbol is not None
+            else sic_underlying(sic, sic_underlyings))
+    if is_sic_symbol(home):
+        raise ValueError("home_symbol must be the home-market (USD) listing, not a SIC symbol")
+    if not isinstance(fetch_missing, bool):
+        raise ValueError("fetch_missing must be true or false")
+    warnings: list[str] = []
+    sources: list[dict] = []
+    values = {
+        "sic_price_mxn": _dated_input(sic_price_mxn, sic_price_as_of, "sic_price_mxn", "sic_price_as_of"),
+        "home_price": _dated_input(home_price, home_price_as_of, "home_price", "home_price_as_of"),
+        "usdmxn": _dated_input(usdmxn, usdmxn_as_of, "usdmxn", "usdmxn_as_of"),
+    }
+    supplied = [name for name, (value, _) in values.items() if value is not None]
+    if supplied:
+        if not source:
+            return _envelope("needs_input", {"sic_symbol": sic, "home_symbol": home},
+                             missing=["price_source (who supplied " + ", ".join(supplied) + ")"])
+        sources.append({"kind": "supplied", "ref": _text(source, "price_source"), "fields": supplied,
+                        "as_of": {name: values[name][1] for name in supplied}})
+    if fetch_missing:
+        fetchers = {"sic_price_mxn": lambda: _fetch_quote(sic, SIC_CURRENCY, "sic_price_mxn", warnings),
+                    "home_price": lambda: _fetch_quote(home, "USD", "home_price", warnings),
+                    "usdmxn": lambda: _fetch_usdmxn(warnings)}
+        for name, (value, _) in list(values.items()):
+            if value is None:
+                fetched, fdate, fsource = fetchers[name]()
+                if fetched is not None:
+                    values[name] = (fetched, fdate)
+                    sources.append(fsource)
+    inputs_used = {name: {"value": value, "as_of": as_of} for name, (value, as_of) in values.items()}
+    base = {"sic_symbol": sic, "home_symbol": home, "home_currency": "USD",
+            "sic_currency": SIC_CURRENCY, "inputs": inputs_used}
+    missing = [name for name, (value, _) in values.items() if value is None]
+    assumptions = [f"{home} is quoted in USD and {sic} in MXN; one {sic} share represents one {home} share "
+                   "(no ADR/share-class ratio).",
+                   "premium = sic_price_mxn / (home_price x usdmxn) - 1; positive is a SIC premium, "
+                   "negative a discount. No bid/ask, commissions, or taxes."]
+    if missing:
+        if not fetch_missing:
+            warnings.append("Missing inputs were not fetched; pass them explicitly or set fetch_missing=true.")
+        return _envelope("needs_input", base, missing=missing, warnings=warnings,
+                         sources=sources, assumptions=assumptions)
+    sic_px, home_px, fx = (values[k][0] for k in ("sic_price_mxn", "home_price", "usdmxn"))
+    implied = home_px * fx
+    premium = sic_px / implied - 1.0
+    dates = {name: as_of for name, (_, as_of) in values.items()}
+    undated = [name for name, as_of in dates.items() if as_of is None]
+    if undated:
+        warnings.append("Undated input(s): " + ", ".join(undated) + "; the comparison cannot be confirmed "
+                        "as same-day.")
+    distinct = sorted({d for d in dates.values() if d})
+    if len(distinct) > 1:
+        warnings.append("DATE MISMATCH: inputs are from different dates (" +
+                        ", ".join(f"{k} {v}" for k, v in dates.items() if v) +
+                        "); part of the premium may be price or FX movement between those dates.")
+    result = {**base,
+              "implied_sic_price_mxn": implied,
+              "sic_price_usd": sic_px / fx,
+              "premium": premium,
+              "premium_bps": premium * 1e4,
+              "direction": "premium" if premium > 0 else ("discount" if premium < 0 else "parity"),
+              "as_of": dates,
+              "same_day": len(distinct) == 1 and not undated}
+    return _envelope("ready", result, warnings=warnings, sources=sources, assumptions=assumptions)
+
+
+def _sic_premium_task(inputs: dict, context: dict) -> dict:
+    if "sic_symbol" not in inputs:
+        return _envelope("needs_input", missing=["sic_symbol"])
+    return sic_premium(
+        inputs["sic_symbol"], inputs.get("home_symbol"),
+        sic_price_mxn=inputs.get("sic_price_mxn"), sic_price_as_of=inputs.get("sic_price_as_of"),
+        home_price=inputs.get("home_price"), home_price_as_of=inputs.get("home_price_as_of"),
+        usdmxn=inputs.get("usdmxn"), usdmxn_as_of=inputs.get("usdmxn_as_of"),
+        source=inputs.get("price_source"), fetch_missing=inputs.get("fetch_missing", False),
+        sic_underlyings=inputs.get("sic_underlyings"))
+
+
+# --------------------------------------------------------------------------
 # descriptive tasks
 # --------------------------------------------------------------------------
 def _analysis(inputs: dict, context: dict) -> dict:
@@ -452,7 +769,7 @@ def _analysis(inputs: dict, context: dict) -> dict:
         return _envelope("needs_input", missing=["weights or household/portfolio.snapshot"])
     currency = info["currency"]
     warnings = list(info.get("warnings", []))
-    assumptions = ["Historical statistics are descriptive and are not forecasts."]
+    assumptions = ["Historical statistics are descriptive and are not forecasts.", *info.get("assumptions", [])]
     benchmark, basis = _benchmark(inputs, currency, warnings, assumptions)
     tickers = list(weights)
     if benchmark and benchmark not in tickers:
@@ -494,7 +811,8 @@ def _stress(inputs: dict, context: dict) -> dict:
     sources: list = []
     warnings: list[str] = list(info.get("warnings", []))
     assumptions = ["Scenario returns are deterministic arithmetic on the supplied portfolio weights; no rebalancing, taxes, or trading costs.",
-                   "Historical windows run close-to-close from the first observed close on or after start to the last close on or before end (the same convention as the regime table)."]
+                   "Historical windows run close-to-close from the first observed close on or after start to the last close on or before end (the same convention as the regime table).",
+                   *info.get("assumptions", [])]
     px = None
     if needs_history:
         prices = _price_frame(inputs, list(weights), info["currency"])
@@ -513,6 +831,7 @@ def _stress(inputs: dict, context: dict) -> dict:
             shocks = scenario["shocks"]
             if not isinstance(shocks, dict):
                 raise ValueError(f"scenarios[{index}].shocks must be an object")
+            shocks = _combined_shocks(shocks, inputs, name)
             missing_assets = sorted(set(weights) - set(shocks))
             if missing_assets:
                 raise ValueError(f"{name}: shocks missing portfolio assets: {', '.join(missing_assets)}")
@@ -556,7 +875,9 @@ def _compare(inputs: dict, context: dict) -> dict:
     if proposed is None:
         return _envelope("needs_input", missing=proposed_missing, warnings=warnings)
     _validate_cash_symbols(proposed, info["currency"], "proposed_weights")
-    assumptions = ["Both portfolios use the identical historical sample, currency, and rebalance convention."]
+    assumptions = ["Both portfolios use the identical historical sample, currency, and rebalance convention.",
+                   *info.get("assumptions", [])]
+    proposed = _combine_sic(proposed, inputs, "proposed_weights", assumptions, warnings)
     benchmark, basis = _benchmark(inputs, info["currency"], warnings, assumptions)
     all_names = list(dict.fromkeys([*current, *proposed]))
     if benchmark and benchmark not in all_names:
@@ -613,6 +934,7 @@ def _factors(inputs: dict, context: dict) -> dict:
         raise ValueError("model must be 3 or 5")
     result = legacy.factor_regression(prices.px, model, warnings)
     result.update(currency="USD", scope=info["scope"], input_complete=info["complete"])
+    factor_assumptions = list(info.get("assumptions", []))
     factor_source = {"kind": "factor_data", "ref": f"Ken French US daily {model}-factor library",
                      "currency": "USD", "window": result["window"]}
     sources.append(factor_source)
@@ -627,7 +949,8 @@ def _factors(inputs: dict, context: dict) -> dict:
         result["excluded_cash"] = cash
     status = "ready" if info["complete"] else "partial"
     return _envelope(status, result, warnings=warnings, sources=sources,
-                     assumptions=["Factor loadings are in-sample regressions on US daily factors, not forecasts or causal exposures."])
+                     assumptions=["Factor loadings are in-sample regressions on US daily factors, not forecasts or causal exposures.",
+                                  *factor_assumptions])
 
 
 # --------------------------------------------------------------------------
@@ -1144,7 +1467,9 @@ def _construction(inputs: dict, context: dict) -> dict:
         currency = _currency(inputs.get("currency"))
         current = {name: 1.0 / len(names) for name in names}
         info = {"currency": currency, "scope": str(inputs.get("scope") or "requested universe"),
-                "complete": True, "source": "inputs.tickers", "total_value": None, "warnings": []}
+                "complete": True, "source": "inputs.tickers", "total_value": None, "warnings": [],
+                "assumptions": []}
+        current = _combine_sic(current, inputs, "tickers", info["assumptions"], info["warnings"])
     _validate_cash_symbols(current, info["currency"], "construction universe")
     cash_weights = {k: v for k, v in current.items() if k.startswith(_CASH_PREFIX) and v > 0}
     cash_weight = sum(cash_weights.values())
@@ -1224,6 +1549,7 @@ def _construction(inputs: dict, context: dict) -> dict:
         result["validation"] = validation
     assumptions = ["Construction is long-only and uses historical daily returns; it is not an expected-return forecast.",
                    "The equal-weight baseline uses the same universe, cap, cash allocation, and price window.",
+                   *info.get("assumptions", []),
                    *prices.assumptions]
     if pairwise:
         assumptions.append("covariance='pairwise': each variance and covariance uses every date its assets were "
@@ -1262,4 +1588,5 @@ def run(task: str, inputs: dict, context: dict) -> dict:
     if not isinstance(inputs, dict) or not isinstance(context, dict):
         raise ValueError("inputs and context must be objects")
     return {"analyze": _analysis, "stress": _stress, "compare": _compare,
-            "construct": _construction, "factors": _factors}[task](inputs, context)
+            "construct": _construction, "factors": _factors,
+            "sic_premium": _sic_premium_task}[task](inputs, context)

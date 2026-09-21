@@ -39,6 +39,7 @@ def test_stdio_tool_journey_and_annotations(tmp_path, capfd):
                 "wealth_decision",
                 "wealth_inspect",
                 "wealth_client",
+                "wealth_ingest",
             }
             assert all(
                 item.input_schema.get("additionalProperties") is False
@@ -50,6 +51,7 @@ def test_stdio_tool_journey_and_annotations(tmp_path, capfd):
             assert tools["wealth_run"].annotations.read_only_hint is False
             assert not any(item.annotations.destructive_hint for item in tools.values())
             assert tools["wealth_client"].input_schema["properties"]["action"]["enum"] == ["create", "index"]
+            assert "explicitly says yes" in tools["wealth_ingest"].description
 
             async def call(name, arguments):
                 result = await client.call_tool(name, arguments)

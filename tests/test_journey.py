@@ -36,13 +36,13 @@ def cli(tmp_path, operation, arguments):
 
 
 def test_cli_round_trip_across_processes_and_error_channel(tmp_path):
-    created = cli(tmp_path, "create", {"client_id": "a", "display_name": "Client A"})
+    created = cli(tmp_path, "client", {"action": "create", "client_id": "a", "inputs": {"display_name": "Client A"}})
     assert created.returncode == 0, created.stderr
     assert json.loads(created.stdout)["revision"] == 0
-    recalled = cli(tmp_path, "prepare", {"client_id": "a", "intent": "overview"})
+    recalled = cli(tmp_path, "context", {"client_id": "a", "intent": "plan"})
     assert recalled.returncode == 0, recalled.stderr
-    assert json.loads(recalled.stdout)["client_id"] == "a"
-    wrong_client = cli(tmp_path, "inspect", {"client_id": "b"})
+    assert "fact_contract" in json.loads(recalled.stdout)
+    wrong_client = cli(tmp_path, "client", {"action": "inspect", "client_id": "b"})
     assert wrong_client.returncode == 2
     assert wrong_client.stdout == ""
     assert json.loads(wrong_client.stderr)["error_type"] == "ClientNotFoundError"

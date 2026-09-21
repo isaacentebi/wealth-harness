@@ -1,7 +1,9 @@
 """One application boundary shared by the CLI and MCP transport."""
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 import importlib
@@ -25,9 +27,33 @@ def database_path(override: str | Path | None = None) -> Path:
 TASK_MODULES = {
     "import": "household", "exposure": "household",
     "analyze": "market", "stress": "market", "compare": "market", "construct": "market", "factors": "market",
-    "research": "research", "value": "research",
+    "sic_premium": "market", "research": "research", "value": "research",
     "project": "planning", "income": "planning", "ladder": "planning", "tax": "tax",
+    "mx_holdings": "mexico", "mx_interest": "mexico", "mx_deductions": "mexico", "mx_foreign": "mexico",
+    "mx_calendar": "mexico", "estate": "estate",
+    "ledger": "ledger", "performance": "ledger", "spending": "cashflow", "dca": "dca",
 }
+# Tasks answered by the service itself rather than one module.
+SERVICE_TASKS = ("plan", "calendar", "monitor")
+TASKS = (*TASK_MODULES, *SERVICE_TASKS)
+# Tasks whose module reads the client's transaction ledger from context["ledger"].
+LEDGER_TASKS = frozenset({"ledger", "performance", "spending", "dca"})
+INGEST_ACTIONS = ("file", "extraction", "chat", "confirm", "confirm_duplicates", "diff")
+_KEEP_PROPOSALS = 20
+
+
+def upload_dir(client_id: str, db_path: str | Path | None = None) -> Path:
+    """The only directory ``ingest`` reads files from for this client.
+
+    ``WEALTH_UPLOAD_DIR`` overrides the root; otherwise it is ``<db dir>/uploads``,
+    where the local browser chat saves attachments.  The client segment is
+    sanitised exactly as ``web.Uploads`` does.
+    """
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", client_id).strip(".") or "client"
+    configured = os.environ.get("WEALTH_UPLOAD_DIR")
+    root = (Path(configured).expanduser() if configured
+            else database_path(db_path).expanduser().resolve().parent / "uploads")
+    return root / safe[:64]
 
 
 def capabilities() -> dict:
@@ -39,7 +65,11 @@ def capabilities() -> dict:
         "memory": "Sourced facts, revisions, correction history, bounded keyword/concept recall and optional host-supplied semantic vectors.",
         "privacy": "Local plaintext SQLite. Retrieved context may reach the host's model provider. No credentials are stored.",
         "execution": "Analysis and decision support only; no trading, transfers, or external messaging.",
-        "tax_scope": "US federal taxable securities and Mexican Article 129 qualifying listed shares; explicit inputs and coverage required.",
+        "tax_scope": "US federal (2025/2026 brackets, LTCG stacking, NIIT, lots, wash sales, harvesting); Mexico "
+                     "(Art. 129 BMV/SIC, real interest, deductions/PPR, foreign securities outside the SIC, calendar); "
+                     "US estate exposure for non-residents. Not state tax, AFORE/IRA internals or filing positions.",
+        "ingest": "wealth_ingest turns an uploaded statement, host extraction or chat facts into a reconciled "
+                  "proposal. Nothing is saved until the person says yes and the host calls action=confirm.",
         "monitoring": "Saved opt-in rules evaluated by the host or wealth watch. Unchanged checks stay quiet; no process starts automatically.",
         "fact_contract": fact_contract(),
     }
@@ -59,7 +89,8 @@ def fact_contract() -> dict:
                       "or a document shows it | inferred: an interpretation. Only a user source may be confirmed.",
         "keys": ["client.profile", "household", "portfolio.snapshot", "goals", "plan.resources", "income.schedule",
                  "constraint.*", "preference.*", "thesis.*", "research.<SYMBOL>", "planning.project",
-                 "planning.income", "planning.ladder", "tax.profile", "monitor.rules"],
+                 "planning.income", "planning.ladder", "planning.dca", "tax.profile", "monitor.rules",
+                 "account.<id>", "liability.<id>", "income.<id>"],
         "review_days": {**{pattern + ("*" if pattern.endswith(".") else ""): days for pattern, days in REVIEW_DAYS},
                         "other keys": DEFAULT_REVIEW_DAYS},
         "freshness": "Omit expires_on unless the source states a shorter validity; the store sets the review date "
@@ -137,6 +168,7 @@ class WealthService:
             return store.remember(client_id, facts, expected_revision, request_id)
 
     def prepare(self, client_id: str, intent: str = "overview") -> dict:
+        """Workflow packet (plan, exposure or income) from remembered facts; used by the examples."""
         with WealthStore(self.db_path) as store:
             return prepare(store.snapshot(client_id), intent)
 
@@ -154,6 +186,10 @@ class WealthService:
             "research": "household thesis research", "tax": "household tax",
             "income": "goals income.schedule planning.income", "project": "goals planning.project",
             "ladder": "goals planning.ladder", "calendar": "income.schedule",
+            "spending": "income.schedule plan.resources account", "dca": "planning.dca constraint.dca",
+            "ledger": "account household", "performance": "account household",
+            "mx_holdings": "household tax", "mx_interest": "tax", "mx_deductions": "tax",
+            "mx_foreign": "household tax", "mx_calendar": "tax", "estate": "household tax",
         }
         from .recall import recall
         with WealthStore(self.db_path) as store:
@@ -161,7 +197,7 @@ class WealthService:
             result = recall(snapshot, " ".join(filter(None, [query, routing.get(intent, intent)])),
                             embeddings=store.auxiliary(client_id, "embeddings"))
         facts = snapshot["facts"]
-        result["available_tasks"] = list(TASK_MODULES) + ["plan", "calendar", "monitor"]
+        result["available_tasks"] = list(TASKS)
         result["fact_contract"] = fact_contract()
         result["known_fact_keys"] = [f["key"] for f in facts[:50]]
         result["omitted_fact_keys"] = max(0, len(facts) - 50)
@@ -205,8 +241,8 @@ class WealthService:
             inputs = {}
         if not isinstance(inputs, dict):
             raise ValueError("inputs must be an object")
-        if task not in {*TASK_MODULES, "plan", "calendar", "monitor"}:
-            raise ValueError("unknown task; read context without a client for task schemas")
+        if task not in TASKS:
+            raise ValueError(f"unknown task {task!r}; tasks are {', '.join(TASKS)}")
         if save_as and (not client_id or not expires_on):
             raise ValueError("saving a result requires client_id and expires_on")
         if save_as and not (task == "import" and save_as == "household"):
@@ -214,14 +250,19 @@ class WealthService:
                 raise ValueError("save_as must be analysis.<name>, research.<symbol>, or household for an import")
         today = datetime.now(timezone.utc).date().isoformat()
         snapshot = {"client": {"id": None, "revision": None}, "facts": [], "decisions": []}
+        ledger = None
         if client_id:
             with WealthStore(self.db_path) as store:
                 snapshot = store.snapshot(client_id)
+                if task in LEDGER_TASKS and "ledger" not in inputs:
+                    ledger = store.ledger(client_id)
         eligible = [f for f in snapshot["facts"] if f["confidence"] != "inferred"
                     and (not f.get("expires_on") or f["expires_on"] >= today)]
         context = _Context({f["key"]: f["value"] for f in eligible}, overridden=inputs.keys())
         if "household" in inputs:
             context["household"] = inputs["household"]
+        if ledger is not None:
+            context["ledger"] = ledger
         planning_key = "planning." + task
         remembered_plan = dict.get(context, planning_key)
         if isinstance(remembered_plan, dict) and all(key in inputs for key in remembered_plan):
@@ -349,17 +390,259 @@ class WealthService:
         with WealthStore(self.db_path) as store:
             return store.delete_client(client_id, confirm_client_id)
 
+    # ------------------------------------------------------------------ ingest
 
-OPERATIONS = ("context", "run", "remember", "recall", "decision", "client", "capabilities", "create", "prepare", "inspect", "propose", "resolve", "forget", "index")
+    def ingest(self, client_id: str, action: str, inputs: dict | None = None) -> dict:
+        """Statement/chat ingestion into a server-held proposal; ``confirm`` saves it.
+
+        Proposals are stored under the client (auxiliary namespace ``ingest``)
+        keyed by ``proposal_id``.  ``confirm`` loads that stored proposal, never
+        one supplied by the caller, and must follow the person's explicit yes.
+        """
+        handlers = {"file": self._ingest_file, "extraction": self._ingest_extraction, "chat": self._ingest_chat,
+                    "confirm": self._ingest_confirm, "confirm_duplicates": self._ingest_confirm_duplicates,
+                    "diff": self._ingest_diff}
+        if action not in handlers:
+            raise ValueError(f"action must be one of {', '.join(INGEST_ACTIONS)}")
+        return _call(handlers[action], f"ingest {action}", inputs or {}, client_id=client_id)
+
+    def _ingest_state(self, client_id: str, update=None) -> dict:
+        with WealthStore(self.db_path) as store:
+            if update is None:
+                return store.auxiliary(client_id, "ingest")
+            return store.update_auxiliary(client_id, "ingest", update)
+
+    def _hold(self, client_id: str, proposal: dict) -> dict:
+        """Store a proposal (or its extraction request) and return it for display."""
+        result = proposal.get("result") or {}
+        now = datetime.now(timezone.utc).isoformat()
+        request = result.get("extraction_request")
+        extraction_id = None
+        if isinstance(request, dict):
+            extraction_id = hashlib.sha256(repr(sorted(request.get("source", {}).items())).encode()
+                                           + repr(request.get("pages")).encode()).hexdigest()[:24]
+        pid = result.get("proposal_id") if proposal["status"] in {"ready_to_confirm", "needs_review"} else None
+
+        def update(old):
+            state = {k: dict(old.get(k) or {}) for k in ("pending", "extractions", "confirmed")}
+            if pid:
+                state["pending"][pid] = {"proposal": proposal, "created_at": now}
+            if extraction_id:
+                state["extractions"][extraction_id] = {"request": request, "created_at": now}
+            for name in ("pending", "extractions", "confirmed"):
+                recent = sorted(state[name].items(), key=lambda item: item[1].get("created_at", ""))[-_KEEP_PROPOSALS:]
+                state[name] = dict(recent)
+            return state
+
+        if pid or extraction_id:
+            self._ingest_state(client_id, update)
+        else:
+            self._ingest_state(client_id)  # still validates the client
+        shown = {**proposal, "result": dict(result)}
+        if extraction_id:
+            shown["result"]["extraction_id"] = extraction_id
+        if pid:
+            needs_ack = proposal["status"] == "needs_review"
+            shown["result"]["confirmation"] = {
+                "required": True,
+                "next_step": "Show the summary and any discrepancies. Only after the person says yes, call "
+                             f"wealth_ingest action=confirm with proposal_id={pid}"
+                             + (" and acknowledge_discrepancies=true (they must accept the listed differences)." if needs_ack else "."),
+            }
+        elif extraction_id:
+            shown["result"]["next_step"] = ("Fill extraction_request.schema from its page text only, then call wealth_ingest "
+                                            f"action=extraction with extraction_id={extraction_id} and payload=<the JSON>.")
+        return shown
+
+    def _ingest_file(self, client_id: str, path: str, owner_id: str = "self", preset: str | None = None,
+                     aliases: dict | None = None, currency: str | None = None, as_of: str | None = None,
+                     tolerance: str | None = None, source_text: str | None = None) -> dict:
+        from .ingest import ingest_file
+        if not isinstance(path, str) or not path.strip():
+            raise ValueError("path must be the uploaded file's path or name")
+        root = upload_dir(client_id, self.db_path)
+        candidate = Path(path).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        proposal = ingest_file(candidate, allowed_roots=[root], owner_id=owner_id, preset=preset, aliases=aliases,
+                               currency=currency, as_of=as_of, tolerance=tolerance, source_text=source_text)
+        if proposal["status"] == "rejected" and not (root.exists()):
+            proposal["warnings"].append(f"Files are read only from the upload directory {root}.")
+        return self._hold(client_id, proposal)
+
+    def _ingest_extraction(self, client_id: str, extraction_id: str, payload: dict, owner_id: str = "self",
+                           tolerance: str | None = None) -> dict:
+        from .ingest import validate_llm_extraction
+        stored = (self._ingest_state(client_id).get("extractions") or {}).get(extraction_id)
+        if stored is None:
+            raise ValueError("extraction_id is unknown or expired; run action=file again")
+        proposal = validate_llm_extraction(payload, stored["request"], owner_id=owner_id, tolerance=tolerance)
+        return self._hold(client_id, proposal)
+
+    def _ingest_chat(self, client_id: str, items: list, as_of: str | None = None, currency: str | None = None,
+                     owner_id: str = "self", conversation_ref: str = "conversation") -> dict:
+        from .ingest import proposal_from_chat
+        if not isinstance(items, list) or not items:
+            raise ValueError("items must be a nonempty list")
+        for index, item in enumerate(items):
+            if not isinstance(item, dict) or not isinstance(item.get("quote"), str) or not item["quote"].strip():
+                raise ValueError(f"items[{index}].quote must hold the person's own words for this item")
+        proposal = proposal_from_chat(items, as_of=as_of, currency=currency, owner_id=owner_id,
+                                      conversation_ref=conversation_ref)
+        return self._hold(client_id, proposal)
+
+    def _ingest_confirm(self, client_id: str, proposal_id: str, acknowledge_discrepancies: bool = False,
+                        expires_on: str | None = None) -> dict:
+        from . import ledger as ledger_module
+        from .ingest import proposal_to_facts
+        from .ingest_posting import proposal_to_batch
+        if not isinstance(acknowledge_discrepancies, bool):
+            raise ValueError("acknowledge_discrepancies must be true or false")
+        state = self._ingest_state(client_id)
+        done = (state.get("confirmed") or {}).get(proposal_id)
+        if done is not None:
+            return {**done["report"], "replayed": True}
+        stored = (state.get("pending") or {}).get(proposal_id)
+        if stored is None:
+            raise ValueError("proposal_id is unknown or expired; ingest the file or chat again and show the new summary")
+        proposal = stored["proposal"]
+        packet = proposal_to_facts(proposal, confirmed=True, proposal_id=proposal_id,
+                                   acknowledge_discrepancies=acknowledge_discrepancies, expires_on=expires_on)
+        if packet["status"] != "ready":
+            return packet
+        facts = packet["result"]["facts"]
+        batch_id = "ingest:" + proposal_id
+        with WealthStore(self.db_path) as store:
+            revision = store.snapshot(client_id)["client"]["revision"]
+            saved = store.remember(client_id, facts, revision, packet["result"]["request_id"])
+            mapping = proposal_to_batch(proposal, batch_id=batch_id, ledger=store.ledger(client_id))
+            receipt = ledger_module.post(store, client_id, mapping["batch"]) if mapping["batch"] else None
+        ledger_view = _ledger_summary(receipt, mapping)
+        summary = [f"Saved {len(facts)} record{'s' if len(facts) != 1 else ''} dated {proposal['result']['as_of']}."]
+        if receipt is not None:
+            summary.append(ledger_view["plain"])
+        report = {
+            "status": "saved",
+            "result": {
+                "summary": " ".join(summary),
+                "saved": {"keys": [f["key"] for f in facts], "client_revision": saved["client"]["revision"],
+                          "expires_on": packet["result"]["expires_on"]},
+                "ledger": ledger_view,
+                "statement_prices": mapping["prices"],
+                "next_step": ("To value these holdings, run task=ledger view=household with currency and "
+                              "prices=result.statement_prices, then task=exposure with that household."),
+            },
+            "missing": [], "warnings": packet["warnings"] + saved.get("warnings", []) + mapping["notes"],
+            "sources": packet["sources"], "assumptions": packet["assumptions"],
+        }
+        now = datetime.now(timezone.utc).isoformat()
+
+        def update(old):
+            state = {k: dict(old.get(k) or {}) for k in ("pending", "extractions", "confirmed")}
+            state["pending"].pop(proposal_id, None)
+            state["confirmed"][proposal_id] = {"proposal": proposal, "created_at": now, "batch": mapping["batch"],
+                                               "held": ledger_view["held"], "report": report}
+            state["confirmed"] = dict(sorted(state["confirmed"].items(),
+                                             key=lambda item: item[1].get("created_at", ""))[-_KEEP_PROPOSALS:])
+            return state
+
+        self._ingest_state(client_id, update)
+        return report
+
+    def _ingest_confirm_duplicates(self, client_id: str, proposal_id: str, entry_ids: list) -> dict:
+        from . import ledger as ledger_module
+        from .ledger.model import normalize_batch
+        if not isinstance(entry_ids, list) or not entry_ids or not all(isinstance(e, str) for e in entry_ids):
+            raise ValueError("entry_ids must be a nonempty list of held entry ids")
+        record = (self._ingest_state(client_id).get("confirmed") or {}).get(proposal_id)
+        if record is None or not record.get("batch"):
+            raise ValueError("proposal_id has no confirmed ledger posting; confirm the proposal first")
+        held = {item["entry_id"] for item in record.get("held") or []}
+        unknown = sorted(set(entry_ids) - held)
+        if unknown:
+            raise ValueError(f"entry_ids {unknown} were not held for this proposal")
+        batch = record["batch"]
+        normalized, _ = normalize_batch(batch)
+        lines = [dict(batch["transactions"][index], confirm_not_duplicate=True)
+                 for index, entry in enumerate(normalized["transactions"]) if entry["id"] in entry_ids]
+        suffix = hashlib.sha256(",".join(sorted(entry_ids)).encode()).hexdigest()[:12]
+        repost = {"batch_id": f"ingest:{proposal_id}:not-duplicate:{suffix}", "source": batch["source"],
+                  "accounts": batch["accounts"], "instruments": batch["instruments"], "transactions": lines}
+        with WealthStore(self.db_path) as store:
+            receipt = ledger_module.post(store, client_id, repost)
+        remaining = [item for item in record["held"] if item["entry_id"] not in receipt["posted"]]
+
+        def update(old):
+            state = {k: dict(old.get(k) or {}) for k in ("pending", "extractions", "confirmed")}
+            if proposal_id in state["confirmed"]:
+                state["confirmed"][proposal_id] = {**state["confirmed"][proposal_id], "held": remaining}
+            return state
+
+        self._ingest_state(client_id, update)
+        return {"status": "saved",
+                "result": {"summary": f"Posted {len(receipt['posted'])} line(s) the person confirmed are separate "
+                                      f"transactions; {len(remaining)} still held.",
+                           "posted": receipt["posted"], "still_held": remaining},
+                "missing": [], "warnings": receipt.get("warnings", []), "sources": [], "assumptions": []}
+
+    def _ingest_diff(self, client_id: str, proposal_id: str, previous_proposal_id: str | None = None) -> dict:
+        from .ingest import diff_proposals
+        state = self._ingest_state(client_id)
+        known = {**(state.get("confirmed") or {}), **(state.get("pending") or {})}
+        if proposal_id not in known:
+            raise ValueError("proposal_id is unknown or expired")
+        current = known[proposal_id]["proposal"]
+        if previous_proposal_id is not None:
+            if previous_proposal_id not in known:
+                raise ValueError("previous_proposal_id is unknown or expired")
+            previous_id = previous_proposal_id
+        else:
+            accounts = {a["id"] for a in current["result"]["household"]["accounts"]}
+            earlier = [(record.get("created_at", ""), pid) for pid, record in (state.get("confirmed") or {}).items()
+                       if pid != proposal_id and accounts & {a["id"] for a in record["proposal"]["result"]["household"]["accounts"]}]
+            previous_id = max(earlier)[1] if earlier else None
+        previous = known[previous_id]["proposal"] if previous_id else None
+        changes = diff_proposals(previous, current)
+        return {"status": "ready",
+                "result": {"proposal_id": proposal_id, "previous_proposal_id": previous_id, "changes": changes},
+                "missing": [], "warnings": [] if previous_id else ["No earlier confirmed statement covers these accounts; every item is new."],
+                "sources": [], "assumptions": []}
+
+
+def _ledger_summary(receipt: dict | None, mapping: dict) -> dict:
+    """The ledger receipt in the terms a person needs: what was added, skipped, or needs a yes."""
+    batch = mapping.get("batch") or {}
+    lines = {i: line for i, line in enumerate(batch.get("transactions", []))}
+    if receipt is None:
+        return {"posted": 0, "already_recorded": 0, "held": [], "not_posted": mapping["not_posted"],
+                "reconciliation": None, "plain": "Nothing could be posted to the transaction ledger."}
+    held = [{"entry_id": item["id"], "date": lines.get(item["line"], {}).get("date"),
+             "description": lines.get(item["line"], {}).get("description"),
+             "amount": lines.get(item["line"], {}).get("amount"), "matches": item["matches"]}
+            for item in receipt["held"]]
+    recon = receipt.get("reconciliation")
+    parts = [f"Ledger: {len(receipt['posted'])} new line(s)"]
+    if receipt["duplicates"]:
+        parts.append(f"{len(receipt['duplicates'])} already recorded")
+    if held:
+        parts.append(f"{len(held)} held as possible duplicates (ask the person)")
+    if mapping["not_posted"]:
+        parts.append(f"{len(mapping['not_posted'])} not posted")
+    text = ", ".join(parts) + "."
+    if recon:
+        text += (" Balances agree with the statement." if recon["status"] == "ready"
+                 else f" {len(recon['breaks'])} balance(s) disagree with the statement.")
+    return {"posted": len(receipt["posted"]), "already_recorded": len(receipt["duplicates"]), "held": held,
+            "not_posted": mapping["not_posted"], "reconciliation": recon, "plain": text}
+
+
+OPERATIONS = ("context", "run", "remember", "recall", "decision", "ingest", "client", "forget")
 
 
 def dispatch(operation: str, arguments: dict, db_path: str | Path | None = None) -> dict:
     if operation not in OPERATIONS:
-        raise ValueError(f"unknown operation: {operation}")
+        raise ValueError(f"unknown operation {operation!r}; operations are {', '.join(OPERATIONS)}")
     if not isinstance(arguments, dict):
         raise ValueError("arguments must be a JSON object")
-    if operation == "capabilities":
-        if arguments:
-            raise ValueError("capabilities takes no arguments")
-        return capabilities()
-    return getattr(WealthService(db_path), operation)(**arguments)
+    service = WealthService(db_path)
+    return _call(getattr(service, operation), operation, arguments)

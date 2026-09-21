@@ -1,6 +1,6 @@
 ---
 name: wealth
-description: Use Wealth tools and personal context for portfolio analysis, investment decisions, financial goals, income planning, and tax-lot scenarios. Company or fund research belongs here when it supports an investment question.
+description: Use Wealth tools and personal context for statement uploads, portfolio analysis, investment decisions, spending and savings, financial goals, income planning, and US or Mexico tax scenarios. Company or fund research belongs here when it supports an investment question.
 ---
 
 # Wealth
@@ -59,14 +59,24 @@ do not preload every schema or invent a tool that is not available.
 
 | Question | Relevant tasks |
 |---|---|
-| What do I own, and where am I exposed? | `import`, `exposure` |
+| What do I own, and where am I exposed? | `import`, `exposure`, `ledger` |
+| How have my investments done? | `performance` |
+| Where does my money go; what can I invest monthly? | `spending`, `dca` |
 | How have these holdings behaved together? | `analyze`, `factors`, `stress` |
+| Is my SIC listing priced above its home market? | `sic_premium` |
 | How does an alternative allocation compare? | `compare`, `construct` |
 | What should I understand about this investment? | `research`, `value` |
 | How much can I invest after expenses and goals? | `plan` |
 | Can my assets support the income or spending I need? | `calendar`, `income`, `project`, `ladder` |
-| Are there tax-loss candidates? | `tax`: US federal taxable-account lots and Mexican Article 129 listed shares only |
+| What tax applies? | `tax` (US federal lots, wash sales, harvesting; Mexico Art. 129), `mx_holdings`, `mx_interest`, `mx_deductions`, `mx_foreign`, `mx_calendar`, `estate` |
 | Has something worth reviewing changed? | `monitor`, when requested |
+
+Tax scope: US federal tax on taxable-account securities (2025/2026 brackets, long-term
+gains stacked on ordinary income, NIIT, lot selection, harvesting); Mexico Article 129
+BMV/SIC sales, real interest (Arts. 133-134), personal deductions and PPR, foreign
+securities outside the SIC, and the tax calendar; US estate exposure for
+non-residents. State taxes, AFORE/IRA internals and filing positions are out of
+scope: explain the principle and refer.
 
 These are starting points, not mandatory sequences. Use supplied holdings or a
 specific question immediately where possible; learn the rest of the person's
@@ -110,6 +120,18 @@ by `id`; `null` removes a field). Replacing a value wholesale requires the
 current `expected_revision`. The result is a receipt: written keys, new revision
 and warnings. On a conflict, reload and reconcile. Reuse a `request_id` only for
 the same write. Claim a save only after it succeeds.
+
+Statements and stated balances go through `wealth_ingest`. `action="file"` (a path
+inside the upload directory) returns a reconciled proposal: show the total, date
+and any discrepancy in one plain line, then save only after an explicit yes with
+`action="confirm"` and its `proposal_id` (`acknowledge_discrepancies=true` when the
+yes covers listed differences). Confirm saves the stored proposal and posts it to
+the transaction ledger. `needs_extraction` means: fill
+`extraction_request.schema` from its page text only and send it with
+`action="extraction"`. Balances said in conversation use `action="chat"`, each
+item with the person's own words as `quote`. Held possible duplicates are posted
+with `confirm_duplicates` only on a yes; `diff` lists changes since the last
+statement.
 
 Save reusable tool results with `save_as` and `expires_on`: validated imports may
 save `household`; other reports use `analysis.<name>` or `research.<symbol>`.

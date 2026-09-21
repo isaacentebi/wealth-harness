@@ -45,8 +45,9 @@ def _confirm_forget(payload: dict) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Client memory and evidence-backed wealth workflows")
-    parser.add_argument("operation", choices=(*OPERATIONS, "watch"))
+    parser = argparse.ArgumentParser(description="Wealth JSON CLI: one JSON object in (stdin or --input), JSON out")
+    parser.add_argument("operation", choices=(*OPERATIONS, "watch"),
+                        help="context | run | remember | recall | decision | ingest | client | forget | watch")
     parser.add_argument("--db", help="SQLite path (default WEALTH_DB or user data directory)")
     parser.add_argument("--input", default="-", help="JSON argument file; '-' reads stdin")
     parser.add_argument("--client", help="explicit client identifier for wealth watch or forget")
@@ -79,8 +80,7 @@ def main(argv: list[str] | None = None) -> int:
             if not args.client:
                 raise ValueError("forget requires --client (or --input FILE)")
             payload = {"client_id": args.client, "confirm_client_id": args.client}
-        elif args.input == "-" and (args.operation == "capabilities" or
-                                   (args.operation == "context" and sys.stdin.isatty())):
+        elif args.input == "-" and args.operation == "context" and sys.stdin.isatty():
             payload = {}
         else:
             raw = sys.stdin.read() if args.input == "-" else Path(args.input).read_text(encoding="utf-8")

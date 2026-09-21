@@ -701,7 +701,7 @@ def proposal_to_facts(
     if expiry < today:
         warnings.append(f"This statement is older than {review_days} days; saved facts are already expired and will not drive calculations.")
     kind = result["source_kind"]
-    store_kind = kind if kind in ("document", "user") else "tool"
+    store_kind = kind if kind in ("document", "user", "connector") else "tool"
     provenance = result.get("provenance") or {}
     ref = provenance.get("ref") or f"{kind}:{proposal_id[:16]}"
     source = {"kind": store_kind, "ref": ref, "observed_on": as_of}
