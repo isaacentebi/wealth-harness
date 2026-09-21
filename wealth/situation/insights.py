@@ -104,10 +104,10 @@ def statement_insights(result: Mapping[str, Any], before: Mapping[str, Any] | No
                 statement_on = str(result.get("as_of") or household.get("as_of") or "")[:10] or None
                 older = bool(saved_on and statement_on and statement_on < saved_on)
                 if older:
-                    text = (f"{ticker}: this statement is from {statement_on}, older than what was saved on {saved_on}. "
-                            f"It showed {fmt(num(quantity))} units then; {fmt(num(had))} are saved now, so the holding "
-                            f"{'grew' if had > quantity else 'shrank'} after {statement_on}. Ask whether that is right; "
-                            "the saved, newer figure stays current.")
+                    text = (f"{ticker}: this statement ({statement_on}) is older than what was saved ({saved_on}): "
+                            f"{fmt(num(quantity))} units then, {fmt(num(had))} saved now. Do not conclude; ask whether "
+                            "they bought or sold between those dates. The saved, newer figure stays current until "
+                            "they answer.")
                 else:
                     text = (f"{ticker}: {fmt(num(had))} units were saved" + (f" as of {saved_on}" if saved_on else "")
                             + f"; the statement ({statement_on or 'undated'}) shows {fmt(num(quantity))} "
