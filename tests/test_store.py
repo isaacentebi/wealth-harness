@@ -246,7 +246,7 @@ def test_acceptance_is_status_only_and_export_contains_full_history(store):
     assert store.snapshot("c")["client"]["revision"] == 1
     store.remember("c", [fact("constraint.liquidity", "medium")], 1)
     exported = store.export_client("c")
-    assert exported["schema_version"] == 2
+    assert exported["schema_version"] == 3
     assert len(exported["facts"]) == 2
     assert exported["decisions"][0]["status"] == "accepted"
     assert exported["decisions"][0]["needs_review"] is True
@@ -356,7 +356,7 @@ def test_remember_returns_compact_receipt_with_default_review_dates(store):
         fact("plan.resources", {"currency": "USD"}),
         fact("goals", [{"id": "home", "name": "Home"}]),
     ])
-    assert set(receipt) == {"client", "written", "write_result", "warnings"}
+    assert set(receipt) == {"client", "written", "needs_user", "write_result", "warnings"}
     assert receipt["client"]["revision"] == receipt["write_result"]["resulting_revision"] == 1
     expiry = {item["key"]: item["expires_on"] for item in receipt["written"]}
     assert expiry == {

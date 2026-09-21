@@ -79,3 +79,25 @@ picture that every turn starts from.
    considered for a Mexican resident buying US exposure.
 6. **Citations render as quiet superscript source marks**, not run-on text.
 7. **Memory line for every write path** (remember, ingest confirm, decisions).
+
+## Re-run after wave 2 (same script, same model)
+
+Fixed:
+- States assumptions (pesos, Mexican tax residence) instead of asking; asks the
+  sharper question (rate and whether the car payment is inside spending).
+- Monthly spending is saved; memory line is natural Spanish.
+- Statement upload compares with the stated estimate (236,087 vs 200,000), names
+  the UDIBONO at 39% and the CSPX/IVV duplication, and asks before replacing.
+- After confirmation it states the new net worth (290,000 → 326,087) and why.
+- "Guardado: cuentas de GBM".
+
+Still wrong:
+- The car-loan thread is not closed: given rate and payment (13%, 4,500/month)
+  it never said when the loan ends (about 15 months) or how that frees cash.
+  The brief computes payoff; the prompt must require closing a thread when the
+  missing input arrives.
+- Latency: first turn about 60 s, statement turn about 50 s at low reasoning.
+  Needs profiling (tool-call count per turn, prompt size).
+- The error for a missing client says "Local memory couldn't be read…"; a
+  vanished profile deserves its own message. (The trigger here was a test
+  harness overwriting the live database, not the product.)

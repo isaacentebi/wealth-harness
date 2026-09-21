@@ -40,6 +40,7 @@ def test_stdio_tool_journey_and_annotations(tmp_path, capfd):
                 "wealth_inspect",
                 "wealth_client",
                 "wealth_ingest",
+                "wealth_resolve_contradiction",
             }
             assert all(
                 item.input_schema.get("additionalProperties") is False
