@@ -30,7 +30,8 @@ def test_thesis_monitor_preserves_baseline_across_stale_evidence():
     inputs = {
         "rules": [
             {"id": "thesis-watch", "kind": "thesis", "fact_key": "thesis.example"}
-        ]
+        ],
+        "timezone": "UTC",
     }
     first = evaluate(
         _snapshot({"view": "old"}, expires_on=TODAY.isoformat()), {}, inputs

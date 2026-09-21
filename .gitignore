@@ -24,3 +24,6 @@ build/
 /profiles/
 /portfolios/
 /docs/archive/handoff-v0.md
+
+# Agent worktrees
+.claude/worktrees/
