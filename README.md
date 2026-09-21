@@ -1,28 +1,32 @@
 # Wealth
 
-**A portable wealth capability that remembers the client, keeps evidence and
-decisions connected, and brings serious financial analysis into any agent.**
+A personal financial assistant with persistent memory, investment research and
+Python financial analysis. Use the local chat or connect the tools to your own
+agent through MCP. Each assistant instance serves one person.
 
-Wealth runs locally behind six MCP tools or the matching JSON CLI. SQLite is
-authoritative for client memory. The host agent owns conversation and source
-work; Wealth owns provenance, calculations, freshness, and decision history.
+## Start chatting
 
-## Install and connect
-
-Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/). Runtime dependencies
-are in the default environment:
+Requires Python 3.11+, [uv](https://docs.astral.sh/uv/) and an installed Codex CLI.
+For the local assistant, sign into Codex with your ChatGPT account:
 
 ```sh
 uv sync
+codex login
+uv run wealth-chat --client my-profile --model sol
 ```
 
-Start the local stdio server:
+Open **http://127.0.0.1:8765/**. Onboarding starts with income, spending, savings,
+investments and debt. Relevant facts are remembered automatically. Web search is
+on; reasoning defaults to Low and can be changed in the chat.
 
-```sh
-WEALTH_DB=/absolute/private/path/wealth.sqlite3 uv run wealth-mcp
-```
+For a fictional terminal demo, run `uv run wealth-agent --demo --model sol`.
+Use `--model luna` for Luna. [Setup, memory and fresh test sessions](docs/agent.md).
 
-Generic MCP configuration:
+## Connect your own agent
+
+Wealth's MCP server needs no model API key. The host supplies the model and web
+search; it can use OpenRouter or another provider. Give it [SKILL.md](SKILL.md)
+and configure the local server:
 
 ```json
 {
@@ -36,59 +40,9 @@ Generic MCP configuration:
 }
 ```
 
-Give the host [SKILL.md](SKILL.md). Calling `wealth_context` without a client
-returns the live task catalog, examples, and boundaries. Set `intent` to a task
-name to retrieve only that task’s contract. The host does not need
-the implementation manual in its prompt.
-
-## Talk to a real agent
-
-If Codex CLI is installed and you are signed in with ChatGPT:
-
-```sh
-uv run wealth-chat --client isaac --model sol
-# Open http://127.0.0.1:8765
-# Or a fictional terminal demo:
-uv run wealth-agent --demo --model sol
-```
-
-Use `--model luna` to switch models. Ask “How much can I invest while protecting
-my home goal?”, then change the goal naturally; the correction is remembered automatically. The fictional
-client's Wealth memory persists across sessions and models. No extra API key is
-needed for this local path. [Agent setup and details](docs/agent.md).
-
-## Model provider
-
-Wealth needs no LLM API key. Your host assistant can use OpenRouter or another
-provider and call Wealth through MCP. See [provider setup](docs/providers.md).
-
-## Surface
-
-| MCP tool | What it does |
-| --- | --- |
-| `wealth_context` | Discover tasks without a client, or retrieve a compact intent/query-specific client packet |
-| `wealth_remember` | Atomically record sourced facts or corrections at an expected revision |
-| `wealth_run` | Run one catalog task, optionally against client context and optionally save its validated result |
-| `wealth_recall` | Retrieve bounded evidence by query; optional semantic vectors must be supplied and identified by the host |
-| `wealth_decision` | Propose, accept, or dismiss an evidence-bound decision; acceptance is not execution |
-| `wealth_client` | Create, inspect, export, forget, or attach a host-provided vector index entry for one explicit client |
-
-The CLI uses the same names without `wealth_`: `context`, `remember`, `run`,
-`recall`, `decision`, and `client`. Existing compatibility aliases remain
-available. Commands accept one JSON object from `--input request.json` or stdin;
-`--db` overrides `WEALTH_DB`.
-
-Compound operations use a small action envelope:
-
-| Operation | Action | `inputs` |
-| --- | --- | --- |
-| `decision` | `propose` | `title`, `rationale`, `expected_revision`, `evidence_ids`, optional `alternatives` |
-| `decision` | `accept` / `dismiss` | `decision_id`, `expected_revision` |
-| `client` | `create` | `display_name` |
-| `client` | `inspect` | optional `detail: current|history` and `key` for history |
-| `client` | `export` | none |
-| `client` | `forget` | `confirm_client_id` matching the requested client |
-| `client` | `index` | `fact_id`, host-supplied `embedding`, exact `model` identifier |
+Provision one profile for the instance. Discover task schemas with
+`wealth_context(intent="overview")` without a profile ID; include the ID for
+personal recall. See the [CLI and MCP reference](docs/cli.md).
 
 ## What it can run
 
@@ -105,73 +59,6 @@ Get exact required fields and a valid example for every task:
 
 ```sh
 printf '{}' | uv run wealth context
-```
-
-## A client journey from the CLI
-
-Create a client only after the user chooses persistent memory:
-
-```sh
-printf '%s' '{"action":"create","client_id":"ana","inputs":{"display_name":"Ana"}}' \
-  | uv run wealth client
-```
-
-Record a sourced fact at revision 0:
-
-```sh
-printf '%s' '{
-  "client_id":"ana",
-  "expected_revision":0,
-  "request_id":"ana-profile-1",
-  "facts":[{
-    "key":"client.profile",
-    "value":{"reporting_currency":"USD"},
-    "source":{"kind":"user","ref":"conversation 2026-09-20","observed_on":"2026-09-20"},
-    "confidence":"confirmed"
-  }]
-}' | uv run wealth remember
-```
-
-Recall relevant context, then run a calculation. Direct inputs override memory
-for that call. Saving requires `save_as`, `client_id`, and `expires_on`;
-validated imports may save `household`, while other results use an
-`analysis.<name>` or `research.<symbol>` key.
-
-```sh
-printf '%s' '{"client_id":"ana","intent":"exposure","query":"current household exposure"}' \
-  | uv run wealth context
-
-printf '%s' '{
-  "task":"analyze",
-  "client_id":"ana",
-  "inputs":{"currency":"USD","weights":{"SPY":0.6,"BND":0.4},"benchmark":"SPY","years":5}
-}' | uv run wealth run
-```
-
-Proposals cite eligible evidence and the current client revision. Resolve them
-with a separate call; stale or inferred evidence cannot support acceptance.
-
-```sh
-printf '%s' '{
-  "action":"propose","client_id":"ana",
-  "inputs":{"title":"Keep a reserve","rationale":"The home goal has a hard date","expected_revision":1,"evidence_ids":["REPLACE_WITH_FACT_ID"],"alternatives":[]}
-}' | uv run wealth decision
-```
-
-Use `wealth_client` / `wealth client` to inspect current state or key history,
-export full private history, and delete one named client with the same ID as
-explicit confirmation.
-
-## Monitoring
-
-Nothing starts automatically. `wealth watch` runs an explicitly started polling
-loop for one client’s opt-in rules. It prints only changed monitor events to
-stdout. It does not send notifications, place trades, move money, or keep running
-after the process stops. A one-shot `monitor` task is available through
-`wealth_run` for hosts that provide their own scheduler.
-
-```sh
-uv run wealth watch --client ana --interval 300
 ```
 
 ## Boundaries
@@ -195,18 +82,30 @@ uv run wealth watch --client ana --interval 300
   provider. Client scoping prevents accidental joins; it is not public-service
   authorization. External exports and backups survive local deletion.
 
-Run the complete fictional, offline client journey:
+## Repository guide
 
-```sh
-uv run python -m examples.complete_journey
-```
+| File or directory | Purpose |
+| --- | --- |
+| [docs/agent.md](docs/agent.md) | Run chat, terminal or a fresh test profile |
+| [docs/cli.md](docs/cli.md) | CLI/MCP operations and examples |
+| [docs/architecture.md](docs/architecture.md) | Runtime, storage and module boundaries |
+| [docs/verification.md](docs/verification.md) | Reproducible checks and what they establish |
+| [docs/open-source.md](docs/open-source.md) | Dependencies and reuse boundaries |
+| [SKILL.md](SKILL.md) | Portable instructions for an external host |
+| [wealth/instructions.md](wealth/instructions.md) | Shared assistant conversation policy |
+| [references/playbook.md](references/playbook.md) | Financial interpretation guidance |
+| `wealth/` | Runtime and financial tools |
+| `examples/` | Fictional executable journeys |
+| `tests/`, `tools/test_*.py` | Regression checks, including the legacy engine |
 
-See the [product specification](docs/product.md) and
-[financial interpretation guide](references/playbook.md).
+Superseded plans and development handoffs are available in Git history.
+Private profiles, databases and local test outputs are ignored by Git.
 
 ## Development
 
 ```sh
 uv sync --extra dev
 uv run pytest -q
+uv run python -m examples.complete_journey
+uv build
 ```

@@ -1,132 +1,87 @@
-# Try Wealth with a real agent
+# Run the assistant
 
-The optional `wealth-agent` terminal connects your existing Codex login to
-Wealth's six MCP tools. Choose Sol or Luna and talk naturally. The financial
-server remains independent of the model provider.
+The optional local launcher uses your installed Codex CLI and its normal login.
+Wealth itself is a model-independent MCP server. The local launcher supports Sol
+and Luna; it does not implement an OpenRouter chat client or extract OAuth tokens.
 
 ## Browser chat
 
 ```sh
-uv run wealth-chat --client isaac --model sol
-```
-
-Open [Wealth chat](http://127.0.0.1:8765). This uses the same client database as
-`wealth-agent`. Live web search is enabled by default in both launchers, using
-[Codex web search](https://learn.chatgpt.com/docs/web-search?surface=cli).
-The page shows working status, source links, retryable errors, and a Low/Medium/High
-reasoning selector. Low is the default; the chosen level applies to the next message. Client facts
-persist across restarts; the visible transcript lasts for the server session.
-The launcher also sets low response verbosity, independently of reasoning effort.
-Ask for a detailed explanation when you want one; this is not a word limit.
-The shared policy in `wealth/instructions.md` replaces the launcher’s built-in
-coding instructions. Inherited AGENTS files are disabled for this financial
-assistant. Standalone Wealth MCP reads the same policy; the launcher omits the
-duplicate MCP copy. Personal context and the request remain in the turn prompt.
-The server binds only to localhost and validates request origins and a session
-token. It is a local personal interface, not a hosted multi-user application.
-
-Python tools perform correlations, factor regressions, historical risk, stress,
-construction and simulations. The model has access to those implemented
-calculations, live market-data fetching and web research; it does not have an
-unrestricted Python shell. Paste holdings or a question into chat. File uploads
-are not implemented in this small browser interface.
-
-## Start in the terminal
-
-Install Codex CLI if it is not already on your PATH, then use its normal login:
-
-```sh
-codex login
 uv sync
-uv run wealth-agent --demo --model sol
+codex login
+uv run wealth-chat --client my-profile --model sol
 ```
 
-`codex login status` reports the active authentication method. ChatGPT login
-uses your available Codex subscription usage. You do not need to provide an
-OpenRouter key for this path. The launcher does not read, copy, or reinterpret
-OAuth tokens; the installed Codex runtime handles authentication.
+Open **http://127.0.0.1:8765/**. Use `--model luna` for Luna. The page provides
+source links, retryable errors and a Low/Medium/High reasoning selector. Low is
+the default. Native web search is enabled by default; Python calculations run
+through Wealth tools, not an unrestricted shell. File uploads are not implemented.
 
-For Luna:
+Onboarding begins with the person's financial situation. Rough figures and
+partial answers are welcome; goals and commitments develop through conversation.
+A specific investment question can be explored alongside onboarding.
+
+## Memory and fresh tests
+
+The profile ID is an internal storage identifier. The same ID and database resume
+saved facts. Relevant explicit facts and corrections are remembered automatically;
+you can ask not to save a detail. Hypothetical scenarios are not personal facts.
+The browser transcript lasts only for the running server session.
+
+`--db` selects a database; otherwise `WEALTH_DB` or the default local data directory
+is used. Both launchers use the same database selection. Databases are plaintext.
+Selected context and tool results reach the model provider.
+
+To test onboarding from zero, stop the running chat with Ctrl+C and choose a
+**new, unused database path**:
 
 ```sh
-uv run wealth-agent --demo --model luna
+uv run wealth-chat --client test --model sol --db private/onboarding-test-01.sqlite3
 ```
 
-Try these messages in sequence:
+Reload the browser after restarting. Reusing that database resumes its memory;
+a different unused filename starts empty. This leaves earlier profiles intact.
+Never commit a personal database or exported conversation.
 
-1. How much can I invest while protecting my home goal and emergency reserve?
-2. My home goal is now $100,000. How does that change the plan?
-3. What changed, and what do you remember about my priorities?
-
-The fictional demo starts with $300,000 total capital: $200,000 in SPY and
-$100,000 cash. The $24,000 reserve and $50,000 home goal leave a $226,000 total
-investment budget, including the existing investments, or $26,000 additional
-cash to invest. Values are fictional; detailed fund constituents and tax lots
-are intentionally missing. Its Wealth memory persists, so restarting the launcher
-does not reset your corrections. Sol and Luna can use the same demo memory.
-Use `--help` for database/client controls and a one-shot `--prompt` option.
-
-## Start your own profile
+## Terminal and fictional demo
 
 ```sh
 uv run wealth-agent --client my-profile --model sol
+uv run wealth-agent --demo --model sol
 ```
 
-A new identifier creates an empty local profile; the same identifier resumes it.
-An empty interactive profile immediately gets a brief introduction and its first
-onboarding question, before you type. A greeting also starts onboarding in
-one-shot mode. Profiles with saved facts resume without the first-time introduction.
-You can instead start with a specific question. The assistant saves relevant facts automatically and
-asks only for missing details needed for that question. You can say not to save
-a detail. It distinguishes real facts from hypothetical scenarios. No separate
-setup questionnaire or “remember this” command is required.
+The fictional demo starts with $200,000 in SPY and $100,000 cash. A $24,000
+reserve and $50,000 home goal leave $26,000 additional cash to invest. Existing
+holdings are not additional cash. Detailed constituents and tax lots are absent.
+Demo memory also persists, including corrections. Try changing the home goal
+and asking how the available cash changes.
 
-## What is instantiated
+Use `uv run wealth-agent --help` for one-shot prompts and other options;
+`uv run wealth-chat --help` lists browser options.
 
-```text
-Your terminal → Codex CLI (Sol or Luna, your login)
-              → Wealth MCP → local client memory + financial calculations
-```
+## Runtime and policy
 
-Each turn is an ephemeral Codex execution with bounded recent conversation
-context. Durable financial memory lives in SQLite. The launcher displays tool
-names separately from the agent's response. Failed model runs report errors.
-Only the Wealth server is explicitly configured; global user configuration is
-not changed. The agent has no shell tool and uses a read-only execution sandbox.
-Wealth tools automatically save relevant explicit facts and corrections in their
-configured database; decisions require the user’s actual choice. This is a local trusted-user testing interface, not a
-public multi-user application.
+Each turn runs an ephemeral `codex exec` with bounded recent conversation.
+SQLite owns durable financial memory. The launcher uses a read-only execution
+sandbox with shell, apps, plugins and subagents disabled. Wealth tools can write
+to their configured database. No trades, transfers or background monitors start.
 
-No background monitor starts and no trades or transfers are possible through
-Wealth. Prompts and selected tool results reach the model provider under the
-Codex account's settings. Do not put credentials in a chat or repository.
+[wealth/instructions.md](../wealth/instructions.md) replaces Codex's built-in
+coding instructions; inherited AGENTS files are disabled for this assistant.
+The standalone MCP server reads the same policy. The launcher suppresses that
+MCP copy so the policy is supplied once. Low response verbosity is independent
+of reasoning effort; explicit requests for detail can still receive long answers.
 
-## SDK versus direct API
+The browser server binds only to localhost, checks origins and uses a session
+token. This is a local personal interface, not a hosted multi-user service.
 
-This small Python launcher uses the supported `codex exec` protocol. A Node or
-Python application can instead use the official Codex SDK. Both approaches
-keep authentication inside the Codex runtime; a ChatGPT OAuth token is not used
-as an OpenRouter or general OpenAI API key.
+## Other model providers
 
-For an independent hosted assistant, configure a server-side API provider such
-as OpenRouter and attach Wealth as MCP. That is a separate integration from
-this local ChatGPT-authenticated launcher.
+To use OpenRouter or another API provider, configure it in your own host agent,
+then attach Wealth through the [MCP configuration](../README.md#connect-your-own-agent).
+Keep credentials in that host's secret configuration, outside prompts and Git.
+The host supplies web search, scheduling and any embedding service. Wealth does
+not supply a hosted model-provider integration or public authentication layer.
 
-Official references:
-[authentication](https://learn.chatgpt.com/docs/auth),
-[Codex SDK](https://learn.chatgpt.com/docs/codex-sdk),
-[models](https://learn.chatgpt.com/docs/models).
-
-## Prompt delivery
-
-Each instance serves one person; the profile ID is an internal tool argument.
-The launcher supplies `wealth/instructions.md` through `model_instructions_file`,
-replacing Codex’s coding instructions. `project_doc_max_bytes=0` prevents inherited
-AGENTS instructions. It sets `WEALTH_BEHAVIOR_IN_HOST=1` on its MCP subprocess
-to omit the duplicate contract. These overrides preserve the existing Codex login.
-A standalone MCP server still supplies that contract by default.
-
-Task schemas come from `wealth_context(intent=task)` without a profile ID.
-Personal recall uses the same tool with the profile ID. Conversation and current
-request sections are explicitly delimited; financial and memory behavior is
-otherwise unchanged.
+Official Codex references: [authentication](https://learn.chatgpt.com/docs/auth),
+[configuration](https://learn.chatgpt.com/docs/config-file/config-reference).

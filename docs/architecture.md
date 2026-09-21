@@ -19,8 +19,8 @@ flowchart LR
 ## Small public surface
 
 `context`, `remember`, `run`, `recall`, `decision`, `client` are the public
-operations. [The task catalog](wealth/catalog.py) documents calculation inputs.
-MCP and CLI share [one service boundary](wealth/service.py).
+operations; the CLI also retains compatibility aliases. [The task catalog](../wealth/catalog.py) documents calculation inputs.
+MCP and CLI share [one service boundary](../wealth/service.py).
 
 ## Responsibilities
 
@@ -48,6 +48,8 @@ Concurrent corrections therefore cannot silently overwrite a saved report.
 Unknown is not zero. Currency conversion requires supplied or provider-derived
 FX. Inferred or expired memory cannot drive calculations. An incomplete
 household cannot support a definitive whole-household allocation conclusion.
+Research evidence alone does not establish personal suitability. Ownership
+overlap and historical return correlation answer different questions.
 An optimizer is compared with an equally scoped baseline. Historical beliefs
 must be dated before use in Black–Litterman validation. Dividends are part of
 total return. Unpaid liabilities consume later cash before it is uncommitted.
@@ -57,7 +59,19 @@ choice; it executes no order. Changed or expired evidence forces review.
 Derived retrieval indexes and monitor cursors do not change financial revisions.
 
 SQLite is local plaintext and assumes a trusted operating-system account.
-There is no hosted authorization layer, trading connection, or model runtime.
-The old command launcher remains for compatibility; the packaged engine is the
-single implementation. See [verification](docs/verification.md) for observed
-results and [README](README.md) for installation.
+There is no hosted authorization layer or trading connection. The optional
+local model launcher is separate from the financial core.
+
+## Local assistant
+
+`agent.py` runs the installed Codex CLI with the shared `instructions.md` policy,
+bounded conversation history, native web search and the Wealth MCP server.
+`web.py` and `chat.html` add the local browser interface. SQLite retains facts;
+the browser transcript is in process memory. `behavior.py` loads the shared
+policy and provides the first-time welcome. [Agent setup](agent.md) covers
+configuration and fresh test sessions.
+
+`wealth/legacy.py` remains the packaged historical analytics engine.
+`tools/wm.py` is its compatibility entrypoint; `tools/test_*.py` still exercises
+that public compatibility surface. It is active code, not a duplicate to delete.
+See [verification](verification.md) for checks and [README](../README.md) for setup.

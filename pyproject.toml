@@ -31,6 +31,6 @@ pythonpath = ["."]
 [tool.hatch.build.targets.sdist]
 include = [
   "/wealth", "/examples", "/tests", "/tools", "/README.md", "/SKILL.md",
-  "/DESIGN.md", "/docs/product.md", "/docs/verification.md", "/docs/open-source.md", "/docs/providers.md", "/docs/agent.md",
-  "/references/playbook.md", "/pyproject.toml", "/uv.lock",
+  "/docs/architecture.md", "/docs/cli.md", "/docs/verification.md", "/docs/open-source.md", "/docs/agent.md",
+  "/references/playbook.md", "/.github/workflows/check.yml", "/pyproject.toml", "/uv.lock",
 ]
