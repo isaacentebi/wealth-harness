@@ -49,7 +49,7 @@ Claims marked (blog) come from third-party write-ups and need checking before an
 - **LangMem** splits semantic memory into *collections* (need insert/update/delete reconciliation) and *profiles* (one schema document, overwritten). It also has episodic and procedural memory, and extraction runs either in the hot path or in the background. https://langchain-ai.github.io/langmem/concepts/conceptual_guide/
 - **cognee** builds a graph plus vectors, validates entities against an ontology, and can date its edges. `memify` prunes stale nodes and reweights by usage. The API verbs are remember / recall / improve / forget. https://github.com/topoteretes/cognee
 - **Memobase** keeps a **topic → subtopic profile** plus an **event timeline**. Profile reads are plain SQL, under 100 ms. https://github.com/memodb-io/memobase
-- **claude-mem** (local, `/Users/isaacentebi/claude-mem`) uses SQLite tables (`sessions`, `memories`, `overviews`, `transcript_events`) with an `origin` column, plus Chroma vectors.
+- **claude-mem** (a local checkout) uses SQLite tables (`sessions`, `memories`, `overviews`, `transcript_events`) with an `origin` column, plus Chroma vectors.
   - Hooks capture observations, and the model compresses them into summaries.
   - Its read path is three layers: `search` (index with IDs) → `timeline` (context around a hit) → `get_observations` (full detail).
 
