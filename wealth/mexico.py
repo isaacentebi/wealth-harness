@@ -404,9 +404,9 @@ _INSTRUMENTS: dict[str, dict[str, Any]] = {
         "liquidity": {"class": "deferral_lockup", "notes": "Fund shares under Art. 185 are custody-locked for five years (except death); account withdrawals become accumulable income.", "early_withdrawal_penalty": "Withdrawals are accumulable income in the year received."},
     },
     "foreign_brokerage": {
-        "name": "Cuenta de corretaje en el extranjero (valores fuera del SIC)", "issuer": "Intermediario extranjero", "denomination": "foreign currency",
-        "tax_regime": "foreign_progressive", "tax_summary": "Sales of foreign-issuer shares outside Mexican exchanges are not within Art. 129 (fr. III covers only Mexican issuers on foreign recognized markets); gains in MXN (including FX effect) are generally Title IV Chapter IV income at progressive rates. Foreign dividends: Art. 142 fr. V plus Art. 5 credit.",
-        "citations": ["LISR Art. 129 fr. III (scope)", "LISR Title IV Chapter IV (Arts. 119-128)", "LISR Art. 142 fr. V", "LISR Art. 5"],
+        "name": "Cuenta de corretaje en el extranjero", "issuer": "Intermediario extranjero", "denomination": "foreign currency",
+        "tax_regime": "sic_listing_decides", "tax_summary": "Securities listed in the SIC keep the 10% definitive Art. 129 fr. I rate even when bought and sold through a foreign broker (SAT criterio normativo 37/ISR/N); the taxpayer computes the MXN gain (average cost, INPC update) and there is no withholding or constancia. Securities not listed in the SIC are Title IV Chapter IV (Arts. 119-124) income at progressive rates. Foreign dividends: Art. 142 fr. V plus Art. 5 credit.",
+        "citations": ["LISR Art. 129 fr. I", "SAT criterio normativo 37/ISR/N (Anexo 7 RMF 2026)", "LISR Title IV Chapter IV (Arts. 119-124)", "LISR Art. 142 fr. V", "LISR Art. 5"],
         "liquidity": {"class": "exchange_listed", "notes": "Liquid through the foreign broker; repatriation and FX timing apply."},
     },
 }
@@ -765,18 +765,25 @@ def personal_deductions(inputs: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# 4. Foreign securities outside the SIC
+# 4. Foreign securities held at foreign brokers
 # ---------------------------------------------------------------------------
 
 def foreign_securities(inputs: dict[str, Any]) -> dict[str, Any]:
-    """Scenario for non-SIC foreign securities: MXN gains incl. FX, dividends, foreign tax credit.
+    """Scenario for foreign securities sold through a foreign broker: MXN gains incl. FX, dividends, credit.
+
+    Whether the security is listed in the SIC decides the regime, not the broker or venue: SIC-listed
+    securities keep the 10% definitive Art. 129 fr. I rate (SAT criterio normativo 37/ISR/N); others
+    are Title IV Chapter IV income at progressive rates.
 
     ``sales`` rows: ``id``, ``currency``, ``proceeds``, ``fx_sale``, ``cost``, ``fx_acquisition``,
-    ``acquired_on``, ``sold_on``, optional ``cost_update_factor`` (INPC update, Art. 124).
+    ``acquired_on``, ``sold_on``, ``sic_listed`` (bool), optional ``security_type`` (``share`` |
+    ``equity_etf`` | ``other_etf``) and ``cost_update_factor`` (INPC update, Art. 124).
     ``dividends`` rows: ``id``, ``currency``, ``gross``, ``withheld``, ``fx``, ``paid_on``,
     ``source_country``, optional ``w8ben_on_file`` (bool, for US-source dividends).
     """
-    sources = [_lisr("articulo 129 fraccion III", "foreign recognized markets qualify only for shares of Mexican issuers"),
+    sources = [_lisr("articulo 129 fraccion I", "10% definitive on shares of foreign issuers listed on Mexican exchanges, including the SIC"),
+               {"title": "SAT Anexo 7 RMF 2026, criterio normativo 37/ISR/N (SIC-listed shares sold through foreign intermediaries)",
+                "url": "https://www.sat.gob.mx/minisitio/NormatividadRMFyRGCE/documentos2026/rmf/anexos/Anexo_7_RMF2026-09012026.pdf"},
                _lisr("Titulo IV Capitulo IV (articulos 119-128)", "gains on alienation of property, cost updating and annualization"),
                _lisr("articulo 142 fraccion V", "foreign dividends accumulate plus additional 10% definitive tax"),
                _lisr("articulo 5", "credit for foreign income tax on foreign-source income that is taxable in Mexico"),
@@ -795,11 +802,12 @@ def foreign_securities(inputs: dict[str, Any]) -> dict[str, Any]:
     assumptions: list[str] = ["MXN cost uses the exchange rate at acquisition and MXN proceeds use the rate at sale; the FX effect is part of the taxable gain in MXN."]
     sale_rows: list[dict[str, Any]] = []
     total_gain = Decimal(0)
+    sic_gain = Decimal(0)
     for index, sale in enumerate(sales):
         if not isinstance(sale, dict):
             raise ValueError(f"sales[{index}] must be an object")
         path = f"sales[{index}]"
-        needed = [f"{path}.{k}" for k in ("id", "currency", "proceeds", "fx_sale", "cost", "fx_acquisition", "acquired_on", "sold_on") if k not in sale]
+        needed = [f"{path}.{k}" for k in ("id", "currency", "proceeds", "fx_sale", "cost", "fx_acquisition", "acquired_on", "sold_on", "sic_listed") if k not in sale]
         if needed:
             missing.extend(needed)
             continue
@@ -824,7 +832,20 @@ def foreign_securities(inputs: dict[str, Any]) -> dict[str, Any]:
         gain = proceeds_mxn - updated_cost
         local_gain_at_sale_fx = (proceeds - cost) * fx_sale
         fx_component = cost * (fx_sale - fx_acq)
-        total_gain += gain
+        if not isinstance(sale["sic_listed"], bool):
+            raise ValueError(f"{path}.sic_listed must be true or false")
+        security_type = sale.get("security_type", "share")
+        if security_type not in {"share", "equity_etf", "other_etf"}:
+            raise ValueError(f"{path}.security_type must be share, equity_etf or other_etf")
+        regime = "article_129" if sale["sic_listed"] else "progressive"
+        if regime == "article_129":
+            sic_gain += gain
+            if security_type == "equity_etf":
+                warnings.append(f"{_text(sale['id'], f'{path}.id')}: criterio 37/ISR/N names shares; applying it to a SIC-listed equity ETF through a foreign broker relies on Art. 129 fr. II and is contested.")
+            elif security_type == "other_etf":
+                warnings.append(f"{_text(sale['id'], f'{path}.id')}: a non-equity ETF (bonds, commodities) sold through a foreign broker may fall outside Art. 129 even if SIC-listed; the 10% here is doubtful.")
+        else:
+            total_gain += gain
         if "cost_update_factor" not in sale:
             warnings.append(f"{_text(sale['id'], f'{path}.id')}: cost was not updated for inflation (INPC); the gain is overstated if an update applies.")
         sale_rows.append({"id": _text(sale["id"], f"{path}.id"), "currency": _text(sale["currency"], f"{path}.currency").upper(),
@@ -832,7 +853,8 @@ def foreign_securities(inputs: dict[str, Any]) -> dict[str, Any]:
                           "cost_update_factor": format(update, "f"), "updated_cost_mxn": _money(updated_cost),
                           "gain_or_loss_mxn": _money(gain), "components": {"local_currency_gain_at_sale_fx_mxn": _money(local_gain_at_sale_fx),
                           "fx_effect_on_cost_mxn": _money(fx_component), "inflation_update_mxn": _money(cost_mxn - updated_cost)},
-                          "years_held": str(round(Decimal((sold - acquired).days) / Decimal("365.25"), 2))})
+                          "years_held": str(round(Decimal((sold - acquired).days) / Decimal("365.25"), 2)),
+                          "regime": regime})
     dividend_rows: list[dict[str, Any]] = []
     total_div = total_withheld = Decimal(0)
     treaty_rate = params.decimal("us_mx_treaty_portfolio_dividend_rate", year)
@@ -885,14 +907,19 @@ def foreign_securities(inputs: dict[str, Any]) -> dict[str, Any]:
     ])
     if total_gain < 0:
         warnings.append("The net result on sales is a loss; it is not deducted from other income in this estimate.")
+    if sale_rows and any(row["regime"] == "article_129" for row in sale_rows):
+        warnings.append("SIC-listed sales through a foreign broker: no withholding or constancia is issued; the gain must be computed (average cost, INPC update) and declared in the annual return. Article 129 losses offset only Article 129 gains.")
     result = {
         "tax_year": year, "currency": "MXN", "sales": sale_rows, "dividends": dividend_rows,
-        "totals": {"net_gain_or_loss_mxn": _money(total_gain), "dividends_gross_mxn": _money(total_div), "foreign_tax_withheld_mxn": _money(total_withheld),
+        "totals": {"net_gain_or_loss_mxn": _money(total_gain),
+                   "article_129_net_gain_or_loss_mxn": _money(sic_gain),
+                   "article_129_tax_mxn": _money(max(sic_gain, Decimal(0)) * Decimal("0.10")), "dividends_gross_mxn": _money(total_div), "foreign_tax_withheld_mxn": _money(total_withheld),
                    "additional_10pct_dividend_tax_mxn": None if additional_rate is None else _money(total_div * additional_rate)},
         "progressive_isr_scenario": _public(estimate),
         "foreign_tax_credit": credit,
         "net_estimated_mexican_tax_mxn": None if estimate is None or additional_rate is None else _money(
-            estimate["_change"] - (Decimal(credit["estimated_credit_mxn"]) if credit else Decimal(0)) + total_div * additional_rate),
+            estimate["_change"] - (Decimal(credit["estimated_credit_mxn"]) if credit else Decimal(0)) + total_div * additional_rate
+            + max(sic_gain, Decimal(0)) * Decimal("0.10")),
         "flags": [CONSULT_FLAG],
         "execution_ready": False,
         **params.report(),

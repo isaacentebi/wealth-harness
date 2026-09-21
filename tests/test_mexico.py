@@ -220,8 +220,8 @@ def test_parameter_override_requires_source_and_warns_on_conflict():
 def test_foreign_securities_gain_with_fx_and_dividend_credit():
     report = mexico.foreign_securities({
         "tax_year": 2026, "taxable_income_before_mxn": 700000,
-        "sales": [{"id": "vti", "currency": "USD", "proceeds": 12000, "fx_sale": "18", "cost": 10000, "fx_acquisition": "20",
-                   "acquired_on": "2020-01-10", "sold_on": "2026-05-01"}],
+        "sales": [{"id": "not-in-sic", "currency": "USD", "proceeds": 12000, "fx_sale": "18", "cost": 10000, "fx_acquisition": "20",
+                   "acquired_on": "2020-01-10", "sold_on": "2026-05-01", "sic_listed": False}],
         "dividends": [{"id": "d1", "currency": "USD", "gross": 1000, "withheld": 100, "fx": "18", "paid_on": "2026-03-31",
                        "source_country": "US", "w8ben_on_file": True}],
     })
@@ -248,10 +248,31 @@ def test_foreign_securities_flags_withholding_and_fails_closed():
     assert any("30%" in w for w in report["warnings"])
     with pytest.raises(ValueError):
         mexico.foreign_securities({"tax_year": 2026, "sales": [{"id": "s", "currency": "USD", "proceeds": 1, "fx_sale": 1, "cost": 1, "fx_acquisition": 1,
-                                                               "acquired_on": "2025-01-01", "sold_on": "2026-01-01", "venue": "sic"}]})
+                                                               "acquired_on": "2025-01-01", "sold_on": "2026-01-01", "venue": "sic", "sic_listed": True}]})
     with pytest.raises(ValueError):
         mexico.foreign_securities({"tax_year": 2026, "sales": [{"id": "s", "currency": "USD", "proceeds": 1, "fx_sale": 1, "cost": 1, "fx_acquisition": 1,
-                                                               "acquired_on": "2025-01-01", "sold_on": "2025-06-01"}]})
+                                                               "acquired_on": "2025-01-01", "sold_on": "2025-06-01", "sic_listed": False}]})
+
+
+def test_sic_listing_not_the_broker_decides_the_ten_percent_rate():
+    sale = {"currency": "USD", "proceeds": 12000, "fx_sale": "18", "cost": 10000, "fx_acquisition": "18",
+            "acquired_on": "2022-01-10", "sold_on": "2026-05-01"}
+    report = mexico.foreign_securities({"tax_year": 2026, "marginal_rate": "0.3", "sales": [
+        {**sale, "id": "aapl-ibkr", "sic_listed": True},
+        {**sale, "id": "cspx-ibkr", "sic_listed": True, "security_type": "equity_etf"},
+        {**sale, "id": "microcap-ibkr", "sic_listed": False},
+    ]})
+    rows = {row["id"]: row for row in report["result"]["sales"]}
+    assert rows["aapl-ibkr"]["regime"] == "article_129"
+    assert rows["microcap-ibkr"]["regime"] == "progressive"
+    totals = report["result"]["totals"]
+    assert totals["article_129_net_gain_or_loss_mxn"] == "72000.00"
+    assert totals["article_129_tax_mxn"] == "7200.00"
+    assert totals["net_gain_or_loss_mxn"] == "36000.00"  # only the non-SIC sale is progressive income
+    assert any("contested" in w for w in report["warnings"])
+    assert any("constancia" in w for w in report["warnings"])
+    missing = mexico.foreign_securities({"tax_year": 2026, "marginal_rate": "0.3", "sales": [{**sale, "id": "x"}]})
+    assert "sales[0].sic_listed" in missing["missing"]
 
 
 # --- calendar ------------------------------------------------------------------

@@ -344,11 +344,11 @@ CATALOG: dict[str, dict[str, Any]] = {
                     "proposed_ppr_contribution_mxn": 100000, "taxable_income_before_mxn": 700000},
     },
     "mx_foreign": {
-        "purpose": "Foreign securities held outside the SIC: MXN gain including FX, foreign dividends, and foreign tax credit.",
-        "required": ["tax_year", "sales [{id, currency, proceeds, fx_sale, cost, fx_acquisition, acquired_on, sold_on}] and/or dividends [{id, currency, gross, withheld, fx, paid_on, source_country}]", "taxable_income_before_mxn or marginal_rate"],
-        "optional": ["sales[].cost_update_factor (INPC)", "dividends[].w8ben_on_file"],
+        "purpose": "Foreign securities at a foreign broker (e.g. IBKR, GBM Trading USA): SIC-listed securities keep the 10% Art. 129 rate (criterio 37/ISR/N); others are progressive income. MXN gains including FX, foreign dividends and credit.",
+        "required": ["tax_year", "sales [{id, currency, proceeds, fx_sale, cost, fx_acquisition, acquired_on, sold_on, sic_listed}] and/or dividends [{id, currency, gross, withheld, fx, paid_on, source_country}]", "taxable_income_before_mxn or marginal_rate"],
+        "optional": ["sales[].security_type (share | equity_etf | other_etf)", "sales[].cost_update_factor (INPC)", "dividends[].w8ben_on_file"],
         "example": {"tax_year": 2026, "taxable_income_before_mxn": 700000,
-                    "sales": [{"id": "vti", "currency": "USD", "proceeds": 12000, "fx_sale": "18", "cost": 10000, "fx_acquisition": "20", "acquired_on": "2020-01-10", "sold_on": "2026-05-01"}],
+                    "sales": [{"id": "aapl", "currency": "USD", "proceeds": 12000, "fx_sale": "18", "cost": 10000, "fx_acquisition": "20", "acquired_on": "2020-01-10", "sold_on": "2026-05-01", "sic_listed": True}],
                     "dividends": [{"id": "d1", "currency": "USD", "gross": 1000, "withheld": 100, "fx": "18", "paid_on": "2026-03-31", "source_country": "US", "w8ben_on_file": True}]},
     },
     "mx_calendar": {
