@@ -42,12 +42,11 @@
     .back:hover { color: var(--ink); }
     .lang { display: flex; }
     .lang button { min-width: 44px; min-height: 44px; border: 0; background: none; cursor: pointer; font: 500 13px var(--mono); color: var(--muted); }
-    .lang button[aria-pressed="true"] { color: var(--ink); text-decoration: underline; text-decoration-color: var(--vermilion); text-underline-offset: 6px; text-decoration-thickness: 2px; }
+    .lang button[aria-pressed="true"] { color: var(--ink); text-decoration: underline; text-underline-offset: 6px; text-decoration-thickness: 1.5px; }
 
     /* ------------------------------------------------ letterhead */
     .origin { margin: 32px 0 0; font: 400 12px/16px var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
     h1 { margin: 8px 0 0; font: 700 44px/48px var(--sans); letter-spacing: -.045em; }
-    h1 .dot { color: var(--vermilion); }
     .controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0 24px; margin-top: 16px; padding-bottom: 8px; border-bottom: 1.5px solid var(--ink); }
     .quarters { display: flex; flex-wrap: wrap; margin-left: -8px; }
     .quarters a {
@@ -55,7 +54,7 @@
       font: 400 13px var(--mono); color: var(--muted);
     }
     .quarters a:hover { color: var(--ink); }
-    .quarters a[aria-current="page"] { color: var(--ink); font-weight: 500; text-decoration: underline; text-decoration-color: var(--vermilion); text-underline-offset: 6px; text-decoration-thickness: 2px; }
+    .quarters a[aria-current="page"] { color: var(--ink); font-weight: 500; text-decoration: underline; text-underline-offset: 6px; text-decoration-thickness: 1.5px; }
     .txt {
       display: inline-flex; align-items: center; min-height: 44px; padding: 0; border: 0; background: none; cursor: pointer;
       font: 500 15px var(--sans); color: var(--ink); text-decoration: underline; text-decoration-color: var(--hairline);
@@ -185,7 +184,7 @@
     'use strict';
     const I18N = {
       en: {
-        title: 'Quarterly review', you: '← You', q: 'Q{n} {y}', origin: 'Quarterly review · {a} – {b}',
+        title: 'Quarterly review', you: '← You', q: 'Q{n} {y}', origin: 'Quarterly review',
         pdf: 'Download PDF', quarters: 'Quarters', loadError: 'The review could not be loaded.',
         empty: 'There is no completed quarter with statements yet. Upload one and the first review appears after the quarter closes.',
         upload: 'Upload a statement',
@@ -204,11 +203,11 @@
         taxPeriod: 'This quarter', taxYtd: 'Year to date', j_MX: 'Mexico', j_US: 'United States',
         paid: 'Paid this quarter', annual: 'Annual cost', bps: '{a}–{b} bp a year', bp1: '{a} bp a year',
         talk: 'Talk about this', noNext: 'Nothing stands out for next quarter.',
-        printed: 'Prepared {d} by Wealth from your statements and saved picture. Estimates, not tax advice.',
+        printed: 'Prepared {d} by Wealth from your statements and saved picture.',
         ac_cash: 'Cash', ac_equity: 'Equity', ac_fixed_income: 'Fixed income', ac_fund: 'Funds', ac_unknown: 'Unclassified'
       },
       es: {
-        title: 'Revisión trimestral', you: '← Yo', q: 'T{n} {y}', origin: 'Revisión trimestral · {a} – {b}',
+        title: 'Revisión trimestral', you: '← Yo', q: 'T{n} {y}', origin: 'Revisión trimestral',
         pdf: 'Descargar PDF', quarters: 'Trimestres', loadError: 'No se pudo cargar la revisión.',
         empty: 'Aún no hay un trimestre cerrado con estados de cuenta. Sube uno y la primera revisión aparece al cerrar el trimestre.',
         upload: 'Subir un estado de cuenta',
@@ -227,7 +226,7 @@
         taxPeriod: 'Este trimestre', taxYtd: 'En lo que va del año', j_MX: 'México', j_US: 'Estados Unidos',
         paid: 'Pagadas este trimestre', annual: 'Costo anual', bps: '{a}–{b} pb al año', bp1: '{a} pb al año',
         talk: 'Hablar de esto', noNext: 'Nada destaca para el próximo trimestre.',
-        printed: 'Preparado el {d} por Wealth con tus estados de cuenta y tu panorama guardado. Son estimaciones, no asesoría fiscal.',
+        printed: 'Preparado el {d} por Wealth con tus estados de cuenta y tu panorama guardado.',
         ac_cash: 'Efectivo', ac_equity: 'Acciones', ac_fixed_income: 'Renta fija', ac_fund: 'Fondos', ac_unknown: 'Sin clasificar'
       }
     };
@@ -305,7 +304,11 @@
 
     // ------------------------------------------------------------ sections
     function netWorth(s) {
-      const rows = s.rows.map((r, i) => row(L(r.label), V(r.value), { sub: r.date ? V(r.date) : null, sign: i ? '+' : null }));
+      // Each movement carries one sign: a negative value reads "− $603", never "+ −$603".
+      const rows = s.rows.map((r, i) => {
+        const v = V(r.value), neg = v.startsWith('−');
+        return row(L(r.label), neg ? v.slice(1) : v, { sub: r.date ? V(r.date) : null, sign: i ? (neg ? '−' : '+') : null });
+      });
       return [h('dl', { class: 'ticket' }, rows, row(L(s.total.label), V(s.total.value), { sub: s.total.date ? V(s.total.date) : null, total: true, sign: '=' })), note(s.note)];
     }
     // The benchmark is drawn from its parts (weight + index name, both in the page language), never from a free-text name.
@@ -396,7 +399,7 @@
         h('div', {},
           h('p', { class: 'title', text: L(x.title) }),
           n(x.value?.v) !== null ? h('div', { class: 'value', text: V(x.value) }) : null,
-          h('button', { class: 'txt act talk', type: 'button', text: t('talk') + ' →', onclick: () => handoff(L(x.prompt), false) })))));
+          h('button', { class: 'txt talk', type: 'button', text: t('talk'), onclick: () => handoff(L(x.prompt), false) })))));
     }
 
     // ------------------------------------------------------------ page
@@ -406,8 +409,8 @@
       if (!data) return;
       const quarters = [...(data.current ? [data.current.period] : []), ...(data.quarters || [])];
       const header = [
-        h('p', { class: 'origin', text: t('origin', { a: date(data.start), b: date(data.end) }) }),
-        h('h1', {}, periodName(data.period), h('span', { class: 'dot', text: '.' })),
+        h('p', { class: 'origin', text: t('origin') }),
+        h('h1', {}, periodName(data.period)),
         h('div', { class: 'controls' },
           quarters.length > 1 ? h('nav', { class: 'quarters', 'aria-label': t('quarters') }, quarters.slice(0, 6).map(q =>
             h('a', { href: '/review?period=' + q, 'aria-current': q === data.period ? 'page' : null, text: periodName(q),

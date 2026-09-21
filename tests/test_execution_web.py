@@ -184,6 +184,8 @@ def test_the_order_card_strings_exist_in_both_languages():
     assert "'Place orders'" in en and "'Cancel'" in en and "'Enviar órdenes'" in es and "'Cancelar'" in es
     for word in ("'Enviada'", "'Ejecutada'", "'Rechazada'"):
         assert word in es
-    assert "Paper · " in en and "Live · " in en and "Paper · " in es and "Live · " in es
+    # The head names the account and whether money is real; "paper" is jargon and the card's code is never shown.
+    assert "'Practice'" in en and "'Real money'" in en and "'Práctica'" in es and "'Dinero real'" in es
+    assert "code:" not in en and "ticket.nonce)" not in _section().split("// The card's code")[0]
     used = set(re.findall(r"\bO\.(\w+)", _section()))
     assert used <= keys[0], used - keys[0]
