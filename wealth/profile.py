@@ -1977,6 +1977,10 @@ def review_view(service: Any, client_id: str, period: str | None = None, today: 
     if _dec(income_net) not in (None, Decimal(0)):
         ticket_rows.append({"label": L("Dividends and interest, less fees", "Dividendos e intereses, menos comisiones"),
                             "value": money(income_net)})
+    residual = (nw.get("identity") or {}).get("residual")
+    if _dec(residual) not in (None, Decimal(0)):
+        # What the flows and market move do not explain, mostly foreign cash moving with the exchange rate.
+        ticket_rows.append({"label": L("Exchange rate and other", "Tipo de cambio y otros"), "value": money(residual)})
     net_worth = {"rows": ticket_rows, "total": {"label": L("End", "Cierre"), "date": V.when(nw.get("closing_date")),
                                                "value": money(nw.get("end"))},
                  "note": _note(sec["net_worth"]["missing"]) if nw.get("start") is None or nw.get("end") is None else None}
