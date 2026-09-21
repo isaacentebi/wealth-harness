@@ -78,30 +78,113 @@ def test_a_13f_notice_between_two_reports_does_not_double_the_annual_rate():
 # ------------------------------------------------------------------ splits
 
 
-def test_doubling_the_shares_while_the_price_moves_is_a_trade_without_corroboration():
-    # Shares x2 with the price down 40%: a split candidate, but the value rose 20%, so it is a purchase.
-    quarters = [_book("2025-12-31", "2026-02-13", {"AAA": (100, 100), "BBB": (100, 100)}),
-                _book("2026-03-31", "2026-05-14", {"AAA": (200, 60), "BBB": (100, 100)})]
-    profile = managers.profile_from_history(quarters)
+def _history(splits):
+    """A SplitLookup over {ticker: [(date, ratio)]} that records which tickers were asked about."""
+    asked = []
+
+    def lookup(ticker):
+        asked.append(ticker)
+        return splits.get(ticker, [])
+    lookup.asked = asked
+    return lookup
+
+
+DOUBLED = [_book("2025-12-31", "2026-02-13", {"AAA": (100, 100), "BBB": (100, 100)}),
+           _book("2026-03-31", "2026-05-14", {"AAA": (200, 60), "BBB": (100, 100)})]   # shares x2, value +20%
+
+
+def test_the_split_history_decides_when_it_is_available():
+    # No split in the history: doubling the shares is a purchase, however clean the ratio.
+    lookup = _history({})
+    profile = managers.profile_from_history(DOUBLED, split_history=lookup)
     (step,) = profile["turnover"]["per_quarter"]
-    assert profile["turnover"]["splits_ignored"] == []
+    assert profile["turnover"]["splits_ignored"] == [] and lookup.asked == ["AAA"]   # BBB did not change
     assert step["buys_estimate"] == 6000 and step["added_to"] == 1
-    assert profile["turnover"]["possible_splits_counted_as_trades"] == [
-        {"period": "2026-03-31", "cusip": "AAA000000", "issuer": "AAA", "ratio": 2}]
-    assert any("nothing corroborates a split" in c for c in profile["turnover"]["caveats"])
+    assert profile["turnover"]["caveats"] == []
+
+    # A 2-for-1 dated inside the quarter: the shares are adjusted, no caveat.
+    split = managers.profile_from_history(DOUBLED, split_history=_history({"AAA": [("2026-02-10", 2.0)]}))
+    assert split["turnover"]["splits_ignored"] == [{"period": "2026-03-31", "cusip": "AAA000000", "issuer": "AAA",
+                                                    "ratio": 2, "basis": "split history"}]
+    assert split["turnover"]["per_quarter"][0]["buys_estimate"] == 0 and split["turnover"]["caveats"] == []
+
+    # A split outside the quarter does not count.
+    old = managers.profile_from_history(DOUBLED, split_history=_history({"AAA": [("2020-08-31", 2.0)]}))
+    assert old["turnover"]["splits_ignored"] == []
 
 
-def test_a_clean_ratio_with_the_value_unchanged_is_a_split():
+def test_a_known_split_plus_a_trim_is_a_sell_on_split_adjusted_shares():
     quarters = [_book("2025-12-31", "2026-02-13", {"AAA": (100, 100), "BBB": (100, 100)}),
-                _book("2026-03-31", "2026-05-14", {"AAA": (200, 51), "BBB": (100, 100)})]   # value +2%
-    profile = managers.profile_from_history(quarters)
+                _book("2026-03-31", "2026-05-14", {"AAA": (180, 50), "BBB": (100, 100)})]
+    profile = managers.profile_from_history(quarters, split_history=_history({"AAA": [("2026-02-10", 2.0)]}))
     (step,) = profile["turnover"]["per_quarter"]
     assert [s["ratio"] for s in profile["turnover"]["splits_ignored"]] == [2]
-    assert step["buys_estimate"] == 0 and step["added_to"] == 0
-    # A share ratio that is not a clean multiple is not accepted on its own.
+    assert (step["buys_estimate"], step["sells_estimate"], step["trimmed"]) == (0, 1000, 1)
+    # A 3-for-2 split, which the offline rules never accept, is read from the history.
+    odd = [quarters[0], _book("2026-03-31", "2026-05-14", {"AAA": (150, 70), "BBB": (100, 100)})]
+    got = managers.profile_from_history(odd, split_history=_history({"AAA": [("2026-03-02", 1.5)]}))
+    assert got["turnover"]["per_quarter"][0]["buys_estimate"] == 0
+
+
+def test_offline_a_clean_ratio_within_25_percent_is_a_split_with_a_caveat():
+    profile = managers.profile_from_history(DOUBLED)
+    assert [s["ratio"] for s in profile["turnover"]["splits_ignored"]] == [2]
+    assert profile["turnover"]["per_quarter"][0]["buys_estimate"] == 0
+    assert any("No split history" in c and "AAA" in c for c in profile["turnover"]["caveats"])
+    # A lookup that has nothing for the ticker (offline, failed) falls back the same way.
+    unknown = managers.profile_from_history(DOUBLED, split_history=lambda ticker: None)
+    assert [s["ratio"] for s in unknown["turnover"]["splits_ignored"]] == [2]
+
+    # Value up 40%: beyond the band, so a purchase, named as a possible split.
+    far = [DOUBLED[0], _book("2026-03-31", "2026-05-14", {"AAA": (200, 70), "BBB": (100, 100)})]
+    trade = managers.profile_from_history(far)
+    assert trade["turnover"]["splits_ignored"] == [] and trade["turnover"]["per_quarter"][0]["buys_estimate"] == 7000
+    assert trade["turnover"]["possible_splits_counted_as_trades"] == [
+        {"period": "2026-03-31", "cusip": "AAA000000", "issuer": "AAA", "ratio": 2}]
+    # A ratio outside 2, 3, 4, 5, 10 (8-for-1 here) or not a clean multiple is a trade offline.
+    eight = [DOUBLED[0], _book("2026-03-31", "2026-05-14", {"AAA": (800, 13), "BBB": (100, 100)})]
+    assert managers.profile_from_history(eight)["turnover"]["splits_ignored"] == []
     rough = [_book("2025-12-31", "2026-02-13", {"AAA": (1000, 100), "BBB": (100, 100)}),
              _book("2026-03-31", "2026-05-14", {"AAA": (2003, 50), "BBB": (100, 100)})]
     assert managers.profile_from_history(rough)["turnover"]["splits_ignored"] == []
+
+
+def test_split_lookup_is_offline_for_snapshots_and_the_environment_and_caches_histories(tmp_path, monkeypatch):
+    assert managers.split_lookup(managers.Edgar(transport=managers.Snapshot({}))) is None
+    calls = []
+
+    def fetch(ticker):
+        calls.append(ticker)
+        if ticker == "BAD":
+            raise LookupError("no data")
+        return [("2024-06-10", 10.0)]
+
+    client = managers.Edgar("Test test@example.com", transport=lambda *a: "{}", cache_dir=tmp_path)
+    monkeypatch.setenv("WEALTH_OFFLINE", "1")
+    assert managers.split_lookup(client, fetch) is None
+    monkeypatch.delenv("WEALTH_OFFLINE")
+    lookup = managers.split_lookup(client, fetch)
+    assert lookup("NVDA") == [("2024-06-10", 10.0)] and lookup("NVDA") == [("2024-06-10", 10.0)]
+    assert lookup("BAD") is None and lookup("BAD") is None
+    assert calls == ["NVDA", "BAD"] and any("BAD" in w for w in client.warnings)
+    fresh = managers.Edgar("Test test@example.com", transport=lambda *a: "{}", cache_dir=tmp_path)
+    assert managers.split_lookup(fresh, fetch)("NVDA") == [("2024-06-10", 10.0)] and calls == ["NVDA", "BAD"]
+    capped = managers.split_lookup(managers.Edgar("T t@example.com", transport=lambda *a: "{}", cache_dir=None),
+                                   fetch, limit=0)
+    assert capped("MSFT") is None
+
+
+def test_profile_uses_a_supplied_split_history():
+    people = [{"cik": "0009990006", "name": "Split LP", "filings": [
+        {"accession": "0009990006-26-000001", "form": "13F-HR", "filing_date": "2026-02-13", "period": "2025-12-31",
+         "rows": [{**_sec("AAA"), "value": 10000, "shares": 100}, {**_sec("BBB"), "value": 10000, "shares": 100}]},
+        {"accession": "0009990006-26-000002", "form": "13F-HR", "filing_date": "2026-05-14", "period": "2026-03-31",
+         "rows": [{**_sec("AAA"), "value": 12000, "shares": 200}, {**_sec("BBB"), "value": 10000, "shares": 100}]}]}]
+    client = _client(people, {"AAA000000": "AAA", "BBB000000": "BBB"})
+    traded = managers.profile("0009990006", 2, client=client, sectors=False, splits=_history({}))
+    assert traded["result"]["turnover"]["per_quarter"][0]["buys_estimate"] == 6000
+    offline = managers.profile("0009990006", 2, client=client, sectors=False)
+    assert offline["result"]["turnover"]["per_quarter"][0]["buys_estimate"] == 0
 
 
 def test_a_split_corroborated_by_the_other_share_class_measures_a_trim_on_split_adjusted_shares():
@@ -246,3 +329,19 @@ def test_a_new_holdings_amendment_without_its_original_is_excluded_from_turnover
     later = managers.holdings("0009990002", "2023-06-30", client=client)
     assert later["result"]["changes"] is None
     assert any("2023-03-31 is incomplete" in w for w in later["warnings"])
+
+
+def test_a_new_holdings_amendment_does_not_count_a_line_the_original_already_has():
+    people = [{"cik": "0009990003", "name": "Dup LP", "filings": [
+        {"accession": "0009990003-23-000001", "form": "13F-HR", "filing_date": "2023-05-15", "period": "2023-03-31",
+         "rows": [{**_sec("AAA"), "value": 1000000, "shares": 100000}]},
+        {"accession": "0009990003-23-000002", "form": "13F-HR/A", "filing_date": "2023-06-01", "period": "2023-03-31",
+         "amendment_type": "NEW HOLDINGS", "rows": [{**_sec("AAA"), "value": 1000000, "shares": 100000},
+                                                    {**_sec("BBB"), "value": 500000, "shares": 5000}]}]}]
+    report = managers.holdings("0009990003", client=_client(people, {"AAA000000": "AAA", "BBB000000": "BBB"}))
+    result = report["result"]
+    assert [(p["ticker"], p["shares"], p["value"]) for p in result["positions"]] == [
+        ("AAA", 100000, 1000000), ("BBB", 5000, 500000)]
+    assert result["summary_total_check"] == {"summary_page": 1500000, "parsed": 1500000, "matches": True}
+    assert "1 already in the quarter" in result["amendments"][0]["effect"]
+    assert any("repeats AAA000000" in w for w in report["warnings"])

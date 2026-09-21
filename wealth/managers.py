@@ -94,7 +94,7 @@ SEC_INTERVAL = 0.11                      # just under 10 requests a second
 FIGI_INTERVAL = {False: 2.5, True: 0.25}  # keyless 25/minute; keyed 25 per 6 seconds
 FIGI_BATCH = {False: 10, True: 100}
 TTL = {"search": 86400, "submissions": 6 * 3600, "filing": 365 * 86400, "tickers": 7 * 86400,
-       "figi": 90 * 86400, "issuer": 30 * 86400}
+       "figi": 90 * 86400, "issuer": 30 * 86400, "splits": 7 * 86400}
 MIN_CONFIDENCE = 0.8
 DEFAULT_CONCENTRATION = 0.10
 
@@ -702,9 +702,24 @@ def _resolve_quarter(client: Edgar, cik: str, period: str, filings: list[dict[st
         warnings += parsed["warnings"]
         added = _summary_dollars(doc, parsed["value_unit"])
         if kind.startswith("NEW"):
-            rows = rows + parsed["rows"]
+            # A NEW HOLDINGS amendment adds holdings the original left out; a line it repeats (same CUSIP,
+            # option side and amount type) is already counted and is not added twice.
+            def line(r: Mapping[str, Any]) -> tuple:
+                return r["cusip"], r.get("put_call") or "", r.get("amount_type") or "SH"
+
+            held = {line(r) for r in rows}
+            fresh = [r for r in parsed["rows"] if line(r) not in held]
+            repeated = [r for r in parsed["rows"] if line(r) in held]
+            rows = rows + fresh
             unit_flags.append(_unit_flag(parsed))
-            effect = f"added {len(parsed['rows'])} holdings"
+            effect = f"added {len(fresh)} holdings"
+            if repeated:
+                effect += f"; {len(repeated)} already in the quarter were not added again"
+                warnings.append(f"The NEW HOLDINGS amendment {filing['accession']} repeats "
+                                f"{', '.join(sorted({r['cusip'] for r in repeated}))}, already reported for "
+                                f"{period}; the repeated lines are counted once.")
+                if added is not None:
+                    added -= sum(r["value"] for r in repeated)
             summary_total = summary_total + added if summary_total is not None and added is not None else None
         else:
             rows = parsed["rows"]
@@ -1263,7 +1278,11 @@ def _sectors(client: Edgar, tickers: Iterable[str]) -> tuple[dict[str, dict[str,
 _SPLITS = (2, 3, 4, 5, 8, 10, 15, 20, 25, 40, 50)
 
 
-SPLIT_VALUE_TOLERANCE = 0.03
+_CLEAN_SPLITS = (2, 3, 4, 5, 10)
+SPLIT_VALUE_TOLERANCE = 0.25   # offline fallback: a clean ratio with the position value within +/-25%
+
+# ticker -> [(ex-date ISO, share ratio new/old), ...], or None when the history is not available (offline).
+SplitLookup = Callable[[str], "list[tuple[str, float]] | None"]
 
 
 def _split_ratio(old_shares: float, new_shares: float, old_price: float | None, new_price: float | None) -> float | None:
@@ -1281,6 +1300,16 @@ def _split_ratio(old_shares: float, new_shares: float, old_price: float | None, 
     return None
 
 
+def _maybe_split(old_shares: float, new_shares: float, old_price: float | None, new_price: float | None) -> bool:
+    """Worth checking a split history: shares within 25% of a split ratio (a split plus a trade) with the
+    price moving inversely."""
+    if not old_shares or not new_shares or not old_price or not new_price:
+        return False
+    ratio = new_shares / old_shares
+    return any(abs(ratio / r - 1) < 0.25 and _inverse_price(old_price, new_price, r)
+               for k in (1.5,) + _SPLITS for r in (k, 1 / k))
+
+
 def _inverse_price(old_price: float | None, new_price: float | None, ratio: float) -> bool:
     return bool(old_price and new_price) and 0.6 < (new_price * ratio / old_price) < 1.6
 
@@ -1296,15 +1325,24 @@ def _line_price(line: Mapping[str, Any] | None) -> float | None:
 
 
 def _split_evidence(old: Mapping[str, Any], new: Mapping[str, Any],
-                    peers: list[tuple[Mapping[str, Any], Mapping[str, Any]]]) -> tuple[float | None, str, float | None]:
+                    peers: list[tuple[Mapping[str, Any], Mapping[str, Any]]],
+                    history: list[tuple[str, float]] | None, start: str, end: str
+                    ) -> tuple[float | None, str, float | None]:
     """(split ratio or None, basis, uncorroborated candidate ratio).
 
-    A split is accepted when (a) at least two of the issuer's lines (this one, other share classes, options on
-    the same CUSIP), and most of them, show the same share ratio with the inverse price move, and this line's
-    price moved inversely too, so a trade on top of the split is measured on split-adjusted shares; or (b) the
-    share ratio is a clean multiple and the position's value changed by at most SPLIT_VALUE_TOLERANCE.  Anything
-    else is a trade.
+    With the ticker's split history, the splits dated in (start, end] adjust the shares (so a trade on top of
+    a split is measured on split-adjusted shares) and no split there means a trade.  Without it (offline), a
+    split is accepted when (a) at least two of the issuer's lines (this one, other share classes, options on
+    its CUSIPs), and most of them, show the same share ratio with this line's price moving inversely; or (b)
+    the share ratio is a clean 2, 3, 4, 5 or 10 (or its inverse) and the value moved at most
+    SPLIT_VALUE_TOLERANCE.  Anything else is a trade.
     """
+    if history is not None:
+        factor = 1.0
+        for day, ratio in history:
+            if start < day <= end and ratio and ratio > 0:
+                factor *= ratio
+        return (factor, "split history", None) if abs(factor - 1) > 1e-9 else (None, "", None)
     old_shares, new_shares = float(old["shares"]), float(new["shares"])
     old_price, new_price = _line_price(old), _line_price(new)
     candidate = _split_ratio(old_shares, new_shares, old_price, new_price)
@@ -1315,14 +1353,66 @@ def _split_evidence(old: Mapping[str, Any], new: Mapping[str, Any],
         ratio = max(set(agreed), key=agreed.count)
         n = agreed.count(ratio)
         if n >= 2 and n * 2 > len(lines) and _inverse_price(old_price, new_price, ratio):
-            return ratio, f"{n} of the issuer's {len(lines)} lines show the same split", None
+            return ratio, f"no split history; {n} of the issuer's {len(lines)} lines show the same split", None
     if candidate is None:
         return None, "", None
     value_change = new["value"] / old["value"] - 1 if old["value"] else None
-    if (_clean_multiple(old_shares, new_shares, candidate) and value_change is not None
+    clean = any(abs(candidate - r) < 1e-9 for k in _CLEAN_SPLITS for r in (k, 1 / k))
+    if (clean and _clean_multiple(old_shares, new_shares, candidate) and value_change is not None
             and abs(value_change) <= SPLIT_VALUE_TOLERANCE):
-        return candidate, "clean share ratio with the position value unchanged", None
+        return candidate, "no split history; clean share ratio with the value within 25%", None
     return None, "", candidate
+
+
+def yahoo_split_history(ticker: str) -> list[tuple[str, float]]:
+    """A ticker's split history from Yahoo via yfinance (the library prices.py wraps); raises on failure."""
+    import pandas as pd
+    import yfinance as yf
+
+    from .prices import provider_symbol
+
+    symbol, reason = provider_symbol(ticker, venue="us")
+    if symbol is None:
+        raise LookupError(f"{ticker}: {reason}")
+    series = yf.Ticker(symbol).splits
+    return [(pd.Timestamp(day).date().isoformat(), float(ratio)) for day, ratio in series.items()
+            if math.isfinite(float(ratio)) and float(ratio) > 0]
+
+
+def split_lookup(client: Edgar, fetch: Callable[[str], list[tuple[str, float]]] | None = None,
+                 *, limit: int = 40) -> SplitLookup | None:
+    """A cached :data:`SplitLookup`, or None when offline (``WEALTH_OFFLINE`` or a recorded-snapshot client).
+
+    Histories are kept in the client's disk cache for a week; a failed lookup answers None, so the offline
+    rules apply to that ticker.  At most ``limit`` tickers are fetched per profile.
+    """
+    from .prices import offline_mode
+
+    if client.offline or offline_mode():
+        return None
+    fetch = fetch or yahoo_split_history
+    fetched = [0]
+
+    def lookup(ticker: str) -> list[tuple[str, float]] | None:
+        cache_key = "splits:" + ticker.upper()
+        if client.memory.get(cache_key) == "null":   # failed earlier in this session
+            return None
+        cached = client._cached("splits", cache_key)
+        if cached is not None:
+            return [(d, float(r)) for d, r in json.loads(cached)]
+        if fetched[0] >= limit:
+            return None
+        fetched[0] += 1
+        try:
+            history = [(str(d), float(r)) for d, r in fetch(ticker)]
+        except Exception as exc:  # noqa: BLE001 - no history means the offline rules, never a failed profile
+            client.warnings.append(f"Split history for {ticker} was not available ({type(exc).__name__}).")
+            client.memory[cache_key] = "null"
+            return None
+        client._store("splits", cache_key, json.dumps(history))
+        return history
+
+    return lookup
 
 
 def _quarter_number(period: str) -> int:
@@ -1350,8 +1440,13 @@ def _concentration(equity: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def profile_from_history(quarters: list[Mapping[str, Any]], *, sectors: Mapping[str, Any] | None = None,
-                         manager: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """Interpretation from consecutive quarters (oldest first); each has period, filing_date and ``book``."""
+                         manager: Mapping[str, Any] | None = None,
+                         split_history: SplitLookup | None = None) -> dict[str, Any]:
+    """Interpretation from consecutive quarters (oldest first); each has period, filing_date and ``book``.
+
+    ``split_history`` returns a ticker's splits (see :data:`SplitLookup`); it is asked only about lines whose
+    share and price changes could be a split.  Without it, or when it returns None, the offline rules apply.
+    """
     quarters = [q for q in quarters if not q.get("notice")]
     quarters.sort(key=lambda q: q["period"])
     sectors = sectors or {}
@@ -1396,7 +1491,7 @@ def profile_from_history(quarters: list[Mapping[str, Any]], *, sectors: Mapping[
                                "confident ticker to link it; it is counted as a sale and a new purchase.")
     transitions = []
     entries: dict[str, dict[str, Any]] = {}   # key -> entry info for names that appear inside the window
-    splits, possible_splits = [], []
+    splits, possible_splits, fallback_splits = [], [], []
     split_factor: dict[tuple[str, int], float] = {}   # (key, transition index) -> share ratio of a split
     numbers = [_quarter_number(q["period"]) for q in quarters]
     for i in range(1, len(quarters)):
@@ -1420,7 +1515,15 @@ def profile_from_history(quarters: list[Mapping[str, Any]], *, sectors: Mapping[
                 peers = [(before[c], after[c]) for c in sorted(family - {k})]
                 peers += [(options_before[o], options_after[o]) for o in sorted(options_before)
                           if o[0] in family and o in options_after]
-                ratio, basis, candidate = _split_evidence(old, new, peers)
+                history = None
+                ticker = new.get("ticker") or old.get("ticker")
+                if (split_history is not None and ticker and (new.get("ticker_confidence") or 0) >= MIN_CONFIDENCE
+                        and _maybe_split(old_shares, new_shares, old_price, new_price)):
+                    history = split_history(ticker)
+                ratio, basis, candidate = _split_evidence(old, new, peers, history, quarters[i - 1]["period"],
+                                                          quarters[i]["period"])
+                if ratio and history is None:
+                    fallback_splits.append(f"{new['issuer']} ({quarters[i]['period']}, {_r(ratio, 4):g}-for-1)")
                 if ratio:
                     old_shares *= ratio
                     split_factor[(k, i)] = ratio
@@ -1470,6 +1573,9 @@ def profile_from_history(quarters: list[Mapping[str, Any]], *, sectors: Mapping[
         caveats.append("Quarters are missing between " + ", ".join(f"{t['from']} and {t['to']}" for t in gaps) +
                        " (a missed filing, a 13F notice or an incomplete quarter); turnover there is spread over the "
                        "quarters elapsed, and trades inside the gap are invisible.")
+    if fallback_splits:
+        caveats.append("No split history was available for " + ", ".join(fallback_splits) + "; the share change "
+                       "is treated as a split from its clean ratio, which a trade of the same size would mimic.")
     if possible_splits:
         caveats.append("Share counts of " + ", ".join(f"{x['issuer']} ({x['period']})" for x in possible_splits) +
                        " changed by a common split ratio, but nothing corroborates a split, so they are counted as "
@@ -1755,8 +1861,12 @@ def _history(client: Edgar, cik: str, quarters: int, tickers: Mapping[str, str] 
 
 
 def profile(cik: Any, quarters: int = 8, *, client: Edgar | None = None, tickers: Mapping[str, str] | None = None,
-            sectors: bool = True, as_of: Any = None) -> dict[str, Any]:
-    """How a manager invests, from up to ``quarters`` consecutive 13F filings."""
+            sectors: bool = True, as_of: Any = None, splits: Any = _DEFAULT) -> dict[str, Any]:
+    """How a manager invests, from up to ``quarters`` consecutive 13F filings.
+
+    ``splits`` is a :data:`SplitLookup`; by default Yahoo split histories via :func:`split_lookup` (none when
+    offline), ``None`` for the offline rules only.
+    """
     cik = normalize_cik(cik)
     if isinstance(quarters, bool) or not isinstance(quarters, int) or not 2 <= quarters <= 40:
         raise ValueError("quarters must be 2-40")
@@ -1774,7 +1884,9 @@ def profile(cik: Any, quarters: int = 8, *, client: Edgar | None = None, tickers
                         missing=["a manager that files Form 13F holdings"],
                         warnings=warnings + [f"{sub.get('name') or cik} has no 13F holdings reports on EDGAR."],
                         sources=_sources(client))
-    result = profile_from_history(views, sectors=sector_map, manager={"cik": cik, "name": sub.get("name")})
+    lookup = split_lookup(client) if splits is _DEFAULT else splits
+    result = profile_from_history(views, sectors=sector_map, manager={"cik": cik, "name": sub.get("name")},
+                                  split_history=lookup)
     result["lag"] = _lag(views[0], _today(as_of))
     if len(views) < 2:
         warnings.append("Only one quarter is available: turnover, holding period and drift need at least two.")

@@ -357,12 +357,12 @@ def test_profiles_read_character_from_multi_quarter_filings():
     result = patient["result"]
     assert patient["status"] == "ready" and result["quarters"] == 5
     assert result["turnover"]["annualised"] < 0.05
-    # COST's 4-for-1 share count comes with a 7% value change and nothing else corroborates a split, so it is
-    # counted as a purchase and named as a possible split.
-    assert result["turnover"]["splits_ignored"] == []
-    assert result["turnover"]["possible_splits_counted_as_trades"] == [
-        {"period": "2026-03-31", "cusip": "22160K105", "issuer": "COSTCO WHSL CORP NEW", "ratio": 4.0}]
-    assert any("COSTCO" in w and "counted as trades" in w for w in patient["warnings"])
+    # Offline (a recorded snapshot), COST's clean 4-for-1 share count with a 7% value move is a split, with a caveat.
+    assert result["turnover"]["splits_ignored"] == [{"period": "2026-03-31", "cusip": "22160K105",
+                                                    "issuer": "COSTCO WHSL CORP NEW", "ratio": 4.0,
+                                                    "basis": "no split history; clean share ratio with the value "
+                                                             "within 25%"}]
+    assert any("No split history" in w and "COSTCO" in w for w in patient["warnings"])
     assert result["holding_period"]["median_quarters"] == 5.0
     assert result["concentration"]["latest"]["positions"] == 10
     assert result["character"]["en"].startswith(
