@@ -208,7 +208,7 @@
         ac_cash: 'Cash', ac_equity: 'Equity', ac_fixed_income: 'Fixed income', ac_fund: 'Funds', ac_unknown: 'Unclassified'
       },
       es: {
-        title: 'Revisión trimestral', you: '← Yo', q: 'T{n} {y}', origin: 'Revisión trimestral · {a} – {b}',
+        title: 'Revisión trimestral', you: '← Tú', q: 'T{n} {y}', origin: 'Revisión trimestral · {a} – {b}',
         pdf: 'Descargar PDF', quarters: 'Trimestres', loadError: 'No se pudo cargar la revisión.',
         empty: 'Aún no hay un trimestre cerrado con estados de cuenta. Sube uno y la primera revisión aparece al cerrar el trimestre.',
         upload: 'Subir un estado de cuenta',
@@ -472,8 +472,14 @@
     try { stored = localStorage.getItem('wealth.lang'); } catch (_) { /* optional */ }
     let asked = null;
     try { asked = new URLSearchParams(location.search).get('lang'); } catch (_) { /* optional */ }
-    setLang(asked || stored || ((navigator.language || '').toLowerCase().startsWith('es') ? 'es' : 'en'), false);
-    load();
+    // The saved language (/api/state) decides the first paint too, so the letter never flips language after loading.
+    (async () => {
+      const state = await fetch('/api/state', { credentials: 'same-origin', cache: 'no-store' }).then(r => r.ok ? r.json() : {}).catch(() => ({}));
+      token = String(state.csrf_token || '');
+      const saved = ['es', 'en'].includes(state.language) ? state.language : null;
+      setLang(asked || stored || saved || ((navigator.language || '').toLowerCase().startsWith('es') ? 'es' : 'en'), false);
+      load();
+    })();
   })();
   </script>
 </body>
