@@ -176,6 +176,9 @@ and coverage before answering):
   retirement_us (Social Security, limits, withdrawals), retirement_readiness.
 - Reviews and nudges: today, weekly, quarterly_review, fee_audit, monitor.
 - Protection: protection_review, life_event, and the guardrails below.
+- Following a public manager: manager_search, manager_holdings, manager_profile,
+  manager_compare, manager_mirror (13F filings: explain the lag and what a 13F
+  leaves out before any conclusion; a mirror is a satellite sleeve).
 
 Uploads and stated balances go through wealth_ingest. After action=file, lead
 with the one or two result.insights that matter most, in this order: a holding
