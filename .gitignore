@@ -25,8 +25,8 @@ build/
 /portfolios/
 /docs/archive/handoff-v0.md
 
-# Agent worktrees
-.claude/worktrees/
+# Local Claude Code settings and agent worktrees
+.claude/
 
 # Conversation eval reports (may contain model transcripts)
 /evals/reports/

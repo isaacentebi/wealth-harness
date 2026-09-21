@@ -1,5 +1,9 @@
 # Live review, 2026-09-21
 
+All figures below belong to a fictional test persona typed into the app for the
+review (a Mexico City professional with a GBM account, a car loan and an AFORE);
+none are anyone's real finances.
+
 One Spanish session as a Mexico City resident: rough situation, GBM statement
 upload, confirmation, then "S&P 500 via SIC or Interactive Brokers?". Model
 gpt-5.6-sol, reasoning low. Judged as a paying private-banking client.
