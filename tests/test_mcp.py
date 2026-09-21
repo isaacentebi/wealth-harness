@@ -21,7 +21,7 @@ from wealth.service import WealthService
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_stdio_six_tool_journey_and_annotations(tmp_path, capfd):
+def test_stdio_tool_journey_and_annotations(tmp_path, capfd):
     async def journey():
         params = StdioServerParameters(
             command=sys.executable,
@@ -37,6 +37,7 @@ def test_stdio_six_tool_journey_and_annotations(tmp_path, capfd):
                 "wealth_run",
                 "wealth_recall",
                 "wealth_decision",
+                "wealth_inspect",
                 "wealth_client",
             }
             assert all(
@@ -45,8 +46,10 @@ def test_stdio_six_tool_journey_and_annotations(tmp_path, capfd):
             )
             assert tools["wealth_context"].annotations.read_only_hint is True
             assert tools["wealth_recall"].annotations.read_only_hint is True
+            assert tools["wealth_inspect"].annotations.read_only_hint is True
             assert tools["wealth_run"].annotations.read_only_hint is False
-            assert tools["wealth_client"].annotations.destructive_hint is True
+            assert not any(item.annotations.destructive_hint for item in tools.values())
+            assert tools["wealth_client"].input_schema["properties"]["action"]["enum"] == ["create", "index"]
 
             async def call(name, arguments):
                 result = await client.call_tool(name, arguments)
@@ -75,6 +78,7 @@ def test_stdio_six_tool_journey_and_annotations(tmp_path, capfd):
                 },
             )
             assert remembered["write_result"]["resulting_revision"] == 1
+            assert "facts" not in remembered and len(remembered["written"]) == len(example_facts())
 
             plan = await call(
                 "wealth_run", {"task": "plan", "client_id": "mcp-client"}
@@ -129,6 +133,7 @@ def test_stdio_six_tool_journey_and_annotations(tmp_path, capfd):
             )
             assert rejected.is_error
             assert "IneligibleEvidenceError" in str(rejected.content)
+            assert "goals changed at revision 2" in str(rejected.content)
 
             monitor = await call(
                 "wealth_run",
@@ -137,14 +142,44 @@ def test_stdio_six_tool_journey_and_annotations(tmp_path, capfd):
             assert monitor["result"]["delivery"].startswith("returned to caller only")
 
             exported = await call(
-                "wealth_client",
-                {"action": "export", "client_id": "mcp-client"},
+                "wealth_inspect",
+                {"detail": "export", "client_id": "mcp-client"},
             )
             assert exported["client"]["revision"] == 2
+            selected = await call(
+                "wealth_inspect",
+                {"client_id": "mcp-client", "keys": ["goals", "nope"]},
+            )
+            assert [f["key"] for f in selected["facts"]] == ["goals"]
+            assert selected["absent_keys"] == ["nope"]
+
+            forget = await client.call_tool(
+                "wealth_client",
+                {"action": "forget", "client_id": "mcp-client",
+                 "inputs": {"confirm_client_id": "mcp-client"}},
+            )
+            assert forget.is_error
+            missing_title = await client.call_tool(
+                "wealth_decision",
+                {"action": "propose", "client_id": "mcp-client",
+                 "inputs": {"rationale": "r", "expected_revision": 2, "evidence_ids": ["x"]}},
+            )
+            assert missing_title.is_error and "missing ['title']" in str(missing_title.content)
+            stale = await client.call_tool(
+                "wealth_remember",
+                {"client_id": "mcp-client", "facts": [correction], "expected_revision": 0},
+            )
+            assert stale.is_error and "current 2" in str(stale.content)
+            patched = await call(
+                "wealth_remember",
+                {"client_id": "mcp-client",
+                 "facts": [{**correction, "value": [{"id": "home", "target_amount": 1}], "merge": True}]},
+            )
+            assert patched["client"]["revision"] == 3
 
             wrong_client = await client.call_tool(
-                "wealth_client",
-                {"action": "inspect", "client_id": "someone-else"},
+                "wealth_inspect",
+                {"client_id": "someone-else"},
             )
             assert wrong_client.is_error
             assert "ClientNotFoundError" in str(wrong_client.content)
@@ -166,9 +201,8 @@ def test_stdio_six_tool_journey_and_annotations(tmp_path, capfd):
             assert "unknown task" in str(unknown_task.content)
 
             unknown = await client.call_tool(
-                "wealth_client",
+                "wealth_inspect",
                 {
-                    "action": "inspect",
                     "client_id": "mcp-client",
                     "extra": "must-not-be-ignored",
                 },

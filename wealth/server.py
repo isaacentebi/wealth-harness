@@ -1,4 +1,8 @@
-"""Local stdio MCP boundary. Install with ``uv sync --extra mcp``."""
+"""Local stdio MCP boundary; run with ``uv run wealth-mcp``.
+
+Deleting a client is deliberately CLI-only (``wealth client`` action ``forget``):
+a model must not be able to erase a profile on its own.
+"""
 from __future__ import annotations
 
 import os
@@ -14,12 +18,12 @@ from pydantic import BaseModel, ConfigDict, StrictInt
 
 from .behavior import ASSISTANT_CONTRACT
 from .service import WealthService
-from .store import StoreError, ValidationError
+from .store import StaleRevisionError, StoreError, ValidationError
 
 
 class Source(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    kind: Literal["user", "document", "tool", "inference"]
+    kind: Literal["user", "document", "web", "tool", "inference"]
     ref: str
     observed_on: str
 
@@ -31,20 +35,14 @@ class Fact(BaseModel):
     source: Source
     confidence: Literal["confirmed", "reported", "inferred"] = "reported"
     expires_on: str | None = None
+    merge: bool = False
 
 
-READ = ToolAnnotations(read_only_hint=True, open_world_hint=False)
-WRITE = ToolAnnotations(
-    read_only_hint=False,
-    destructive_hint=False,
-    idempotent_hint=False,
-    open_world_hint=False,
+READ = ToolAnnotations(
+    read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False
 )
-CLIENT = ToolAnnotations(
-    read_only_hint=False,
-    destructive_hint=True,
-    idempotent_hint=False,
-    open_world_hint=False,
+WRITE = ToolAnnotations(
+    read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=False
 )
 
 
@@ -52,7 +50,7 @@ def _safe_reason(error: Exception) -> str:
     """Return bounded domain guidance without echoing payloads or trace details."""
 
     reason = " ".join(str(error).split())
-    return (reason or "Input failed the operation contract.")[:300]
+    return (reason or "Input failed the operation contract; check field names and types.")[:600]
 
 
 def build_server(db_path: str | None = None, *, include_behavior: bool = True) -> MCPServer:
@@ -68,22 +66,25 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = True) -
                     return function(*args, **kwargs)
                 except ValidationError as exc:
                     raise ToolError(f"ValidationError: {_safe_reason(exc)}") from None
+                except StaleRevisionError as exc:
+                    raise ToolError(
+                        f"StaleRevisionError: memory changed (expected revision {exc.expected}, "
+                        f"current {exc.current}). Reload the affected facts, reconcile, and retry "
+                        f"with expected_revision={exc.current}, or omit it and send merge=true."
+                    ) from None
                 except StoreError as exc:
                     guidance = {
                         "ClientNotFoundError": "No client matches this identifier.",
                         "ClientExistsError": "This client already exists; inspect it first.",
-                        "StaleRevisionError": "Memory changed. Reload context and reconcile before retrying.",
-                        "RequestConflictError": "This request ID belongs to another payload; inspect memory before retrying.",
-                        "IneligibleEvidenceError": "Evidence or proposal is stale, inferred, or belongs to another client; refresh and create a new proposal.",
                         "DecisionNotFoundError": "No decision matches this client and identifier.",
-                    }.get(type(exc).__name__, "Input failed the memory contract. Check the supplied fields.")
+                    }.get(type(exc).__name__) or _safe_reason(exc)
                     raise ToolError(f"{type(exc).__name__}: {guidance}") from None
                 except (OSError, sqlite3.Error):
                     raise ToolError("StorageError: Cannot access local client memory.") from None
-                except ValueError as exc:
+                except (ValueError, TypeError) as exc:
                     raise ToolError(f"ValidationError: {_safe_reason(exc)}") from None
-                except (TypeError, KeyError):
-                    raise ToolError("ValidationError: Input failed the operation contract.") from None
+                except KeyError as exc:
+                    raise ToolError(f"ValidationError: missing required field {exc}") from None
 
             registered = Tool.from_function(boundary, annotations=annotations)
             registered.fn_metadata.arg_model.model_config.update(extra="forbid", strict=True)
@@ -111,10 +112,14 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = True) -
     def wealth_remember(
         client_id: str,
         facts: list[Fact],
-        expected_revision: StrictInt,
+        expected_revision: StrictInt | None = None,
         request_id: str | None = None,
     ) -> dict[str, Any]:
-        """Atomically record sourced facts or corrections at an expected revision."""
+        """Atomically record sourced facts; returns a receipt (keys, new revision, warnings).
+
+        New keys and merge=true updates need no expected_revision. Replacing an
+        existing value wholesale needs the client_revision you read.
+        """
         return service.remember(
             client_id, [item.model_dump() for item in facts], expected_revision, request_id
         )
@@ -145,7 +150,7 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = True) -
         embedding_model: str | None = None,
         include_stale: bool = False,
     ) -> dict[str, Any]:
-        """Recall bounded current evidence by keyword and optional host-supplied vector."""
+        """Recall bounded evidence by keyword and optional host-supplied vector; stale facts are marked."""
         return service.recall(
             client_id=client_id,
             query=query,
@@ -161,16 +166,30 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = True) -
         client_id: str,
         inputs: dict[str, Any],
     ) -> dict[str, Any]:
-        """Propose or resolve an evidence-bound decision; acceptance is not execution."""
+        """Propose or resolve an evidence-bound decision; acceptance is not execution.
+
+        propose inputs: title, rationale, expected_revision, evidence_ids, alternatives?.
+        accept/dismiss inputs: decision_id, expected_revision?.
+        """
         return service.decision(action=action, client_id=client_id, inputs=inputs)
 
-    @tool(annotations=CLIENT)
+    @tool(annotations=READ)
+    def wealth_inspect(
+        client_id: str,
+        key: str | None = None,
+        keys: list[str] | None = None,
+        detail: Literal["current", "history", "export"] = "current",
+    ) -> dict[str, Any]:
+        """Read full current facts (optionally only key/keys), one key's history, or a full export."""
+        return service.inspect(client_id, detail=detail, key=key, keys=keys)
+
+    @tool(annotations=WRITE)
     def wealth_client(
-        action: Literal["create", "inspect", "export", "forget", "index"],
+        action: Literal["create", "index"],
         client_id: str,
         inputs: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Manage client state; forget is destructive and requires explicit confirmation."""
+        """create inputs: display_name. index inputs: fact_id, embedding, model."""
         return service.client(action=action, client_id=client_id, inputs=inputs)
 
     return MCPServer(
@@ -185,7 +204,9 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = True) -
             "actually confirmed the fact. Use wealth_run for deterministic calculations; "
             "a ready result is not a suitability judgment. Decisions are not orders. "
             "Monitoring runs only when explicitly called and sends no external notifications. "
-            "Exports contain sensitive history and should be fetched only when requested.\n"
+            "Exports contain sensitive history and should be fetched only when requested. "
+            "Deleting a profile is not available here; the person runs `wealth client` forget "
+            "themselves.\n"
             + (ASSISTANT_CONTRACT if include_behavior else "")
         ),
     )
