@@ -72,7 +72,7 @@
     .area { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--hairline); }
     .area:first-of-type { margin-top: 24px; }
     .area h3 { margin: 0; font: 500 13px/16px var(--sans); letter-spacing: .01em; color: var(--ink-2); }
-    .summary { margin: 12px 0 0; font: 400 24px/32px var(--sans); letter-spacing: -.022em; color: var(--ink); text-wrap: balance; }
+    .summary { margin: 12px 0 0; font: 400 24px/32px var(--sans); letter-spacing: -.022em; color: var(--ink); text-wrap: pretty; }
     .facts { list-style: none; margin: 24px 0 0; padding: 0; display: grid; gap: 24px; }
 
     .fact-say {
@@ -244,7 +244,7 @@
         o_transactions: 'From your transactions', o_guess: 'My guess', o_calculated: 'I worked it out',
         o_asof: 'as of {d}', since: 'since {d}',
         yesRight: 'Yes, that’s right',
-        diffOrigin: '{i} statement · {d}', useStatement: 'Use the statement', keepMine: 'Keep what I said', itChanged: 'It changed',
+        diffOrigin: '{i} statement · {d}', newOrigin: 'Something new · {d}', useNew: 'Use the new figure', useStatement: 'Use the statement', keepMine: 'Keep what I said', itChanged: 'It changed',
         check: 'Worth a quick check', same: 'Still the same', update: 'Update',
         save: 'Save', cancel: 'Cancel', forget: 'Forget', close: 'Close', amount: 'Amount', currency: 'Currency',
         months: 'months', people: 'people',
@@ -255,7 +255,7 @@
         m_investments: 'whether you invest', m_debts: 'whether you owe anything', m_dependents: 'whether anyone depends on you',
         m_tax_residence: 'where you pay taxes', m_currencies: 'which currencies you use', m_goals: 'what you want to achieve',
         m_risk: 'how much risk you’re comfortable with',
-        source: 'Source', recorded: 'Recorded', reviewBy: 'Review by', status: 'Status', versions: 'Versions',
+        history: 'Over time', forgottenOn: 'Forgotten', replacedOn: 'Replaced by a statement', now: 'now', source: 'Source', recorded: 'Recorded', reviewBy: 'Review by', status: 'Status', versions: 'Versions',
         c_confirmed: 'Confirmed', c_reported: 'Reported', c_inferred: 'Not confirmed',
         src_you_said: 'You told me', src_document: 'Statement', src_web: 'Web', src_derived: 'Calculated',
         freshStatement: 'Upload a newer statement', notHere: 'Change this in the chat.',
@@ -279,7 +279,7 @@
         o_transactions: 'De tus movimientos', o_guess: 'Mi suposición', o_calculated: 'Lo calculé',
         o_asof: 'al {d}', since: 'desde {d}',
         yesRight: 'Sí, es correcto',
-        diffOrigin: 'Estado de cuenta de {i} · {d}', useStatement: 'Usar el estado de cuenta', keepMine: 'Mantener lo que dije', itChanged: 'Cambió',
+        diffOrigin: 'Estado de cuenta de {i} · {d}', newOrigin: 'Dato nuevo · {d}', useNew: 'Usar el dato nuevo', useStatement: 'Usar el estado de cuenta', keepMine: 'Mantener lo que dije', itChanged: 'Cambió',
         check: 'Vale la pena revisar', same: 'Sigue igual', update: 'Actualizar',
         save: 'Guardar', cancel: 'Cancelar', forget: 'Olvidar', close: 'Cerrar', amount: 'Monto', currency: 'Moneda',
         months: 'meses', people: 'personas',
@@ -290,7 +290,7 @@
         m_investments: 'si inviertes', m_debts: 'si debes algo', m_dependents: 'si alguien depende de ti',
         m_tax_residence: 'dónde pagas impuestos', m_currencies: 'en qué monedas manejas tu dinero', m_goals: 'qué quieres lograr',
         m_risk: 'cuánto riesgo toleras',
-        source: 'Fuente', recorded: 'Registrado', reviewBy: 'Revisar antes de', status: 'Estado', versions: 'Versiones',
+        history: 'Con el tiempo', forgottenOn: 'Olvidado', replacedOn: 'Reemplazado por un estado de cuenta', now: 'hoy', source: 'Fuente', recorded: 'Registrado', reviewBy: 'Revisar antes de', status: 'Estado', versions: 'Versiones',
         c_confirmed: 'Confirmado', c_reported: 'Reportado', c_inferred: 'Sin confirmar',
         src_you_said: 'Tú me lo dijiste', src_document: 'Estado de cuenta', src_web: 'Web', src_derived: 'Calculado',
         freshStatement: 'Sube un estado de cuenta más reciente', notHere: 'Cámbialo en el chat.',
@@ -361,6 +361,7 @@
       const sameYear = now && d.getUTCFullYear() === now.getUTCFullYear();
       return new Intl.DateTimeFormat(locale, { day: 'numeric', month: lang === 'es' ? 'long' : 'short', ...(sameYear ? {} : { year: 'numeric' }), timeZone: 'UTC' }).format(d);
     }
+    function railDate(iso) { const d = asDate(iso); return d ? new Intl.DateTimeFormat(locale, { day: 'numeric', month: 'short', timeZone: 'UTC' }).format(d).replace('.', '') : ''; }
     function ago(days) {
       const rtf = new Intl.RelativeTimeFormat(locale, { numeric: 'auto' });
       if (days < 60) return rtf.format(-Math.round(days / 7), 'week');
@@ -462,9 +463,12 @@
       render();
       if (result !== true && result !== false) say(String(result));
     }
-    window.addEventListener('pagehide', () => { if (pending) {
-      navigator.sendBeacon?.(factPath(pending.item.key), new Blob([JSON.stringify({ action: 'delete', field: pending.item.forget?.field ?? null,
-        expected_revision: data?.client?.revision ?? null })], { type: 'application/json' }));
+    // Leaving during the undo window still forgets: the person already asked for it.
+    window.addEventListener('pagehide', () => { if (pending && writes) {
+      fetch(factPath(pending.item.key), { method: 'POST', credentials: 'same-origin', keepalive: true,
+        headers: { 'Content-Type': 'application/json', 'X-Wealth-Token': token },
+        body: JSON.stringify({ action: 'delete', field: pending.item.forget?.field ?? null,
+          expected_revision: data?.client?.revision ?? null }) }).catch(() => {});
     } });
 
     // ------------------------------------------------------------ inline edit
@@ -527,7 +531,21 @@
     // ------------------------------------------------------------ detail sheet (fetched on tap)
     async function openSheet(item) {
       if (!item.key) return;
-      const detail = await fetch(factPath(item.key), { credentials: 'same-origin' }).then(r => r.ok ? r.json() : null).catch(() => null);
+      const [detail, history] = await Promise.all([
+        fetch(factPath(item.key), { credentials: 'same-origin' }).then(r => r.ok ? r.json() : null).catch(() => null),
+        // Optional: older servers answer 404 and the sheet simply has no timeline.
+        fetch('/api/profile/fact/' + encodeURIComponent(item.key) + '/history', { credentials: 'same-origin' })
+          .then(r => r.ok ? r.json() : null).catch(() => null)]);
+      const periods = (history?.entries || []).filter(e => e && e.valid_from).slice(0, 5);
+      const period = e => e.status === 'forgotten' ? `${t('forgottenOn')} · ${short(e.valid_from)}`
+        : e.status === 'replaced' ? `${t('replacedOn')} · ${short(e.valid_from)}`
+        : e.valid_to ? `${monthYear(e.valid_from)} – ${monthYear(e.valid_to)}` : `${monthYear(e.valid_from)} – ${t('now')}`;
+      const worth = e => {
+        const v = e.value;
+        if (v && typeof v === 'object') for (const f of ['amount', 'balance', 'total', 'value'])
+          if (isNum(v[f]) && typeof v.currency === 'string') return money(v[f], v.currency);
+        return e.status === 'forgotten' || e.status === 'replaced' ? '' : String(e.text || '').replace(/ (since|from) .*$/, '');
+      };
       const draw = () => {
         const line = (k, v, mono) => h('div', { class: 'line' }, h('span', { class: 'k', text: k }),
           h('span', { class: 'v', style: mono ? null : { fontFamily: 'var(--sans)' }, text: v }));
@@ -538,6 +556,7 @@
           h('button', { class: 'txt close', type: 'button', text: t('close'), onclick: () => sheet.close() }),
           h('p', { class: 'say', id: 'sheet-title' }, sentence(item.text, item.emphasis)),
           statement && ['ready', 'partial'].includes(ov.status) ? [renderHoldings(ov, draw), h('h4', { text: t('source') })] : null,
+          periods.length > 1 ? [h('div', { class: 'ticket' }, periods.map(e => line(period(e), worth(e), true))), h('h4', { text: t('source') })] : null,
           h('div', { class: 'ticket' },
             line(t('source'), [t('src_' + (src.label || 'derived')), src.ref && src.label === 'document' ? src.ref : null].filter(Boolean).join(' · ')),
             src.observed_on ? line(t('recorded'), day(src.observed_on), true) : null,
@@ -592,17 +611,48 @@
         ov.unconfirmed ? h('div', { class: 'quiet', text: t('unconfirmedHoldings') }) : null);
     }
 
+    // A stored contradiction is answered through its own endpoint; without it (older server, or a
+    // stated figure kept in a legacy list) the same three answers go through the fact endpoints.
+    async function resolve(c, choice, fallback) {
+      if (!writes) { say(t('writesOff')); return; }
+      if (c.contradiction_id) {
+        const response = await fetch('/api/profile/contradictions/' + encodeURIComponent(c.contradiction_id), {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json', 'X-Wealth-Token': token },
+          body: JSON.stringify({ choice, ...(choice === 'changed' && c.as_of ? { valid_from: c.as_of } : {}),
+            expected_revision: data?.client?.revision ?? null })
+        }).catch(() => null);
+        if (response && response.ok) {
+          const body = await response.json().catch(() => ({}));
+          if (body?.profile?.version) data = body.profile; else await load();
+          editing = null; render(); say(t(choice === 'keep' ? 'confirmed' : 'saved'));
+          return;
+        }
+        if (response && ![404, 405, 501].includes(response.status)) {
+          const body = await response.json().catch(() => ({}));
+          if (response.status === 409) { await load(); say(t('conflict')); } else say(body.error || t('loadError'));
+          return;
+        }
+      }
+      if (fallback) fallback(); else say(t('notHere'));
+    }
     function renderConflict(c) {
       const id = 'conflict-' + c.id;
+      const origin = c.institution ? t('diffOrigin', { i: c.institution, d: c.as_of ? short(c.as_of) : '' })
+        : t('newOrigin', { d: c.as_of ? short(c.as_of) : '' });
+      const useIt = c.use_statement ? () => act(c.key, 'edit', c.use_statement.field,
+        editValue({ kind: 'amount', wrap: c.use_statement.wrap }, c.use_statement.amount, c.use_statement.currency)) : null;
+      const openEdit = c.edit ? () => { editing = id; render(); } : null;
       const body = editing === id && c.edit
         ? editor({ ...c, id, forget: null }, c.edit, { allowForget: false })
         : h('div', { class: 'acts' },
-            c.use_statement ? h('button', { class: 'txt act', type: 'button', text: t('useStatement'),
-              onclick: () => act(c.key, 'edit', c.use_statement.field, editValue({ kind: 'amount', wrap: c.use_statement.wrap }, c.use_statement.amount, c.use_statement.currency)) }) : null,
-            h('button', { class: 'txt', type: 'button', text: t('keepMine'), onclick: () => act(c.key, 'confirm') }),
-            c.edit ? h('button', { class: 'txt', type: 'button', text: t('itChanged'), onclick: () => { editing = id; render(); } }) : null);
-      return h('section', { class: 'card', 'aria-label': t('diffOrigin', { i: c.institution || '', d: c.as_of ? short(c.as_of) : '' }) },
-        h('p', { class: 'origin', text: t('diffOrigin', { i: c.institution || '', d: c.as_of ? short(c.as_of) : '' }) }),
+            c.use_statement || c.contradiction_id ? h('button', { class: 'txt act', type: 'button',
+              text: t(c.institution ? 'useStatement' : 'useNew'), onclick: () => resolve(c, 'use_new', useIt) }) : null,
+            h('button', { class: 'txt', type: 'button', text: t('keepMine'), onclick: () => resolve(c, 'keep', () => act(c.key, 'confirm', c.edit?.field)) }),
+            c.edit || c.contradiction_id ? h('button', { class: 'txt', type: 'button', text: t('itChanged'),
+              onclick: () => c.contradiction_id ? resolve(c, 'changed', openEdit) : openEdit() }) : null);
+      return h('section', { class: 'card', 'aria-label': origin },
+        h('p', { class: 'origin', text: origin }),
         h('p', { class: 'say', 'data-say': id }, sentence(c.text, c.emphasis)),
         writes ? body : null);
     }
@@ -646,8 +696,9 @@
 
     function renderUnknown(missing, known) {
       if (!missing || !missing.length || !known) return null;
-      const parts = missing.slice(0, 3).map(k => t('m_' + k));
-      if (missing.length > 3) parts.push(t('more', { n: num(missing.length - 3) }));
+      const cut = missing.length > 4 ? 3 : missing.length;  // never "one more thing": name it
+      const parts = missing.slice(0, cut).map(k => t('m_' + k));
+      if (missing.length > cut) parts.push(t('more', { n: num(missing.length - cut) }));
       const joined = parts.length > 1 ? parts.slice(0, -1).join(', ') + t('and') + parts[parts.length - 1] : parts[0];
       return h('div', { class: 'unknown' }, h('p', { class: 'say', text: t('unknownLead', { x: joined }) }),
         h('div', { class: 'acts' }, h('a', { class: 'txt act', href: '/?draft=accounts', text: t('tell') })));
@@ -665,7 +716,7 @@
       return h('section', { class: 'part', 'aria-labelledby': 'up-h' },
         h('h2', { id: 'up-h', text: t('comingUp') }),
         h('ul', { class: 'upcoming' }, items.slice(0, 5).map(i => h('li', {},
-          h('time', { datetime: i.date || '', text: i.date ? short(i.date) : '' }),
+          h('time', { datetime: i.date || '', text: i.date ? railDate(i.date) : '' }),
           h('div', {}, h('div', { text: i.type === 'review' && String(i.key || '').startsWith('account.') ? t('statementOf', { i: String(i.label).split(' · ')[0] }) : String(i.label) }),
             h('div', { class: 'quiet', text: t('up_' + i.type) }))))));
     }

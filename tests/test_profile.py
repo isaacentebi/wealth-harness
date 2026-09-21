@@ -347,3 +347,167 @@ def test_form_merges_and_skips_blanks(tmp_path):
     assert form_facts(service.inspect("mx"), {"income": None}) == []
     with pytest.raises(ValueError):
         form_facts(service.inspect("mx"), {"salary": 1})
+
+
+# ------------------------------------------------------------------ memory as sentences
+
+def _live(tmp_path, facts=None, statement=True):
+    """The 2026-09-21 live session (legacy shapes) plus a confirmed GBM statement."""
+    import os
+    from tests.fixtures.ingest import statements
+    from tests.test_situation import LIVE, _client
+    from wealth.service import upload_dir
+    service = _client(tmp_path, LIVE if facts is None else facts)
+    if statement:
+        os.environ.pop("WEALTH_UPLOAD_DIR", None)
+        folder = upload_dir("ana", service.db_path)
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "gbm.pdf").write_bytes(statements.gbm_multicurrency())
+        proposal = service.ingest("ana", "file", {"path": "gbm.pdf"})
+        service.ingest("ana", "confirm", {"proposal_id": proposal["result"]["proposal_id"]})
+    return service
+
+
+def _spans(item):
+    return [item["text"][a:b] for a, b in item["emphasis"]]
+
+
+def test_memory_reads_as_grouped_sentences_with_quiet_origins(tmp_path, monkeypatch):
+    monkeypatch.delenv("WEALTH_UPLOAD_DIR", raising=False)
+    view = profile_view(_live(tmp_path), "ana", language="es")
+    assert set(view["memory"]) == {"language", "es"} and view["memory"]["language"] == "es"
+    memory = view["memory"]["es"]
+    groups = {g["id"]: g for g in memory["groups"]}
+    assert list(groups) == ["money_in", "money_out", "own", "owe", "goals", "invest", "about"]
+    assert groups["money_in"]["summary"]["text"] == "Te sobran unos $40,000 al mes, sin contar el pago del coche."
+    assert _spans(groups["money_in"]["summary"]) == ["$40,000"]
+    assert groups["owe"]["summary"]["text"] == "Aún no sé cuánto pagas del coche al mes."
+    assert groups["goals"]["summary"]["text"] == "Apartas $10,000 al mes para tus metas; te quedan $30,000 libres."
+    own = [f["text"] for f in groups["own"]["facts"]]
+    # One sentence per institution, whole pesos, no parenthetical dates, no difference sentence.
+    assert own == ["Tienes $150,000 en efectivo en Nu.", "En GBM tienes $217,837 y $1,000 USD en tu cuenta de inversión."]
+    gbm = groups["own"]["facts"][1]
+    assert _spans(gbm) == ["$217,837", "$1,000 USD"]
+    assert gbm["origin"] == {"kind": "statement", "institution": "GBM", "as_of": "2026-08-31"}
+    assert gbm["edit"] is None and gbm["forget"] is None  # statement values change with a statement
+    cash = groups["own"]["facts"][0]
+    assert cash["origin"] == {"kind": "said"} and cash["edit"] == {
+        "field": "cash:cash0", "kind": "amount", "amount": 150000, "currency": "MXN"}
+    assert [f["text"] for f in groups["invest"]["facts"]] == [
+        "Tu posición más grande es el Udibono 351122: 36% de lo que tienes invertido.",
+        "Tienes el S&P 500 dos veces: a través de CSPX y IVV."]
+    # The contradiction is one card, worded from the person's side, with the statement's figure ready.
+    (card,) = memory["conflicts"]
+    assert card["text"] == "Dijiste unos $200,000 en GBM; tu estado de cuenta dice $236,087."
+    assert card["use_statement"] == {"field": "investments:investment0", "amount": 236087, "currency": "MXN", "wrap": None}
+    assert memory["review"] == [] and "dependents" in memory["missing"]
+    en = profile_view(_live(tmp_path / "en"), "ana")["memory"]
+    assert set(en) == {"language", "en", "es"}
+    assert en["en"]["conflicts"][0]["text"] == "You said about $200,000 at GBM; your statement says $236,087."
+
+
+def test_memory_edits_and_forgets_legacy_items_in_place(tmp_path, monkeypatch):
+    monkeypatch.delenv("WEALTH_UPLOAD_DIR", raising=False)
+    service = _live(tmp_path)
+    memory = profile_view(service, "ana", language="en")["memory"]["en"]
+    cash = next(f for g in memory["groups"] for f in g["facts"] if f["text"].startswith("You have $150,000"))
+    snap = service.inspect("ana")
+    facts = fact_action(snap, cash["key"], "edit", field=cash["edit"]["field"], value={"amount": 160000, "currency": "MXN"})
+    service.remember("ana", facts, snap["client"]["revision"])
+    assert service.situation("ana")["cash"][0]["amount"] == 160000
+    # "Use the statement" rewrites only the stated GBM figure and retires the card.
+    card = profile_view(service, "ana", language="en")["memory"]["en"]["conflicts"][0]
+    use = card["use_statement"]
+    snap = service.inspect("ana")
+    service.remember("ana", fact_action(snap, card["key"], "edit", field=use["field"],
+                                        value={"amount": use["amount"], "currency": use["currency"]}),
+                     snap["client"]["revision"])
+    resources = service.inspect("ana", key="plan.resources")["facts"][0]["value"]
+    assert resources["investments"][0]["amount"] == 236087 and "approximate" not in resources["investments"][0]
+    assert resources["cash"][0]["amount"] == 160000 and resources["debts"][0]["balance"] == 60000
+    assert profile_view(service, "ana", language="en")["memory"]["en"]["conflicts"] == []
+    # Forget removes exactly one item.
+    debt = next(f for g in profile_view(service, "ana", language="en")["memory"]["en"]["groups"] for f in g["facts"]
+                if g["id"] == "owe")
+    snap = service.inspect("ana")
+    service.remember("ana", fact_action(snap, debt["key"], "delete", field=debt["forget"]["field"]),
+                     snap["client"]["revision"])
+    after = service.situation("ana")
+    assert after["liabilities"] == [] and after["cash"][0]["amount"] == 160000
+    with pytest.raises(LookupError):
+        fact_action(service.inspect("ana"), "plan.resources", "edit", field="debts:debt0", value={"amount": 1, "currency": "MXN"})
+
+
+def test_keeping_what_was_said_retires_the_card(tmp_path, monkeypatch):
+    monkeypatch.delenv("WEALTH_UPLOAD_DIR", raising=False)
+    service = _live(tmp_path)
+    card = profile_view(service, "ana", language="es")["memory"]["es"]["conflicts"][0]
+    snap = service.inspect("ana")
+    service.remember("ana", fact_action(snap, card["key"], "confirm", field=card["edit"]["field"]), snap["client"]["revision"])
+    assert profile_view(service, "ana", language="es")["memory"]["es"]["conflicts"] == []
+
+
+def test_goal_contribution_edits_keep_the_goal_shape(tmp_path):
+    from tests.test_situation import LIVE
+    service = _live(tmp_path, statement=False)
+    goal = next(f for g in profile_view(service, "ana", language="es")["memory"]["es"]["groups"]
+                for f in g["facts"] if g["id"] == "goals")
+    assert goal["edit"]["wrap"] == "monthly_contribution" and goal["edit"]["amount"] == 10000
+    snap = service.inspect("ana")
+    service.remember("ana", fact_action(snap, "goals", "edit", field=goal["edit"]["field"],
+                                        value={"monthly_contribution": 12000, "currency": "MXN"}),
+                     snap["client"]["revision"])
+    saved = service.inspect("ana", key="goals")["facts"][0]["value"][0]
+    assert saved["amount"] == 12000 and saved["frequency"] == "monthly" and saved["id"] == LIVE["goals"][0]["id"]
+    assert service.situation("ana")["goals"][0]["monthly_contribution"] == 12000
+
+
+def test_canonical_contradiction_uses_the_stored_record(tmp_path, monkeypatch):
+    from tests.test_situation import CANONICAL
+    monkeypatch.delenv("WEALTH_UPLOAD_DIR", raising=False)
+    service = _live(tmp_path, CANONICAL)
+    pending = service.contradictions("ana")["contradictions"]
+    memory = profile_view(service, "ana", language="es")["memory"]["es"]
+    assert pending, "the statement disagrees with the stated GBM figure by more than the tolerance"
+    (card,) = memory["conflicts"]
+    assert card["contradiction_id"] == pending[0]["id"] and card["key"] == "investment.gbm"
+    assert card["text"] == "Dijiste unos $200,000 en GBM; tu estado de cuenta dice $236,087."
+    spending = next(f for g in memory["groups"] for f in g["facts"] if g["id"] == "money_out")
+    assert spending["edit"] == {"field": "total", "kind": "amount", "amount": 45000, "currency": "MXN"}
+    snap = service.inspect("ana")
+    patch = fact_action(snap, "spending.monthly", "edit", field="total", value={"amount": 47000, "currency": "MXN"})
+    assert patch[0]["merge"] and patch[0]["value"] == {"total": 47000, "currency": "MXN", "approximate": False}
+
+
+def test_stale_facts_become_at_most_three_check_ins_and_since_needs_a_real_start(tmp_path):
+    service = WealthService(tmp_path / "w.db")
+    service.create("s", "S")
+    old = TODAY - timedelta(days=500)
+    facts = [{"key": f"cash.bank{i}", "value": {"amount": 1000 * (i + 1), "currency": "MXN", "institution": f"Banco {i}"},
+              "source": _src(observed=old), "confidence": "reported"} for i in range(4)]
+    start = (TODAY - timedelta(days=200)).replace(day=1).isoformat()
+    facts.append({"key": "income.salary", "value": {"amount": 85000, "currency": "MXN", "frequency": "monthly", "net": True},
+                  "source": _src(), "confidence": "reported", "valid_from": start})
+    service.remember("s", facts)
+    memory = profile_view(service, "s", language="es")["memory"]["es"]
+    assert len(memory["review"]) == 3 and all(i["confirm"] and i["stale"] for i in memory["review"])
+    own = next(g for g in memory["groups"] if g["id"] == "own")["facts"]
+    assert len(own) == 1 and own[0]["stale"]  # the fourth stays in its group, not duplicated
+    salary = next(g for g in memory["groups"] if g["id"] == "money_in")["facts"][0]
+    assert salary["since"] == start
+    assert own[0]["since"] is None  # valid_from defaults to when it was said: no "since"
+    # A guess is worded, marked as mine, and one tap confirms it.
+    service.remember("s", [{"key": "liability.card", "value": {"kind": "card", "balance": 12000, "currency": "MXN"},
+                            "source": _src("inference", ref="chat"), "confidence": "inferred"}],
+                     service.inspect("s")["client"]["revision"])
+    memory = profile_view(service, "s", language="es")["memory"]["es"]
+    guess = next(g for g in memory["groups"] if g["id"] == "owe")["facts"][0]
+    assert guess["text"] == "Te quedan $12,000 de la tarjeta de crédito."
+    assert guess["origin"] == {"kind": "guess"} and guess["unconfirmed"] and guess["confirm"]
+
+
+def test_empty_memory_has_no_groups(tmp_path):
+    service = WealthService(tmp_path / "w.db")
+    service.create("e", "E")
+    memory = profile_view(service, "e")["memory"]
+    assert memory["en"]["groups"] == [] and memory["es"]["conflicts"] == [] and memory["es"]["review"] == []

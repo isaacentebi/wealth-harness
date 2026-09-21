@@ -834,7 +834,7 @@ def performance(snapshot: dict, household_history: list[dict], today: date) -> d
     fact = next((facts[k] for k in ("performance.history", "portfolio.history") if k in facts
                  and isinstance(facts[k].get("value"), dict)), None)
     if fact is None:
-        snapshots = {row.get("value", {}).get("as_of") for row in household_history
+        snapshots = {(row.get("value") or {}).get("as_of") for row in household_history
                      if isinstance(row.get("value"), dict) and row["value"].get("as_of")}
         return {"status": "insufficient", "reason": "flows_unknown" if len(snapshots) >= 2 else "no_history",
                 "statements": len(snapshots)}
@@ -1096,6 +1096,32 @@ def _origin(sentence: dict, institutions: dict[str, str], observed: dict[str, An
     return origin
 
 
+def _held_back(sit: dict, snapshot: dict, language: str) -> list[dict]:
+    """Sentences for facts the model keeps out of the numbers (past review, or only a guess).
+
+    The situation never uses them, so it never words them; a relaxed copy of the
+    snapshot does, and each sentence is marked stale or unconfirmed so the page
+    asks about it instead of stating it.
+    """
+    stale, inferred = set(sit.get("stale") or []), set(sit.get("inferred") or [])
+    held = stale | inferred
+    if not held:
+        return []
+    relaxed = {**snapshot, "facts": [
+        {**f, "expires_on": None, "confidence": "reported"} if f.get("key") in held else f
+        for f in snapshot.get("facts") or []]}
+    try:
+        shadow = build_situation(relaxed, None, _as_date(sit.get("as_of")) or _today(None))
+    except Exception:  # a partial legacy shape the model cannot read yet; nothing to word
+        return []
+    shadow["meta"] = {**shadow.get("meta", {}), **{k: v for k, v in (sit.get("meta") or {}).items() if k in held}}
+    out = []
+    for s in sentences(shadow, language):
+        if s["key"] in held and s.get("kind") != "difference" and not s.get("readonly"):
+            out.append({**s, "stale": s["key"] in stale, "unconfirmed": s["key"] in inferred})
+    return out
+
+
 def memory_view(sit: dict, snapshot: dict, language: str, missing: Iterable[str] = ()) -> dict:
     """Sentences grouped by life area, the stated-vs-statement cards and at most three check-ins."""
     facts = {f["key"]: f for f in snapshot.get("facts") or [] if f.get("value") is not None}
@@ -1103,15 +1129,16 @@ def memory_view(sit: dict, snapshot: dict, language: str, missing: Iterable[str]
     institutions = {a["key"]: a.get("institution") for a in sit["accounts"] if a.get("key") and a.get("institution")}
     observed = {k: m.get("observed_on") for k, m in meta.items()}
     heads = summaries(sit, language)
-    items, conflicts = [], []
-    for index, s in enumerate(sentences(sit, language)):
+    items, conflicts, answered = [], [], set()
+    records = [c for c in sit.get("contradictions") or [] if c.get("status", "pending") == "pending"]
+    for index, s in enumerate(sentences(sit, language) + _held_back(sit, snapshot, language)):
         fact = facts.get(s["key"] or "")
         ref = s.get("ref")
         editable = not s.get("readonly")
         item = {
             "id": f"{s['topic']}-{index}", "topic": s["topic"], "text": s["text"], "emphasis": s["emphasis"],
             "key": s["key"] if fact else None, "origin": _origin(s, institutions, observed),
-            "since": s.get("since"), "age_days": s.get("age_days"),
+            "since": s.get("since") or _valid_since(meta.get(s["key"] or "", {})), "age_days": s.get("age_days"),
             "unconfirmed": s["unconfirmed"], "stale": s["stale"],
             "edit": _edit_spec(fact, ref) if fact and editable else None,
             "forget": _forget_spec(fact, ref, s) if fact else None,
@@ -1119,11 +1146,19 @@ def memory_view(sit: dict, snapshot: dict, language: str, missing: Iterable[str]
                             and not s["key"].startswith("account.") and s["key"] not in _MARKET_VALUED),
         }
         if s.get("kind") == "difference":
-            conflict = _conflict(item, s, sit, meta)
+            record = next((c for c in records if c["key"] == item["key"]), None)
+            conflict = _conflict(item, s, sit, facts, record)
             if conflict:
                 conflicts.append(conflict)
+                answered.add(item["key"])
             continue
         items.append(item)
+    # Contradiction records the sentences did not already word (a document or pattern vs what was said).
+    for record in records:
+        if record["key"] not in answered:
+            card = _record_card(record, language, facts)
+            if card:
+                conflicts.append(card)
     review = [i for i in items if i["stale"] and (i["confirm"] or i["edit"])][:_REVIEW_MAX]
     in_review = {i["id"] for i in review}
     groups = []
@@ -1134,24 +1169,90 @@ def memory_view(sit: dict, snapshot: dict, language: str, missing: Iterable[str]
     return {"groups": groups, "conflicts": conflicts, "review": review, "missing": list(missing)}
 
 
-def _conflict(item: dict, sentence: dict, sit: dict, meta: dict) -> dict | None:
+def _valid_since(meta: dict) -> str | None:
+    """'since March 2026' only when the person said when it became true (not merely when they told us)."""
+    start, told = meta.get("valid_from"), meta.get("observed_on")
+    if meta.get("source") != "user" or not isinstance(start, str) or not isinstance(told, str):
+        return None
+    return start[:10] if start[:7] < told[:7] else None
+
+
+_WHERE = {"es": {"document": "tu estado de cuenta", "pattern": "tus movimientos", "connector": "tu cuenta conectada",
+                 "web": "una página web", "inference": "mi lectura", "tool": "un cálculo"},
+          "en": {"document": "your statement", "pattern": "your transactions", "connector": "your connected account",
+                 "web": "a web page", "inference": "my reading", "tool": "a calculation"}}
+_TOPIC = {"es": {"income.": "tu ingreso", "cash.": "tu efectivo", "investment.": "lo que tienes invertido",
+                 "liability.": "tu deuda", "spending.": "tu gasto al mes"},
+          "en": {"income.": "your income", "cash.": "your cash", "investment.": "what you have invested",
+                 "liability.": "your debt", "spending.": "your monthly spending"}}
+
+
+def _plain_amount(value: Any) -> tuple[Any, Any] | None:
+    if isinstance(value, dict):
+        for field in ("amount", "balance", "total", "value"):
+            if _num(value.get(field)) is not None and isinstance(value.get("currency"), str):
+                return _num(value[field]), value["currency"]
+    return None
+
+
+def _money_words(amount: float, currency: str, reporting: str | None) -> str:
+    whole = round(amount) if abs(amount) >= 1000 else amount
+    text = f"${whole:,.0f}" if float(whole).is_integer() else f"${whole:,.2f}"
+    return text + (f" {currency}" if currency != reporting else "")
+
+
+def _record_card(record: dict, language: str, facts: dict) -> dict | None:
+    """A stored contradiction (document, pattern, web) worded as one sentence, amounts only."""
+    mine, theirs = _plain_amount(record.get("current_value")), _plain_amount(record.get("proposed_value"))
+    topic = next((v for k, v in _TOPIC[language].items() if record["key"].startswith(k)), None)
+    if not mine or not theirs or not topic or record["key"] not in facts:
+        return None
+    es = language == "es"
+    where = _WHERE[language].get(((record.get("sources") or {}).get("proposed") or {}).get("kind"),
+                                 "otra fuente" if es else "another source")
+    a, b = _money_words(*mine, mine[1]), _money_words(*theirs, mine[1])
+    head = f"Me dijiste que {topic} es de " if es else f"You told me {topic} is "
+    mid = f"; {where} dice "
+    if not es:
+        mid = f"; {where} says "
+    text = head + a + mid + b + "."
+    text = text[:1].upper() + text[1:]
+    spans = [[len(head), len(head) + len(a)], [len(head) + len(a) + len(mid), len(head) + len(a) + len(mid) + len(b)]]
+    return {"id": f"contradiction-{record['id']}", "text": text, "emphasis": spans, "key": record["key"],
+            "contradiction_id": record["id"], "institution": None,
+            "as_of": (record.get("valid_from") or {}).get("proposed"),
+            "use_statement": None, "edit": _edit_spec(facts[record["key"]], None)}
+
+
+def _unanswered(fact: dict | None, ref: str | None, as_of: str | None) -> bool:
+    """A legacy stated item not yet kept, replaced or changed since the statement's date."""
+    if fact is None or not ref or ":" not in ref:
+        return fact is not None
+    try:
+        name, index, _ = _legacy_item(fact["key"], fact.get("value"), ref)
+    except LookupError:
+        return False
+    answered = fact["value"][name][index].get("confirmed_on")
+    return not (isinstance(answered, str) and answered >= str(as_of or ""))
+
+
+def _conflict(item: dict, sentence: dict, sit: dict, facts: dict, record: dict | None = None) -> dict | None:
     """A stated figure a newer statement disagrees with; gone once the person has answered it."""
     diff = next((d for d in sit["differences"] if d.get("statement") and d["key"] == item["key"]
                  and d.get("institution") == sentence.get("institution")), None)
     if diff is None or item["key"] is None:
         return None
-    statement_keys = [a["key"] for a in sit["accounts"] if a.get("key") and a["source"] == "statement"
-                      and (a.get("institution") or "").lower() == (diff.get("institution") or "").lower()]
-    statement_rev = max((meta.get(k, {}).get("revision") or 0 for k in statement_keys), default=0)
-    stated_rev = meta.get(item["key"], {}).get("revision") or 0
-    if stated_rev > statement_rev:
-        return None  # answered after the statement arrived: kept, replaced or changed
+    if record is None and item["key"].startswith(("investment.", "cash.")):
+        return None  # the store asks about canonical balances itself; no record means nothing to ask
+    if record is None and not _unanswered(facts.get(item["key"]), sentence.get("ref"), diff.get("as_of")):
+        return None  # the person already kept, replaced or changed this figure
     edit = item["edit"]
     use = None
     if edit and diff.get("statement_value") is not None and diff.get("currency"):
         use = {"field": edit["field"], "amount": round(float(diff["statement_value"])), "currency": diff["currency"],
                "wrap": edit.get("wrap")}
     return {"id": item["id"], "text": item["text"], "emphasis": item["emphasis"], "key": item["key"],
+            "contradiction_id": record["id"] if record else None,
             "institution": diff.get("institution"), "as_of": diff.get("as_of"),
             "use_statement": use, "edit": edit}
 
@@ -1332,6 +1433,12 @@ def fact_action(snapshot: dict, key: str, action: str, *, field: str | None = No
         raise LookupError("no current fact with that key")
     current = fact["value"]
 
+    if action == "confirm" and key in _LEGACY_LISTS and field and ":" in field:
+        # One legacy item kept as the person said it (e.g. against a statement): mark that item only.
+        name, index, _ = _legacy_item(key, current, field)
+        items = list(current[name])
+        items[index] = {**items[index], "confirmed_on": today.isoformat()}
+        return [_user_fact(key, {**current, name: items}, "profile page: confirmed still true", today)]
     if action == "confirm":
         if key in _MARKET_VALUED or key.startswith(("analysis.", "research.")):
             raise ValueError("market values need a fresh statement or analysis, not a confirmation")
@@ -1359,7 +1466,8 @@ def fact_action(snapshot: dict, key: str, action: str, *, field: str | None = No
             return [_user_fact(key, {**current, name: items}, "profile page: item removed", today)]
         amount = _amount(value)
         item = {k: v for k, v in items[index].items() if k != "approximate"}  # the person just stated it
-        items[index] = {**item, amount_field: amount["amount"], "currency": amount["currency"]}
+        items[index] = {**item, amount_field: amount["amount"], "currency": amount["currency"],
+                        "confirmed_on": today.isoformat()}
         return [_user_fact(key, {**current, name: items}, "profile page edit", today)]
     if key == "goals":
         if not isinstance(current, list):
@@ -1368,11 +1476,12 @@ def fact_action(snapshot: dict, key: str, action: str, *, field: str | None = No
                          if isinstance(g, dict) and str(g.get("id", i)) == field), None)
         if position is None:
             raise LookupError("no goal with that id")
-        goals = list(current)
+        # Older goals had no name; the schema needs one on every rewrite, so give them their read name.
+        goals = [{**g, "name": goal_name(g)} if isinstance(g, dict) and not g.get("name") else g for g in current]
         if action == "delete":
             goals.pop(position)
             return [_user_fact(key, goals, "profile page: goal removed", today)]
-        goals[position] = _goal_patch(current[position], value)
+        goals[position] = _goal_patch(goals[position], value)
         return [_user_fact(key, goals, "profile page: goal edited", today)]
     if not isinstance(current, dict) or field not in current:
         raise LookupError("no such field on this fact")

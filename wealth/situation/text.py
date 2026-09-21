@@ -609,7 +609,9 @@ def summaries(sit: Mapping[str, Any], language: str | None = None) -> dict[str, 
     if len(debts) >= 2 and nw.get("liabilities") is not None:
         put("owe", "Debes {x} en total." if es else "You owe {x} in all.", x=money(nw["liabilities"]))
     elif len(debts) == 1 and debts[0]["missing"]:
-        put("owe", "Aún no sé cuánto pagas al mes." if es else "I don’t know your monthly payment yet.")
+        kind = debts[0]["kind"]
+        put("owe", f"Aún no sé cuánto pagas {_PAYMENT_ES.get(kind, _PAYMENT_ES['other'])} al mes." if es else
+            f"I don’t know your monthly {_PAYMENT_EN.get(kind, _PAYMENT_EN['other'])} payment yet.")
     elif len(debts) == 1 and debts[0]["payoff"].get("status") == "ready" and debts[0]["payoff"].get("date"):
         put("owe", "Terminas de pagar en {d}." if es else "It's paid off by {d}.",
             d=_Emph(_month_year(debts[0]["payoff"]["date"], lang)))
