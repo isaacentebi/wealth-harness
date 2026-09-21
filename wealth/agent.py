@@ -15,7 +15,7 @@ import subprocess
 import sys
 from typing import Iterable, Sequence
 
-from .behavior import ASSISTANT_CONTRACT, ONBOARDING_WELCOME
+from .behavior import INSTRUCTIONS_PATH, ONBOARDING_WELCOME
 from .service import WealthService, database_path
 from .store import (
     ClientExistsError,
@@ -78,7 +78,9 @@ def build_command(model: str, db_path: str | Path, *, web_search: bool = True, r
         "-c",
         'model_verbosity="low"',
         "-c",
-        f"developer_instructions={_toml(ASSISTANT_CONTRACT)}",
+        f"model_instructions_file={_toml(str(INSTRUCTIONS_PATH))}",
+        "-c",
+        "project_doc_max_bytes=0",
         "-C",
         str(project_root),
         "-c",

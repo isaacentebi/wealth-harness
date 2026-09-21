@@ -167,7 +167,7 @@ missing constituents produce partial coverage. Skill validation, that exposure
 probe, all 355 checks and package build passed.
 
 
-## Conversation refinement (2026-09-21)
+## Initial conversation refinement (2026-09-21; superseded below)
 
 The shared policy now asks the assistant to supply analytical expertise, select
 consequential findings, and learn personal context through useful work. Ownership
@@ -175,7 +175,7 @@ overlap, historical co-movement and economic exposure remain distinct. Ambiguous
 amounts still need clarification; they do not block unrelated research. Experience
 is not inferred from wealth or holding count.
 
-The launcher delivers this policy once through Codex developer instructions,
+This initial implementation delivered the policy through Codex developer instructions,
 instead of embedding it in the user message. Native verbosity defaults to low
 independently of the existing reasoning selector. Standalone MCP retains its
 policy. The command regression parses the TOML override and verifies deduplication.
@@ -198,3 +198,40 @@ private/agent-smoke; no real-client transcript was committed. Full regression
 suite: 355 passed. After the final wording edits, 12 agent/MCP checks passed;
 package build and skill validation passed. Local chat reload preserved the
 conversation, token and reasoning selection, verified through HTTP state.
+
+
+## Conversation delivery repair (2026-09-21)
+
+The initial developer override still inherited Codex's coding instructions and
+AGENTS guidance. The launcher now uses `model_instructions_file` with the packaged
+`wealth/instructions.md`, and `project_doc_max_bytes=0`. Standalone MCP reads the
+same file. Native web search and the reasoning selector are unchanged. The wheel
+was checked to contain the exact policy file.
+
+Ordinary chat has a soft brevity and paragraph-format default; explicit requests
+for technical detail retain full explanations. The policy demonstrates literal
+financial language, requires selecting decisive evidence, and retains unanswered
+personal details as unknown instead of guessing or repeatedly asking. A single
+illustration demonstrates synthesis; it contains no ticker-specific rule. No
+response truncation, phrase replacement, secondary editing model or onboarding
+state machine was added.
+
+Real Sol/low checks used isolated fictional profiles:
+
+- `conversation-final.txt`: the same mixed portfolio/Micron question produced
+  236 words in three connected paragraphs, versus roughly 580 in the earlier
+  failed attempt. It retained reserved cash, indirect ownership and valuation
+  uncertainty, without headings, bullet breakdowns, risk-statistic appendices or
+  figurative allocation labels. It ended with a relevant funding question.
+- `ack-final.txt`: a hesitant "mm" after an unresolved amount question produced
+  an 11-word acknowledgment, keeping the amount unknown without another question.
+- `depth-final.txt`: an explicit request for technical explanation produced
+  1,987 words with equations, estimation choices and limitations.
+- `conversation-transfer.txt`: a different Apple/VTI example surfaced indirect
+  ownership proactively without declaring the allocation unsuitable. This probe
+  preceded the final paragraph-format refinement.
+
+Outputs are in ignored `private/agent-smoke`; no real-client transcript is
+committed. These checks establish observed improvements, not a universal style
+guarantee or independent verification of every live market claim. Full suite:
+355 passed; final agent/MCP checks: 12 passed. Skill validation and build passed.

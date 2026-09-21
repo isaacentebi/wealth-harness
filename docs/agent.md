@@ -18,8 +18,10 @@ reasoning selector. Low is the default; the chosen level applies to the next mes
 persist across restarts; the visible transcript lasts for the server session.
 The launcher also sets low response verbosity, independently of reasoning effort.
 Ask for a detailed explanation when you want one; this is not a word limit.
-The shared conversation policy is delivered once as developer instructions;
-personal context and the current request remain in the turn prompt.
+The shared policy in `wealth/instructions.md` replaces the launcher’s built-in
+coding instructions. Inherited AGENTS files are disabled for this financial
+assistant. Standalone Wealth MCP reads the same policy; the launcher omits the
+duplicate MCP copy. Personal context and the request remain in the turn prompt.
 The server binds only to localhost and validates request origins and a session
 token. It is a local personal interface, not a hosted multi-user application.
 
@@ -118,8 +120,10 @@ Official references:
 ## Prompt delivery
 
 Each instance serves one person; the profile ID is an internal tool argument.
-The launcher includes the shared behavior contract once in its turn prompt and
-sets `WEALTH_BEHAVIOR_IN_HOST=1` on its MCP subprocess to omit the duplicate.
+The launcher supplies `wealth/instructions.md` through `model_instructions_file`,
+replacing Codex’s coding instructions. `project_doc_max_bytes=0` prevents inherited
+AGENTS instructions. It sets `WEALTH_BEHAVIOR_IN_HOST=1` on its MCP subprocess
+to omit the duplicate contract. These overrides preserve the existing Codex login.
 A standalone MCP server still supplies that contract by default.
 
 Task schemas come from `wealth_context(intent=task)` without a profile ID.

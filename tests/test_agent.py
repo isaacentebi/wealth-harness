@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import tomllib
 
 import pytest
 
@@ -258,13 +260,15 @@ def test_launcher_supplies_behavior_once_and_preserves_standalone_mcp_contract(t
     command = agent.build_command("sol", tmp_path / "db")
     assert 'mcp_servers.wealth.env.WEALTH_BEHAVIOR_IN_HOST="1"' in command
     prompt = agent.build_prompt("hello", "profile")
-    import tomllib
-    policies = [tomllib.loads(value)["developer_instructions"] for value in command
-                if value.startswith("developer_instructions=")]
-    assert policies == [ASSISTANT_CONTRACT]
+    paths = [tomllib.loads(value)["model_instructions_file"] for value in command
+             if value.startswith("model_instructions_file=")]
+    assert len(paths) == 1
+    assert Path(paths[0]).read_text(encoding="utf-8") == ASSISTANT_CONTRACT
+    assert "project_doc_max_bytes=0" in command
+    assert not any(value.startswith("developer_instructions=") for value in command)
     assert ASSISTANT_CONTRACT not in prompt
     assert 'model_verbosity="low"' in command
     assert ASSISTANT_CONTRACT not in build_server(include_behavior=False).instructions
     assert ASSISTANT_CONTRACT in build_server().instructions
     assert "This instance serves one person" in prompt
-    assert "WITHOUT client_id" in policies[0]
+    assert "WITHOUT client_id" in ASSISTANT_CONTRACT
