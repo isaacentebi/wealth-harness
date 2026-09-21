@@ -246,3 +246,65 @@ def test_friendly_names_and_memory_labels():
     assert web.friendly_name("fictional-demo", "Fictional Wealth Demo") == "Fictional Wealth Demo"
     assert web.memory_label("plan.resources") == "Planning resources"
     assert web.memory_label("constraint.no_leverage") == "Constraint: no leverage"
+
+
+def _page() -> str:
+    from pathlib import Path
+    return Path(web.__file__).with_name("chat.html").read_text(encoding="utf-8")
+
+
+def test_page_citations_presence_and_send_markup():
+    import re
+    page = _page()
+    # Citations open their sources in a new tab without an opener or referrer, and only for http(s).
+    assert page.count("a.rel = 'noopener noreferrer'") >= 2
+    assert "url.protocol === 'http:' || url.protocol === 'https:'" in page
+    assert "el('ol', 'sources')" in page
+    assert "'role', 'button'" in page and "aria-expanded" in page and "aria-controls" in page
+    # The 44px hit area of a citation mark comes from padding, given back by negative margins.
+    assert re.search(r"\.answer a\.cite \{[^}]*padding: 15px 16px", page)
+    # Presence is drawn on a whole-pixel 24 grid; only the cobalt element moves, and reduced motion stops it.
+    assert "viewBox', '0 0 24 24'" in page and "viewBox', '0 0 40 40'" not in page
+    assert "@keyframes feed" in page and "prefers-reduced-motion: reduce" in page
+    # Disabled send: no blush fill, a hairline drawn with box-shadow so nothing shifts.
+    disabled = re.search(r"\.send:disabled \{([^}]*)\}", page).group(1)
+    assert "blush" not in disabled and "box-shadow: inset 0 0 0 1px var(--hairline)" in disabled
+    assert "Guardado" in page and "'Recordado'" not in page
+
+
+def _run_page_js(snippet: str):
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    page = _page()
+    strings = page[page.index("    const STRINGS = {"):page.index("    function localizeChrome()")]
+    memory = page[page.index("    const LABEL_KEYS = ["):page.index("    // ------------------------------------------------------------------ citations")]
+    script = ("globalThis.navigator = { language: 'en-US' };\n" + strings + memory
+              + f"\nprocess.stdout.write(JSON.stringify({snippet}));")
+    out = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=20, check=True)
+    return json.loads(out.stdout)
+
+
+def test_memory_line_reads_naturally_and_localises():
+    keys = json.dumps(["account.gbm-4321", "account.gbm-8890", "liability.car_loan", "thread.continuity", "goals"])
+    data = json.dumps({"event": {"institutions": {"gbm-4321": "GBM", "gbm-8890": "GBM"}}})
+    en, es, bare, labels, only_thread, named = _run_page_js(
+        f"[memoryPhrase({keys}, 'en', {data}), memoryPhrase({keys}, 'es', {data}), memoryPhrase({keys}, 'en'),"
+        " memoryPhrase(['Account gbm 4321', 'Liability car loan', 'Income schedule', 'Thread continuity', 'Goals'], 'es'),"
+        " memoryPhrase(['thread.continuity'], 'en'),"
+        " memoryPhrase([{key: 'account.x1', institution: 'Banorte'}, {key: 'goals', label: 'Casa en 2028'}], 'en')]")
+    assert en == "Remembered: GBM accounts, debts, and goals"
+    assert es == "Guardado: cuentas de GBM, deudas y metas"
+    assert bare == "Remembered: statement accounts, debts, and goals"
+    assert labels == "Guardado: cuenta del estado de cuenta, deudas, ingresos y metas"
+    assert only_thread == ""
+    assert named == "Remembered: Banorte account and Casa en 2028"
+
+
+def test_turn_language_follows_the_conversation():
+    result = _run_page_js(
+        "[languageOf('¿Cuánto me cuesta mi cuenta de GBM?'), languageOf('Revisa mi asignación'),"
+        " languageOf('How much does my GBM account cost?'), languageOf('ok'), languageOf('GBM 4321')]")
+    assert result == ["es", "es", "en", "en", "en"]

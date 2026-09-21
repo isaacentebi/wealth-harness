@@ -230,6 +230,7 @@
     .answer th:last-child, .answer td:last-child { padding-right: 0; }
     .answer td:first-child, .answer th:first-child { white-space: normal; min-width: 7rem; }
     .answer tbody tr:last-child td { border-bottom: 0; }
+    .answer td:has(a) { white-space: normal; min-width: 6rem; }   /* a linked reference wraps instead of clipping */
     .answer th {
       padding-top: 0;
       padding-bottom: 8px;
@@ -266,6 +267,54 @@
       font-size: 13px;
     }
 
+    /* Citations: a quiet numbered mark in the text; the sources themselves open under the message. */
+    .answer a.cite {
+      position: relative;
+      padding: 15px 16px;          /* 44px hit area around a 12px numeral; margins give the space back */
+      margin: 0 -14px 0 -15px;
+      color: var(--muted);
+      font: 500 11px/1 var(--sans);
+      font-variant-numeric: tabular-nums;
+      vertical-align: super;
+      text-decoration: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .answer a.cite:hover, .answer a.cite[aria-expanded="true"] { color: var(--ink); }
+    .answer a.cite:focus-visible { outline: none; }
+    .answer a.cite:focus-visible::after {
+      content: ""; position: absolute; inset: 11px 12px; border-radius: 4px; outline: 2px solid var(--ink);
+    }
+
+    .sources {
+      margin: 16px 0 0;
+      padding: 0;
+      list-style: none;
+      border-top: 1px solid var(--hairline);
+      counter-reset: source;
+    }
+    .sources[hidden] { display: none; }
+    .sources li { counter-increment: source; border-bottom: 1px solid var(--hairline); }
+    .sources a {
+      display: grid;
+      grid-template-columns: 24px minmax(0, 1fr);
+      column-gap: 8px;
+      min-height: 44px;
+      padding: 10px 0;
+      color: var(--ink);
+      text-decoration: none;
+    }
+    .sources a::before {
+      content: counter(source);
+      grid-row: span 2;
+      color: var(--muted);
+      font: 500 12px/20px var(--mono);
+      font-variant-numeric: tabular-nums;
+    }
+    .sources li.current a::before { color: var(--ink); }
+    .sources .domain { color: var(--muted); font: 400 12px/20px var(--mono); overflow-wrap: anywhere; }
+    .sources .title { font-size: 15px; line-height: 20px; overflow-wrap: anywhere; }
+    .sources a:hover .title { text-decoration: underline; text-decoration-color: var(--hairline); text-underline-offset: 3px; }
+
     .attachments { display: flex; flex-wrap: wrap; gap: 8px; }
     .message.user .attachments { justify-content: flex-end; margin-bottom: 8px; }
 
@@ -297,7 +346,9 @@
     /* ---------- presence and worktrace ---------- */
 
     .presence { display: block; flex: none; width: 24px; height: 24px; }
-    .presence .live { animation: seam 1.6s ease-in-out infinite; }
+    /* Only the cobalt live element moves: the channel feeds the housing, the seam breathes. */
+    .presence .channel { transform-box: fill-box; transform-origin: 0 50%; animation: feed 1.2s cubic-bezier(.45, 0, .25, 1) infinite alternate; }
+    .presence .seam { animation: seam 1.8s ease-in-out infinite; }
 
     /* Same 24px line box as the answer's first line, so nothing moves when the answer replaces it. */
     .worktrace {
@@ -476,7 +527,8 @@
       flex: none;
     }
     .send:hover:not(:disabled), .send:active:not(:disabled) { background: var(--pressed); }
-    .send:disabled { background: var(--blush); color: var(--surface); cursor: default; }
+    /* Disabled: the same 44px square, drawn as a hairline with a quiet arrow. Box-shadow, so nothing shifts. */
+    .send:disabled { background: transparent; box-shadow: inset 0 0 0 1px var(--hairline); color: var(--muted); cursor: default; }
     .send .stop-icon { display: none; }
     .send.stopping .stop-icon { display: block; }
     .send.stopping .send-icon { display: none; }
@@ -501,7 +553,8 @@
     .fatal code { font: .9em var(--mono); }
 
     @keyframes arrive { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
-    @keyframes seam { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+    @keyframes seam { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
+    @keyframes feed { from { transform: scaleX(.3); } to { transform: scaleX(1); } }
 
     @media (min-width: 768px) {
       .conversation .column { padding-top: 48px; }
@@ -592,6 +645,13 @@
         webOn: 'Web search is on.', webOff: 'Web search is off.',
         working: 'Working on it', inProgress: 'Response in progress', stopping: 'Stopping…',
         remembered: 'Remembered', attachedOnly: 'I’ve attached a file.',
+        source: 'Source', sources: 'Sources',
+        memory: {
+          account: (name, n) => name ? `${name} account${n > 1 ? 's' : ''}` : `statement account${n > 1 ? 's' : ''}`,
+          debts: 'debts', income: 'income', goals: 'goals', profile: 'profile', plan: 'planning resources',
+          holdings: 'holdings', portfolio: 'portfolio', preferences: 'preferences', constraints: 'constraints',
+          decisions: 'decisions'
+        },
         retry: 'Retry', askAgain: 'Ask again', details: 'Details', uploading: 'Uploading…',
         badType: 'Use PDF, CSV or image', tooBig: 'Over 25 MB', empty: 'Empty file', uploadFailed: 'Upload failed',
         remove: name => `Remove ${name}`,
@@ -616,7 +676,14 @@
         privacyText: 'La memoria y los adjuntos se guardan en esta computadora. Los mensajes y el contexto seleccionado se envían al proveedor del modelo; la investigación usa servicios externos de búsqueda y datos de mercado.',
         webOn: 'La búsqueda web está activada.', webOff: 'La búsqueda web está desactivada.',
         working: 'Trabajando en ello', inProgress: 'Respuesta en curso', stopping: 'Deteniendo…',
-        remembered: 'Recordado', attachedOnly: 'Adjunté un archivo.',
+        remembered: 'Guardado', attachedOnly: 'Adjunté un archivo.',
+        source: 'Fuente', sources: 'Fuentes',
+        memory: {
+          account: (name, n) => `${n > 1 ? 'cuentas' : 'cuenta'} ${name ? `de ${name}` : 'del estado de cuenta'}`,
+          debts: 'deudas', income: 'ingresos', goals: 'metas', profile: 'perfil', plan: 'recursos del plan',
+          holdings: 'posiciones', portfolio: 'portafolio', preferences: 'preferencias', constraints: 'restricciones',
+          decisions: 'decisiones'
+        },
         retry: 'Reintentar', askAgain: 'Preguntar de nuevo', details: 'Detalles', uploading: 'Subiendo…',
         badType: 'Usa PDF, CSV o imagen', tooBig: 'Más de 25 MB', empty: 'Archivo vacío', uploadFailed: 'No se pudo subir',
         remove: name => `Quitar ${name}`,
@@ -672,7 +739,26 @@
     };
     const LANG = /^es\b/i.test(navigator.language || '') ? 'es' : 'en';
     const T = STRINGS[LANG];
-    const stepText = text => T.steps[text] || text;
+    const stepText = (text, lang = LANG) => STRINGS[lang].steps[text] || text;
+
+    // The chrome follows the browser, but a turn's progress steps, citations and memory line follow the
+    // language the person is writing in: two or more telltale tokens (stopwords or accented words) decide it.
+    const ES_WORDS = new Set(('de la el los las del que se por para con sin una unos unas mi mis tu tus su sus es está están '
+      + 'estoy tengo tiene tienes quiero puedo debo debería conviene cómo como qué cuál cuánto cuánta cuántos mejor pero '
+      + 'porque también muy más ya hay sí y al lo le les nos este esta esto estos estas ese esa mes año años pesos '
+      + 'cuenta cuentas invertir ahorro ahorrar hola gracias').split(' '));
+    const EN_WORDS = new Set(('the and is are my i you your what how should would could of to in for with do does can it '
+      + 'this that have has me we our about much many which when').split(' '));
+    function languageOf(text) {
+      const raw = String(text || '');
+      const tokens = raw.toLowerCase().match(/\p{L}+/gu) || [];
+      const es = tokens.filter(t => ES_WORDS.has(t) || /[áéíóúñü]/.test(t)).length + (/[¿¡]/.test(raw) ? 1 : 0);
+      const en = tokens.filter(t => EN_WORDS.has(t)).length;
+      if (es >= 2 && es > en) return 'es';
+      if (en >= 2 && es === 0) return 'en';
+      return LANG;
+    }
+    const tagLang = (node, lang) => { if (lang !== LANG) node.lang = lang === 'es' ? 'es-MX' : 'en'; return node; };
     const errorText = error => (LANG === 'es' && T.errors[error.kind]) || error.message || T.errors[error.kind] || T.errors.other;
 
     function localizeChrome() {
@@ -693,59 +779,55 @@
 
     // ------------------------------------------------------------------ presence (Dot family, compact 24)
 
-    // Each state is drawn on the native 40-unit grid. Cobalt (class "live") appears only in live states.
-    const INK = '#2B2522', VERMILION = '#C84335', BLUSH = '#F4DED9', COBALT = '#4358C7', PAPER = '#FFFCF7';
-    const aperture = (x, y) => ['path', { d: `M${x} ${y + .6}l2.6-.6v2.4l-2.6.4z`, fill: PAPER }];
-    const trace = (d, stroke, extra = {}) => ['path', Object.assign({ d, fill: 'none', stroke, 'stroke-width': 1.5 }, extra)];
+    // Compact presence, redrawn on a 24-unit grid so every edge lands on a whole pixel at 1x and 2x.
+    // Essentials only: the ink housing with its aperture, the state's one vermilion plane, and a single
+    // cobalt element in live states (class "channel" or "seam": the only part that moves).
+    const INK = '#2B2522', VERMILION = '#C84335', COBALT = '#4358C7', PAPER = '#FFFCF7';
+    const housing = [['path', { d: 'M15 5l5-2v18l-5-2z', fill: INK }], ['rect', { x: 16.5, y: 10, width: 2, height: 3, fill: PAPER }]];
     const PRESENCE = {
+      // Shutters open: one vermilion shutter, a cobalt seam between it and the housing.
       listening: [
-        ['path', { d: 'M8 11l6 2.5v13L8 29z', fill: VERMILION }],
-        ['rect', { x: 15.5, y: 14, width: 3, height: 12, fill: BLUSH }],
-        ['rect', { x: 19.25, y: 13, width: 1.5, height: 14, fill: COBALT, class: 'live' }],
-        ['path', { d: 'M23 13.5l7-2.5v18l-7-2.5z', fill: INK }],
-        aperture(25.2, 18)
+        ['path', { d: 'M4 6l5 1.5v9L4 18z', fill: VERMILION }],
+        ['rect', { x: 11, y: 7, width: 2, height: 10, fill: COBALT, class: 'seam' }],
+        ...housing
       ],
+      // Traces align: two ink rails converge; the cobalt bend carries them into the housing.
       understanding: [
-        trace('M6 13h8l5 6.25M6 20h11M6 27h8l5-6.25', INK),
-        trace('M17 20h2l1.5-1.5L22 20', COBALT, { class: 'live' }),
-        ['path', { d: 'M23 10l6-1.5v23L23 30z', fill: INK }],
-        ['rect', { x: 29, y: 12, width: 4, height: 16, fill: VERMILION }],
-        aperture(24.8, 18)
+        ['path', { d: 'M3 8h4.5l3.5 3.5M3 16h4.5l3.5-3.5', fill: 'none', stroke: INK, 'stroke-width': 2 }],
+        ['rect', { x: 10, y: 11, width: 5, height: 2, fill: COBALT, class: 'seam' }],
+        ...housing
       ],
+      // Plates translate: two vermilion plates, a cobalt channel feeding the housing between them.
       working: [
-        ['rect', { x: 6, y: 10, width: 5, height: 8.5, fill: VERMILION }],
-        ['rect', { x: 6, y: 21.5, width: 5, height: 8.5, fill: VERMILION }],
-        ['rect', { x: 12, y: 10, width: 5, height: 20, fill: BLUSH }],
-        ['rect', { x: 6, y: 19.25, width: 17, height: 1.5, fill: COBALT, class: 'live' }],
-        ['rect', { x: 23, y: 9, width: 1.5, height: 22, fill: INK }],
-        ['path', { d: 'M26.5 10.5l6.5-2v23l-6.5-2z', fill: INK }],
-        aperture(28.6, 18)
+        ['rect', { x: 4, y: 5, width: 6, height: 5, fill: VERMILION }],
+        ['rect', { x: 4, y: 14, width: 6, height: 5, fill: VERMILION }],
+        ['rect', { x: 4, y: 11, width: 11, height: 2, fill: COBALT, class: 'channel' }],
+        ...housing
       ],
+      // Contour terrace: a vermilion contour holds the housing; the cobalt newest edge inside it.
       remembering: [
-        ['rect', { x: 4.75, y: 4.75, width: 30.5, height: 30.5, fill: 'none', stroke: BLUSH, 'stroke-width': 1.5 }],
-        ['rect', { x: 9, y: 9, width: 22, height: 22, fill: 'none', stroke: VERMILION, 'stroke-width': 2 }],
-        ['rect', { x: 12, y: 12, width: 16, height: 16, fill: BLUSH }],
-        ['path', { d: 'M15.5 14.5l6-1.5v14l-6-1.5z', fill: INK }],
-        aperture(17, 18.2),
-        ['rect', { x: 24, y: 15.5, width: 1.5, height: 9, fill: COBALT, class: 'live' }]
+        ['rect', { x: 3, y: 3, width: 18, height: 18, fill: 'none', stroke: VERMILION, 'stroke-width': 2 }],
+        ['path', { d: 'M8 8l5-1.5v11L8 16z', fill: INK }],
+        ['rect', { x: 9.5, y: 10.5, width: 2, height: 2.5, fill: PAPER }],
+        ['rect', { x: 15, y: 8, width: 2, height: 8, fill: COBALT, class: 'seam' }]
       ],
+      // Route broke: the ink rail holds, the lower rail breaks in vermilion. No cobalt.
       exception: [
-        trace('M6 13.5h13M6 18h13', INK),
-        trace('M6 28.5h3M10.5 27.5l3-2M15 24.5l3-2', VERMILION),
-        ['path', { d: 'M22 11.5l7-3v23l-7-3z', fill: INK }],
-        aperture(24.2, 18.6)
+        ['path', { d: 'M2 9h10', fill: 'none', stroke: INK, 'stroke-width': 2 }],
+        ['path', { d: 'M2 18h2.5M6 17l2-1.5M9.5 14.5l2-1.5', fill: 'none', stroke: VERMILION, 'stroke-width': 2 }],
+        ...housing
       ],
+      // Closed housing: settled, no aperture, no cobalt.
       quiet: [
-        ['rect', { x: 8, y: 11.5, width: 13, height: 17, fill: INK }],
-        ['rect', { x: 22.5, y: 12.5, width: 2, height: 15, fill: INK }],
-        ['path', { d: 'M26 14l5 1.5v9L26 26z', fill: BLUSH }]
+        ['rect', { x: 5, y: 5, width: 10, height: 14, fill: INK }],
+        ['rect', { x: 16, y: 6, width: 2, height: 12, fill: INK }]
       ]
     };
 
     function presence(state) {
       const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
       s.setAttribute('class', 'presence');
-      s.setAttribute('viewBox', '0 0 40 40');
+      s.setAttribute('viewBox', '0 0 24 24');
       s.setAttribute('aria-hidden', 'true');
       setPresence(s, state);
       return s;
@@ -833,7 +915,7 @@
       return a;
     }
 
-    const INLINE = /(`+)([^`]+?)\1|\*\*(?=\S)([\s\S]+?)\*\*|__(?=\S)([\s\S]+?)__|\[([^\]\n]+)\]\(\s*<?(https?:\/\/[^\s)>]+)>?\s*\)|(https?:\/\/[^\s<>()]+(?:\([^\s<>()]*\)[^\s<>()]*)*)|(?<![\w*])\*(?=\S)([^*\n]+?)\*(?![\w*])|(?<![\w_])_(?=\S)([^_\n]+?)_(?![\w_])/g;
+    const INLINE = /(`+)([^`]+?)\1|\*\*(?=\S)([\s\S]+?)\*\*|__(?=\S)([\s\S]+?)__|\[([^\]\n]+)\]\(\s*<?((?:[^\s()<>]|\([^\s()<>]*\))+)>?\s*\)|(https?:\/\/[^\s<>()]+(?:\([^\s<>()]*\)[^\s<>()]*)*)|(?<![\w*])\*(?=\S)([^*\n]+?)\*(?![\w*])|(?<![\w_])_(?=\S)([^_\n]+?)_(?![\w_])/g;
 
     function inline(parent, text) {
       let cursor = 0, match;
@@ -1073,6 +1155,241 @@
       }
     }
 
+    // ------------------------------------------------------------------ memory line
+
+    // Items arrive as raw keys ("account.gbm-4321"), as the server's mechanical labels ("Account gbm 4321"),
+    // or as objects {key, label, institution}. An explicit label wins; internal continuity notes never show.
+    const LABEL_KEYS = [
+      [/^accounts?\b\s*(.*)$/i, m => `account.${m[1]}`], [/^liabilit(?:y|ies)\b/i, () => 'liability'],
+      [/^debts?\b/i, () => 'liability'], [/^income\b/i, () => 'income'], [/^thread\b/i, () => 'thread'],
+      [/^goals?$/i, () => 'goals'], [/^planning resources$/i, () => 'plan.resources'], [/^profile$/i, () => 'client.profile'],
+      [/^holdings$/i, () => 'household'], [/^portfolio$/i, () => 'portfolio.snapshot'],
+      [/^preference\b/i, () => 'preference'], [/^constraint\b/i, () => 'constraint'], [/^decisions?\b/i, () => 'decision']
+    ];
+    const idOf = value => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+
+    function institutionsFrom(...sources) {
+      const found = {};
+      const add = (id, name) => { if (id && typeof name === 'string' && name.trim()) found[idOf(id)] = name.trim(); };
+      sources.forEach(source => {
+        if (!source || typeof source !== 'object') return;
+        const inst = source.institutions, accounts = source.accounts;
+        if (inst && typeof inst === 'object' && !Array.isArray(inst)) Object.entries(inst).forEach(([id, name]) => add(id, name));
+        if (Array.isArray(accounts)) accounts.forEach(a => a && add(a.id || a.account_id, a.institution || a.name));
+        else if (accounts && typeof accounts === 'object') Object.entries(accounts).forEach(([id, a]) => add(id, a && typeof a === 'object' ? a.institution : a));
+      });
+      return found;
+    }
+
+    function memoryPhrase(items, lang, data = {}) {
+      const M = STRINGS[lang].memory;
+      const institutions = institutionsFrom(data.event, data.message);
+      const named = data.event && data.event.labels && !Array.isArray(data.event.labels) ? data.event.labels : {};
+      const accounts = new Map();   // institution ('' when unknown) -> count
+      const phrases = [];
+      const push = text => { if (text && !phrases.includes(text)) phrases.push(text); };
+      (Array.isArray(items) ? items : []).forEach(item => {
+        let key = '', label = '', institution = '';
+        if (item && typeof item === 'object') {
+          key = String(item.key || ''); label = String(item.label || ''); institution = String(item.institution || '');
+        } else {
+          const text = String(item || '').trim();
+          if (/^[a-z][a-z0-9_]*(\.[\w.:-]+)?$/.test(text)) key = text;
+          else {
+            const hit = LABEL_KEYS.find(([pattern]) => pattern.test(text));
+            if (hit) key = hit[1](text.match(hit[0])); else label = text;
+          }
+        }
+        if (!label && typeof named[key] === 'string') label = named[key];
+        const [head, ...rest] = key.split('.');
+        const tail = rest.join('.');
+        if (head === 'thread') return;
+        if (head === 'account') {
+          const name = institution || institutions[idOf(tail)] || '';
+          accounts.set(name, (accounts.get(name) || 0) + 1);
+          return;
+        }
+        if (label) { push(label); return; }
+        if (head === 'liability' || head === 'liabilities' || head === 'debts') push(M.debts);
+        else if (head === 'income') push(M.income);
+        else if (head === 'goals' || head === 'goal') push(M.goals);
+        else if (key === 'client.profile' || head === 'profile') push(M.profile);
+        else if (key === 'plan.resources') push(M.plan);
+        else if (head === 'household') push(M.holdings);
+        else if (head === 'portfolio') push(M.portfolio);
+        else if (head === 'preference') push(M.preferences);
+        else if (head === 'constraint') push(M.constraints);
+        else if (head === 'decision' || head === 'decisions') push(M.decisions);
+        else if (key) push(key.replace(/[._-]+/g, ' ').trim());
+      });
+      const accountPhrases = [...accounts].sort(([a], [b]) => (a ? 0 : 1) - (b ? 0 : 1)).map(([name, n]) => M.account(name, n));
+      const all = [...accountPhrases, ...phrases];
+      if (!all.length) return '';
+      let list;
+      try { list = new Intl.ListFormat(lang === 'es' ? 'es-MX' : 'en', { type: 'conjunction' }).format(all); } catch (_) { list = all.join(', '); }
+      return `${STRINGS[lang].remembered}: ${list}`;
+    }
+
+    // ------------------------------------------------------------------ citations
+
+    // Source names and trailing piles of links become quiet numbered marks; the list opens under the message.
+    // A link that reads as prose inside a sentence stays a link. Only http(s) links ever reach here.
+    const SOURCE_WORDS = /\b(art[íi]culo|article|ley|law|lisr|liva|lieps|sat|dof|cnbv|banxico|condusef|irs|sec|reglamento|regulation|publication|prospect(?:o|us)|factsheet|fact sheet|kid|comisiones|tarifas|fees|pricing|documentation|faq)\b/i;
+    const SEPARATOR = /^[\s,;·|/()[\]—–.:!?-]*$|^\s*(y|and|e|&)\s*$/i;
+    const LABEL_TAIL = /\s*\b(sources?|fuentes?|see|ver|véase)\s*:?\s*$/i;
+    let citeSeq = 0;
+
+    function isSourceName(text, href) {
+      const t = text.trim();
+      if (!t) return false;
+      if (t === href || /^https?:\/\//i.test(t) || /^(www\.)?[\w-]+(\.[\w-]+)+(\/\S*)?$/.test(t)) return true;
+      return /^[\p{Lu}\d]/u.test(t) || SOURCE_WORDS.test(t);
+    }
+
+    const domainOf = href => { try { return new URL(href).hostname.replace(/^www\./, ''); } catch (_) { return ''; } };
+
+    function citations(body, lang) {
+      const S = STRINGS[lang];
+      const listId = `sources-${citeSeq += 1}`;
+      const sources = [];
+      const numberFor = (href, title) => {
+        let index = sources.findIndex(s => s.href === href);
+        if (index < 0) { sources.push({ href, title, domain: domainOf(href) }); index = sources.length - 1; }
+        return index + 1;
+      };
+      const mark = a => {
+        const title = a.textContent.trim();
+        const n = numberFor(a.href, title === a.href ? domainOf(a.href) : title);
+        const m = el('a', 'cite', String(n));
+        m.href = `#${listId}`;
+        m.setAttribute('role', 'button');
+        m.setAttribute('aria-expanded', 'false');
+        m.setAttribute('aria-controls', listId);
+        m.setAttribute('aria-label', `${S.source} ${n}: ${sources[n - 1].title}`);
+        m.dataset.ns = String(n);
+        return m;
+      };
+      const detachedBefore = node => {
+        // True when the text before a link is a finished sentence, a label or nothing: the link is not grammar.
+        if (!node) return true;
+        if (node.nodeType !== 3) return node.nodeName === 'BR';
+        const text = node.nodeValue;
+        if (SEPARATOR.test(text) && !node.previousSibling) return true;
+        return /[.!?:)(]\s*$/.test(text) || LABEL_TAIL.test(text) || !text.trim();
+      };
+
+      body.querySelectorAll('p, li').forEach(block => {
+        if (block.closest('table, .ticket')) return;
+        const own = [];
+        for (const node of block.childNodes) { if (node.nodeName === 'UL' || node.nodeName === 'OL') break; own.push(node); }
+        const anchors = own.filter(n => n.nodeName === 'A');
+        if (!anchors.length) return;
+
+        // The trailing run: links at the very end, separated only by commas, spaces, "y"/"and" or brackets.
+        const run = [];
+        let tailPunct = '';
+        for (let i = own.length - 1; i >= 0; i -= 1) {
+          const node = own[i];
+          if (node.nodeName === 'A') { run.unshift(node); continue; }
+          if (node.nodeType === 3 && SEPARATOR.test(node.nodeValue)) { if (!run.length) tailPunct = (node.nodeValue.match(/[.!?]/) || [''])[0]; continue; }
+          break;
+        }
+        const trailing = run.length >= 2 || (run.length === 1 && isSourceName(run[0].textContent, run[0].href)) ? run : [];
+
+        if (trailing.length) {
+          const first = trailing[0], last = trailing[trailing.length - 1];
+          let before = first.previousSibling;
+          while (before && before.nodeType === 3 && SEPARATOR.test(before.nodeValue) && !/[.!?:)]/.test(before.nodeValue) && before.previousSibling) before = before.previousSibling;
+          if (detachedBefore(before)) {
+            // A pile of sources: drop the separators and the names, keep one row of marks after the sentence.
+            own.slice(own.indexOf(first)).forEach(n => { if (n.nodeName !== 'A') n.remove(); });
+            let node = first.previousSibling;
+            while (node && node.nodeType === 3 && SEPARATOR.test(node.nodeValue)) {
+              const stop = (node.nodeValue.match(/[.!?]/) || [''])[0];
+              if (stop) { node.nodeValue = stop; break; }
+              const prev = node.previousSibling; node.remove(); node = prev;
+            }
+            if (node && node.nodeType === 3) {
+              node.nodeValue = node.nodeValue.replace(LABEL_TAIL, '').replace(/[\s([]+$/, '');
+              if (tailPunct && !/[.!?:]$/.test(node.nodeValue)) node.nodeValue += tailPunct;
+            }
+            trailing.forEach(a => a.replaceWith(mark(a)));
+          } else {
+            trailing.forEach(a => a.replaceWith(document.createTextNode(a.textContent), mark(a)));
+          }
+        }
+
+        // Links elsewhere: a source name that closes a clause keeps its words and gains a mark;
+        // a link alone in brackets becomes just the mark; prose links stay links.
+        anchors.filter(a => !trailing.includes(a) && block.contains(a)).forEach(a => {
+          const prev = a.previousSibling, next = a.nextSibling;
+          const opens = prev && prev.nodeType === 3 && /\(\s*$/.test(prev.nodeValue);
+          const closes = next && next.nodeType === 3 && /^\s*\)/.test(next.nodeValue);
+          if (opens && closes) {
+            prev.nodeValue = prev.nodeValue.replace(/\s*\(\s*$/, '');
+            next.nodeValue = next.nodeValue.replace(/^\s*\)/, '');
+            a.replaceWith(mark(a));
+          } else if (isSourceName(a.textContent, a.href) && (!next || (next.nodeType === 3 && /^\s*[).,;:!?]/.test(next.nodeValue)))) {
+            a.replaceWith(document.createTextNode(a.textContent), mark(a));
+          }
+        });
+      });
+
+      if (!sources.length) return null;
+
+      // A paragraph left holding only marks (after "Sources:") folds its marks into the paragraph above.
+      body.querySelectorAll('p').forEach(p => {
+        const rest = [...p.childNodes].filter(n => !(n.nodeName === 'A' && n.classList.contains('cite')));
+        if (!p.querySelector('a.cite') || rest.some(n => n.nodeType !== 3 || !SEPARATOR.test(n.nodeValue.replace(LABEL_TAIL, '')))) return;
+        const above = p.previousElementSibling;
+        if (above && above.tagName === 'P') { above.append(...p.querySelectorAll('a.cite')); p.remove(); }
+        else rest.forEach(n => n.remove());
+      });
+
+      const list = el('ol', 'sources');
+      list.id = listId;
+      list.hidden = true;
+      list.setAttribute('aria-label', S.sources);
+      sources.forEach(source => {
+        const item = el('li');
+        const a = el('a');
+        a.href = source.href; a.target = '_blank'; a.rel = 'noopener noreferrer';
+        a.append(el('span', 'domain', source.domain), el('span', 'title', source.title));
+        item.append(a);
+        list.append(item);
+      });
+      // Adjacent marks merge into one mark ("1 2 3"): one 44px target that opens the list at those sources.
+      body.querySelectorAll('a.cite').forEach(m => {
+        if (!body.contains(m)) return;
+        let next = m.nextSibling;
+        while (next && (next.nodeName === 'A' && next.classList.contains('cite') || (next.nodeType === 3 && !next.nodeValue.trim() && next.nextSibling && next.nextSibling.nodeName === 'A' && next.nextSibling.classList.contains('cite')))) {
+          const after = next.nextSibling;
+          if (next.nodeName === 'A') m.dataset.ns += ` ${next.dataset.ns}`;
+          next.remove();
+          next = after;
+        }
+        const ns = [...new Set(m.dataset.ns.split(' ').map(Number))];
+        m.dataset.ns = ns.join(' ');
+        m.textContent = ns.join('\u2009');
+        if (ns.length > 1) m.setAttribute('aria-label', `${S.sources}: ${ns.map(n => sources[n - 1].title).join('; ')}`);
+      });
+      const marks = [...body.querySelectorAll('a.cite')];
+      const toggle = ns => {
+        const key = ns.join(' ');
+        const open = list.hidden || list.dataset.current !== key;
+        list.hidden = !open;
+        list.dataset.current = open ? key : '';
+        [...list.children].forEach((li, i) => li.classList.toggle('current', open && ns.includes(i + 1)));
+        marks.forEach(m => m.setAttribute('aria-expanded', String(open && m.dataset.ns === key)));
+      };
+      marks.forEach(m => {
+        const ns = m.dataset.ns.split(' ').map(Number);
+        m.addEventListener('click', event => { event.preventDefault(); toggle(ns); });
+        m.addEventListener('keydown', event => { if (event.key === ' ') { event.preventDefault(); toggle(ns); } });
+      });
+      return list;
+    }
+
     // ------------------------------------------------------------------ rendering
 
     function attachmentChips(items) {
@@ -1097,14 +1414,18 @@
     }
 
     function assistantMessage(content, options = {}) {
+      const lang = options.lang || LANG;
       const article = el('article', 'message assistant');
       article.setAttribute('aria-label', T.wealth);
       const body = el('div', 'answer');
       markdown(body, content);
       article.append(body);
-      if (options.memory && options.memory.length) {
+      const sources = citations(body, lang);
+      if (sources) article.append(tagLang(sources, lang));
+      const remembered = memoryPhrase(options.memory, lang, { event: options.memoryEvent, message: options.message });
+      if (remembered) {
         // Remembering, settled: one quiet line, no mark.
-        article.append(el('p', 'memory', `${T.remembered}: ${options.memory.join(', ')}`));
+        article.append(tagLang(el('p', 'memory', remembered), lang));
       }
       messages.append(article);
       if (options.announce) {
@@ -1115,12 +1436,13 @@
     }
 
     // Worktrace row: live presence mapped to the step, the step itself, elapsed time.
-    function pendingMessage(raw = '') {
-      const article = el('article', 'message assistant pending');
+    function pendingMessage(raw = '', lang = LANG) {
+      const article = tagLang(el('article', 'message assistant pending'), lang);
       article.setAttribute('aria-label', T.wealth);
+      article._lang = lang;
       const line = el('div', 'worktrace');
       const mark = presence(presenceFor(raw || 'Working on it'));
-      const step = el('span', 'step', raw ? stepText(raw) : T.working);
+      const step = el('span', 'step', raw ? stepText(raw, lang) : STRINGS[lang].working);
       step.setAttribute('role', 'status');
       line.append(mark, step);
       article.append(line);
@@ -1132,7 +1454,7 @@
 
     function setStep(node, raw, state) {
       if (!node) return;
-      const text = stepText(raw);
+      const text = stepText(raw, node._lang);
       if (node._step.textContent !== text) node._step.textContent = text;
       setPresence(node._mark, state || presenceFor(raw));
     }
@@ -1314,13 +1636,14 @@
       turn.after = Math.max(turn.after || 0, event.seq || 0);
       if (event.type === 'progress' && turn.pendingNode) {
         if (!turn.stopping) setStep(turn.pendingNode, event.text);
-      } else if (event.type === 'memory' && turn.pendingNode && !turn.stopping) {
-        setPresence(turn.pendingNode._mark, 'remembering');
+      } else if (event.type === 'memory') {
+        turn.memoryEvent = event;
+        if (turn.pendingNode && !turn.stopping) setPresence(turn.pendingNode._mark, 'remembering');
       } else if (event.type === 'answer') {
         clearPending(turn.pendingNode);
         turn.pendingNode = null;
         const m = event.message || {};
-        assistantMessage(m.content || '', { memory: m.memory, announce: true });
+        assistantMessage(m.content || '', { memory: m.memory, memoryEvent: turn.memoryEvent, message: m, lang: turn.lang, announce: true });
         turn.answered = true;
         follow();
       } else if (event.type === 'error') {
@@ -1392,10 +1715,10 @@
         tray.replaceChildren();
         resize();
       }
-      const turn = { message, attachments: files, userNode, after: 0 };
+      const turn = { message, attachments: files, userNode, after: 0, lang: languageOf(message) };
       current = turn;
       setBusy(true);
-      turn.pendingNode = pendingMessage();
+      turn.pendingNode = pendingMessage('', turn.lang);
       follow(true);
       try {
         const response = await api('/api/turns', {
@@ -1418,7 +1741,7 @@
       const turn = current;
       if (!turn || !turn.id || turn.stopping) return;
       turn.stopping = true;
-      if (turn.pendingNode) { turn.pendingNode._step.textContent = T.stopping; setPresence(turn.pendingNode._mark, 'quiet'); }
+      if (turn.pendingNode) { turn.pendingNode._step.textContent = STRINGS[turn.pendingNode._lang].stopping; setPresence(turn.pendingNode._mark, 'quiet'); }
       try { await api(`/api/turns/${turn.id}/cancel`, { method: 'POST' }); } catch (_) { /* the stream reports the outcome */ }
     }
 
@@ -1552,10 +1875,11 @@
 
       const history = Array.isArray(state.messages) ? state.messages : [];
       if (!history.length && !(state.turn && state.turn.message)) renderIntro(state);
+      let spoken = LANG;
       history.forEach(item => {
         if (!item || typeof item.content !== 'string') return;
-        if (item.role === 'user') userMessage(item.content, item.attachments || []);
-        else if (item.role === 'assistant') assistantMessage(item.content, { memory: item.memory });
+        if (item.role === 'user') { userMessage(item.content, item.attachments || []); spoken = languageOf(item.content); }
+        else if (item.role === 'assistant') assistantMessage(item.content, { memory: item.memory, message: item, lang: spoken });
       });
 
       input.disabled = false;
@@ -1565,13 +1889,13 @@
       const turn = state.turn;
       if (turn && turn.message) {
         const node = userMessage(turn.message, turn.attachments || []);
-        const record = { id: turn.id, message: turn.message, attachments: turn.attachments || [], userNode: node, after: 0, elapsed: turn.elapsed };
+        const record = { id: turn.id, message: turn.message, attachments: turn.attachments || [], userNode: node, after: 0, elapsed: turn.elapsed, lang: languageOf(turn.message) };
         const retry = () => submit(record.message, record.attachments, node);
         if (turn.status === 'running') {
           current = record;
           setBusy(true);
-          record.pendingNode = pendingMessage(turn.progress ? turn.progress : 'Response in progress');
-          if (!turn.progress) record.pendingNode._step.textContent = T.inProgress;
+          record.pendingNode = pendingMessage(turn.progress ? turn.progress : 'Response in progress', record.lang);
+          if (!turn.progress) record.pendingNode._step.textContent = STRINGS[record.lang].inProgress;
           track(record);
         } else if (turn.error) {
           showError(node, turn.error, retry);
