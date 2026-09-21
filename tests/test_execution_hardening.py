@@ -304,3 +304,95 @@ def test_a_fill_posted_before_the_first_sync_does_not_suppress_its_history(tmp_p
     history, _, start_of_year = orders_first
     assert start_of_year[0] == {"ASML": "2", "TSLA": "1.5", "VOO": "5"}  # opening balances were posted
     assert sum(1 for row in history if row[0] == "buy" and row[1] == "VOO" and row[2] == "0.5") == 1  # once
+
+
+# -- 8. the tap binds to what the card showed ---------------------------------------------------------
+
+def test_a_price_move_after_the_card_was_shown_is_not_sent_until_a_fresh_tap(db, paper):
+    card = make_ticket(db, [{"symbol": "VTI", "side": "buy", "qty": 10}])["result"]["ticket"]
+    assert card["lines"][0]["limit_price"] == "251.25" and not card["blocked"]
+    nonce = nonce_of(db, card["id"])
+    paper.prices["VTI"] = "300.00"  # the market moves 20% inside the ticket's ten minutes
+    with pytest.raises(tickets.ConfirmError) as moved:
+        confirm(db, card["id"], nonce, now=NOW + timedelta(minutes=5))
+    assert moved.value.kind == "price_moved" and moved.value.status == 409 and paper.posts() == []
+    reshown = moved.value.ticket
+    assert reshown["status"] == "pending" and not reshown["blocked"] and reshown["nonce"] == nonce
+    assert reshown["lines"][0]["limit_price"] == "301.5" and reshown["lines"][0]["estimated_amount"] == "3015"
+    notice = next(n for n in reshown["notices"] if n["code"] == "price_moved")
+    assert notice["params"]["shown_limit"] == "251.25" and notice["params"]["limit"] == "301.5"
+    assert any(e["event"] == "blocked" and e["payload"]["reasons"] == ["price_moved"]
+               for e in _events(db))
+    # The fresh tap confirms the re-shown lines: now they go out, at the price the card showed.
+    placed = confirm(db, card["id"], nonce, now=NOW + timedelta(minutes=6))
+    assert placed["status"] == "submitted" and paper.posts()[0]["body"]["limit_price"] == "301.5"
+
+
+def test_a_small_price_move_within_tolerance_is_placed(db, paper):
+    card = make_ticket(db, [{"symbol": "VTI", "side": "buy", "qty": 1}])["result"]["ticket"]
+    nonce = nonce_of(db, card["id"])
+    paper.prices["VTI"] = "250.50"  # 0.2%: inside the collar and the 2% amount tolerance
+    assert confirm(db, card["id"], nonce)["status"] == "submitted"
+    assert paper.posts()[0]["body"]["limit_price"] == "251.76"
+
+
+def test_a_live_amount_that_moves_is_reconfirmed_even_under_the_per_order_limit(db, fake, monkeypatch):
+    _live(monkeypatch)
+    monkeypatch.setenv("WEALTH_TRADING_MAX_ORDER_USD", "1000")
+    card = make_ticket(db, [{"symbol": "VTI", "side": "buy", "qty": 3}])["result"]["ticket"]
+    nonce = nonce_of(db, card["id"])
+    fake.prices["VTI"] = "330.00"
+    with pytest.raises(tickets.ConfirmError) as moved:
+        confirm(db, card["id"], nonce, typed="LIVE", now=NOW + timedelta(minutes=9))
+    assert moved.value.kind == "price_moved" and fake.posts() == []
+    assert _state(db).get("live_reserved", {}) == {}  # nothing was reserved against the daily limit
+
+
+def _events(db):
+    with WealthStore(db) as store:
+        return store.order_events("ana")
+
+
+# -- 9. expired tickets settle and the stored history stays bounded -----------------------------------
+
+def test_expired_tickets_are_settled_pruned_and_marked_on_read(db, paper):
+    old = NOW - timedelta(days=30)
+    for i in range(tickets.KEEP_TICKETS + 40):
+        make_ticket(db, [{"symbol": "VTI", "side": "buy", "qty": 1}], now=old + timedelta(seconds=i))
+    assert len(_state(db)["tickets"]) == tickets.KEEP_TICKETS + 40  # all still inside their ten minutes then
+
+    fresh = make_ticket(db, [{"symbol": "BND", "side": "buy", "qty": 1}])["result"]["ticket"]
+    stored = _state(db)["tickets"]
+    assert len(stored) == tickets.KEEP_TICKETS
+    assert [t["id"] for t in stored.values() if t["status"] == "pending"] == [fresh["id"]]
+    assert {t["status"] for t in stored.values()} == {"pending", "expired"}
+    assert all(t["nonce_hash"] is None for t in stored.values() if t["status"] == "expired")
+    later = NOW + tickets.TICKET_TTL
+    with WealthStore(db) as store:
+        tickets.list_tickets(store, "ana", now=later)  # read after expiry: marked expired, code dropped
+    item = _state(db)["tickets"][fresh["id"]]
+    assert item["status"] == "expired" and item["nonce_hash"] is None
+    assert len(_state(db)["tickets"]) <= tickets.KEEP_TICKETS
+    with pytest.raises(tickets.ConfirmError) as expired:
+        confirm(db, fresh["id"], "ABCD1234", now=later)
+    assert expired.value.kind == "expired" and expired.value.status == 410 and paper.posts() == []
+    with WealthStore(db) as store:
+        assert tickets.cancel(store, "ana", fresh["id"], now=later)["status"] == "expired"
+
+
+# -- 10. a live client for new work needs the opt-in; existing live orders stay reachable -----------------
+
+def test_live_client_needs_the_opt_in_except_for_existing_live_orders(db, fake, monkeypatch):
+    keys = {"WEALTH_ALPACA_KEY_ID": "AKX", "WEALTH_ALPACA_SECRET": "s"}
+    assert tickets.broker_for("live", keys) is None
+    assert tickets.broker_for("live", keys, existing=True) is not None
+    assert tickets.broker_for("live", {**keys, "WEALTH_TRADING_LIVE": "alpaca"}) is not None
+
+    _live(monkeypatch)
+    card = make_ticket(db, [{"symbol": "BND", "side": "buy", "qty": 1}])["result"]["ticket"]
+    order_id = confirm(db, card["id"], nonce_of(db, card["id"]), typed="LIVE")["lines"][0]["broker_order_id"]
+    monkeypatch.delenv("WEALTH_TRADING_LIVE")
+    fake.fill(order_id)
+    with WealthStore(db) as store:
+        refreshed = next(t for t in tickets.refresh(store, "ana", now=NOW) if t["id"] == card["id"])
+    assert refreshed["status"] == "done" and refreshed["lines"][0]["state"] == "filled"

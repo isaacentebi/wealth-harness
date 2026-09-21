@@ -285,7 +285,18 @@ def _range(value: Any, path: str, *, minimum: float | None = None, maximum: floa
 
 
 def _r(value: float) -> float:
-    return round(float(value) + 0.0, 2)
+    return round(float(value), 2) + 0.0  # + 0.0 after rounding: round(-0.001, 2) is -0.0
+
+
+def _no_negative_zero(value: Any) -> Any:
+    """Every -0.0 in an output becomes 0.0 (a tiny negative float rounds to -0.0 and reads as a sign)."""
+    if isinstance(value, float):
+        return value + 0.0
+    if isinstance(value, dict):
+        return {k: _no_negative_zero(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_no_negative_zero(v) for v in value]
+    return value
 
 
 def _envelope(status: str, result: dict[str, Any], *, missing: list[str], warnings: list[str],
@@ -295,7 +306,7 @@ def _envelope(status: str, result: dict[str, Any], *, missing: list[str], warnin
         if source not in unique:
             unique.append(source)
     dedupe = lambda items: list(dict.fromkeys(items))  # noqa: E731
-    return {"status": status, "result": result, "missing": dedupe(missing), "warnings": dedupe(warnings),
+    return {"status": status, "result": _no_negative_zero(result), "missing": dedupe(missing), "warnings": dedupe(warnings),
             "sources": unique, "assumptions": dedupe(assumptions)}
 
 
@@ -496,9 +507,11 @@ def _effective_age(age: float) -> int:
     return whole + (1 if age - whole >= 0.5 else 0)
 
 
-def _assignments(dependants: dict[str, Any] | None, table: dict[str, str]) -> tuple[float | None, str]:
+def _assignments(dependants: dict[str, Any] | None, table: dict[str, str]) -> tuple[float, str]:
     if dependants is None:
-        return None, "dependants not supplied; family assignments and assistance are excluded"
+        return float(table["no_dependants_assistance"]), (
+            "ASSUMED: dependants not supplied, so the 15% ayuda asistencial of Art. 164 (no spouse, children or dependent "
+            "parents) is used; a spouse or dependent parents would raise it, a single child under 16 would lower it to 10%")
     if not isinstance(dependants, dict):
         raise ValueError("dependants must be an object")
     spouse = dependants.get("spouse", False)
@@ -559,7 +572,7 @@ def ley73_pension(average_daily_salary: float, weeks: float, age: float, minimum
     # Arts. 164 and 169: assignments on the vejez pension, capped at 100% of the average salary unless the
     # own-right cuantia is already above it.
     salary_monthly = average_daily_salary * 365 / 12
-    vejez_with_family = min(vejez_monthly * (1 + (share or 0.0)), max(salary_monthly, vejez_monthly))
+    vejez_with_family = min(vejez_monthly * (1 + share), max(salary_monthly, vejez_monthly))
     # Art. 171: the cesantia percentage applies to that vejez pension; then the 1.11 decree factor.
     total = vejez_with_family * percent * factor
     cap = salary_monthly * factor  # the Art. 169 cap, shown with the decree factor like the pension
@@ -574,6 +587,7 @@ def ley73_pension(average_daily_salary: float, weeks: float, age: float, minimum
         "annual_cuantia_at_65_mxn": _r(annual), "cesantia_percent": round(percent * 100, 2),
         "monthly_cuantia_mxn": _r(cuantia), "decree_factor": factor, "monthly_cuantia_with_factor_mxn": _r(cuantia_f),
         "family_assignments_share": share, "family_assignments_basis": basis,
+        "family_assignments_assumed": dependants is None,
         "cap_monthly_mxn": _r(cap), "minimum_monthly_mxn": _r(minimum), "minimum_applied": floor_applied,
         "monthly_pension_mxn": _r(total), "aguinaldo_annual_mxn": _r(total),
         "annual_income_mxn": _r(total * 13),
@@ -736,10 +750,25 @@ def pension_garantizada(year: int, age: float, weeks: float, average_career_sbc_
     row = rows.get(min(effective, 65)) or rows.get(str(min(effective, 65)))
     dec2020 = float(row[column])
     factor = params.number("pension_garantizada_inpc_factor")
-    return {"eligible": True, "weeks_required": required, "salary_band": band, "age_row": min(effective, 65),
+    warnings.append("The pension garantizada amount is an estimate pending the official IMSS table: which weeks column "
+                    "applies (counted from the weeks required in the pension year) could not be confirmed against the "
+                    "DOF 16-12-2020 table header. Confirm the amount with IMSS.")
+    return {"eligible": True, "estimate": True, "weeks_required": required, "salary_band": band, "age_row": min(effective, 65),
             "weeks_column": f"{base_weeks + 25 * column}{' o mas' if column == 10 else ''}",
             "monthly_dec2020_mxn": dec2020, "inpc_factor": factor,
             "monthly_mxn": None if factor is None else _r(dec2020 * factor)}
+
+
+def _afore_fee(params: _Params, year: int, warnings: list[str]) -> tuple[float | None, int | None]:
+    """The CONSAR maximum AFORE fee for ``year``, or the latest known year's cap with a warning; ``(fee, year used)``."""
+    table = PARAMETERS["afore_fee_max"]
+    known = sorted(y for y, e in table.items() if isinstance(y, int) and y <= year and e["status"] != "needs_verification")
+    if "afore_fee_max" in params.overrides or year in table or not known:
+        return params.number("afore_fee_max", year), year
+    latest = known[-1]
+    warnings.append(f"No CONSAR maximum AFORE fee is recorded for {year}; the {latest} cap is used. Supply ley97.fee "
+                    f"(or parameters.afore_fee_max) with the {year} figure.")
+    return params.number("afore_fee_max", latest), latest
 
 
 def ley97(data: dict[str, Any], *, age_now: float, retirement_age: float, weeks_now: float, as_of: date,
@@ -763,11 +792,14 @@ def ley97(data: dict[str, Any], *, age_now: float, retirement_age: float, weeks_
         assumptions.append("SIEFORE generacional real returns before fees assumed at 2.0% / 3.5% / 5.0% (low / base / high). "
                            "CONSAR reports a 5.02% historical real system return (21-11-2025); history is not a forecast. "
                            "Supply ley97.real_return to replace this range.")
-    fee = params.number("afore_fee_max", as_of.year) if "fee" not in data else _num(data["fee"], "ley97.fee", minimum=0, maximum=0.05)
+    if "fee" in data:
+        fee, fee_year = _num(data["fee"], "ley97.fee", minimum=0, maximum=0.05), None
+    else:
+        fee, fee_year = _afore_fee(params, as_of.year, warnings)
     if fee is None:
         return None
     if "fee" not in data:
-        assumptions.append(f"AFORE fee {fee:.2%} of assets per year (the {as_of.year} CONSAR maximum) held constant.")
+        assumptions.append(f"AFORE fee {fee:.2%} of assets per year (the {fee_year} CONSAR maximum) held constant.")
     annuity_rates = _range(data.get("annuity_real_rate", [0.02, 0.035]), "ley97.annuity_real_rate", minimum=-0.05, maximum=0.2)
     if "annuity_real_rate" not in data:
         assumptions.append("Programmed withdrawal priced at a 2.0%-3.5% real rate (Art. 194 divides the balance by the capital "
@@ -932,9 +964,33 @@ def retirement_mx(inputs: dict[str, Any], context: dict[str, Any] | None = None)
         else:
             avg = None
             missing.append("ley73.average_daily_salary_mxn (last 250 weeks) or ley73.salary_history")
+        if avg is not None:
+            cap_multiple = params.number("sbc_cap_uma_multiple")
+            if uma is None or cap_multiple is None:
+                missing.append("parameters.uma_daily_mxn (to check the 25-UMA salary ceiling, LSS art. 28)")
+            elif avg > uma * cap_multiple + 0.005:
+                warnings.append(f"The Ley 73 average daily salary {_r(avg)} MXN is above the LSS art. 28 ceiling of "
+                                f"{cap_multiple:g} UMA ({_r(uma * cap_multiple)} MXN/day); the pension uses the ceiling.")
+                avg = uma * cap_multiple
         dependants = data.get("dependants")
         if dependants is None:
             missing.append("ley73.dependants {spouse, children_under_16, dependent_parents} (family assignments)")
+            assumptions.append("Dependants not supplied: the Ley 73 pension includes the 15% ayuda asistencial (LSS 1973 "
+                               "art. 164, pensioner with no spouse, children or dependent parents). Supply ley73.dependants "
+                               "to replace this assumption.")
+        contributing = data.get("still_contributing", False)
+        if not isinstance(contributing, bool):
+            raise ValueError("ley73.still_contributing must be a boolean")
+
+        def weeks_at(pension_age: float) -> float:
+            """Recognized weeks at ``pension_age``: 52 more per working year while the person still contributes."""
+            return weeks + 52 * max(pension_age - age_now, 0.0) if contributing else weeks
+
+        if contributing:
+            assumptions.append("Still contributing: 52 weeks are added for each working year until the pension age.")
+        elif "still_contributing" not in data and age_now < max(retirement_age, 65):
+            assumptions.append(f"Weeks held at the reported {weeks:g} (no further contributions); pass "
+                               "ley73.still_contributing: true to add 52 weeks per working year.")
         group_note = ("Art. 167 groups use the salario minimo general at the pension date (statutory text); some IMSS "
                       "practice and advisers use the UMA since the 2016 desindexation. Confirm with IMSS; the lower "
                       "reference raises the times-multiple and lowers the basic percentage.")
@@ -942,19 +998,23 @@ def retirement_mx(inputs: dict[str, Any], context: dict[str, Any] | None = None)
         if minimum_wage is None:
             pass
         elif avg is not None:
-            pension = ley73_pension(avg, weeks, retirement_age, minimum_wage, dependants=dependants, params=params)
+            pension = ley73_pension(avg, weeks_at(retirement_age), retirement_age, minimum_wage, dependants=dependants,
+                                    params=params)
             result["ley73"] = {"pension_at_retirement_age": pension}
             if pension and pension.get("eligible"):
                 pension_monthly = {"low": pension["monthly_pension_mxn"], "high": pension["monthly_pension_mxn"]}
                 result["ley73"]["by_age"] = {}
                 for age in range(60, 66):
-                    alt = ley73_pension(avg, weeks, age, minimum_wage, dependants=dependants, params=params)
+                    alt = ley73_pension(avg, weeks_at(age), age, minimum_wage, dependants=dependants, params=params)
                     result["ley73"]["by_age"][str(age)] = alt.get("monthly_pension_mxn") if alt and alt.get("eligible") else None
             elif pension is not None:
                 warnings.append(pension["reason"])
             if "modalidad40" in data and pension is not None:
+                # Modalidad 40 replaces ordinary contributions, so its baseline is the pension on today's weeks.
+                baseline = pension if not contributing else ley73_pension(
+                    avg, weeks, retirement_age, minimum_wage, dependants=dependants, params=params)
                 base = {"prior_salary": avg, "weeks": weeks, "pension_age": retirement_age, "age_now": age_now,
-                        "dependants": dependants, "pension": pension, "longevity_ages": longevity}
+                        "dependants": dependants, "pension": baseline, "longevity_ages": longevity}
                 mod = modalidad40(data["modalidad40"], base=base, params=params, as_of=as_of, minimum_wage=minimum_wage,
                                   uma=uma, warnings=warnings, missing=missing, assumptions=assumptions)
                 if mod is not None:
@@ -978,8 +1038,11 @@ def retirement_mx(inputs: dict[str, Any], context: dict[str, Any] | None = None)
         vol_returns = [0.02, 0.035, 0.05]
         if isinstance(inputs.get("ley97"), dict) and "real_return" in inputs["ley97"]:
             vol_returns = _range(inputs["ley97"]["real_return"], "ley97.real_return", minimum=-0.5, maximum=0.5)
+        ley97_in = inputs.get("ley97") if isinstance(inputs.get("ley97"), dict) else {}
+        vol_fee = _num(ley97_in["fee"], "ley97.fee", minimum=0, maximum=0.05) if "fee" in ley97_in \
+            else _afore_fee(params, as_of.year, warnings)[0]
         result["voluntary"] = _voluntary(inputs["voluntary"], years=max(int(round(retirement_age - age_now)), 0), returns=vol_returns,
-                                         fee=params.number("afore_fee_max", as_of.year), params=params, as_of=as_of, missing=missing)
+                                         fee=vol_fee, params=params, as_of=as_of, missing=missing)
     target = inputs.get("target_monthly_spending_mxn")
     if target is None:
         missing.append("target_monthly_spending_mxn (real, today's pesos)")
@@ -1241,7 +1304,7 @@ def simulate_withdrawals(cfg: dict[str, Any], strategy: str, params: _Params) ->
             else:
                 w_tax = min(remaining, taxable)
                 w_def = min(remaining - w_tax, avail_def)
-                w_roth = min(remaining - w_tax - w_def, roth)
+                w_roth = max(min(remaining - w_tax - w_def, roth), 0.0)
             short = remaining - w_tax - w_def - w_roth
             conv = 0.0
             if top is not None:
@@ -1491,9 +1554,15 @@ def retirement_readiness(inputs: dict[str, Any], context: dict[str, Any] | None 
         "required_nest_egg_by_withdrawal_rate": nest,
         "projected_savings_at_retirement_by_return": projected,
         "gap_matrix": gaps,
-        "worst_case_extra_monthly": max((g["extra_monthly_contribution"] or 0.0) for g in gaps),
-        "best_case_extra_monthly": min((g["extra_monthly_contribution"] or 0.0) for g in gaps),
     }
+    # A gap no contribution can close (no months left) is None, never 0: the worst case is then unclosable.
+    known = [g["extra_monthly_contribution"] for g in gaps if g["extra_monthly_contribution"] is not None]
+    unclosable = len(known) < len(gaps)
+    result["worst_case_extra_monthly"] = None if unclosable or not known else max(known)
+    result["best_case_extra_monthly"] = min(known) if known else None
+    if unclosable:
+        result["worst_case_extra_monthly_reason"] = ("At least one scenario has a gap and no months left to contribute before "
+                                                     "retirement, so no monthly contribution closes it.")
     if years == 0 and any(g["gap"] > 0 for g in gaps):
         warnings.append("Already at retirement age: a gap cannot be closed by contributions; it means lower spending, later retirement, or more risk.")
     if "return_model" in inputs:
