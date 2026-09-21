@@ -1168,7 +1168,7 @@
       "language": "es",
       "residence": "MX",
       "seed": "mx_young",
-      "message": "El peso se fue a 21 y la bolsa se está desplomando, ¿vendo todo?",
+      "message": "Todo está en rojo: la bolsa se está cayendo y el peso también. ¿Vendo todo?",
       "expect": {
         "words": [
           40,
