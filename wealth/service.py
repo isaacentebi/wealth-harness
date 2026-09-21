@@ -896,6 +896,13 @@ class WealthService:
             with WealthStore(self.db_path) as store:
                 gone = missing_positions(proposal, current_ledger(store.ledger(client_id)))
             shown["result"]["reconciliation"] = {"missing_positions": gone}
+            for position in gone:
+                # A holding the ledger still has that this newer statement no longer lists: sold, moved or missed.
+                shown["result"]["insights"].insert(0, {
+                    "kind": "position_gone", "symbol": position["symbol"], "account": position["account_id"],
+                    "saved": {"quantity": position["quantity"]}, "as_of": position["as_of"],
+                    "text": f"{position['symbol']}: {position['quantity']} units were held before; this statement "
+                            "no longer lists it. Ask whether it was sold or moved."})
         if extraction_id:
             shown["result"]["extraction_id"] = extraction_id
         if pid:

@@ -77,7 +77,7 @@ _B = {
            "debt": "Deuda {n}: {b} al {r}; pago {p}/mes; {when}", "paid": "liquida {d}", "missing": "falta {x}",
            "never": "no se liquida con ese pago", "interest": ", intereses {x}",
            "goal": "Meta {n}: {detail} ({st})", "per_month": "{x}/mes", "target": "{x} para {d}",
-           "inv": "Inversiones: {x}", "pos": "Posiciones: {x}", "units": "títulos", "top": "mayor exposición {u} {w} ({s})",
+           "inv": "Inversiones: {x}", "invalid": "Datos guardados que no se pudieron leer (pide el valor correcto): {x}", "pos": "Posiciones: {x}", "units": "títulos", "top": "mayor exposición {u} {w} ({s})",
            "diff": "Diferencia {inst}: dijiste {s}; estado {x} ({d})",
            "thread": "Pendiente [{k}, {d}]: {t}", "k_advice": "consejo", "k_question": "pregunta", "k_commitment": "compromiso",
            "stale": "Por reconfirmar: {x}", "inferred": "Sin confirmar: {x}", "unknown": "Desconocido: {x}",
@@ -97,7 +97,7 @@ _B = {
            "debt": "Debt {n}: {b} at {r}; payment {p}/month; {when}", "paid": "paid off {d}", "missing": "missing {x}",
            "never": "never at this payment", "interest": ", interest {x}",
            "goal": "Goal {n}: {detail} ({st})", "per_month": "{x}/month", "target": "{x} by {d}",
-           "inv": "Investments: {x}", "pos": "Positions: {x}", "units": "units", "top": "largest exposure {u} {w} ({s})",
+           "inv": "Investments: {x}", "invalid": "Saved data that could not be read (ask for the correct value): {x}", "pos": "Positions: {x}", "units": "units", "top": "largest exposure {u} {w} ({s})",
            "diff": "Difference {inst}: stated {s}; statement {x} ({d})",
            "thread": "Open [{k}, {d}]: {t}", "k_advice": "advice", "k_question": "question", "k_commitment": "commitment",
            "stale": "Reconfirm: {x}", "inferred": "Unconfirmed: {x}", "unknown": "Unknown: {x}",
@@ -239,6 +239,8 @@ def brief(sit: Mapping[str, Any], language: str | None = None) -> str:
         unknown.append(t["u_" + item["code"]].format(c=item.get("residence"), p=item.get("pair"), g=item.get("goal")))
     if unknown:
         lines.append((10, t["unknown"].format(x="; ".join(unknown[:4]))))
+    if sit.get("invalid_facts"):
+        lines.append((4, t["invalid"].format(x=", ".join(i["key"] for i in sit["invalid_facts"][:4]))))
     if sit["stale"]:
         lines.append((11, t["stale"].format(x=", ".join(sit["stale"][:6]))))
     if sit["inferred"]:
