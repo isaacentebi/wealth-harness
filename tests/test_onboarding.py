@@ -77,7 +77,8 @@ def test_chips_follow_the_country(service):
     labels = [o["label"] for o in money["fields"][0]["options"]]
     assert "Nu / banco" in labels and "GBM / casa de bolsa" in labels and "Broker en EE. UU." in labels
     assert money["currency"] == "MXN" and money["fields"][0]["options"][-2]["fields"][0]["currency"] == "USD"
-    assert "aguinaldo" in _ids(ob.card(sit, "income", "es"), "extras") and "ptu" in _ids(ob.card(sit, "income"), "extras")
+    # Extra income is never prompted: only take-home pay is asked.
+    assert [f["name"] for f in ob.card(sit, "income", "es")["fields"]] == ["amount"]
     assert "student" not in _ids(ob.card(sit, "debts", "es"))
 
     us = WealthService(service.db_path)
@@ -86,7 +87,7 @@ def test_chips_follow_the_country(service):
     sit = us.situation("sam")
     assert _ids(ob.card(sit, "money", "en")) == ["bank", "brokerage", "retirement", "hsa", "none"]
     assert [o["label"] for o in ob.card(sit, "money", "en")["fields"][0]["options"]][2] == "401(k) / IRA"
-    assert _ids(ob.card(sit, "income", "en"), "extras") == ["bonus", "rent", "other"]
+    assert [f["name"] for f in ob.card(sit, "income", "en")["fields"]] == ["amount"]
     assert "student" in _ids(ob.card(sit, "debts", "en"))
     assert ob.card(sit, "spending", "en")["currency"] == "USD"
     # The state field only shows for the United States.

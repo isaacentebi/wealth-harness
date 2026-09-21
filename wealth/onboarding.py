@@ -393,11 +393,10 @@ def _income_fields(lang: str, ctx: dict) -> list[dict]:
     for option in _extras(ctx):
         options.append({"id": option["id"], "label": option["label"][lang],
                         "fields": [_amount_field("amount", lang, ctx, per[option["id"]], required=False)]})
-    return [
-        _amount_field("amount", lang, ctx, {"en": "Take-home per month", "es": "Neto al mes"}),
-        {"name": "extras", "type": "chips", "label": {"en": "Also", "es": "Además"}[lang], "options": options,
-         "max": len(options), "required": False},
-    ]
+    # Only take-home pay is asked: an aguinaldo, bonus or PTU is recorded when the person mentions it or a
+    # statement shows the deposit, never prompted "just in case". (Answers carrying extras are still accepted.)
+    del options
+    return [_amount_field("amount", lang, ctx, {"en": "Take-home per month", "es": "Neto al mes"})]
 
 
 def _income_known(sit) -> bool:

@@ -23,7 +23,8 @@ def salary(amount):
 
 
 def fact(key, value, kind="user", observed_on=None, **extra):
-    ref = "statement:gbm-2026-09.pdf" if kind == "document" else "conversation:1"
+    ref = ("statement:gbm-2026-09.pdf" if kind == "document" else
+           "https://example.com/salary-article" if kind == "web" else "conversation:1")
     return {"key": key, "value": value, "source": src(kind, observed_on, ref), **extra}
 
 
@@ -131,28 +132,36 @@ def test_version_two_database_migrates_with_valid_time_and_tombstones(tmp_path):
 # ------------------------------------------------------------------ contradictions
 
 
-def test_evidence_never_overwrites_what_the_person_said(store):
+def test_a_payslip_or_statement_settles_a_stated_figure(store):
     store.remember("c", [fact("income.salary", salary(85000), observed_on=RECENT)])
-    receipt = store.remember("c", [fact("income.salary", salary(90000), kind="document")], 1)
+    receipt = store.remember("c", [fact("income.salary", salary(90000), kind="document")])
+    assert receipt["needs_user"] == [] and [w["key"] for w in receipt["written"]] == ["income.salary"]
+    assert current(store, "income.salary")["value"]["amount"] == 90000
+    assert [h["value"]["amount"] for h in store.history("c", "income.salary") if h["value"]] == [85000, 90000]
+
+
+def test_web_evidence_never_overwrites_what_the_person_said(store):
+    store.remember("c", [fact("income.salary", salary(85000), observed_on=RECENT)])
+    receipt = store.remember("c", [fact("income.salary", salary(90000), kind="web")], 1)
     assert receipt["written"] == [] and receipt["write_result"]["resulting_revision"] == 1
     [held] = receipt["needs_user"]
     assert held["kind"] == "same_key" and held["key"] == held["proposed_key"] == "income.salary"
     assert held["current_value"]["amount"] == 85000 and held["proposed_value"]["amount"] == 90000
-    assert held["sources"]["current"]["kind"] == "user" and held["sources"]["proposed"]["kind"] == "document"
+    assert held["sources"]["current"]["kind"] == "user" and held["sources"]["proposed"]["kind"] == "web"
     assert held["question"].startswith("You told me your salary is $85,000 a month")
     assert "income.salary" not in held["question"]
     assert "$90,000 a month" in held["question"] and held["choices"] == ["keep", "use_new", "changed"]
     assert any("never pick a side" in w for w in receipt["warnings"])
     assert current(store, "income.salary")["value"]["amount"] == 85000
 
-    again = store.remember("c", [fact("income.salary", salary(90000), kind="document")])
+    again = store.remember("c", [fact("income.salary", salary(90000), kind="web")])
     assert [c["id"] for c in again["needs_user"]] == [held["id"]]  # one question, not two
     assert [c["id"] for c in store.contradictions("c")] == [held["id"]]
 
     kept = store.resolve_contradiction("c", held["id"], "keep")
     assert kept["contradiction"]["status"] == "kept" and kept["written"] == []
     assert store.contradictions("c") == []
-    quiet = store.remember("c", [fact("income.salary", salary(90000), kind="document")])
+    quiet = store.remember("c", [fact("income.salary", salary(90000), kind="web")])
     assert quiet["needs_user"] == [] and "already chose to keep" in quiet["warnings"][0]
     with pytest.raises(ValidationError, match="already resolved"):
         store.resolve_contradiction("c", held["id"], "use_new")
@@ -160,19 +169,19 @@ def test_evidence_never_overwrites_what_the_person_said(store):
 
 def test_use_new_marks_the_old_value_corrected(store):
     store.remember("c", [fact("income.salary", salary(85000), observed_on=RECENT)])
-    held = store.remember("c", [fact("income.salary", salary(90000), kind="document")])["needs_user"][0]
+    held = store.remember("c", [fact("income.salary", salary(90000), kind="web")])["needs_user"][0]
     result = store.resolve_contradiction("c", held["id"], "use_new")
     assert result["contradiction"]["status"] == "used_new"
     assert result["written"][0]["valid_from"] == RECENT  # it was always so
     old, new = store.history("c", "income.salary")
     assert old["status"] == "corrected" and old["valid_to"] == old["valid_from"]
-    assert new["value"]["amount"] == 90000 and new["source"]["kind"] == "document"
+    assert new["value"]["amount"] == 90000 and new["source"]["kind"] == "web"
     assert "MXN 85,000 a month (corrected)" in store.timeline("c", "income.salary")["text"]
 
 
 def test_changed_keeps_both_values_in_turn(store):
     store.remember("c", [fact("income.salary", salary(85000), observed_on=RECENT)])
-    held = store.remember("c", [fact("income.salary", salary(90000), kind="document")])["needs_user"][0]
+    held = store.remember("c", [fact("income.salary", salary(90000), kind="web")])["needs_user"][0]
     changed_on = (TODAY - timedelta(days=20)).isoformat()
     with pytest.raises(ValidationError, match="must not precede"):
         store.resolve_contradiction("c", held["id"], "changed", valid_from="2020-01-01")
@@ -185,25 +194,16 @@ def test_changed_keeps_both_values_in_turn(store):
     assert (new["valid_from"], new["valid_to"]) == (changed_on, None)
 
 
-def test_statement_on_another_key_opens_the_same_kind_of_question(tmp_path):
+def test_a_statement_replaces_the_stated_balance_it_covers(tmp_path):
     service = WealthService(tmp_path / "w.sqlite3")
     service.create("c", "Client")
     service.remember("c", [fact("investment.gbm", {"amount": 500000, "currency": "MXN", "institution": "GBM"},
                                 observed_on=RECENT)])
     receipt = service.remember("c", [statement(612000)])
-    assert [w["key"] for w in receipt["written"]] == ["account.gbm-1"]  # the statement itself is saved
-    [held] = receipt["needs_user"]
-    assert (held["kind"], held["key"], held["proposed_key"]) == ("stated_vs_statement", "investment.gbm",
-                                                                 "account.gbm-1")
-    assert held["proposed_value"]["statement"] == {"MXN": 612000}
-    assert "at GBM" in held["question"] and "$612,000" in held["question"]
-    assert "investment.gbm" not in held["question"]
-    assert [c["id"] for c in service.situation("c")["contradictions"]] == [held["id"]]
-    assert dispatch("contradictions", {"client_id": "c"}, service.db_path)["contradictions"][0]["id"] == held["id"]
-
-    result = dispatch("resolve_contradiction", {"client_id": "c", "contradiction_id": held["id"],
-                                                "choice": "changed"}, service.db_path)
-    assert result["contradiction"]["resolution"]["valid_from"] == STATEMENT_DAY
+    assert "account.gbm-1" in [w["key"] for w in receipt["written"]]  # the statement itself is saved
+    assert receipt["needs_user"] == []  # the statement is the source of truth: nothing to ask
+    assert any("replaced the estimate" in w for w in receipt["warnings"])
+    assert service.situation("c")["contradictions"] == []
     assert "investment.gbm" not in {f["key"] for f in service.inspect("c")["facts"]}
     stated, retired = service.inspect("c", detail="history", key="investment.gbm")["history"]
     assert stated["valid_to"] == STATEMENT_DAY and retired["status"] == "replaced"
@@ -211,7 +211,7 @@ def test_statement_on_another_key_opens_the_same_kind_of_question(tmp_path):
     assert text == f"replaced by a statement from {STATEMENT_DAY}; MXN 500,000 from {RECENT[:7]} to {STATEMENT_DAY[:7]}"
 
 
-def test_uploaded_statement_asks_about_the_stated_balance(tmp_path, monkeypatch):
+def test_uploaded_statement_replaces_the_stated_balance_without_asking(tmp_path, monkeypatch):
     from tests.fixtures.ingest import statements as fixtures
     from tests.test_situation import CANONICAL, _client
     from wealth.service import upload_dir
@@ -223,10 +223,8 @@ def test_uploaded_statement_asks_about_the_stated_balance(tmp_path, monkeypatch)
     (folder / "gbm.pdf").write_bytes(fixtures.gbm_multicurrency())
     proposal = service.ingest("ana", "file", {"path": "gbm.pdf"})
     saved = service.ingest("ana", "confirm", {"proposal_id": proposal["result"]["proposal_id"]})
-    [held] = saved["result"]["needs_user"]
-    assert (held["kind"], held["key"]) == ("stated_vs_statement", "investment.gbm")
-    assert held["proposed_key"].startswith("account.")
-    assert [c["id"] for c in service.contradictions("ana")["contradictions"]] == [held["id"]]
+    assert saved["result"]["needs_user"] == [] and service.contradictions("ana")["contradictions"] == []
+    assert not service.situation("ana")["differences"]
 
 
 def test_statement_close_to_the_stated_figure_asks_nothing(store):
@@ -239,19 +237,9 @@ def test_statement_close_to_the_stated_figure_asks_nothing(store):
     assert held == []  # stated cash has no statement figure to compare in differences
 
 
-def test_statement_use_new_retires_the_stated_balance(store):
-    store.remember("c", [fact("investment.gbm", {"amount": 500000, "currency": "MXN", "institution": "GBM"},
-                              observed_on=RECENT)])
-    held = store.remember("c", [statement(612000)])["needs_user"][0]
-    store.resolve_contradiction("c", held["id"], "use_new")
-    stated, retired = store.history("c", "investment.gbm")
-    assert stated["status"] == "corrected" and retired["status"] == "replaced"
-    assert current(store, "investment.gbm") is None
-
-
 def test_a_changed_fact_invalidates_its_open_question(store):
     store.remember("c", [fact("income.salary", salary(85000), observed_on=RECENT)])
-    held = store.remember("c", [fact("income.salary", salary(90000), kind="document")])["needs_user"][0]
+    held = store.remember("c", [fact("income.salary", salary(90000), kind="web")])["needs_user"][0]
     store.remember("c", [fact("income.salary", salary(88000))], 1)
     with pytest.raises(ValidationError, match="changed after this question"):
         store.resolve_contradiction("c", held["id"], "keep")
@@ -324,7 +312,7 @@ def test_patterns_stay_inferred_and_apart_from_told_facts(tmp_path):
 
 def test_receipt_shape_and_replay(store):
     store.remember("c", [fact("income.salary", salary(85000), observed_on=RECENT)])
-    receipt = store.remember("c", [fact("income.salary", salary(90000), kind="document"),
+    receipt = store.remember("c", [fact("income.salary", salary(90000), kind="web"),
                                    fact("reserve", {"target_months": 6}, kind="document")],
                              request_id="upload-1")
     assert set(receipt) == {"client", "written", "needs_user", "write_result", "warnings"}
@@ -334,7 +322,7 @@ def test_receipt_shape_and_replay(store):
                                              "proposed_value", "sources", "valid_from", "question", "choices",
                                              "status", "created_at", "resolved_at", "resolution"}
     assert [w["key"] for w in receipt["written"]] == ["reserve"]
-    replay = store.remember("c", [fact("income.salary", salary(90000), kind="document"),
+    replay = store.remember("c", [fact("income.salary", salary(90000), kind="web"),
                                   fact("reserve", {"target_months": 6}, kind="document")],
                             request_id="upload-1")
     assert replay["write_result"]["replayed"] is True

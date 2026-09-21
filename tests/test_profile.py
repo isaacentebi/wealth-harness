@@ -462,16 +462,14 @@ def test_goal_contribution_edits_keep_the_goal_shape(tmp_path):
     assert service.situation("ana")["goals"][0]["monthly_contribution"] == 12000
 
 
-def test_canonical_contradiction_uses_the_stored_record(tmp_path, monkeypatch):
+def test_a_statement_replaces_the_estimate_without_a_card(tmp_path, monkeypatch):
     from tests.test_situation import CANONICAL
     monkeypatch.delenv("WEALTH_UPLOAD_DIR", raising=False)
     service = _live(tmp_path, CANONICAL)
-    pending = service.contradictions("ana")["contradictions"]
+    # The statement is the source of truth for the balance it covers: no card asks about the old estimate.
+    assert service.contradictions("ana")["contradictions"] == []
     memory = profile_view(service, "ana", language="es")["memory"]["es"]
-    assert pending, "the statement disagrees with the stated GBM figure by more than the tolerance"
-    (card,) = memory["conflicts"]
-    assert card["contradiction_id"] == pending[0]["id"] and card["key"] == "investment.gbm"
-    assert card["text"] == "Dijiste unos $200,000 en GBM; tu estado de cuenta dice $236,087."
+    assert not memory["conflicts"]
     spending = next(f for g in memory["groups"] for f in g["facts"] if g["id"] == "money_out")
     assert spending["edit"] == {"field": "total", "kind": "amount", "amount": 45000, "currency": "MXN"}
     snap = service.inspect("ana")

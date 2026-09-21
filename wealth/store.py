@@ -28,6 +28,9 @@ _CONFIDENCES = frozenset({"confirmed", "reported", "inferred"})
 _SOURCE_KINDS = frozenset({"user", "document", "web", "tool", "inference", "connector", "pattern"})
 # Sources that may not silently overwrite what the person told us (see ``remember``).
 _CHALLENGER_KINDS = frozenset({"document", "web", "connector", "inference", "pattern"})
+# Records that settle a figure outright (a statement, a payslip, a connected account), and the figures they settle.
+_EVIDENCE_KINDS = frozenset({"document", "connector"})
+_FIGURE_PREFIXES = ("income.", "cash.", "investment.", "liability.", "spending.", "account.")
 _DECISION_STATUSES = frozenset({"accepted", "dismissed"})
 # A fact revision is ``active`` (possibly closed by valid_to), ``corrected`` (it turned out
 # wrong), or a value-less terminal row: ``forgotten`` (the person removed it) or
@@ -1558,6 +1561,9 @@ class WealthStore:
                         and _protected(prior_fact)
                         and fact["source"]["kind"] in _CHALLENGER_KINDS
                         and _json(fact["value"]) != prior_fact["value_json"]
+                        # A statement, payslip or connected account is the source of truth for the figures
+                        # it covers: it replaces what the person estimated (history keeps the estimate).
+                        and not (fact["source"]["kind"] in _EVIDENCE_KINDS and key.startswith(_FIGURE_PREFIXES))
                     ):
                         opened = self._open_contradiction(
                             client_id, "same_key", key, key, prior_fact,
@@ -1577,7 +1583,8 @@ class WealthStore:
                                 f"Ask them (needs_user {opened['id']}); never pick a side silently"
                             )
                         continue
-                    if prior_fact is not None and not fact["merge"] and expected_revision is None:
+                    settles = fact["source"]["kind"] in _EVIDENCE_KINDS and key.startswith(_FIGURE_PREFIXES)
+                    if prior_fact is not None and not fact["merge"] and expected_revision is None and not settles:
                         if not (prior_fact["confidence"] == "inferred"
                                 and fact["confidence"] != "inferred"):
                             raise ValidationError(
@@ -1615,12 +1622,12 @@ class WealthStore:
                         if fact["key"].startswith("account.") and fact["key"].count(".") == 1
                         and fact["source"]["kind"] in _CHALLENGER_KINDS and fact["value"] is not None
                     )
-                    for opened in (self._statement_contradictions(client_id, statement_keys, request_id, now)
-                                   if statement_keys else []):
-                        needs_user.append(opened)
+                    for replaced in (self._statement_contradictions(client_id, statement_keys, request_id, now)
+                                     if statement_keys else []):
                         warnings.append(
-                            f"the statement in {opened['proposed_key']} disagrees with what the person told us "
-                            f"in {opened['key']}. Ask them (needs_user {opened['id']}); never pick a side silently"
+                            f"the statement in {replaced['replaced_by']} replaced the estimate in {replaced['key']} "
+                            f"({replaced['stated']} stated, {replaced['statement']} on the statement); mention the "
+                            "difference once if it matters, do not ask about it"
                         )
                 if request_id is not None:
                     self._db.execute(
@@ -1747,7 +1754,7 @@ class WealthStore:
     def _statement_contradictions(
         self, client_id: str, statement_keys: Sequence[str], request_id: str | None, now: str,
     ) -> list[dict[str, Any]]:
-        """Stated balances that a just-saved statement disagrees with (situation differences)."""
+        """Replace stated balances that a just-saved statement covers; returns what was replaced."""
 
         from .situation.model import build, same_institution
 
@@ -1783,12 +1790,19 @@ class WealthStore:
                 "valid_from": difference.get("as_of") or account["valid_from"],
                 "institution": difference.get("institution"),
             }
-            found = self._open_contradiction(
-                client_id, "stated_vs_statement", stated_key, matching[0], stated_row, proposed,
-                request_id, now,
+            # A statement is the source of truth for the balance it covers: the person's estimate is closed
+            # when the statement begins and kept in history, with nothing to ask.
+            start = max(str(proposed["valid_from"]), str(stated_row["valid_from"]))
+            self._close(stated_row["id"], start)
+            revision = self._db.execute("SELECT revision FROM clients WHERE id = ?", (client_id,)).fetchone()[0]
+            self._insert_fact(
+                client_id,
+                {"key": stated_key, "value": None, "source": proposed["source"], "confidence": "reported",
+                 "expires_on": None, "valid_from": start},
+                revision, now, status="replaced",
             )
-            if found is not None:
-                opened.append(found)
+            opened.append({"key": stated_key, "replaced_by": matching[0], "stated": stated_value,
+                           "statement": value, "as_of": difference.get("as_of")})
         return opened
 
     def contradictions(self, client_id: str, status: str | None = "pending") -> list[dict[str, Any]]:

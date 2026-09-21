@@ -405,20 +405,17 @@ def test_contradiction_questions_use_human_labels_in_the_persons_language(servic
                              said("investment.brokerage", {"amount": 200000, "currency": "MXN", "institution": "GBM",
                                                            "approximate": True}, observed_on="2026-08-01")])
     saved = confirm(service, upload(service, "gbm.pdf", fx.gbm_multicurrency()))
-    [question] = [q["question"] for q in saved["result"]["needs_user"]]
-    # Codes appear only because the statement holds two currencies.
-    assert question.startswith("Dijiste unos $200,000 MXN en GBM, pero el estado de cuenta del 31 de agosto de 2026")
-    assert "investment.brokerage" not in question and "¿Mantengo tu cifra" in question
+    assert saved["result"]["needs_user"] == []  # the statement replaces the estimate: nothing to ask
 
     with WealthStore(service.db_path) as store:
         store.remember("ana", [said("income.salary", {"amount": 85000, "currency": "MXN", "frequency": "monthly"})])
         receipt = store.remember("ana", [{"key": "income.salary", "value": {"amount": 90000, "currency": "MXN",
                                                                              "frequency": "monthly"},
-                                          "source": {"kind": "document", "ref": "nomina.pdf",
+                                          "source": {"kind": "web", "ref": "https://example.com/nomina",
                                                      "observed_on": TODAY.isoformat()}}])
     [held] = receipt["needs_user"]
     assert held["question"].startswith("Me dijiste que tu sueldo es de $85,000 al mes")
-    assert "income.salary" not in held["question"] and "nomina.pdf" not in held["question"]
+    assert "income.salary" not in held["question"] and "example.com" not in held["question"]
 
 
 # ------------------------------------------------------------------ 10. one sentence per stale statement account

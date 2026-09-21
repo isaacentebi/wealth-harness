@@ -84,7 +84,7 @@ def test_contradictions_and_history_endpoints(tmp_path):
     service.remember("personal", [{"key": "cash.nu", "value": {"amount": 150000, "currency": "MXN", "institution": "Nu"},
                                    "source": {"kind": "user", "ref": "chat", "observed_on": today}}])
     receipt = service.remember("personal", [{"key": "cash.nu", "value": {"amount": 160000, "currency": "MXN", "institution": "Nu"},
-                                             "source": {"kind": "document", "ref": "nu.pdf", "observed_on": today},
+                                             "source": {"kind": "web", "ref": "https://example.com/nu", "observed_on": today},
                                              "confidence": "reported"}])
     assert receipt["needs_user"]
     chat = web.Chat(db, "personal")
