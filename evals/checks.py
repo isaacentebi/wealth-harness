@@ -465,11 +465,22 @@ def memory_findings(saved_keys: Iterable[str], expect: Mapping[str, Any] | None)
     expect = expect or {}
     findings = []
     for prefix in expect.get("saves", []):
-        if not any(key == prefix or key.startswith(prefix) for key in saved):
+        accepted = CANONICAL_EQUIVALENTS.get(prefix, (prefix,))
+        if not any(key == p or key.startswith(p) for key in saved for p in accepted):
             findings.append(Finding("memory_not_saved", "warn", f"expected a write to {prefix}"))
-    if expect.get("no_saves") and saved:
-        findings.append(Finding("memory_unexpected_save", "fail", f"wrote {', '.join(sorted(saved))}"))
+    # Continuity notes (advice given) are the adviser's own record, not facts about the person.
+    personal = [key for key in saved if not key.startswith("thread.")]
+    if expect.get("no_saves") and personal:
+        findings.append(Finding("memory_unexpected_save", "fail", f"wrote {', '.join(sorted(personal))}"))
     return findings
+
+
+# Scenario expectations written against the older memory keys, and the canonical keys that now hold the same facts.
+CANONICAL_EQUIVALENTS = {
+    "plan.resources": ("plan.resources", "cash.", "investment.", "liability.", "reserve"),
+    "income.schedule": ("income.",),
+    "household": ("household", "account.", "investment.", "cash."),
+}
 
 
 def verdict(findings: Iterable[Finding]) -> str:
