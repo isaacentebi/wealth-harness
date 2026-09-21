@@ -200,6 +200,47 @@
     #toast .txt { color: var(--surface); text-decoration-color: color-mix(in srgb, var(--surface) 45%, transparent); padding: 0 8px; min-height: 36px; }
     #toast p { margin: 4px 8px 4px 0; }
 
+    /* Hoy in the rail: the chat's lines, read-only here; a tap asks in the chat */
+    ul.hoy { list-style: none; margin: 8px 0 0; padding: 0; border-top: 1.5px solid var(--ink); }
+    ul.hoy li { border-bottom: 1px solid var(--hairline); }
+    .hoy-go { display: flex; align-items: baseline; gap: 12px; width: 100%; min-height: 48px; padding: 12px 0; border: 0; background: none; text-align: left; cursor: pointer; color: var(--ink-2); }
+    .hoy-go:hover .hoy-title { color: var(--ink); }
+    .hoy-go .mark { flex: none; width: 7px; height: 7px; border-radius: 50%; transform: translateY(-2px); }
+    .hoy-go .mark.act { background: var(--ink); }
+    .hoy-go .mark.consider { border: 1px solid var(--ink-2); }
+    .hoy-title { flex: 1; min-width: 0; }
+    .hoy-title .v { font-weight: 600; color: var(--ink); }
+    .hoy-due { flex: none; font: 400 12px/24px var(--mono); color: var(--ink-3); }
+    .rail-link { display: flex; align-items: center; justify-content: space-between; min-height: 48px; border-top: 1.5px solid var(--ink); border-bottom: 1px solid var(--hairline); color: var(--ink); font: 600 17px/24px var(--sans); letter-spacing: -.01em; }
+    .rail-link:hover { color: var(--ink); }
+    .rail-link:hover span:last-child { color: var(--vermilion); }
+
+    /* Conexiones: one row per read-only source */
+    .conns-lead { margin: 12px 0 0; font-size: 15px; line-height: 24px; color: var(--ink-2); max-width: 36em; }
+    .conn-list { list-style: none; margin: 16px 0 0; padding: 0; border-top: 1.5px solid var(--ink); }
+    .conn { padding: 16px 0 8px; border-bottom: 1px solid var(--hairline); }
+    .conn-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+    .conn-name { font: 600 17px/24px var(--sans); letter-spacing: -.01em; }
+    .conn-state { font: 400 12px/16px var(--mono); color: var(--ink-3); white-space: nowrap; }
+    .conn-state.on { color: var(--ink); }
+    .conn-cap, .conn-meta { margin: 4px 0 0; font-size: 13px; line-height: 20px; color: var(--ink-2); }
+    .conn-meta { font-family: var(--mono); font-size: 12px; color: var(--ink-3); }
+    .accts { list-style: none; margin: 8px 0 0; padding: 0; }
+    .accts li { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding: 4px 0; }
+    .acct-name { min-width: 0; overflow-wrap: anywhere; font-size: 15px; }
+    .acct-fresh { font: 400 12px/20px var(--mono); color: var(--ink-3); white-space: nowrap; }
+    .acct-fresh.stale { color: var(--vermilion); }
+    .conn .acts { margin-top: 4px; }
+    .data-row { padding: 12px 0; border-bottom: 1px solid var(--hairline); }
+    .data h2 + .data-row { margin-top: 16px; border-top: 1.5px solid var(--ink); }
+    .data-row p { margin: 0; }
+    .data .erase { font: 500 15px/24px var(--sans); }
+    pre.cmd { margin: 8px 0 0; padding: 12px 16px; background: var(--surface); border: 1px solid var(--hairline); border-radius: 8px; font: 400 13px/20px var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+    ol.steps { list-style: none; margin: 0 0 16px; padding: 0; display: grid; gap: 16px; }
+    ol.steps li { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 8px; }
+    .step-n { font: 400 13px/24px var(--mono); color: var(--ink-3); }
+    ol.steps .env { margin: 8px 0 0; font: 400 13px/20px var(--mono); overflow-wrap: anywhere; }
+
     @media (max-width: 960px) {
       .cols { grid-template-columns: minmax(0, 1fr); gap: 0; }
       .side { position: static; }
@@ -267,6 +308,23 @@
         topPositions: 'Largest positions', throughFunds: 'Through funds', directVia: 'Direct {a} · via funds {b}',
         unidentified: 'Unidentified fund holdings', unknown: 'Unknown', statementOf: '{i} statement',
         ac_equity: 'Equity', ac_fixed_income: 'Fixed income', ac_cash: 'Cash', ac_fund: 'Funds', ac_pension: 'Pension', ac_real_estate: 'Real estate', ac_unknown: 'Unclassified',
+        today: 'Today', todayDay: 'today', tomorrow: 'tomorrow', review: 'Quarterly review',
+        conns: 'Connections', connsLead: 'Read only. Keys are stored with the system keychain command in Terminal; this page never shows or asks for one.',
+        keyKeychain: 'Key in keychain', keyEnv: 'Key in environment', noKey: 'Not connected',
+        cap_ibkr_flex: 'Read only: positions, trades, dividends and cash', cap_alpaca: 'Read only: positions, activity and dividends',
+        cap_cuenca: 'Read only: balance, transactions and savings pockets', cap_statements: 'Read only: whatever the PDF or CSV holds',
+        statements: 'Statements', uploadRow: 'Upload a statement', synced: 'Synced {t}', asOfShort: 'as of {d}',
+        sync: 'Sync', howTo: 'How to connect', noAccounts: 'No accounts yet.',
+        syncAsk: 'Sync my {i} account (read only) and show me the summary before saving anything.',
+        syncAskIbkr: ' My Flex query id is ', uploadAsk: 'I’m attaching a statement.',
+        sheetTitle: 'Connect {i}', step1_ibkr_flex: 'In the IBKR portal create an Activity Flex Query (XML, last 365 days), then enable Flex Web Service and copy the current token.',
+        step1_alpaca: 'In the Alpaca dashboard generate an API key and copy the key id and the secret (the secret is shown once).',
+        step1_cuenca: 'Ask Cuenca for an API key and secret for your account. Without one, upload the monthly statement instead.',
+        step2: 'Store it yourself from Terminal; macOS asks for the value. Never paste it into the chat.',
+        step3: 'Or, for one session only, export:', step4: 'Then tap Sync here.', step4_ibkr_flex: 'Then tap Sync here and have your query id ready.',
+        readOnlyLine: 'Wealth only reads. It cannot trade or move money.', copy: 'Copy', copied: 'Copied.',
+        data: 'Your data', export: 'Download everything (JSON)', exportLine: 'Every fact, its history, decisions and the ledger.',
+        erase: 'Delete my data', eraseLine: 'Deleting is done only from Terminal, so nothing can do it by accident:', exportFailed: 'The export could not be downloaded.',
       },
       es: {
         you: 'Yo', chat: '← Chat', loadError: 'No se pudo cargar tu perfil.',
@@ -302,12 +360,30 @@
         topPositions: 'Posiciones principales', throughFunds: 'A través de fondos', directVia: 'Directo {a} · vía fondos {b}',
         unidentified: 'Posiciones de fondos sin identificar', unknown: 'Desconocido', statementOf: 'Estado de cuenta de {i}',
         ac_equity: 'Acciones', ac_fixed_income: 'Renta fija', ac_cash: 'Efectivo', ac_fund: 'Fondos', ac_pension: 'Pensión', ac_real_estate: 'Inmuebles', ac_unknown: 'Sin clasificar',
+        today: 'Hoy', todayDay: 'hoy', tomorrow: 'mañana', review: 'Revisión trimestral',
+        conns: 'Conexiones', connsLead: 'Solo lectura. Las llaves se guardan con el comando del llavero del sistema en la Terminal; esta página nunca las muestra ni las pide.',
+        keyKeychain: 'Llave en el llavero', keyEnv: 'Llave en el entorno', noKey: 'Sin conectar',
+        cap_ibkr_flex: 'Solo lectura: posiciones, operaciones, dividendos y efectivo', cap_alpaca: 'Solo lectura: posiciones, movimientos y dividendos',
+        cap_cuenca: 'Solo lectura: saldo, movimientos y apartados', cap_statements: 'Solo lectura: lo que traiga el PDF o CSV',
+        statements: 'Estados de cuenta', uploadRow: 'Subir estado de cuenta', synced: 'Sincronizado {t}', asOfShort: 'al {d}',
+        sync: 'Sincronizar', howTo: 'Cómo conectar', noAccounts: 'Aún no hay cuentas.',
+        syncAsk: 'Sincroniza mi cuenta de {i} (solo lectura) y muéstrame el resumen antes de guardar nada.',
+        syncAskIbkr: ' Mi query id de Flex es ', uploadAsk: 'Te adjunto un estado de cuenta.',
+        sheetTitle: 'Conectar {i}', step1_ibkr_flex: 'En el portal de IBKR crea una Activity Flex Query (XML, últimos 365 días); luego activa Flex Web Service y copia el token vigente.',
+        step1_alpaca: 'En el panel de Alpaca genera una API key y copia el key id y el secret (el secret se muestra una sola vez).',
+        step1_cuenca: 'Pide a Cuenca una API key y secret para tu cuenta. Sin llave, sube el estado de cuenta mensual.',
+        step2: 'Guárdala tú desde la Terminal; macOS te pide el valor. Nunca la pegues en el chat.',
+        step3: 'O, solo para esta sesión, exporta:', step4: 'Luego toca Sincronizar aquí.', step4_ibkr_flex: 'Luego toca Sincronizar aquí y ten a la mano tu query id.',
+        readOnlyLine: 'Wealth solo lee. No puede operar ni mover dinero.', copy: 'Copiar', copied: 'Copiado.',
+        data: 'Tus datos', export: 'Descargar todo (JSON)', exportLine: 'Cada dato, su historial, tus decisiones y los movimientos.',
+        erase: 'Borrar mis datos', eraseLine: 'Borrar se hace solo desde la Terminal, para que nada lo haga por error:', exportFailed: 'No se pudo descargar la exportación.',
       }
     };
     const root = document.getElementById('root');
     const sheet = document.getElementById('sheet');
     const toast = document.getElementById('toast');
     let lang = 'en', locale = 'en-US', data = null, token = '', writes = true, allocTab = 'account', toastTimer = null;
+    let todayData = null, conns = null;   // the Hoy lines and the Conexiones rows (token-protected reads)
     let editing = null;            // id of the sentence being edited in place
     const hidden = new Set();      // sentences forgotten but still undoable
     let pending = null;            // { item, timer } — the delete waiting out its undo window
@@ -403,6 +479,7 @@
         if (!response.ok) throw new Error(body.error || t('loadError'));
         data = body;
         if (data.writes === false) writes = false;
+        await loadSurfaces();
         render();
       } catch (error) {
         fill(root, h('p', { class: 'say', style: { marginTop: '40px' }, text: error instanceof Error ? error.message : t('loadError') }));
@@ -595,8 +672,9 @@
       fill(root,
         h('h1', {}, t('you'), h('span', { class: 'dot', text: '.' })),
         h('div', { class: 'cols' },
-          h('div', {}, empty ? renderEmpty() : [renderWorth(ov), m.conflicts.map(renderConflict), renderCheck(m.review), renderNotes(m)]),
-          h('aside', { class: 'side' }, renderUpcoming(), ov.status === 'empty' ? null : renderReturns())));
+          h('div', {}, empty ? renderEmpty() : [renderWorth(ov), m.conflicts.map(renderConflict), renderCheck(m.review), renderNotes(m)],
+            renderConnections(), renderData()),
+          h('aside', { class: 'side' }, renderToday(), renderReviewLink(), renderUpcoming(), ov.status === 'empty' ? null : renderReturns())));
     }
 
     function renderEmpty() {
@@ -778,6 +856,132 @@
         (lt.rows || []).length ? [h('h4', { text: t('throughFunds') }),
           ruled(t('throughFunds'), lt.rows.map(r => tr(r.instrument === 'unidentified' ? t('unidentified') : String(r.instrument),
             r.direct > 0 ? t('directVia', { a: money(r.direct, ov.currency), b: money(r.via_funds, ov.currency) }) : null, money(r.total, ov.currency))))] : null);
+    }
+
+    // ------------------------------------------------------------ Hoy, quarterly review, connections, your data
+    async function loadSurfaces() {
+      const get = path => fetch(path, { credentials: 'same-origin', cache: 'no-store', headers: { 'X-Wealth-Token': token } })
+        .then(r => r.ok ? r.json() : null).catch(() => null);
+      let zone = '';
+      try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (_) { /* optional */ }
+      [todayData, conns] = await Promise.all([get('/api/today?tz=' + encodeURIComponent(zone)), get('/api/connections')]);
+    }
+    // Other pages hand the chat a prompt through sessionStorage, never the address.
+    function handoff(text, send) {
+      try { sessionStorage.setItem('wealth.handoff', JSON.stringify({ text, send: !!send })); } catch (_) { /* the chat still opens */ }
+      location.href = '/';
+    }
+    function dueText(item) {
+      if (!item.due || typeof item.days !== 'number') return null;
+      return item.days === 0 ? t('todayDay') : item.days === 1 ? t('tomorrow') : railDate(item.due);
+    }
+    function renderToday() {
+      const items = (todayData?.items || []).slice(0, 3);
+      if (!items.length) return null;
+      return h('section', { class: 'part', 'aria-labelledby': 'today-h' },
+        h('h2', { id: 'today-h', text: t('today') }),
+        h('ul', { class: 'hoy' }, items.map(item => {
+          const title = String(item.title?.[lang] || '');
+          const [a, b] = (item.emphasis?.[lang] || [])[0] || [0, 0];
+          const due = dueText(item);
+          return h('li', {}, h('button', { type: 'button', class: 'hoy-go', onclick: () => handoff(String(item.next_step?.[lang] || title), true) },
+            h('span', { class: 'mark ' + (['act', 'consider'].includes(item.severity) ? item.severity : ''), 'aria-hidden': 'true' }),
+            h('span', { class: 'hoy-title' }, b > a && b <= title.length ? [title.slice(0, a), h('span', { class: 'v', text: title.slice(a, b) }), title.slice(b)] : title),
+            due ? h('time', { class: 'hoy-due', datetime: item.due, text: due }) : null));
+        })));
+    }
+    function renderReviewLink() {
+      return h('section', { class: 'part', 'aria-label': t('review') },
+        h('a', { class: 'rail-link', href: '/review' }, h('span', { text: t('review') }), h('span', { 'aria-hidden': 'true', text: '→' })));
+    }
+    function sinceText(iso) {
+      const when = new Date(iso);
+      if (Number.isNaN(when.getTime())) return '';
+      const rtf = new Intl.RelativeTimeFormat(locale, { numeric: 'auto' });
+      const hours = (Date.now() - when.getTime()) / 36e5;
+      if (hours < 1) return rtf.format(-Math.max(1, Math.round(hours * 60)), 'minute');
+      if (hours < 24) return rtf.format(-Math.round(hours), 'hour');
+      return rtf.format(-Math.round(hours / 24), 'day');
+    }
+    function freshText(days) {
+      if (!isNum(days)) return '';
+      if (days < 14) return new Intl.RelativeTimeFormat(locale, { numeric: 'auto' }).format(-days, 'day');
+      return ago(days);
+    }
+    function accountRows(accounts) {
+      if (!accounts.length) return null;
+      return h('ul', { class: 'accts' }, accounts.map(a => h('li', {},
+        h('span', { class: 'acct-name', text: a.label }),
+        h('span', { class: 'acct-fresh' + (a.stale ? ' stale' : '') },
+          a.as_of ? [t('asOfShort', { d: railDate(a.as_of) }), ' · ', freshText(a.days)] : t('unknown')))));
+    }
+    function renderConnections() {
+      if (!conns) return null;
+      const rows = (conns.connectors || []).map(c => {
+        const state = c.configured ? t(c.via === 'env' ? 'keyEnv' : 'keyKeychain') : t('noKey');
+        const ask = t('syncAsk', { i: c.institution }) + (c.name === 'ibkr_flex' ? t('syncAskIbkr') : '');
+        return h('li', { class: 'conn' },
+          h('div', { class: 'conn-head' }, h('span', { class: 'conn-name', text: c.institution }),
+            h('span', { class: 'conn-state' + (c.configured ? ' on' : ''), text: state })),
+          h('p', { class: 'conn-cap', text: t('cap_' + c.name) }),
+          c.last_sync ? h('p', { class: 'conn-meta', text: t('synced', { t: sinceText(c.last_sync) }) }) : null,
+          accountRows(c.accounts || []),
+          h('div', { class: 'acts' },
+            c.configured ? h('button', { class: 'txt act', type: 'button', text: t('sync'), onclick: () => handoff(ask, false) }) : null,
+            h('button', { class: 'txt', type: 'button', 'aria-haspopup': 'dialog', text: t('howTo'), onclick: () => openSetup(c) })));
+      });
+      const statements = conns.statements?.accounts || [];
+      rows.push(h('li', { class: 'conn' },
+        h('div', { class: 'conn-head' }, h('span', { class: 'conn-name', text: t('statements') })),
+        h('p', { class: 'conn-cap', text: t('cap_statements') }),
+        accountRows(statements),
+        h('div', { class: 'acts' }, h('button', { class: 'txt act', type: 'button', text: t('uploadRow'), onclick: () => handoff(t('uploadAsk'), false) }))));
+      return h('section', { class: 'notes conns', 'aria-labelledby': 'conns-h' },
+        h('h2', { id: 'conns-h', text: t('conns') }),
+        h('p', { class: 'conns-lead', text: t('connsLead') }),
+        h('ul', { class: 'conn-list' }, rows));
+    }
+    function openSetup(c) {
+      const setup = c.setup || {};
+      const commands = (setup.commands || []).join('\n');
+      const copy = h('button', { class: 'txt small', type: 'button', text: t('copy'), onclick: async () => {
+        try { await navigator.clipboard.writeText(commands); say(t('copied')); } catch (_) { /* the text stays selectable */ }
+      } });
+      const step = (no, ...kids) => h('li', {}, h('span', { class: 'step-n', 'aria-hidden': 'true', text: String(no) }), h('div', {}, kids));
+      fill(sheet,
+        h('button', { class: 'txt close', type: 'button', text: t('close'), onclick: () => sheet.close() }),
+        h('p', { class: 'say', id: 'sheet-title', text: t('sheetTitle', { i: c.institution }) }),
+        h('ol', { class: 'steps' },
+          step(1, t('step1_' + c.name)),
+          step(2, t('step2'), h('pre', { class: 'cmd' }, h('code', { text: commands })), copy),
+          step(3, t('step3'), h('p', { class: 'env', text: (setup.env || []).join('  ') })),
+          step(4, has('step4_' + c.name) ? t('step4_' + c.name) : t('step4'))),
+        h('p', { class: 'quiet', text: t('readOnlyLine') }));
+      sheet.dataset.from = '';
+      if (!sheet.open) sheet.showModal();
+    }
+    async function downloadExport(button) {
+      button.disabled = true;
+      try {
+        const response = await fetch('/api/export', { credentials: 'same-origin', cache: 'no-store', headers: { 'X-Wealth-Token': token } });
+        if (!response.ok) throw new Error(t('exportFailed'));
+        const url = URL.createObjectURL(await response.blob());
+        const link = h('a', { href: url, download: 'wealth-export.json' });
+        document.body.append(link); link.click(); link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 4000);
+      } catch (_) { say(t('exportFailed')); } finally { button.disabled = false; }
+    }
+    function renderData() {
+      if (!conns?.data) return null;
+      return h('section', { class: 'notes data', 'aria-labelledby': 'data-h' },
+        h('h2', { id: 'data-h', text: t('data') }),
+        h('div', { class: 'data-row' },
+          h('button', { class: 'txt', type: 'button', text: t('export'), onclick: e => downloadExport(e.currentTarget) }),
+          h('p', { class: 'quiet', text: t('exportLine') })),
+        h('div', { class: 'data-row' },
+          h('p', { class: 'erase', text: t('erase') }),
+          h('p', { class: 'quiet', text: t('eraseLine') }),
+          h('pre', { class: 'cmd' }, h('code', { text: conns.data.forget_command }))));
     }
 
     // ------------------------------------------------------------ boot

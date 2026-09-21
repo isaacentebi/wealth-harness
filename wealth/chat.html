@@ -859,6 +859,41 @@
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition: none !important; scroll-behavior: auto !important; }
     }
+
+    /* ---------- today: at most three quiet lines above the composer ---------- */
+    /* Hidden while a turn runs (visibility keeps its height, so nothing moves) and during setup. */
+    .hoy { margin: 0 0 4px; }
+    .hoy ul { list-style: none; margin: 0; padding: 0; }
+    .hoy li { display: flex; align-items: center; min-height: 44px; }
+    .dock:has(.send.stopping) .hoy { visibility: hidden; }
+    .app:has(.messages .setup) .hoy { display: none; }
+    .hoy-go {
+      flex: 1; min-width: 0; min-height: 44px; display: flex; align-items: center; gap: 12px;
+      padding: 0; border: 0; background: none; text-align: left; color: var(--ink-soft);
+      font: 400 15px/20px var(--sans);
+    }
+    .hoy-go:hover .hoy-title { color: var(--ink); text-decoration: underline; text-decoration-color: var(--hairline); text-underline-offset: 4px; }
+    .hoy-mark { flex: none; width: 7px; height: 7px; border-radius: 50%; }
+    .hoy-mark.act { background: var(--ink); }
+    .hoy-mark.consider { border: 1px solid var(--ink-soft); }
+    .hoy-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .hoy-title b { font-weight: 600; color: var(--ink); }
+    .hoy-due { flex: none; font: 400 12px/20px var(--mono); color: var(--muted); }
+    .hoy-later, .hoy-x {
+      flex: none; min-height: 44px; border: 0; background: none; color: var(--muted); padding: 0 8px;
+      font: 400 13px/20px var(--sans);
+    }
+    .hoy-x { width: 44px; margin-right: -12px; padding: 0; display: grid; place-items: center; }
+    .hoy-later:hover, .hoy-x:hover { color: var(--ink); }
+    /* With a mouse the two quiet controls appear on the line being pointed at or focused; touch always shows them. */
+    @media (hover: hover) and (pointer: fine) {
+      .hoy li:not(:hover):not(:focus-within) :is(.hoy-later, .hoy-x) { opacity: 0; }
+    }
+    @media (max-width: 560px) {
+      .hoy-title { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+      .hoy-go { gap: 10px; padding: 4px 0; }
+      .hoy-later { padding: 0 4px 0 8px; }
+    }
   </style>
 </head>
 <body>
@@ -3122,6 +3157,106 @@
       }
     });
 
+    // ------------------------------------------------------------------ today (Hoy) and hand-offs from other pages
+
+    // At most three dated lines above the composer. Tapping one asks its next step; × dismisses it until its
+    // trigger changes; "Later" hides it for seven days. Strings live here so the chrome table stays untouched.
+    const HOY = {
+      en: { region: 'Today', later: 'Later', laterLabel: title => `Remind me in 7 days: ${title}`,
+        dismiss: title => `Dismiss: ${title}`, today: 'today', tomorrow: 'tomorrow', failed: 'That could not be saved. Try again.' },
+      es: { region: 'Hoy', later: 'Más tarde', laterLabel: title => `Recordármelo en 7 días: ${title}`,
+        dismiss: title => `Descartar: ${title}`, today: 'hoy', tomorrow: 'mañana', failed: 'No se pudo guardar. Intenta de nuevo.' }
+    }[LANG];
+    let hoyNode = null;
+
+    function hoyDue(item) {
+      if (!item.due || typeof item.days !== 'number') return null;
+      if (item.days === 0) return HOY.today;
+      if (item.days === 1) return HOY.tomorrow;
+      const [y, m, d] = String(item.due).split('-').map(Number);
+      try { return new Intl.DateTimeFormat(localeOf(LANG), { day: 'numeric', month: 'short', timeZone: 'UTC' }).format(new Date(Date.UTC(y, m - 1, d, 12))).replace('.', ''); } catch (_) { return null; }
+    }
+
+    function hoyLine(item) {
+      const title = String((item.title || {})[LANG] || '');
+      const ask = String((item.next_step || {})[LANG] || '');
+      const line = el('li');
+      const go = el('button', 'hoy-go');
+      go.type = 'button';
+      const mark = el('span', `hoy-mark ${['act', 'consider'].includes(item.severity) ? item.severity : ''}`);
+      mark.setAttribute('aria-hidden', 'true');
+      const text = el('span', 'hoy-title');
+      const [a, b] = ((item.emphasis || {})[LANG] || [])[0] || [0, 0];
+      if (b > a && b <= title.length) text.append(title.slice(0, a), el('b', '', title.slice(a, b)), title.slice(b));
+      else text.textContent = title;
+      text.title = title;
+      go.append(mark, text);
+      const due = hoyDue(item);
+      if (due) { const time = el('time', 'hoy-due', due); time.dateTime = String(item.due); go.append(time); }
+      go.addEventListener('click', () => { if (!busy && ask) submit(ask); });
+      const later = el('button', 'hoy-later', HOY.later);
+      later.type = 'button';
+      later.setAttribute('aria-label', HOY.laterLabel(title));
+      later.addEventListener('click', () => hoyAck('snooze', item.id, line));
+      const x = el('button', 'hoy-x');
+      x.type = 'button';
+      x.setAttribute('aria-label', HOY.dismiss(title));
+      x.append(svg('M7 7l10 10M17 7 7 17', 14));
+      x.addEventListener('click', () => hoyAck('dismiss', item.id, line));
+      line.append(go, later, x);
+      return line;
+    }
+
+    function hoyRender(items) {
+      const shown = (Array.isArray(items) ? items : []).slice(0, 3);
+      if (!shown.length) { if (hoyNode) hoyNode.remove(); hoyNode = null; return; }
+      if (!hoyNode) {
+        hoyNode = el('section', 'hoy');
+        hoyNode.setAttribute('aria-label', HOY.region);
+        form.before(hoyNode);
+      }
+      const list = el('ul');
+      shown.forEach(item => list.append(hoyLine(item)));
+      hoyNode.replaceChildren(list);
+    }
+
+    async function hoyAck(action, id, line) {
+      line.hidden = true;
+      try {
+        const data = await json(await api('/api/today', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ [action]: id, timezone: timezone() })
+        }));
+        hoyRender(data.items);
+        const first = hoyNode && hoyNode.querySelector('.hoy-go');
+        if (first) first.focus(); else if (!coarse.matches) input.focus();
+      } catch (_) {
+        line.hidden = false;
+        live.textContent = HOY.failed;
+      }
+    }
+
+    // Other pages hand the chat a prompt through sessionStorage (never the address): prefilled, or sent.
+    function takeHandoff() {
+      let item = null;
+      try { item = JSON.parse(sessionStorage.getItem('wealth.handoff') || 'null'); sessionStorage.removeItem('wealth.handoff'); } catch (_) { return; }
+      const text = item && typeof item.text === 'string' ? item.text.trim().slice(0, 2000) : '';
+      if (!text) return;
+      if (item.send && !busy) { submit(text); return; }
+      input.value = text;
+      resize();
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    }
+
+    // Loaded before the conversation is drawn (briefly), so the lines arrive without moving what is on screen.
+    async function startToday(state) {
+      setTimeout(takeHandoff, 0);
+      const setupFlow = (state.onboarding || {}).active && state.onboarding.mode === 'flow';
+      if (setupFlow) return;  // the setup cards own the screen; a resumed setup hides the lines through CSS
+      const load = api(`/api/today?tz=${encodeURIComponent(timezone() || '')}`).then(json).then(data => hoyRender(data.items)).catch(() => {});
+      await Promise.race([load, new Promise(resolve => setTimeout(resolve, 700))]);
+    }
+
     // ------------------------------------------------------------------ start
 
     // The profile is a sibling view; show its link only when the server has it.
@@ -3155,6 +3290,7 @@
       const level = form.querySelector(`input[name="depth"][value="${state.reasoning}"]`);
       if (level) level.checked = true;
       revealProfile();
+      await startToday(state);
 
       const history = Array.isArray(state.messages) ? state.messages : [];
       const onboarding = state.onboarding || {};
