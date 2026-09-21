@@ -331,3 +331,25 @@ def test_invalid_intent_and_snapshot_return_structured_packets():
     packet = prepare(None, "overview", AS_OF)
     assert packet["status"] == "needs_input"
     assert packet["missing"][0]["key"] == "snapshot"
+
+
+def test_plan_separates_total_capital_from_new_cash_and_preserves_unknown_cash():
+    resources = {"currency": "USD", "available_capital": 300000,
+        "monthly_essentials": 4000, "reserve_months": 6,
+        "reserve_outside_pool": 0, "debt_payments_from_pool": 0}
+    goals = [{"id": "home", "name": "Home", "currency": "USD", "due": "2027-09-20",
+        "target_amount": 50000, "funded_outside_pool": 0, "protect_now": True}]
+    def calculate():
+        return prepare(snapshot(fact("plan.resources", resources), fact("goals", goals)), "plan", AS_OF)
+    unknown = calculate()["calculations"]
+    assert unknown["uncommitted_capital"]["amount"] == "226000"
+    assert unknown["additional_cash_to_invest"] is None
+    resources["cash_available"] = 100000
+    known = calculate()["calculations"]
+    assert known["additional_cash_to_invest"]["amount"] == "26000"
+    resources["cash_available"] = 50000
+    short = calculate()["calculations"]
+    assert short["additional_cash_to_invest"]["amount"] == "0"
+    assert short["cash_funding_shortfall"]["amount"] == "24000"
+    resources["cash_available"] = 300001
+    assert not calculate()["calculations"]

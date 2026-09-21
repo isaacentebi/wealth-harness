@@ -28,7 +28,7 @@ uv run wealth-agent --demo --model luna
 Try these messages in sequence:
 
 1. How much can I invest while protecting my home goal and emergency reserve?
-2. My home goal is now $100,000. Remember that and update the plan.
+2. My home goal is now $100,000. How does that change the plan?
 3. What changed, and what do you remember about my priorities?
 
 The fictional demo starts with $300,000 total capital: $200,000 in SPY and
@@ -38,6 +38,18 @@ cash to invest. Values are fictional; detailed fund constituents and tax lots
 are intentionally missing. Its Wealth memory persists, so restarting the launcher
 does not reset your corrections. Sol and Luna can use the same demo memory.
 Use `--help` for database/client controls and a one-shot `--prompt` option.
+
+## Start your own profile
+
+```sh
+uv run wealth-agent --client my-profile --model sol
+```
+
+A new identifier creates an empty local profile; the same identifier resumes it.
+Start with your question. The assistant saves relevant facts automatically and
+asks only for missing details needed for that question. You can say not to save
+a detail. It distinguishes real facts from hypothetical scenarios. No separate
+setup questionnaire or “remember this” command is required.
 
 ## What is instantiated
 
@@ -51,8 +63,8 @@ context. Durable financial memory lives in SQLite. The launcher displays tool
 names separately from the agent's response. Failed model runs report errors.
 Only the Wealth server is explicitly configured; global user configuration is
 not changed. The agent has no shell tool and uses a read-only execution sandbox.
-Wealth tools can still save explicitly requested facts and decisions in their
-configured database. This is a local trusted-user testing interface, not a
+Wealth tools automatically save relevant explicit facts and corrections in their
+configured database; decisions require the user’s actual choice. This is a local trusted-user testing interface, not a
 public multi-user application.
 
 No background monitor starts and no trades or transfers are possible through

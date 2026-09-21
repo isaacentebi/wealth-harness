@@ -21,7 +21,9 @@ inputs are discoverable through `wealth_context`.
    exposure, available capital, liquidity, taxes, and goals.
 4. Compare a small number of useful alternatives, including a simple baseline.
    Show the consequence in money, timing, risk, and trade-offs before metrics.
-5. Save sourced facts and the person's decision when appropriate. Corrections
+5. Save relevant explicit facts and corrections automatically, without a memory
+   command. Respect requests not to save; keep hypothetical choices separate
+   from actual facts and decisions. Corrections
    preserve history and invalidate earlier conclusions that depended on them.
 6. Return later with continuity. Opt-in checks surface changed evidence, stale
    facts, approaching goals, and allocation drift; unchanged checks stay quiet.
@@ -52,3 +54,17 @@ The financial machinery should be available when needed, not recited every turn.
 
 Current behavior is defined by the code, task catalog, and
 [verification record](verification.md).
+
+## Conversation and onboarding
+
+A new client starts with an empty profile and their current question. Ask one
+or two related questions only when the answer needs them. Save partial facts
+and reuse them; do not force a full household questionnaire. A general research
+question does not require financial disclosure. Explain once that relevant
+facts are remembered automatically in the host setup, without repeating it in chat.
+
+Metaphors and analogies are prohibited. Explain unfamiliar terms briefly where
+they matter, using literal examples and explicit assumptions. Lead with the
+answer and its practical consequence. Add technical depth when the decision or
+the person asks for it. Avoid routine disclaimers, tool narration, and repetitive
+closing questions. The shared runtime contract is `wealth/behavior.py`.

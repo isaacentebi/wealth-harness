@@ -100,3 +100,43 @@ Wealth memory, supports Sol/Luna, and leaves the user's Codex configuration inta
 Launcher regressions cover command isolation, surfaced failures, rejection of an
 incomplete event stream, and demo persistence. The integrated local suite passed
 with 345 tests; the final canonical demo also passed its focused exposure check.
+
+## Adversarial review and progressive onboarding (2026-09-21)
+
+Requested native routed reviews completed with SWE-2 (runtime reliability),
+Opus 5 (conversation, memory, onboarding), and GLM-5.3 Flash (financial semantics).
+Their findings were checked against current code; these are scoped reviews, not
+certification of every financial method.
+
+Changes include automatic explicit-fact memory, a shared literal-language policy
+with no metaphors or analogies, create/resume onboarding, canonical memory
+contracts in client context, a bounded known-key index, full-record retrieval
+before structured updates, and a defined review deadline for new financial facts.
+Incomplete goals can be saved without fabricated amounts and cannot produce
+calculations until required inputs are available.
+
+Plan results now separate total uncommitted capital from additional cash available
+to invest, using explicit unrestricted cash in the declared capital scope. Unknown
+cash returns null. Household reconciliation is not implied. Reserve, debt and
+protected goals must describe distinct commitments; the tool does not infer
+semantic duplicates from goal names.
+
+Review recommendations not adopted: exposing arbitrary process stderr; treating
+malformed event streams as successful; silently reaccepting stale financial
+decisions; deduplicating goals because their amounts happen to match; and adding
+unsourced mortgage estimates to conversation examples. An alleged f-string brace
+issue was invalid: interpolated string contents are not evaluated as Python.
+
+Live checks used fictional profiles with the actual Codex runtime, Sol and Luna,
+and Wealth MCP. Automatic writes and cross-session recall were observed; a
+considered property price was not promoted to a committed budget. Early runs
+exposed invented fact keys and excessive recap text, which informed the changes.
+Behavior still depends on the host model following the contract; prompt text is
+not a guarantee that every future response will comply.
+
+Final checks: `uv run pytest -q` passed all 350 existing and focused regression
+checks; source/wheel build and the offline complete journey passed. The final
+live onboarding run saved canonical `client.profile` and incomplete `goals`,
+used the 30-day review deadline, invented no budget, and asked one financing
+question. Interrupted demo initialization is now repaired without replacing
+recorded client state.

@@ -107,7 +107,8 @@ CATALOG: dict[str, dict[str, Any]] = {
     "plan": {
         "purpose": "Reserve capital for essentials, selected debt payments, and protected dated goals without double-counting outside funds.",
         "required": ["plan.resources and goals, unless both are stored for the client"],
-        "optional": ["outside_sources", "reserve_funding", "goal outside_funding"],
+        "optional": ["plan.resources.cash_available: explicitly known unrestricted cash within available_capital, not total assets; omit if unknown", "outside_sources", "reserve_funding", "goal outside_funding"],
+        "scope": "Available capital may already be invested. Only additional_cash_to_invest answers new cash deployment; null means unknown. Reserve, debt payments and goals must be disjoint; do not also list the emergency reserve as a protected goal.",
         "example": {
             "plan.resources": {"currency": "USD", "available_capital": 100000, "monthly_essentials": 4000, "reserve_months": 6, "reserve_outside_pool": 0, "debt_payments_from_pool": 0},
             "goals": [{"id": "home", "name": "Home", "currency": "USD", "due": "2027-09-20", "target_amount": 30000, "funded_outside_pool": 0, "protect_now": True}],

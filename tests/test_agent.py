@@ -130,3 +130,99 @@ def test_demo_seed_is_idempotent_and_preserves_changed_state(tmp_path):
     values = {fact["key"]: fact["value"] for fact in after["facts"]}
     assert values["constraint.demo-note"] == "Keep this persisted change"
     assert after["client"]["revision"] == before["client"]["revision"] + 1
+
+
+def test_first_conversation_creates_profile_and_resume_preserves_it(monkeypatch, tmp_path):
+    database = tmp_path / "new.sqlite3"
+    seen = []
+
+    def fake_turn(text, **kwargs):
+        service = WealthService(kwargs["db_path"])
+        snapshot = service.inspect(kwargs["client_id"])
+        seen.append(snapshot["client"]["revision"])
+        if not snapshot["facts"]:
+            service.remember(kwargs["client_id"], [{
+                "key": "preference.currency", "value": "MXN",
+                "source": {"kind": "user", "ref": "conversation", "observed_on": "2026-09-21"},
+                "confidence": "confirmed",
+            }], snapshot["client"]["revision"])
+        return "Ready."
+
+    monkeypatch.setattr(agent, "run_turn", fake_turn)
+    args = ["--client", "new-client", "--db", str(database), "--prompt", "I spend in pesos"]
+    assert agent.main(args) == 0
+    assert agent.main(args) == 0
+    assert seen == [0, 1]
+
+
+def test_partial_onboarding_facts_are_discoverable_and_not_calculated_as_zero(tmp_path):
+    service = WealthService(tmp_path / "partial.sqlite3")
+    service.create("client", "Client")
+    context = service.context("client", intent="plan")
+    contract = context["fact_contract"]
+    assert "goals" in contract["keys"]
+    facts = {
+        "client.profile": {"residence": "Mexico", "spending_currency": "MXN"},
+        "goals": [{"id": "home", "name": "Buy a home", "timing": "about three years"}],
+        "plan.resources": {"currency": "MXN", "available_capital": 100000,
+            "monthly_essentials": 1000, "reserve_months": 6,
+            "reserve_outside_pool": 0, "debt_payments_from_pool": 0},
+    }
+    service.remember("client", [{"key": key, "value": value,
+        "source": {"kind": "user", "ref": "conversation", "observed_on": agent.datetime.now(agent.timezone.utc).date().isoformat()},
+        "confidence": "confirmed", "expires_on": contract["default_review_on"]}
+        for key, value in facts.items()], 0)
+    later = service.context("client", intent="research", query="unrelated ticker")
+    assert "goals" in later["known_fact_keys"]
+    result = service.run("plan", client_id="client")
+    # Calculations stay unavailable until required fields are present; the status
+    # is needs_input for missing fields and partial for invalid ones.
+    assert result["status"] in {"needs_input", "partial"}
+    assert not result["result"]
+
+
+def test_demo_seed_repairs_interrupted_initialization(tmp_path):
+    database = tmp_path / "demo.sqlite3"
+    service = WealthService(database)
+    # Simulate a crash between client creation and the seed write: revision 0,
+    # no facts, no decisions.
+    service.create(agent.DEMO_CLIENT_ID, "Fictional Wealth Demo")
+
+    assert agent.seed_demo(database) is True
+    snapshot = service.inspect(agent.DEMO_CLIENT_ID)
+    assert snapshot["client"]["revision"] == 1
+    assert {fact["key"] for fact in snapshot["facts"]} >= {
+        "client.profile",
+        "plan.resources",
+        "goals",
+        "household",
+    }
+
+
+def test_demo_seed_preserves_client_with_recorded_state(tmp_path):
+    database = tmp_path / "demo.sqlite3"
+    service = WealthService(database)
+    service.create(agent.DEMO_CLIENT_ID, "Fictional Wealth Demo")
+    service.remember(
+        agent.DEMO_CLIENT_ID,
+        [
+            {
+                "key": "client.profile",
+                "value": {"note": "user-written"},
+                "source": {
+                    "kind": "user",
+                    "ref": "test",
+                    "observed_on": "2026-09-20",
+                },
+                "confidence": "confirmed",
+                "expires_on": None,
+            }
+        ],
+        0,
+        "user-write",
+    )
+
+    assert agent.seed_demo(database) is False
+    snapshot = service.inspect(agent.DEMO_CLIENT_ID)
+    assert [fact["key"] for fact in snapshot["facts"]] == ["client.profile"]
+    assert snapshot["facts"][0]["value"] == {"note": "user-written"}

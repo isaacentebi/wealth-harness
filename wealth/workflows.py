@@ -79,7 +79,7 @@ def _question(missing: list[dict[str, str]]) -> str | None:
         return None
     key = missing[0]["key"]
     questions = {
-        "plan.resources": "What capital, monthly essentials, reserve target, outside reserve, and pool-funded debt payments should this plan use?",
+        "plan.resources": "How much capital should this plan cover, and in which currency?",
         "goals": "What goals should this pool fund, or should I record that there are none?",
         "portfolio.snapshot": "What holdings and values are in the portfolio scope you want measured?",
         "income.schedule": "What monthly cash is expected to be received, what outflows are committed, and what spending need should the calendar use?",
@@ -269,6 +269,11 @@ def _plan(facts: dict[str, dict[str, Any]], packet: dict[str, Any], as_of: date 
         currency = _currency(resources.get("currency"), "plan.resources.currency")
         _check_reporting_currency(facts, currency, "plan.resources.currency")
         available = _decimal(resources.get("available_capital"), "plan.resources.available_capital")
+        cash = None
+        if resources.get("cash_available") is not None:
+            cash = _decimal(resources["cash_available"], "plan.resources.cash_available")
+            if cash > available:
+                raise ValueError("plan.resources.cash_available cannot exceed available_capital")
         monthly = _decimal(resources.get("monthly_essentials"), "plan.resources.monthly_essentials")
         reserve_months = _decimal(resources.get("reserve_months"), "plan.resources.reserve_months")
         outside_reserve = _decimal(resources.get("reserve_outside_pool"), "plan.resources.reserve_outside_pool")
@@ -396,6 +401,13 @@ def _plan(facts: dict[str, dict[str, Any]], packet: dict[str, Any], as_of: date 
     shortfall = max(Decimal(0), -uncommitted)
     packet["calculations"] = {
         "currency": currency,
+        "capital_scope": "Declared planning capital; may include existing investments. Not reconciled to household assets or restrictions.",
+        "funding_assumption": "Emergency reserve, debt payments, and protected goals are separate commitments; do not list the emergency reserve again as a goal.",
+        "cash_available": _money(cash, currency) if cash is not None else None,
+        "additional_cash_to_invest": _money(max(Decimal(0), cash - reserve_from_pool - debt - protected_goals), currency) if cash is not None else None,
+        "cash_funding_shortfall": _money(max(Decimal(0), reserve_from_pool + debt + protected_goals - cash), currency) if cash is not None else None,
+        "cash_calculation_scope": "Uses only explicitly supplied unrestricted cash within this capital, after all declared reservations; does not assume asset sales. Missing cash means unknown, not zero.",
+        "uncommitted_capital_meaning": "Total capital remaining after reservations, including any existing investments; not additional cash available to invest.",
         "available_capital": _money(available, currency),
         "reserve_target": _money(reserve_target, currency),
         "reserve_funded_outside_pool": _money(outside_reserve, currency),

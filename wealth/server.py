@@ -11,6 +11,7 @@ from mcp.server.mcpserver.tools import Tool
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, StrictInt
 
+from .behavior import ASSISTANT_CONTRACT
 from .service import WealthService
 from .store import StoreError, ValidationError
 
@@ -179,7 +180,8 @@ def build_server(db_path: str | None = None) -> MCPServer:
             "actually confirmed the fact. Use wealth_run for deterministic calculations; "
             "a ready result is not a suitability judgment. Decisions are not orders. "
             "Monitoring runs only when explicitly called and sends no external notifications. "
-            "Exports contain sensitive history and should be fetched only when requested."
+            "Exports contain sensitive history and should be fetched only when requested.\n"
+            + ASSISTANT_CONTRACT
         ),
     )
 

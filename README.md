@@ -50,7 +50,7 @@ uv run wealth-agent --demo --model sol
 ```
 
 Use `--model luna` to switch models. Ask “How much can I invest while protecting
-my home goal?”, then change the goal and ask it to remember. The fictional
+my home goal?”, then change the goal naturally; the correction is remembered automatically. The fictional
 client's Wealth memory persists across sessions and models. No extra API key is
 needed for this local path. [Agent setup and details](docs/agent.md).
 

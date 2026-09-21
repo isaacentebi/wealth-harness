@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import importlib
 import uuid
 
@@ -45,6 +45,10 @@ def capabilities() -> dict:
             "confidence": "confirmed (user source only)|reported|inferred",
             "keys": ["client.profile", "household", "goals", "plan.resources", "constraint.*", "preference.*", "thesis.*", "research.<SYMBOL>", "planning.project", "planning.income", "planning.ladder", "tax.profile", "monitor.rules"],
             "freshness": "Use explicit expiries for material financial state. Stale and inferred inputs are excluded from calculations.",
+            "review_policy": "For newly stated financial facts without a shorter supplied validity, use the provided default_review_on as a review deadline, not a prediction of continued accuracy. Do not extend old facts merely by recalling them.",
+            "default_review_on": (datetime.now(timezone.utc).date() + timedelta(days=30)).isoformat(),
+            "partial_values": "Incomplete canonical objects and goal entries may be remembered; omit unknown fields. Calculations remain unavailable until required fields are present. Never use zero for an unknown amount.",
+            "structured_updates": "Before replacing a structured value, fetch the complete current fact using wealth_client inspect inputs.key; merge without dropping other fields or goals.",
         },
     }
 
@@ -100,7 +104,12 @@ class WealthService:
             "ladder": "goals planning.ladder", "calendar": "income.schedule",
         }
         result = self.recall(client_id, " ".join(filter(None, [query, routing.get(intent, intent)])))
-        result["available_tasks"] = list(capabilities()["tasks"])
+        result["available_tasks"] = list(TASK_MODULES) + ["plan", "calendar", "monitor"]
+        result["fact_contract"] = capabilities()["fact_contract"]
+        with WealthStore(self.db_path) as store:
+            facts = store.snapshot(client_id)["facts"]
+        result["known_fact_keys"] = [f["key"] for f in facts[:50]]
+        result["omitted_fact_keys"] = max(0, len(facts) - 50)
         result["next_step"] = "Use run for calculations; inspect a fact by key if its value was omitted."
         return result
 
