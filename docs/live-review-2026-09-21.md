@@ -101,3 +101,25 @@ Still wrong:
 - The error for a missing client says "Local memory couldn't be read…"; a
   vanished profile deserves its own message. (The trigger here was a test
   harness overwriting the live database, not the product.)
+
+## Run 4, after waves 3–5 (onboarding cards, memory, market data)
+
+Fixed during the run:
+- Onboarding: an account chosen without an amount was dropped, so net worth read
+  −60,000 and the reveal said "no tienes ahorro". Accounts now keep an unknown
+  balance; net worth reads "sin contar AFORE"; the reserve is unknown, not 0.
+- Confirming a statement crashed when an unsized AFORE was folded into the GBM
+  statement; unnamed balances now match only when sized and liquid.
+- The page switched to English after a reload; it now follows the profile.
+- Profile: "Dijiste … en None", untranslated "Car loan", a total without its
+  caveat, and a difference asked again after the person accepted the statement.
+
+What worked: the reveal ("sin contar tu AFORE… liquida el auto en diciembre de
+2027"), the statement summary (difference vs estimate, 39% concentration), and
+the SIC answer: CSPX over IVV for estate situs, the IBKR 10% rule as contested,
+commission plus IVA, whole shares, and the surplus split "$10,000 a CSPX y los
+$25,500 restantes al auto".
+
+Still open (dispatched): chat history lost on restart; a nudge calling the
+$25,500 "sin destino" right after the adviser allocated it; no quarter-to-date
+review.
