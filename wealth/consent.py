@@ -517,6 +517,8 @@ def ungrounded(value: Any, figures: Iterable[float]) -> list[float]:
     missing = []
     for number in value_numbers(value):
         n = abs(number)
+        if n in restated:  # a figure copied as printed (a 1099-B can list thousands of lots)
+            continue
         if not any(_near(n, f) for f in restated):
             missing.append(number)
     return missing

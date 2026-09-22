@@ -282,6 +282,86 @@ def test_schema_checks_constancias_and_tax_years():
     with pytest.raises(SchemaError):
         validate("tax.2025", {"mx": {"article_129_loss_carryforwards": {"2023": 100}}})
     assert validate("tax.profile", {"anything": True}) == []  # the legacy key keeps its shape
+    lot = {"description": "VANGUARD TOTAL STOCK", "symbol": "VTI", "quantity": 20.0, "acquired": "VARIOUS",
+           "sold": "2025-03-10", "proceeds": 5600.0, "basis": 6000.0, "wash_sale_disallowed": 400.0, "gain": 0.0,
+           "term": "short", "box": "A"}
+    good = {"tax_year": 2025, "institution": "Charles Schwab", "account_last4": "5678",
+            "form_1099_b": {"short_term_gain": 400.0, "lots": [lot]}}
+    validate("constancia.schwab_2025_1099_5678", good)
+    for broken in ({**good, "account_last4": "0012345678"},
+                   {**good, "form_1099_b": {"lots": [dict(lot, box="Z")]}},
+                   {**good, "form_1099_b": {"lots": [dict(lot, sold="03/10/2025")]}},
+                   {**good, "form_1099_b": {"lots": [dict(lot, ssn="x")]}},
+                   {**good, "form_1099_div": {"ordinary": 1.0, "lots": []}},
+                   {**good, "form_1099_b": {"lots": [lot] * 5001}}):
+        with pytest.raises(SchemaError):
+            validate("constancia.x", broken)
+    from wealth.ingest import taxdoc
+    from wealth.situation import schema
+    assert taxdoc.MAX_1099B_LOTS == schema.MAX_1099B_LOTS
+    assert taxdoc.TAX_EXTRACTION_SCHEMA["properties"]["lots"]["maxItems"] == schema.MAX_1099B_LOTS
+
+
+def test_two_constancias_of_one_broker_are_summed_and_each_reconciled(tmp_path):
+    """Two GBM contracts, each with its own constancia: the pack declares their sum, never just one."""
+    inputs = deepcopy(MX)
+    whole = fact(inputs, "constancia.gbm_2025")["value"]
+    inputs["facts"] = [f for f in inputs["facts"] if f["key"] != "constancia.gbm_2025"] + [
+        {"key": "constancia.gbm_2025_1111", "value": {
+            "tax_year": 2025, "institution": "GBM", "currency": "MXN", "account_last4": "1111",
+            "enajenacion": {"gain": 5000.0, "loss": 2000.0, "net": 3000.0},
+            "intereses": {"nominal": 4000.0, "real": 2000.0, "real_loss": 0, "isr_withheld": 300.0},
+            "dividendos": {"domestic_gross": 1000.0, "isr_withheld": 100.0}}},
+        {"key": "constancia.gbm_2025_2222", "value": {
+            "tax_year": 2025, "institution": "GBM", "currency": "MXN", "account_last4": "2222",
+            "enajenacion": {"gain": 417.0, "loss": 830.0},  # no net printed: gain less loss
+            "intereses": {"nominal": 500.0, "real": 400.0, "real_loss": 0, "isr_withheld": 100.0},
+            "dividendos": {"domestic_gross": 200.0, "isr_withheld": 20.0}}}]
+    report = run(inputs, tmp_path)
+    art129 = section(report, "mx_enajenacion")
+    [broker] = art129["summary"]["brokers"]
+    assert (broker["constancia_net_mxn"], broker["declared_net_mxn"]) == ("2587.00", "2587.00")
+    net = art129["reconciliation"][0]
+    assert net["document_id"] == "gbm_2025_1111+gbm_2025_2222"
+    assert net["documents"] == [{"document_id": "gbm_2025_1111", "document": "3000.00"},
+                                {"document_id": "gbm_2025_2222", "document": "-413.00"}]
+    banks = {r["institution"]: r for r in section(report, "mx_intereses")["table"]["rows"]}
+    assert banks["GBM"]["constancia_real_mxn"] == format(Decimal(str(whole["intereses"]["real"])), ".2f")
+    assert banks["GBM"]["constancia_retention_mxn"] == "400.00"
+    dividends = section(report, "mx_dividendos")["summary"]["brokers"][0]
+    assert dividends["constancia"]["domestic_gross"] == "1200.00"
+    # The same document saved twice (an older key and a re-upload) is read once.
+    twice = deepcopy(MX)
+    twice["facts"].append({"key": "constancia.gbm_2025_5678", "value": dict(whole)})
+    again = run(twice, tmp_path)
+    assert section(again, "mx_enajenacion")["summary"]["brokers"][0]["declared_net_mxn"] == "2587.00"
+    assert any("counted once" in w for w in again["warnings"])
+
+
+def test_a_stale_profile_is_left_out_and_the_jurisdiction_is_asked_for():
+    def snap(facts):
+        return {"client": {"id": "ana", "revision": 1}, "decisions": [], "facts": [
+            {"id": f"f:{f['key']}", "confidence": "reported", "status": "active",
+             "source": {"kind": "user", "ref": "conversation", "observed_on": "2024-01-10"}, **f} for f in facts]}
+
+    profile = {"key": "client.profile", "expires_on": "2025-06-30",
+               "value": {"residence": {"country": "US"}, "us_person": True, "birth_year": 1960}}
+    report = taxpack.run_task({"tax_year": 2025}, snap([profile]), None, "2026-03-01")
+    assert report["status"] == "needs_input"
+    assert {m["key"] for m in report["missing"]} == {"jurisdiction", "client.profile"}
+    assert any("client.profile is past its review date" in w for w in report["warnings"])
+    assert "f:client.profile" not in report["_evidence"]
+    # Fresh year facts choose the jurisdiction; the stale profile still is not read (no US person, no FBAR).
+    year = {"key": "tax.2025", "value": {"jurisdiction": ["MX"]}}
+    report = taxpack.run_task({"tax_year": 2025}, snap([profile, year]), None, "2026-03-01")
+    assert report["result"]["jurisdictions"] == ["MX"] and report["result"]["us_person"] is False
+    assert "us_fbar" not in report["result"]["sections"]
+    assert any(p["key"] == "client.profile" and p["reason"] == "stale" for p in report["result"]["pendientes"])
+    assert "f:client.profile" not in report["_evidence"]
+    # A fresh profile is read as before.
+    fresh = dict(profile, expires_on="2026-12-31")
+    report = taxpack.run_task({"tax_year": 2025}, snap([fresh]), None, "2026-03-01")
+    assert report["result"]["jurisdictions"] == ["US"] and "f:client.profile" in report["_evidence"]
 
 
 def test_cli_writes_json_csv_and_html(tmp_path, capsys):

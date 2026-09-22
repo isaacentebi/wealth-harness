@@ -389,11 +389,20 @@ lots against the printed term and overall totals, gain - loss = net, nominal -
 inflation adjustment = real interest); a document that does not is
 `needs_review` and needs `acknowledge_discrepancies`. The proposal shows
 `figures`, `lots`, the checks and `facts_preview`; `confirm` saves exactly
-those as `constancia.<institution>_<year>` (`_1099`, `_5498`) facts with
+those as `constancia.<institution>_<year>[_1099|_5498]_<account>` facts with
 `source.kind=document` citing the file, and posts nothing to the ledger.
+`<account>` is the last four digits of the account the document prints, else
+`h` and a short hash of the document (type, institution, year, issue date,
+figures): two accounts' documents from one institution never replace each
+other, and uploading the same document again rewrites the same key. A 1099's
+`form_1099_b` keeps its lots (description, symbol, quantity, acquired, sold,
+proceeds, basis, wash sale, gain, term, box; up to 5,000).
 `task=tax_pack` then declares the document's figures and shows its own
-computation next to them; an uploaded document replaces one typed in under the
-same key and is preferred over a typed one for the same institution.
+computation next to them: several documents of one institution are summed per
+block (each one's figure listed under `documents` in the reconciliation), a
+1099-B's lots are the Form 8949 rows for the accounts it covers (the ledger's
+sales there are reconciled against them, never added), and an uploaded
+document is preferred over a typed one for the same institution.
 
 **Upload retention.** Raw statements hold RFC, CURP, CLABE and account numbers,
 so uploads are deleted (overwritten, then unlinked) once they are no longer
@@ -686,12 +695,15 @@ three kinds of saved facts:
   `ira_prior_year_end_balance_usd`, `treasury_rate_per_usd`,
   `mx_annual_isr_usd`.
 - `constancia.<id>`: an institution's annual document as printed, with
-  `tax_year`, `institution`, `account_id?` and blocks `enajenacion`
+  `tax_year`, `institution`, `account_id?`, `account_last4?` and blocks `enajenacion`
   (`gain`, `loss`, `net`), `intereses` (`nominal`, `real`, `real_loss`,
   `isr_withheld`), `dividendos`, `form_1099_b`, `form_1099_div`,
   `form_1099_int`. Save it with `wealth_remember` (`source.kind: document`)
   after reading the PDF with the person.
-- `client.profile` (residence, tax residence, `us_person`, birth year).
+- `client.profile` (residence, tax residence, `us_person`, birth year). Past
+  its review date it is left out like any stale fact (warned, and listed to
+  reconfirm): the jurisdiction then comes from `tax.<year>` or the request,
+  or the pack asks for it (`needs_input`).
 
 Sections, each with `status`, `summary`, a `table` (`columns` in es/en,
 `rows`), `reconciliation`, `missing`, `warnings`, `sources` and `assumptions`:

@@ -217,7 +217,10 @@ SCHEMA: dict[str, dict[str, str]] = {
         "enajenacion?": "{gain, loss, net} Art. 129 share sales (MXN)",
         "intereses?": "{nominal, real, real_loss, isr_withheld} (MXN)",
         "dividendos?": "{domestic_gross, foreign_gross, isr_withheld, isr_creditable} (MXN)",
-        "form_1099_b?": "{short_term_gain, long_term_gain, wash_sale_disallowed} (USD)",
+        "account_last4?": "the account's last four digits as the document prints them",
+        "form_1099_b?": "{proceeds, cost_basis, short_term_gain, long_term_gain, wash_sale_disallowed, lots?: "
+                        "[{description, symbol, quantity, acquired, sold, proceeds, basis, wash_sale_disallowed, "
+                        "gain, term short|long, box A-F}]} (USD)",
         "form_1099_div?": "{ordinary, qualified, capital_gain_distributions, foreign_tax_paid} (USD)",
         "form_1099_int?": "{interest, foreign_tax_paid} (USD)",
         "form_5498?": "{ira_contributions, rollover_contributions, roth_conversion, recharacterized, fair_market_value, "
@@ -915,20 +918,59 @@ def _tax_year_value(value: Any, path: str) -> None:
         _fail(path, f"must be a four-digit year, not {_shown(value)}")
 
 
+MAX_1099B_LOTS = 5000
+"""A 1099-B fact keeps at most this many lots (a composite lists every sale; the extraction schema's limit)."""
+LOT_FIELDS = ("description", "symbol", "quantity", "acquired", "sold", "proceeds", "basis", "wash_sale_disallowed",
+              "gain", "term", "box")
+
+
+def _lot_day(value: Any, path: str, *, required: bool = False) -> None:
+    if value == "VARIOUS":
+        return
+    _iso_date(value, path, required=required)
+
+
+def _lots(value: Any, path: str) -> None:
+    if not isinstance(value, list):
+        _fail(path, "must be a list of lots {description, symbol, quantity, acquired, sold, proceeds, basis, "
+                    "wash_sale_disallowed, gain, term, box}")
+    if len(value) > MAX_1099B_LOTS:
+        _fail(path, f"has {len(value)} lots; at most {MAX_1099B_LOTS:,} are kept")
+    for index, lot in enumerate(value):
+        where = f"{path}[{index}]"
+        lot = _object(lot, where, set(LOT_FIELDS))
+        _text(lot.get("description"), f"{where}.description", limit=120)
+        _text(lot.get("symbol"), f"{where}.symbol", limit=20)
+        _lot_day(lot.get("acquired"), f"{where}.acquired")
+        _lot_day(lot.get("sold"), f"{where}.sold")
+        for field in ("quantity", "proceeds", "basis", "wash_sale_disallowed", "gain"):
+            _number(lot.get(field), f"{where}.{field}", required=False, minimum=None)
+        _enum(lot.get("term"), f"{where}.term", ("short", "long"))
+        _enum(lot.get("box"), f"{where}.box", ("A", "B", "C", "D", "E", "F"))
+
+
 def _constancia(value: dict, key: str) -> None:
-    fields = {"tax_year", "institution", "account_id", "currency", "issued_on", "note", *CONSTANCIA_BLOCKS}
+    fields = {"tax_year", "institution", "account_id", "account_last4", "currency", "issued_on", "note",
+              *CONSTANCIA_BLOCKS}
     _object(value, key, fields)
     _tax_year_value(value.get("tax_year"), f"{key}.tax_year")
     _text(value.get("institution"), f"{key}.institution", required=True)
     _text(value.get("account_id"), f"{key}.account_id")
+    last4 = value.get("account_last4")
+    if last4 is not None and not (isinstance(last4, str) and re.fullmatch(r"\d{4}", last4)):
+        _fail(f"{key}.account_last4", "must be the account's last four digits (never the full number)")
     _currency(value.get("currency"), f"{key}.currency", required=False)
     _iso_date(value.get("issued_on"), f"{key}.issued_on")
     blocks = [name for name in CONSTANCIA_BLOCKS if value.get(name) is not None]
     if not blocks:
         _fail(key, "needs at least one block: " + ", ".join(CONSTANCIA_BLOCKS))
     for name in blocks:
-        block = _object(value[name], f"{key}.{name}", set(CONSTANCIA_BLOCKS[name]))
+        allowed = set(CONSTANCIA_BLOCKS[name]) | ({"lots"} if name == "form_1099_b" else set())
+        block = _object(value[name], f"{key}.{name}", allowed)
         for field, number in block.items():
+            if field == "lots":
+                _lots(number, f"{key}.{name}.lots")
+                continue
             _number(number, f"{key}.{name}.{field}", required=False, minimum=None)
 
 

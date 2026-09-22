@@ -393,3 +393,28 @@ def test_you_page_summary_has_score_and_top_gap():
     assert line["score"] == 0 and line["top_gap"]["es"].startswith("Tu cuenta de GBM")
     assert proactive._estate_facts(snapshot)
     assert not proactive._estate_facts(_snapshot({"client.profile": {"residence": {"country": "MX"}}}))
+
+
+def test_a_will_with_one_share_missing_keeps_the_stated_shares_and_flags_the_rest():
+    report = _run({"cash.bbva": {"amount": 100000, "currency": "MXN", "institution": "BBVA"},
+                   **_d("cash.bbva", beneficiaries=[]),
+                   "estate.will": {"exists": True, "date": "2025-09-10",
+                                   "heirs": [{"name": "Ana", "share": 0.75}, {"name": "Beto"}]}})
+    row = _row(report, "cash.bbva")
+    assert row["mechanism"] == "will"
+    heirs = {h["name"]: h for h in row["heirs"]}
+    assert heirs["Ana"]["share"] == 0.75 and heirs["Ana"]["amount"] == 75000
+    assert heirs["Beto"]["share"] is None and heirs["Beto"]["share_range"] == {"low": 0, "high": 0.25}
+    assert heirs["Beto"]["amount_range"] == {"low": 0, "high": 25000}
+    assert any("Beto" in w and "not split equally" in w for w in report["warnings"])
+    assert "estate.will.heirs[1].share" in report["missing"]
+    assert any(q["code"] == "will_share_unknown" for q in report["result"]["questions"])
+    assert report["status"] == "partial"
+    # Stated shares that already reach 100% leave the unrecorded heir unknown, never equalized.
+    full = _run({"cash.bbva": {"amount": 100000, "currency": "MXN", "institution": "BBVA"},
+                 **_d("cash.bbva", beneficiaries=[]),
+                 "estate.will": {"exists": True, "date": "2025-09-10",
+                                 "heirs": [{"name": "Ana", "share": 1}, {"name": "Beto"}]}})
+    heirs = {h["name"]: h for h in _row(full, "cash.bbva")["heirs"]}
+    assert heirs["Ana"]["amount"] == 100000
+    assert heirs["Beto"]["share"] is None and heirs["Beto"]["amount"] is None

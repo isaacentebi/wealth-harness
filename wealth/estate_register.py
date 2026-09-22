@@ -563,14 +563,34 @@ def _spouse_fraction(mass: Decimal, children: int, spouse_assets: Decimal | None
     return min(max(x, Decimal(0)), mass / (children + 1)) / mass
 
 
-def _will_heirs(will: Mapping[str, Any]) -> list[dict]:
+def _will_heirs(will: Mapping[str, Any]) -> tuple[list[dict], list[str], str | None]:
+    """The will's heirs with their stated shares; (heirs, heirs whose share is unknown, warning).
+
+    A stated share is kept as stated.  An heir without one is never given an equal part: the rest
+    (100% less the stated shares) is split among the unknown ones only as a range, from nothing to all
+    of that rest; when the stated shares already reach or pass 100% it is simply unknown."""
     heirs = [h for h in will.get("heirs") or [] if isinstance(h, dict) and isinstance(h.get("name"), str)]
     if not heirs:
-        return []
+        return [], [], None
     shares = [D(h.get("share")) for h in heirs]
-    if None in shares:
-        shares = [Decimal(1) / len(heirs)] * len(heirs)
-    return [{"name": h["name"], "relationship": h.get("relationship"), "share": s} for h, s in zip(heirs, shares)]
+    out = [{"name": h["name"], "relationship": h.get("relationship"), "share": s} for h, s in zip(heirs, shares)]
+    unknown = [h["name"] for h, s in zip(heirs, shares) if s is None]
+    if not unknown:
+        return out, [], None
+    stated = sum((s for s in shares if s is not None), Decimal(0))
+    remainder = Decimal(1) - stated
+    for heir in out:
+        if heir["share"] is None and remainder > 0:
+            heir["share_range"] = (Decimal(0), remainder)
+    names = ", ".join(unknown)
+    if remainder > 0:
+        warning = (f"The will's share for {names} is not recorded: the stated shares are kept and the remaining "
+                   f"{num(remainder * 100, 2)}% is shown as a range for them (from nothing up to all of it), not "
+                   "split equally. Record each heir's share from the will.")
+    else:
+        warning = (f"The will's share for {names} is not recorded and the stated shares already total "
+                   f"{num(stated * 100, 2)}%: their share is unknown. Record each heir's share from the will.")
+    return out, unknown, warning
 
 
 def _mechanism_label(mechanism: str, product: str, country: str | None, value: Mapping[str, Any]) -> dict:
@@ -680,7 +700,14 @@ def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mappin
                         if estimate is not None else {}),
                      **{k: v for k, v in extra.items() if v is not None}})
 
-    will_heirs = _will_heirs(will) if will and will.get("exists") else []
+    will_heirs, unknown_shares, share_warning = _will_heirs(will) if will and will.get("exists") else ([], [], None)
+    if share_warning:
+        warnings.append(share_warning)
+        raw_heirs = [h for h in will.get("heirs") or [] if isinstance(h, dict) and isinstance(h.get("name"), str)]
+        for index, heir in enumerate(raw_heirs):
+            if heir["name"] in unknown_shares:
+                questions.append({"code": "will_share_unknown", "field": f"estate.will.heirs[{index}].share",
+                                  "name": heir["name"]})
     family_asks: list[str] = []
     pension_survivors = _pension_survivors(family)
     for entry in accounts:

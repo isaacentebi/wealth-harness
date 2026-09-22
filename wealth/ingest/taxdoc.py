@@ -43,6 +43,7 @@ BLOCK_FIELDS: dict[str, tuple[str, ...]] = {
 _CURRENCY = {"mx_constancia": "MXN", "us_1099": "USD", "us_5498": "USD"}
 _KEY_SUFFIX = {"mx_constancia": "", "us_1099": "_1099", "us_5498": "_5498"}
 TOLERANCE = Decimal("0.01")
+MAX_1099B_LOTS = 5000  # the lots a 1099-B fact keeps; the same limit as wealth.situation.schema.MAX_1099B_LOTS
 
 _INSTITUTIONS = tuple((key, name, re.compile(pattern, re.IGNORECASE)) for key, name, pattern in (
     ("gbm", "GBM", r"\bGBM\b|grupo burs[aá]til mexicano"),
@@ -254,7 +255,13 @@ def _term_of(label: str) -> str | None:
     return None
 
 
-def _lot(line: str, term: str | None, number: int) -> dict | None:
+def _box_of(label: str) -> str | None:
+    """The Form 8949 box a 1099-B section header names ("... covered tax lots (Box A)")."""
+    match = re.search(r"\bbox\s+([a-f])\b", label)
+    return match.group(1).upper() if match else None
+
+
+def _lot(line: str, term: str | None, number: int, box: str | None = None) -> dict | None:
     dates = list(_DATE_TOKEN.finditer(line))
     if len(dates) < 2:
         return None
@@ -268,7 +275,7 @@ def _lot(line: str, term: str | None, number: int) -> dict | None:
            "date_acquired": dates[-2].group(0), "date_sold": dates[-1].group(0),
            "proceeds": amounts[0], "cost_basis": amounts[1],
            "wash_sale_disallowed": amounts[2] if len(amounts) == 4 else None, "gain": amounts[-1],
-           "term": term, "page": number}
+           "term": term, "box": box, "page": number}
     return lot
 
 
@@ -284,7 +291,7 @@ def _total(label: str, line: str, term: str | None, number: int) -> dict | None:
 def _parse_us(pages: list[tuple[int, str]], doc: dict) -> None:
     kind = doc["document_type"]
     section = "form_5498" if kind == "us_5498" else None
-    term = None
+    term = box = None
     for number, text in pages:
         for line in text.splitlines():
             folded = _clean_label(line)
@@ -293,9 +300,11 @@ def _parse_us(pages: list[tuple[int, str]], doc: dict) -> None:
                 marker = _SECTION_US.search(folded) if kind == "us_1099" else None
                 if marker:
                     section = _BLOCK_OF_US.get(marker.group(1))  # MISC/OID are not read: None
-                    term = None
+                    term = box = None
                 if section == "form_1099_b":
-                    term = _term_of(folded) or term
+                    heading = _term_of(folded)
+                    if heading:
+                        term, box = heading, _box_of(folded)
                 continue
             if section == "form_1099_b":
                 if folded.startswith("total"):
@@ -303,7 +312,7 @@ def _parse_us(pages: list[tuple[int, str]], doc: dict) -> None:
                     if total:
                         doc["totals"].append(total)
                     continue
-                lot = _lot(line, term, number)
+                lot = _lot(line, term, number, box)
                 if lot:
                     doc["lots"].append(lot)
                 continue
@@ -519,9 +528,47 @@ def _check_1099b(doc: dict, figures: dict, check, reasons: list[str], derived: l
 # --------------------------------------------------------------- proposal
 
 
-def _fact_key(doc: dict) -> str:
+def _fact_key(doc: dict, value: dict[str, Any]) -> str:
+    """``constancia.<institution>_<year>[_1099|_5498]_<account>``: one key per account's document.
+
+    Two accounts at one institution each get their own key (the second never replaces the first);
+    the same document uploaded again gets the same key.  The account is the last four digits the
+    document prints (already masked), else a short hash of what identifies the document: its type,
+    institution, year, issue date and figures."""
     base = doc.get("institution_key") or slug(doc.get("institution") or "institution").replace("-", "_")
-    return f"constancia.{base}_{doc['tax_year']}{_KEY_SUFFIX[doc['document_type']]}"
+    tail = doc.get("account_last4")
+    if not (isinstance(tail, str) and re.fullmatch(r"\d{4}", tail)):
+        tail = "h" + digest({"document_type": doc["document_type"], "institution": fold(doc.get("institution")),
+                             **{k: v for k, v in value.items() if k != "institution"}})[:8]
+    return f"constancia.{base}_{doc['tax_year']}{_KEY_SUFFIX[doc['document_type']]}_{tail}"
+
+
+def _iso_day(value: Any, day_first: bool) -> str | None:
+    if not value:
+        return None
+    if re.fullmatch(r"(?i)various|varios", str(value)):
+        return "VARIOUS"
+    try:
+        return date.fromisoformat(str(value)).isoformat()
+    except ValueError:
+        found = find_dates(str(value), day_first=day_first)
+        return found[0][0].isoformat() if found else None
+
+
+def _fact_lot(lot: dict, day_first: bool) -> dict[str, Any]:
+    """A 1099-B lot as the constancia fact keeps it: what Form 8949 needs, figures as printed."""
+    def amount(field: str) -> float | None:
+        number = _d(lot.get(field))
+        return None if number is None else float(number)
+
+    box = str(lot.get("box") or "").upper() or None
+    return {"description": (lot.get("description") or None) and str(lot["description"])[:120],
+            "symbol": lot.get("symbol") or None, "quantity": amount("quantity"),
+            "acquired": _iso_day(lot.get("date_acquired"), day_first), "sold": _iso_day(lot.get("date_sold"), day_first),
+            "proceeds": amount("proceeds"), "basis": amount("cost_basis"),
+            "wash_sale_disallowed": amount("wash_sale_disallowed"), "gain": amount("gain"),
+            "term": lot.get("term") if lot.get("term") in ("short", "long") else None,
+            "box": box if box in {"A", "B", "C", "D", "E", "F"} else None}
 
 
 def _fact_value(doc: dict, figures: dict[str, dict[str, str]]) -> dict[str, Any]:
@@ -530,10 +577,17 @@ def _fact_value(doc: dict, figures: dict[str, dict[str, str]]) -> dict[str, Any]
                              "currency": doc.get("currency") or _CURRENCY[doc["document_type"]]}
     if doc.get("issued_on"):
         value["issued_on"] = doc["issued_on"]
+    if isinstance(doc.get("account_last4"), str) and re.fullmatch(r"\d{4}", doc["account_last4"]):
+        value["account_last4"] = doc["account_last4"]
     for block, fields in figures.items():
         keep = {f: float(Decimal(v)) for f, v in fields.items() if f in CONSTANCIA_BLOCKS.get(block, ())}
         if keep:
             value[block] = keep
+    lots = [_fact_lot(lot, doc["document_type"] == "mx_constancia") for lot in doc.get("lots") or []]
+    if lots and doc["document_type"] == "us_1099" and len(lots) <= MAX_1099B_LOTS:
+        # Form 8949 is built from these (tax_pack never counts them and the ledger's sales both); a list too
+        # long to keep is left out whole, never cut short, so the ledger's rows stand for that broker.
+        value.setdefault("form_1099_b", {})["lots"] = lots
     return value
 
 
@@ -561,6 +615,9 @@ def build_tax_proposal(doc: dict[str, Any], pages: list[tuple[int, str]], *, pro
         reasons.append("The document contains text addressed to an assistant; it was read as data only.")
     if not any(figures.values()):
         reasons.append("No figures were read from the document.")
+    if len(doc["lots"]) > MAX_1099B_LOTS:
+        reasons.append(f"1099-B lists {len(doc['lots'])} lots, more than the {MAX_1099B_LOTS:,} a document keeps: "
+                       "only its totals are saved, and Form 8949 comes from the ledger for this broker.")
     as_of = doc.get("issued_on") or f"{doc['tax_year']}-12-31"
     if date.fromisoformat(as_of) > date.today():
         as_of = date.today().isoformat()
@@ -578,8 +635,9 @@ def build_tax_proposal(doc: dict[str, Any], pages: list[tuple[int, str]], *, pro
         "verification": verification, "provenance": provenance,
         "review_reasons": list(dict.fromkeys(reasons)),
     }
-    key = _fact_key(doc)
-    result["facts_preview"] = [{"key": key, "value": _fact_value(doc, figures)}]
+    value = _fact_value(doc, figures)
+    key = _fact_key(doc, value)
+    result["facts_preview"] = [{"key": key, "value": value}]
     result["summary"] = {"document": f"{LABELS[doc['document_type']]} {doc['tax_year']} ({doc['institution']})",
                          "saves": key, "figures": _lines(result),
                          "reconciliation": result["reconciliation"]["status"]}
@@ -658,7 +716,9 @@ TAX_EXTRACTION_SCHEMA: dict[str, Any] = {
         "lots": _obj({"description": _TEXT, "symbol": _TEXT, "quantity": _NUM,
                       "date_acquired": {"type": ["string", "null"], "pattern": r"^(\d{4}-\d{2}-\d{2}|VARIOUS)$"},
                       "date_sold": _DATE, "proceeds": _NUM, "cost_basis": _NUM, "wash_sale_disallowed": _NUM,
-                      "gain": _NUM, "term": _TERM, "page": _PAGE}, 5000),
+                      "gain": _NUM, "term": _TERM,
+                      "box": {"type": ["string", "null"], "enum": [None, "A", "B", "C", "D", "E", "F"]},
+                      "page": _PAGE}, MAX_1099B_LOTS),
         "term_totals": _obj({"term": _TERM, "proceeds": _NUM, "cost_basis": _NUM, "wash_sale_disallowed": _NUM,
                              "gain": _NUM, "page": _PAGE}, 10),
     }),
@@ -672,7 +732,8 @@ TAX_INSTRUCTIONS = (
     "dividendos = {domestic_gross, foreign_gross, isr_withheld, isr_creditable, foreign_tax_withheld, total}. "
     "1099 (USD): form_1099_div boxes 1a ordinary, 1b qualified, 2a capital_gain_distributions, 4 federal_tax_withheld, "
     "7 foreign_tax_paid; form_1099_int boxes 1 interest, 3 us_treasury_interest, 4, 6; form_1099_b = the printed "
-    "totals, with every lot in lots (term short or long) and every printed total in term_totals (term all for the "
+    "totals, with every lot in lots (term short or long; box the Form 8949 box A-F its section names, else null) and "
+    "every printed total in term_totals (term all for the "
     "overall total). Form 5498 boxes 1 ira_contributions, 2, 3, 4, 5 fair_market_value, 8, 9, 10 roth_contributions, "
     "12b rmd_next_year. Give only the last four digits of the account. Never output RFC, CURP, SSN/TIN, addresses or "
     "names of people. Return one JSON object matching the schema."

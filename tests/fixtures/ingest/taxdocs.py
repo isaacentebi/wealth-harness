@@ -72,17 +72,18 @@ LOT_COLUMNS = [("Description", 46, "L"), ("Symbol", 12, "L"), ("Quantity", 14, "
                ("Gain/(Loss)", 20, "R")]
 
 
-def schwab_1099(short_proceeds: str = "12,100.00") -> bytes:
+def schwab_1099(short_proceeds: str = "12,100.00", account: str | None = "XXXX-5678",
+                ordinary: str = "105.00") -> bytes:
     return render([
         ("text", "Charles Schwab & Co., Inc."),
         ("text", "2025 Form 1099 Composite and Year-End Summary"),
         ("text", "Tax Year 2025"),
         ("text", "Date Prepared: February 13, 2026"),
         ("text", "Recipient: SAM EXAMPLE (fictional)      Recipient's TIN: ***-**-6789"),
-        ("text", "Account Number: XXXX-5678"),
+        *([("text", f"Account Number: {account}")] if account else []),
         ("blank",),
         ("text", "Form 1099-DIV  Dividends and Distributions"),
-        _line("1a Total ordinary dividends", "105.00"),
+        _line("1a Total ordinary dividends", ordinary),
         _line("1b Qualified dividends", "90.00"),
         _line("2a Total capital gain distributions", "0.00"),
         _line("4 Federal income tax withheld", "0.00"),

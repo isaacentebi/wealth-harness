@@ -285,6 +285,81 @@ def _long_term(acquired: str, sold: str) -> bool:
     return s > anniversary
 
 
+def _same_institution(a: Any, b: Any) -> bool:
+    """GBM and "GBM Grupo Bursátil", Charles Schwab and Schwab: the same institution."""
+    one, two = fold(a), fold(b)
+    return bool(one and two) and (one == two or one in two.split() or two in one.split()
+                                  or one.startswith(two) or two.startswith(one))
+
+
+def _combine(docs: list[dict]) -> dict | None:
+    """One document, or several of one institution (one per account) summed into one, block by block.
+
+    A figure is summed only when every document carrying the block prints it; 1099-B lots are
+    concatenated, each keeping the id of the document it came from.  ``_parts`` keeps the originals
+    so each one is still reconciled on its own."""
+    if not docs:
+        return None
+    if len(docs) == 1:
+        return docs[0]
+    out: dict[str, Any] = {"id": "+".join(d["id"] for d in docs), "institution": docs[0].get("institution"),
+                           "tax_year": docs[0].get("tax_year"), "_source": docs[0].get("_source"),
+                           "_ref": docs[0].get("_ref"), "_parts": docs}
+    for name in DOCUMENT_BLOCKS:
+        blocks = [(d, _normalized(name, d[name])) for d in docs if isinstance(d.get(name), dict)]
+        if not blocks:
+            continue
+        fields = {f for _, b in blocks for f in b if f != "lots"}
+        merged: dict[str, Any] = {}
+        for field in sorted(fields):
+            values = [_d(b.get(field)) for _, b in blocks]
+            if None not in values:
+                merged[field] = str(sum(values, ZERO))
+        lots = [dict(lot, _document_id=d["id"]) for d, b in blocks for lot in b.get("lots") or []]
+        if lots:
+            merged["lots"] = lots
+        out[name] = merged
+    return out
+
+
+def _normalized(name: str, block: Mapping[str, Any]) -> dict:
+    """An Art. 129 block with its net (gain less loss) stated, so documents printing either can be summed."""
+    block = dict(block)
+    if name == "enajenacion":
+        gain, loss = _d(block.get("gain")), _d(block.get("loss"))
+        if loss is not None:
+            block["loss"] = str(abs(loss))
+        if _d(block.get("net")) is None and gain is not None and loss is not None:
+            block["net"] = str(gain - abs(loss))
+    return block
+
+
+def _parts(doc: Mapping[str, Any], block: str, field: str) -> list[dict] | None:
+    """Each document's own figure behind a summed one: [{document_id, document}], None for a single document."""
+    parts = doc.get("_parts")
+    if not parts:
+        return None
+    return [{"document_id": p["id"], "document": _m(_d(_normalized(block, p.get(block) or {}).get(field)))}
+            for p in parts if isinstance(p.get(block), dict)]
+
+
+def _recon(item: str, ours: Decimal | None, theirs: Decimal | None, truth: str, doc: Mapping[str, Any],
+           block: str, field: str) -> dict:
+    """A reconciliation row; a summed document also lists each document's own figure."""
+    row = {"item": item, "ours": _m(ours), "document": _m(theirs),
+           "difference": _m(None if ours is None or theirs is None else ours - theirs),
+           "source_of_truth": truth, "document_id": doc["id"]}
+    parts = _parts(doc, block, field)
+    if parts:
+        row["documents"] = parts
+    return row
+
+
+def _fingerprint(doc: Mapping[str, Any]) -> str:
+    return json.dumps({"institution": fold(doc.get("institution")), "tax_year": doc.get("tax_year"),
+                       **{b: doc.get(b) for b in DOCUMENT_BLOCKS}}, sort_keys=True, default=str)
+
+
 # ----------------------------------------------------------------- the inputs
 
 
@@ -297,12 +372,22 @@ class _Book:
         self.start, self.end = f"{year}-01-01", f"{year}-12-31"
         self.today = today
         self.ledger = ledger or {"accounts": [], "instruments": [], "entries": [], "fx": []}
-        # Inferred facts wait for the person's yes; a past review date retires a balance, not a dated document.
+        # Inferred facts wait for the person's yes; a past review date retires a balance or a profile, not a
+        # dated document: only the year's stated tax facts and the institutions' documents are about a closed year.
         self.facts = {f["key"]: f for f in snapshot.get("facts") or [] if f.get("value") is not None
                       and f.get("confidence") != "inferred"
                       and (not f.get("expires_on") or f["expires_on"] >= today
-                           or f["key"].startswith(("tax.", "constancia.", "client.profile")))}
+                           or f["key"].startswith(("tax.", "constancia.")))}
         self.evidence: set[str] = set()
+        self.warnings: list[str] = []
+        stale_profile = next((f for f in snapshot.get("facts") or [] if f.get("key") == "client.profile"
+                              and f.get("value") is not None and f.get("confidence") != "inferred"
+                              and f.get("expires_on") and f["expires_on"] < today), None)
+        self.stale_profile = stale_profile is not None
+        if stale_profile:
+            self.warnings.append(f"client.profile is past its review date ({stale_profile['expires_on']}): it was "
+                                 "left out (residence, US status, birth year). Reconfirm it with the person; the "
+                                 "jurisdictions come from fresh facts or are asked for.")
         profile_fact = self.facts.get("client.profile")
         self.profile = profile_fact["value"] if profile_fact and isinstance(profile_fact["value"], dict) else {}
         if profile_fact:
@@ -326,6 +411,31 @@ class _Book:
                 self.evidence.add(fact["id"])
         # An uploaded document (source kind document) wins over one typed in for the same institution.
         self.constancias.sort(key=lambda d: d["_source"] != "document")
+        # The same document saved twice (a re-upload under an older key) counts once; two accounts' documents
+        # of one institution are all kept and summed where the pack reads them.
+        seen: dict[str, dict] = {}
+        kept = []
+        for doc in self.constancias:
+            mark = _fingerprint(doc)
+            twin = seen.get(mark)
+            if twin is not None and (not twin.get("account_last4") or not doc.get("account_last4")
+                                     or twin["account_last4"] == doc["account_last4"]):
+                self.warnings.append(f"constancia.{doc['id']} has the same figures as constancia.{twin['id']}: "
+                                     "read as one document, counted once.")
+                continue
+            seen[mark] = doc
+            kept.append(doc)
+        self.constancias = kept
+        for name in DOCUMENT_BLOCKS:
+            unlabeled: dict[str, list[str]] = {}
+            for doc in kept:
+                if isinstance(doc.get(name), dict) and not doc.get("account_id") and not doc.get("account_last4"):
+                    unlabeled.setdefault(fold(doc.get("institution")), []).append(doc["id"])
+            for ids in unlabeled.values():
+                if len(ids) > 1:
+                    self.warnings.append(f"{', '.join('constancia.' + i for i in ids)} ({name}) name no account and "
+                                         "are summed as separate accounts; if one is a corrected copy of the other, "
+                                         "forget the older one.")
         self.parameters = inputs.get("parameters") or {}
         if not isinstance(self.parameters, dict):
             raise ValueError("parameters must be an object {key: {value, source}}")
@@ -407,18 +517,45 @@ class _Book:
             return True
         return None
 
-    def constancia_for(self, account_ids: Iterable[str], institution: str) -> dict | None:
+    def constancias_for(self, account_ids: Iterable[str], institution: str,
+                        blocks: str | tuple[str, ...] | None = None) -> list[dict]:
+        """Every saved document for these accounts or this institution (with one of ``blocks``).
+
+        A document naming one of the accounts matches; so does one of the institution that names no
+        account (or an account the ledger does not have).  Uploaded documents win over typed-in ones."""
         ids = set(account_ids)
-        name = fold(institution)
-        for doc in self.constancias:
-            if doc.get("account_id") in ids:
-                return doc
-        for doc in self.constancias:
-            other = fold(doc.get("institution"))
-            if other and name and (other == name or other in name.split() or name in other.split()
-                                   or other.startswith(name) or name.startswith(other)):
-                return doc
-        return None
+        wanted = (blocks,) if isinstance(blocks, str) else blocks
+        docs = [d for d in self.constancias if wanted is None or any(isinstance(d.get(b), dict) for b in wanted)]
+        matched = [d for d in docs if d.get("account_id") in ids]
+        matched += [d for d in docs if d not in matched and _same_institution(d.get("institution"), institution)
+                    and (not d.get("account_id") or d["account_id"] not in self.accounts)]
+        if not matched:
+            matched = [d for d in docs if _same_institution(d.get("institution"), institution)]
+        if any(d["_source"] == "document" for d in matched):
+            matched = [d for d in matched if d["_source"] == "document"]
+        return matched
+
+    def constancia_for(self, account_ids: Iterable[str], institution: str,
+                       blocks: str | tuple[str, ...] | None = None) -> dict | None:
+        """The institution's document, or the sum of all of them (two accounts, two 1099s) as one."""
+        return _combine(self.constancias_for(account_ids, institution, blocks))
+
+    def accounts_for(self, doc: Mapping[str, Any]) -> set[str]:
+        """The taxable ledger accounts a document covers: its account, else its institution's (by last four)."""
+        parts = doc.get("_parts") or [doc]
+        out: set[str] = set()
+        for part in parts:
+            if part.get("account_id") in self.accounts:
+                out.add(part["account_id"])
+                continue
+            same = {a for a in self.accounts if _same_institution(part.get("institution"), self.institution(a))
+                    and self.kind(a) not in _TAX_SHELTERED}
+            tail = part.get("account_last4")
+            if tail:
+                narrowed = {a for a in same if tail in f"{a} {self.accounts[a].get('name') or ''}"}
+                same = narrowed or same
+            out |= same
+        return out
 
     def convert(self, amount: Decimal | None, currency: str | None, target: str, on: str) -> Decimal | None:
         if amount is None or currency is None:
@@ -663,19 +800,17 @@ def _mx_enajenacion(book: _Book, disposals: list[dict], foreign_129: Decimal | N
                              + " para actualizar el costo.",
                              "INPC (INEGI) for " + ", ".join(sorted(months)) + " to update the cost."))
     summary_rows, recon, declared = [], [], {}
+    used: set[str] = set()
     for broker, data in sorted(brokers.items()):
         ours = [_d(r["gain_mxn"]) for r in data["rows"]]
         nominal = [_d(r["gain_nominal_mxn"]) for r in data["rows"]]
         net = _sum(ours)
         gains = None if net is None else sum((g for g in ours if g > 0), ZERO)
         losses = None if net is None else -sum((g for g in ours if g < 0), ZERO)
-        doc = book.constancia_for(data["accounts"], broker)
-        block = (doc or {}).get("enajenacion") if isinstance((doc or {}).get("enajenacion"), dict) else None
-        doc_net = None
-        if block:
-            doc_net = _d(block.get("net"))
-            if doc_net is None and _d(block.get("gain")) is not None and _d(block.get("loss")) is not None:
-                doc_net = _d(block["gain"]) - abs(_d(block["loss"]))
+        doc = book.constancia_for(data["accounts"], broker, "enajenacion")
+        used.update(p["id"] for p in (doc or {}).get("_parts") or ([doc] if doc else []))
+        block = _normalized("enajenacion", doc["enajenacion"]) if doc else None
+        doc_net = _d(block.get("net")) if block else None
         use = doc_net if doc_net is not None else net
         declared[broker] = use
         summary_rows.append({"broker": broker, "sales": len(data["rows"]), "gains_mxn": _m(gains),
@@ -684,17 +819,13 @@ def _mx_enajenacion(book: _Book, disposals: list[dict], foreign_129: Decimal | N
                              "basis": "constancia" if doc_net is not None else ("computed" if net is not None
                                                                                 else "unknown")})
         if block:
-            recon.append({"item": f"{broker}: resultado neto Art. 129 / net Art. 129 result", "ours": _m(net),
-                          "document": _m(doc_net), "difference": _m(None if net is None or doc_net is None
-                                                                    else net - doc_net),
-                          "source_of_truth": "constancia", "document_id": doc["id"]})
+            recon.append(_recon(f"{broker}: resultado neto Art. 129 / net Art. 129 result", net, doc_net,
+                                "constancia", doc, "enajenacion", "net"))
             for field in ("gain", "loss"):
                 ours_value = gains if field == "gain" else losses
                 if _d(block.get(field)) is not None:
-                    recon.append({"item": f"{broker}: {'ganancias / gains' if field == 'gain' else 'pérdidas / losses'}",
-                                  "ours": _m(ours_value), "document": _m(abs(_d(block[field]))),
-                                  "difference": _m(None if ours_value is None else ours_value - abs(_d(block[field]))),
-                                  "source_of_truth": "constancia", "document_id": doc["id"]})
+                    recon.append(_recon(f"{broker}: {'ganancias / gains' if field == 'gain' else 'pérdidas / losses'}",
+                                        ours_value, abs(_d(block[field])), "constancia", doc, "enajenacion", field))
         else:
             missing.append(_need(sid, f"constancia.{fold(broker).replace(' ', '_')}.{book.year}",
                                  f"Constancia anual de {broker} {book.year} (enajenación de acciones): súbela; es la "
@@ -702,19 +833,21 @@ def _mx_enajenacion(book: _Book, disposals: list[dict], foreign_129: Decimal | N
                                  f"{broker}'s {book.year} annual constancia (share sales): upload it; it is the "
                                  "source of truth."))
     # Brokers with a constancia but no sales in the ledger still count (the ledger may be incomplete).
+    unmatched: dict[str, list[dict]] = {}
     for doc in book.constancias:
-        block = doc.get("enajenacion")
-        if not isinstance(block, dict) or any(book.constancia_for(d["accounts"], b) is doc for b, d in brokers.items()):
-            continue
-        doc_net = _d(block.get("net"))
-        if doc_net is None and _d(block.get("gain")) is not None and _d(block.get("loss")) is not None:
-            doc_net = _d(block["gain"]) - abs(_d(block["loss"]))
-        declared[doc.get("institution") or doc["id"]] = doc_net
-        summary_rows.append({"broker": doc.get("institution") or doc["id"], "sales": 0, "gains_mxn": None,
+        if isinstance(doc.get("enajenacion"), dict) and doc["id"] not in used:
+            group = next((k for k in unmatched if _same_institution(k, doc.get("institution"))),
+                         doc.get("institution") or doc["id"])
+            unmatched.setdefault(group, []).append(doc)
+    for name, docs in unmatched.items():
+        doc = _combine(docs)
+        doc_net = _d(_normalized("enajenacion", doc["enajenacion"]).get("net"))
+        declared[name] = doc_net
+        summary_rows.append({"broker": name, "sales": 0, "gains_mxn": None,
                              "losses_mxn": None, "net_mxn": None, "net_nominal_mxn": None,
                              "constancia_net_mxn": _m(doc_net), "declared_net_mxn": _m(doc_net),
                              "basis": "constancia"})
-        warnings.append(f"{doc.get('institution')}: the constancia reports Art. 129 sales the ledger does not "
+        warnings.append(f"{name}: the constancia reports Art. 129 sales the ledger does not "
                         "have; the constancia is used.")
     if foreign_129 is not False:
         summary_rows.append({"broker": "Intermediario extranjero (SIC) / foreign broker (SIC)", "sales": None,
@@ -970,18 +1103,19 @@ def _mx_intereses(book: _Book, debt_sales: list[dict]) -> dict:
                     debt_gain += gain
                 found = True
         retention = _interest_retention(book, account_id)
-        doc = book.constancia_for([account_id], book.institution(account_id))
-        block = (doc or {}).get("intereses") if isinstance((doc or {}).get("intereses"), dict) else None
+        doc = book.constancia_for([account_id], book.institution(account_id), "intereses")
+        block = doc["intereses"] if doc else None
         if not found and not block and not retention:
             continue
         name = book.institution(account_id)
         agg = by_institution.setdefault(name, {"accounts": [], "nominal": ZERO, "debt_gain": ZERO, "retention": ZERO,
-                                               "doc": None, "avg": ZERO, "avg_known": True, "bank": True})
+                                               "docs": {}, "avg": ZERO, "avg_known": True, "bank": True})
         agg["accounts"].append(account_id)
         agg["nominal"] += nominal
         agg["debt_gain"] += debt_gain
         agg["retention"] += retention
-        agg["doc"] = agg["doc"] or (doc if block else None)
+        for part in (doc or {}).get("_parts") or ([doc] if doc else []):
+            agg["docs"].setdefault(part["id"], part)  # each account's document once, summed per institution
         if book.kind(account_id) == "bank":
             avg = _average_daily_cash(book, account_id, (book.accounts[account_id].get("currency") or "MXN"))
             if avg is None:
@@ -1001,6 +1135,7 @@ def _mx_intereses(book: _Book, debt_sales: list[dict]) -> dict:
         if agg["bank"] and agg["avg_known"] and inflation is not None:
             real = nominal_total - agg["avg"] * inflation
             basis = "computed"
+        agg["doc"] = _combine(list(agg["docs"].values()))
         block = (agg["doc"] or {}).get("intereses") or {}
         doc_nominal, doc_real = _d(block.get("nominal")), _d(block.get("real"))
         doc_loss, doc_ret = _d(block.get("real_loss")), _d(block.get("isr_withheld"))
@@ -1019,13 +1154,13 @@ def _mx_intereses(book: _Book, debt_sales: list[dict]) -> dict:
                      "declared_retention_mxn": _m(doc_ret if doc_ret is not None else agg["retention"]),
                      "basis": "constancia" if agg["doc"] else basis if real is not None else "unknown"})
         if agg["doc"]:
-            for label, ours, theirs in (("interés nominal / nominal interest", nominal_total, doc_nominal),
-                                        ("interés real / real interest", real, doc_real),
-                                        ("ISR retenido / ISR withheld", agg["retention"], doc_ret)):
+            for label, ours, theirs, field in (
+                    ("interés nominal / nominal interest", nominal_total, doc_nominal, "nominal"),
+                    ("interés real / real interest", real, doc_real, "real"),
+                    ("ISR retenido / ISR withheld", agg["retention"], doc_ret, "isr_withheld")):
                 if theirs is not None:
-                    recon.append({"item": f"{name}: {label}", "ours": _m(ours), "document": _m(theirs),
-                                  "difference": _m(None if ours is None else ours - theirs),
-                                  "source_of_truth": "constancia", "document_id": agg["doc"]["id"]})
+                    recon.append(_recon(f"{name}: {label}", ours, theirs, "constancia", agg["doc"], "intereses",
+                                        field))
         else:
             missing.append(_need(sid, f"constancia.{fold(name).replace(' ', '_')}.{book.year}",
                                  f"Constancia de intereses {book.year} de {name} (nominal, real y retención; se "
@@ -1103,8 +1238,8 @@ def _mx_dividendos(book: _Book) -> dict:
         bucket["withheld_foreign" if origin == "foreign" else "withheld_domestic"] += withheld or ZERO
     summary = []
     for broker, bucket in sorted(totals.items()):
-        doc = book.constancia_for(bucket["accounts"], broker)
-        block = (doc or {}).get("dividendos") if isinstance((doc or {}).get("dividendos"), dict) else None
+        doc = book.constancia_for(bucket["accounts"], broker, "dividendos")
+        block = doc["dividendos"] if doc else None
         domestic = bucket["domestic"] if bucket["known"] else None
         # LISR Art. 140: the corporate ISR is (dividend x 1.4286) x 30%; the person accumulates the dividend plus
         # that ISR (piramidación) and credits it, when the dividend comes from CUFIN (the constancia says).
@@ -1131,9 +1266,8 @@ def _mx_dividendos(book: _Book) -> dict:
                                       bucket["withheld_domestic"], "isr_withheld")):
                 theirs = _d(block.get(key))
                 if theirs is not None:
-                    recon.append({"item": f"{broker}: {label}", "ours": _m(ours if bucket["known"] else None),
-                                  "document": _m(theirs), "difference": _m(ours - theirs if bucket["known"] else None),
-                                  "source_of_truth": "constancia", "document_id": doc["id"]})
+                    recon.append(_recon(f"{broker}: {label}", ours if bucket["known"] else None, theirs,
+                                        "constancia", doc, "dividendos", key))
         else:
             missing.append(_need(sid, f"constancia.{fold(broker).replace(' ', '_')}.{book.year}.dividendos",
                                  f"Constancia de dividendos {book.year} de {broker} (ISR acreditable por CUFIN y el 10% "
@@ -1412,9 +1546,101 @@ def _us_rows(book: _Book) -> tuple[list[dict], list[dict], list[str]]:
     return rows, missing, warnings
 
 
+_SHORT_BOXES, _LONG_BOXES = frozenset("ABC"), frozenset("DEF")
+
+
+def _lot_row(doc_id: str, institution: str, lot: Mapping[str, Any], account_id: str | None) -> dict:
+    """A Form 8949 row from a 1099-B lot as the broker printed it (the source of truth for that sale)."""
+    acquired, sold = lot.get("acquired"), lot.get("sold")
+    proceeds, basis, wash = _d(lot.get("proceeds")), _d(lot.get("basis")), _d(lot.get("wash_sale_disallowed"))
+    gain = _d(lot.get("gain"))
+    if gain is None and proceeds is not None and basis is not None:
+        gain = proceeds - basis + (wash or ZERO)
+    box = lot.get("box") if lot.get("box") in _SHORT_BOXES | _LONG_BOXES else None
+    term = lot.get("term") if lot.get("term") in ("short", "long") else None
+    if term is None and box:
+        term = "short" if box in _SHORT_BOXES else "long"
+    if term is None and acquired and sold and acquired != "VARIOUS":
+        try:
+            term = "long" if _long_term(acquired, sold) else "short"
+        except ValueError:
+            term = None
+    if box is None and term:
+        box = "A" if term == "short" else "D"  # a US broker's 1099-B: basis reported (see the assumptions)
+    quantity = _q(_d(lot.get("quantity")))
+    what = lot.get("symbol") or lot.get("description")
+    row = {"account": institution, "account_id": account_id,
+           "description": " ".join(x for x in (quantity, what) if x) or "?", "instrument_id": None,
+           "date_acquired": acquired, "date_sold": sold, "proceeds_usd": _m(proceeds), "cost_usd": _m(basis),
+           "code": "W" if wash else "", "adjustment_usd": _m(wash) if wash else None, "gain_usd": _m(gain),
+           "term": term, "box": box, "permanently_disallowed_usd": None, "currency": "USD",
+           "source": "1099-B", "document_id": doc_id}
+    if term is None:
+        row["note"] = "The 1099-B does not say whether this lot is short or long term."
+    return row
+
+
 def _us_8949(book: _Book) -> tuple[dict, dict]:
+    """Form 8949 rows: a broker's 1099-B lots where it listed them (the source of truth), else the ledger's.
+
+    A sale is never counted twice: the lots of a 1099-B replace the ledger's rows for the accounts it
+    covers, and the ledger's figures for those accounts are shown against the document instead."""
     sid = "us_8949"
-    rows, missing, warnings = _us_rows(book)
+    ledger_rows, missing, warnings = _us_rows(book)
+    groups: dict[str, list[dict]] = {}
+    for doc in book.constancias:
+        if isinstance(doc.get("form_1099_b"), dict):
+            name = next((k for k in groups if _same_institution(k, doc.get("institution"))),
+                        doc.get("institution") or doc["id"])
+            groups.setdefault(name, []).append(doc)
+    recon, document_rows, replaced = [], [], set()
+    for name, docs in groups.items():
+        doc = _combine(docs)
+        block = doc["form_1099_b"]
+        accounts = book.accounts_for(doc)
+        ours_rows = [r for r in ledger_rows if r["account_id"] in accounts]
+        with_lots = [d for d in docs if d["form_1099_b"].get("lots")]
+        use_lots = bool(with_lots) and (len(with_lots) == len(docs) or not ours_rows)
+        mine: list[dict] = []
+        if use_lots:
+            single = next(iter(accounts)) if len(accounts) == 1 else None
+            mine = [_lot_row(d["id"], name, lot, single) for d in with_lots for lot in d["form_1099_b"]["lots"]]
+            document_rows += mine
+            replaced |= accounts
+            for d in docs:
+                if d not in with_lots:
+                    missing.append(_need(sid, f"constancia.{d['id']}.form_1099_b.lots",
+                                         f"Los lotes del 1099-B {d['id']} de {name} (solo se guardaron sus totales).",
+                                         f"The lots of {name}'s 1099-B {d['id']} (only its totals were saved)."))
+            if not ours_rows:
+                warnings.append(f"{name}: the Form 8949 rows are the 1099-B's lots; the ledger has no sales there "
+                                "to check them against.")
+        elif with_lots:
+            warnings.append(f"{name}: only some of the 1099-Bs list their lots; the rows come from the ledger and "
+                            "each 1099-B's totals are reconciled against it.")
+        ours_known = bool(ours_rows)
+        ours_wash = sum((_d(r["adjustment_usd"]) or ZERO for r in ours_rows), ZERO) if ours_known else None
+        theirs_wash = _d(block.get("wash_sale_disallowed"))
+        if theirs_wash is None and mine:
+            theirs_wash = sum((_d(r["adjustment_usd"]) or ZERO for r in mine), ZERO)
+        if theirs_wash is not None:
+            recon.append(_recon(f"{name}: wash sale loss disallowed (1099-B box 1g)", ours_wash, theirs_wash,
+                                "1099-B", doc, "form_1099_b", "wash_sale_disallowed"))
+            if use_lots and ours_wash is not None and ours_wash > theirs_wash + CENT:
+                warnings.append(f"{name}: the ledger finds {_m(ours_wash - theirs_wash)} USD more wash-sale loss "
+                                "than the 1099-B (a replacement bought in another account, which the broker cannot "
+                                "see): add that adjustment (code W) to the rows from the 1099-B.")
+        for term, key in (("short", "short_term_gain"), ("long", "long_term_gain")):
+            theirs = _d(block.get(key))
+            if theirs is None and mine:
+                chosen = [r for r in mine if r["term"] == term]
+                theirs = _sum(_d(r["gain_usd"]) for r in chosen) if chosen else None
+            if theirs is None:
+                continue
+            ours = _sum(_d(r["gain_usd"]) for r in ours_rows if r["term"] == term) if ours_known else None
+            recon.append(_recon(f"{name}: {term}-term gain (1099-B)", ours, theirs, "1099-B", doc, "form_1099_b",
+                                key))
+    rows = [r for r in ledger_rows if r["account_id"] not in replaced] + document_rows
     totals: dict[str, dict[str, Decimal | None]] = {}
     for term in ("short", "long"):
         chosen = [r for r in rows if r["term"] == term]
@@ -1430,33 +1656,9 @@ def _us_8949(book: _Book) -> tuple[dict, dict]:
                                   "cost": _sum(_d(r["cost_usd"]) for r in unknown_term),
                                   "adjustments": sum((_d(r["adjustment_usd"]) or ZERO for r in unknown_term), ZERO),
                                   "gain": _sum(_d(r["gain_usd"]) for r in unknown_term), "count": len(unknown_term)}
-    recon = []
-    for doc in book.constancias:
-        block = doc.get("form_1099_b")
-        if isinstance(block, dict) and _d(block.get("wash_sale_disallowed")) is not None:
-            ours = sum((_d(r["adjustment_usd"]) or ZERO for r in rows
-                        if fold(r["account"]) == fold(doc.get("institution"))), ZERO)
-            theirs = _d(block["wash_sale_disallowed"])
-            recon.append({"item": f"{doc.get('institution')}: wash sale loss disallowed (1099-B box 1g)",
-                          "ours": _m(ours), "document": _m(theirs), "difference": _m(ours - theirs),
-                          "source_of_truth": "1099-B", "document_id": doc["id"]})
-    for doc in book.constancias:
-        block = doc.get("form_1099_b")
-        if not isinstance(block, dict):
-            continue
-        for term, key in (("short", "short_term_gain"), ("long", "long_term_gain")):
-            theirs = _d(block.get(key))
-            if theirs is None:
-                continue
-            ours = _sum(_d(r["gain_usd"]) for r in rows if r["term"] == term
-                        and fold(r["account"]) == fold(doc.get("institution")))
-            recon.append({"item": f"{doc.get('institution')}: {term}-term gain (1099-B)", "ours": _m(ours),
-                          "document": _m(theirs), "difference": _m(None if ours is None else ours - theirs),
-                          "source_of_truth": "1099-B", "document_id": doc["id"]})
     us_brokers = sorted({r["account"] for r in rows if r["box"] in {"A", "D"}})
     for broker in us_brokers:
-        if not any(isinstance(d.get("form_1099_b"), dict) and fold(d.get("institution")) == fold(broker)
-                   for d in book.constancias):
+        if not any(_same_institution(name, broker) for name in groups):
             missing.append(_need(sid, f"constancia.{fold(broker).replace(' ', '_')}.{book.year}.1099b",
                                  f"El 1099-B {book.year} de {broker} (fuente de verdad del costo y de las ventas de "
                                  "lavado).", f"{broker}'s {book.year} Form 1099-B (the source of truth for basis and "
@@ -1477,6 +1679,8 @@ def _us_8949(book: _Book) -> tuple[dict, dict]:
         sources=[SRC_8949, SRC_PUB550, SRC_RR_2008_5],
         assumptions=["Lots are relieved first-in first-out unless the sale named its lots.",
                      "Foreign-currency sales convert proceeds at the sale-date rate and cost at the purchase-date rate.",
+                     "Where a broker's 1099-B lists its lots, those lots are the rows for its accounts (the "
+                     "ledger's sales there are only reconciled against them, never added).",
                      "Box A/D assumes the US broker reported basis to the IRS (check the 1099-B; otherwise B/E); "
                      "foreign brokers issue no 1099-B (box C/F).",
                      "Wash sales: purchases of the same security (same underlying symbol) in any of your accounts "
@@ -1575,13 +1779,32 @@ def _us_1099(book: _Book, scope: set[str]) -> tuple[dict, dict, Decimal | None]:
             if country != "US":
                 foreign_tax[country] = (foreign_tax.get(country) or ZERO) + abs(value)
     cap_gain_distributions: Decimal | None = ZERO
+    # Accounts one document (or one institution's documents, summed) covers are one row: never counted twice.
+    groups: dict[str, dict] = {}
     for account_id, bucket in sorted(per_account.items()):
-        name = book.institution(account_id)
-        country = book.country(account_id)[0]
-        doc = next((d for d in book.constancias if (d.get("account_id") == account_id or fold(d.get("institution"))
-                                                    == fold(name)) and (isinstance(d.get("form_1099_div"), dict)
-                                                                         or isinstance(d.get("form_1099_int"), dict))),
-                   None)
+        doc = book.constancia_for([account_id], book.institution(account_id), ("form_1099_div", "form_1099_int"))
+        group = groups.setdefault(doc["id"] if doc else account_id, {
+            "account_id": account_id, "doc": doc, "dividend": ZERO, "interest": ZERO, "tax_withheld": ZERO,
+            "known": True})
+        for kind in ("dividend", "interest", "tax_withheld"):
+            group[kind] += bucket[kind]
+        group["known"] = group["known"] and bucket["known"]
+    # A 1099 whose accounts the ledger does not have still counts: its figures are shown and declared.
+    used = {p["id"] for g in groups.values() if g["doc"] for p in (g["doc"].get("_parts") or [g["doc"]])}
+    loose: dict[str, list[dict]] = {}
+    for d in book.constancias:
+        if d["id"] not in used and any(isinstance(d.get(b), dict) for b in ("form_1099_div", "form_1099_int")):
+            name = next((k for k in loose if _same_institution(k, d.get("institution"))),
+                        d.get("institution") or d["id"])
+            loose.setdefault(name, []).append(d)
+    for name, docs in loose.items():
+        doc = _combine(docs)
+        groups[doc["id"]] = {"account_id": None, "name": name, "doc": doc, "dividend": ZERO, "interest": ZERO,
+                             "tax_withheld": ZERO, "known": False}
+    for group in groups.values():
+        account_id, bucket, doc = group["account_id"], group, group["doc"]
+        name = group.get("name") or book.institution(account_id)
+        country = book.country(account_id)[0] if account_id else "US"
         div = (doc or {}).get("form_1099_div") or {}
         intr = (doc or {}).get("form_1099_int") or {}
         ours_div = bucket["dividend"] if bucket["known"] else None
@@ -1604,12 +1827,11 @@ def _us_1099(book: _Book, scope: set[str]) -> tuple[dict, dict, Decimal | None]:
         if cgd is not None and cap_gain_distributions is not None:
             cap_gain_distributions += cgd
         if doc:
-            for label, ours, theirs in (("dividends (1099-DIV 1a)", ours_div, _d(div.get("ordinary"))),
-                                        ("interest (1099-INT 1)", ours_int, _d(intr.get("interest")))):
+            for label, ours, theirs, block, field in (
+                    ("dividends (1099-DIV 1a)", ours_div, _d(div.get("ordinary")), "form_1099_div", "ordinary"),
+                    ("interest (1099-INT 1)", ours_int, _d(intr.get("interest")), "form_1099_int", "interest")):
                 if theirs is not None:
-                    recon.append({"item": f"{name}: {label}", "ours": _m(ours), "document": _m(theirs),
-                                  "difference": _m(None if ours is None else ours - theirs),
-                                  "source_of_truth": "1099", "document_id": doc["id"]})
+                    recon.append(_recon(f"{name}: {label}", ours, theirs, "1099", doc, block, field))
             ftp = _d(div.get("foreign_tax_paid"))
             if ftp is not None and country == "US":
                 foreign_tax["per 1099-DIV box 7"] = (foreign_tax.get("per 1099-DIV box 7") or ZERO) + ftp
@@ -2265,10 +2487,15 @@ def run_task(inputs: Mapping[str, Any], snapshot: Mapping[str, Any], ledger: Map
     book = _Book(inputs, snapshot, ledger, year, today)
     jurisdictions, jurisdiction_basis = _jurisdictions(inputs, book)
     if not jurisdictions:
+        missing = [_need("pack", "jurisdiction", "¿Dónde eres residente fiscal (MX, US o ambos)?",
+                         "Where are you tax resident (MX, US or both)?")]
+        if book.stale_profile:
+            missing.append(_need("pack", "client.profile", "Confirma tu perfil (residencia fiscal y si eres "
+                                 "persona estadounidense): su fecha de revisión pasó.",
+                                 "Reconfirm your profile (tax residence and US person status): its review date "
+                                 "has passed.", reason="stale"))
         return {"status": "needs_input", "result": {"tax_year": year}, "_evidence": sorted(book.evidence),
-                "missing": [_need("pack", "jurisdiction", "¿Dónde eres residente fiscal (MX, US o ambos)?",
-                                  "Where are you tax resident (MX, US or both)?")],
-                "warnings": [], "sources": [], "assumptions": []}
+                "missing": missing, "warnings": list(book.warnings), "sources": [], "assumptions": []}
     us_person = book.profile.get("us_person") is True or "US" in jurisdictions
     sections: list[dict] = []
     if "MX" in jurisdictions:
@@ -2308,12 +2535,18 @@ def run_task(inputs: Mapping[str, Any], snapshot: Mapping[str, Any], ledger: Map
         if fbar:
             sections.append(fbar)
     pendientes = _unique(item for s in sections for item in s["missing"])
+    if book.stale_profile:
+        pendientes = _unique([*pendientes, _need(
+            "pack", "client.profile", "Confirma tu perfil (residencia, si eres persona estadounidense, año de "
+            "nacimiento): su fecha de revisión pasó y no se usó.",
+            "Reconfirm your profile (residence, US person status, birth year): its review date has passed and it "
+            "was not used.", reason="stale")])
     deadlines = _deadlines(book, jurisdictions, us_person)
     computed = [s for s in sections if s["status"] not in {"not_applicable", "needs_input"}]
     status = "needs_input" if not computed and pendientes else ("partial" if pendientes else "ready")
     if not book.entries:
         status = "needs_input" if not computed else status
-    warnings = [w for s in sections for w in s["warnings"]]
+    warnings = list(book.warnings) + [w for s in sections for w in s["warnings"]]
     sources = _unique([*[src for s in sections for src in s["sources"]], *book.ledger_sources])
     assumptions = [f"Tax year {year}: {year_basis}.", f"Jurisdiction {', '.join(jurisdictions)}: {jurisdiction_basis}.",
                    "Working papers for your contador or CPA, not a return: every figure shows its source; where an "
