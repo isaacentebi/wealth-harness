@@ -84,7 +84,9 @@ def _safe_reason(error: Exception) -> str:
     reason = " ".join(str(error).split())
     unknown = _UNKNOWN_TASK.match(reason)
     if unknown:  # the full task list does not fit; point at discovery instead of truncating it
-        return f"unknown task {unknown.group(1)}; call wealth_context without client_id to list tasks."
+        hint = (" The fact contract (every key's schema) comes with wealth_context(client_id, intent=<task>) or "
+                "detail=full.") if "fact" in unknown.group(1) or "schema" in unknown.group(1) else ""
+        return f"unknown task {unknown.group(1)}; call wealth_context without client_id to list tasks.{hint}"
     return (reason or "Input failed the operation contract; check field names and types.")[:600]
 
 
@@ -445,6 +447,12 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = False,
         receipt = service.remember(client_id, items, expected_revision, request_id)
         if warnings:
             receipt["warnings"] = [*warnings, *(receipt.get("warnings") or [])]
+        if receipt.get("warnings") or receipt.get("unchanged"):
+            # A receipt is never a failure: say so, so a warning or a no-op is not retried.
+            receipt["next_step"] = (
+                "Saved: every key in written is stored and every key in unchanged already held this value. "
+                + ("Items in needs_user were held for the person to decide. " if receipt.get("needs_user") else "")
+                + "Warnings are notes for the conversation, not errors; do not resend these facts.")
         return receipt
 
     @tool(annotations=RUN)
