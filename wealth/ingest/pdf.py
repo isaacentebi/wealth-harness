@@ -20,6 +20,7 @@ from .model import build_proposal
 from .redact import redact_text
 from .safety import MAX_PDF_PAGES, flag_instructions, pdf_risks
 from .statement import parse_statement_text
+from .taxdoc import detect_tax_document, ingest_tax_pages
 
 
 _ENCRYPTED = ("This PDF is password-protected. Save an unlocked copy (for example with Print > Save as PDF) and "
@@ -100,6 +101,9 @@ def ingest_pdf(data: bytes, filename: str, *, owner_id: str = "self", aliases: d
                                      reason="The PDF has no text layer (likely scanned). Wealth includes no OCR.")
         return envelope("needs_extraction", {"provenance": provenance, "extraction_request": request},
                         warnings=warnings, sources=[provenance["ref"]])
+    detected = detect_tax_document(pages)
+    if detected is not None:  # an annual constancia, 1099 or 5498: figures for tax_pack, not balances
+        return ingest_tax_pages(pages, detected, provenance=provenance, warnings=warnings, review_reasons=reasons)
     parsed = parse_statement_text(pages, aliases=aliases)
     if not parsed["parsed"]:
         request = extraction_request(pages, provenance=provenance,

@@ -1429,6 +1429,10 @@ class WealthService:
         from .ingest_posting import describe_changes, is_newest, missing_positions, proposal_to_batch, reconciliation_lines
         if not isinstance(acknowledge_discrepancies, bool):
             raise ValueError("acknowledge_discrepancies must be true or false")
+        state = self._ingest_state(client_id)
+        record = (state.get("pending") or {}).get(proposal_id) or (state.get("confirmed") or {}).get(proposal_id)
+        if (((record or {}).get("proposal") or {}).get("result") or {}).get("kind") == "tax_document":
+            return self._ingest_confirm_tax(client_id, proposal_id, acknowledge_discrepancies, expires_on)
         today = datetime.now(timezone.utc).date()
         with WealthStore(self.db_path) as store:
             with store.atomic():
@@ -1519,6 +1523,70 @@ class WealthService:
             report["result"]["needs_user"] = [item for item in waiting if item not in settled]
             report["result"]["settled_by_confirmation"] = [item["key"] for item in settled]
         sha = ((proposal.get("result") or {}).get("provenance") or {}).get("sha256")
+        if sha and purge_on_confirm():
+            try:
+                report["result"]["upload_removed"] = bool(purge_uploads(client_id, self.db_path, sha256=sha))
+            except OSError:
+                report["result"]["upload_removed"] = False
+        return report
+
+    def _ingest_confirm_tax(self, client_id: str, proposal_id: str, acknowledge_discrepancies: bool,
+                            expires_on: str | None) -> dict:
+        """Save a confirmed annual tax document as ``constancia.<id>`` facts (provenance ``document``).
+
+        The facts are exactly the proposal's ``facts_preview``, whose figures the
+        proposal holds, so they stay grounded in the ingested file.  No ledger
+        lines are posted: a constancia or 1099 reports a year, not transactions.
+        """
+        from .ingest import tax_proposal_to_facts
+        with WealthStore(self.db_path) as store:
+            with store.atomic():
+                state = store.auxiliary(client_id, "ingest")
+                done = (state.get("confirmed") or {}).get(proposal_id)
+                if done is not None:
+                    return {**done["report"], "replayed": True}
+                stored = (state.get("pending") or {}).get(proposal_id)
+                if stored is None:
+                    raise ValueError("proposal_id is unknown or expired; ingest the file again and show the figures")
+                proposal = stored["proposal"]
+                packet = tax_proposal_to_facts(proposal, confirmed=True, proposal_id=proposal_id,
+                                               acknowledge_discrepancies=acknowledge_discrepancies,
+                                               expires_on=expires_on)
+                if packet["status"] != "ready":
+                    return packet
+                facts = packet["result"]["facts"]
+                snapshot = store.snapshot(client_id)
+                saved = store.remember(client_id, facts, snapshot["client"]["revision"],
+                                       packet["result"]["request_id"])
+                result = proposal["result"]
+                written = [w["key"] for w in saved["written"]]
+                summary = (f"Saved the {result['document_label']} {result['tax_year']} from {result['institution']} "
+                           f"as {', '.join(f['key'] for f in facts)}; tax_pack uses it as the source of truth.")
+                report = {
+                    "status": "saved",
+                    "result": {"summary": summary,
+                               "saved": {"keys": written, "client_revision": saved["client"]["revision"],
+                                         "expires_on": packet["result"]["expires_on"]},
+                               "needs_user": saved["needs_user"], "figures": result["figures"],
+                               "tax_year": result["tax_year"],
+                               "next_step": f"Run task=tax_pack with tax_year={result['tax_year']}: the pack compares "
+                                            "its computation with this document and declares the document's figure."},
+                    "missing": [], "warnings": packet["warnings"] + saved.get("warnings", []),
+                    "sources": packet["sources"], "assumptions": packet["assumptions"],
+                }
+                now = datetime.now(timezone.utc).isoformat()
+
+                def update(old):
+                    state = {k: dict(old.get(k) or {}) for k in ("pending", "extractions", "confirmed")}
+                    state["pending"].pop(proposal_id, None)
+                    state["confirmed"][proposal_id] = {"proposal": proposal, "created_at": now, "batch": None,
+                                                       "held": [], "report": report}
+                    state["confirmed"] = dict(sorted(state["confirmed"].items(),
+                                                     key=lambda item: item[1].get("created_at", ""))[-_KEEP_PROPOSALS:])
+                    return state
+
+                store.update_auxiliary(client_id, "ingest", update)
+        sha = (result.get("provenance") or {}).get("sha256")
         if sha and purge_on_confirm():
             try:
                 report["result"]["upload_removed"] = bool(purge_uploads(client_id, self.db_path, sha256=sha))
@@ -1662,6 +1730,8 @@ class WealthService:
         if proposal_id not in known:
             raise ValueError("proposal_id is unknown or expired")
         current = known[proposal_id]["proposal"]
+        if "household" not in (current.get("result") or {}):
+            raise ValueError("diff compares statements; an annual tax document replaces its constancia fact whole")
         if previous_proposal_id is not None:
             if previous_proposal_id not in known:
                 raise ValueError("previous_proposal_id is unknown or expired")
@@ -1669,7 +1739,8 @@ class WealthService:
         else:
             accounts = {a["id"] for a in current["result"]["household"]["accounts"]}
             earlier = [(record.get("created_at", ""), pid) for pid, record in (state.get("confirmed") or {}).items()
-                       if pid != proposal_id and accounts & {a["id"] for a in record["proposal"]["result"]["household"]["accounts"]}]
+                       if pid != proposal_id and accounts & {a["id"] for a in ((record["proposal"]["result"].get("household")
+                                                                                or {}).get("accounts") or [])}]
             previous_id = max(earlier)[1] if earlier else None
         previous = known[previous_id]["proposal"] if previous_id else None
         changes = diff_proposals(previous, current)

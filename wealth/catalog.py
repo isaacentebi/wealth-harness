@@ -881,7 +881,8 @@ CATALOG: dict[str, dict[str, Any]] = {
                      "as_of"],
         "notes": "Reads client.profile, tax.<year> (stated tax facts: carryforwards, deductions, income, filing status, "
                  "IRA contributions) and constancia.<id> (documents: enajenacion, intereses, dividendos, form_1099_b, "
-                 "form_1099_div, form_1099_int). Result: sections {id: {status, title {es, en}, summary, table "
+                 "form_1099_div, form_1099_int, form_5498; an uploaded PDF confirmed through wealth_ingest saves "
+                 "them with source.kind=document). Result: sections {id: {status, title {es, en}, summary, table "
                  "{columns, rows}, reconciliation [{item, ours, document, difference, source_of_truth}], missing, "
                  "warnings, sources, assumptions}}, section_order, pendientes, deadlines. An empty figure is unknown, "
                  "never zero. CLI: `wealth tax-pack --client ID --year YYYY --out DIR` writes JSON, one CSV per section "
