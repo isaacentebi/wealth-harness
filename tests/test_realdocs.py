@@ -324,6 +324,53 @@ def test_ibkr_cash_by_currency_accruals_fund_types_and_dividend_symbols():
     assert recon["status"] == "reconciled" and money(recon["reported_total"]) == money(TRUTH[IBKR]["nav"])
 
 
+@pytest.mark.parametrize("accrual", ["5.02", "-5.02"])
+def test_ibkr_accruals_of_either_sign_reconcile_to_nav_and_are_saved(service, accrual):
+    """Before: a negative Interest Accruals total (margin interest owed) became a negative position that the
+    proposal dropped as a short, so the saved account exceeded the printed NAV by the amount owed."""
+    text = (DOCS / IBKR).read_text(encoding="utf-8")
+    nav = money(TRUTH[IBKR]["nav_excluding_accruals"]) + Decimal(accrual)
+    text = text.replace("Net Asset Value,Data,Interest Accruals,4.10,5.02,0,5.02,0.92",
+                        f"Net Asset Value,Data,Interest Accruals,4.10,{accrual},0,{accrual},0")
+    text = text.replace(f"Net Asset Value,Data,Total,38920.42,{TRUTH[IBKR]['nav']},0,{TRUTH[IBKR]['nav']},",
+                        f"Net Asset Value,Data,Total,38920.42,{nav},0,{nav},")
+    root = upload_dir("mariana", service.db_path)
+    (root / "ibkr_variant.csv").write_text(text, encoding="utf-8")
+    read_only = ingest_bytes(text.encode("utf-8"), "ibkr_variant.csv")
+    recon = read_only["result"]["reconciliation"]["accounts"][0]
+    assert read_only["status"] == "ready_to_confirm", read_only["result"]["review_reasons"]
+    assert money(recon["reported_total"]) == nav and recon["status"] == "reconciled"
+    proposal = service.ingest("mariana", "file", {"path": "ibkr_variant.csv"})
+    service.ingest("mariana", "confirm", {"proposal_id": proposal["result"]["proposal_id"]})
+    sit = service.situation("mariana")
+    account = next(a for a in sit["accounts"] if a["id"] == "ibkr-2345")
+    owed = sum(Decimal(str(r["balance"])) for r in sit["liabilities"] if "Interest accruals" in (r.get("name") or ""))
+    usd = Decimal(str(account["native"]["USD"])) - owed
+    assert money(usd + money(25000) * Decimal("0.053694")) == nav
+    assert owed == (abs(Decimal(accrual)) if accrual.startswith("-") else 0)
+
+
+def test_every_connector_institution_classifies_as_what_it_is():
+    """Before: Alpaca (a connector) was missing from the institutions, so "$500 cash at Alpaca" was saved as savings
+    and counted again beside the synced Alpaca account."""
+    from wealth.connectors import alpaca, cuenca, ibkr_flex
+    from wealth.ingest.classify import BROKERS, INSTITUTION_KINDS, INSTITUTIONS, detect_institution
+
+    assert set(INSTITUTION_KINDS) == {key for key, _, _ in INSTITUTIONS}
+    expected = {alpaca: "broker", ibkr_flex: "broker", cuenca: "bank"}
+    for module, kind in expected.items():
+        key = detect_institution(module.INSTITUTION)[0]
+        assert key is not None and INSTITUTION_KINDS[key] == kind, module.INSTITUTION
+    assert "alpaca" in BROKERS and "cuenca" not in BROKERS
+
+
+def test_cash_said_to_be_at_alpaca_is_part_of_the_brokerage_account(service):
+    chat = service.ingest("mariana", "chat", {"items": [
+        {"kind": "cash", "label": "Alpaca", "amount": 500, "currency": "USD", "quote": "tengo 500 dólares en Alpaca"}]})
+    saved = service.ingest("mariana", "confirm", {"proposal_id": chat["result"]["proposal_id"]})
+    assert saved["result"]["saved"]["keys"] == ["investment.alpaca"]
+
+
 def test_saved_ibkr_account_keeps_its_accruals(service):
     """Before: accruals were subtracted from NAV to reconcile, so the saved account lost the 5.02 receivable."""
     proposal = service.ingest("mariana", "file", {"path": IBKR})
@@ -461,13 +508,14 @@ def test_a_second_chat_in_another_currency_never_overwrites_the_first(service):
     """Before: "USD 100 in Wallet", then in a later message "MXN 1,000 in Wallet", both became cash.wallet and the
     second replaced the first."""
     for amount, currency, quote in ((100, "USD", "tengo 100 dólares en Wallet"),
-                                    (1000, "MXN", "y 1,000 pesos en Wallet")):
+                                    (1000, "MXN", "y 1,000 pesos en Wallet"),
+                                    (1500, "MXN", "ya son 1,500 pesos en Wallet")):  # an update, not a third wallet
         chat = service.ingest("mariana", "chat", {"items": [
             {"kind": "cash", "label": "Wallet", "amount": amount, "currency": currency, "quote": quote}]})
         service.ingest("mariana", "confirm", {"proposal_id": chat["result"]["proposal_id"]})
-    facts = {f["key"]: f["value"] for f in service.inspect("mariana")["facts"]}
-    assert (facts["cash.wallet"]["amount"], facts["cash.wallet"]["currency"]) == (100, "USD")
-    assert (facts["cash.wallet-mxn"]["amount"], facts["cash.wallet-mxn"]["currency"]) == (1000, "MXN")
+    facts = {f["key"]: f["value"] for f in service.inspect("mariana")["facts"] if f["key"].startswith("cash.")}
+    assert {k: (v["amount"], v["currency"]) for k, v in facts.items()} == {
+        "cash.wallet": (100, "USD"), "cash.wallet-mxn": (1500, "MXN")}
 
 
 def test_expires_on_is_honoured_when_saving_what_the_person_said(service):
@@ -686,16 +734,64 @@ def test_cash_said_to_be_at_a_broker_is_replaced_by_its_statement(service):
 
 
 def test_a_stated_key_never_merges_two_institutions():
-    from wealth.service import _separate_accounts
+    from wealth.service import _resolve_stated_keys
 
-    snapshot = {"facts": [{"key": "cash.wallet", "value": {"amount": 1, "currency": "MXN", "institution": "Nu"}}]}
-    facts = [{"key": "cash.wallet", "value": {"amount": 2, "currency": "MXN", "institution": "BBVA"}},
-             {"key": "cash.nu", "value": {"amount": 3, "currency": "MXN", "institution": "Nu"}}]
-    _separate_accounts(facts, snapshot)
-    assert [f["key"] for f in facts] == ["cash.wallet-2", "cash.nu"]
-    same = [{"key": "cash.wallet", "value": {"amount": 4, "currency": "MXN", "institution": "Nu México"}}]
-    _separate_accounts(same, snapshot)
-    assert same[0]["key"] == "cash.wallet"  # the same firm: an update, not a new account
+    snapshot = {"facts": [{"key": "cash.wallet", "value": {"name": "Wallet", "amount": 1, "currency": "MXN",
+                                                           "institution": "Nu"}}]}
+    facts = [{"key": "cash.wallet", "value": {"name": "Wallet", "amount": 2, "currency": "MXN", "institution": "BBVA"}}]
+    _resolve_stated_keys(facts, snapshot)
+    assert facts[0]["key"] == "cash.bbva-wallet"  # another firm: a key of its own
+    same = [{"key": "cash.x", "value": {"name": "Wallet", "amount": 4, "currency": "MXN", "institution": "Nu México"}}]
+    _resolve_stated_keys(same, snapshot)
+    assert same[0]["key"] == "cash.wallet"  # the same firm: an update of the existing key
+
+
+def _identities(service) -> dict[tuple, list[tuple[str, float]]]:
+    from wealth.ingest.common import fold
+
+    out: dict[tuple, list[tuple[str, float]]] = {}
+    for fact in service.inspect("mariana")["facts"]:
+        if fact["key"].startswith("cash."):
+            value = fact["value"]
+            identity = (fold(value["name"]), value.get("institution"), value["currency"])
+            out.setdefault(identity, []).append((fact["key"], value["amount"]))
+    return out
+
+
+@pytest.mark.parametrize("seed", range(25))
+def test_stated_keys_hold_one_fact_per_identity_over_any_sequence_of_confirmations(tmp_path, monkeypatch, seed):
+    """Property: over any sequence of chat confirmations (same or other currency, same or other firm, repeated
+    updates), each (label, firm, currency) identity has exactly one fact holding its latest amount, an update never
+    creates a key, and two identities never share a key.  Before, an MXN wallet update after cash.wallet (USD) and
+    cash.wallet-mxn existed was saved as cash.wallet-mxn-2 and counted twice."""
+    import random
+
+    monkeypatch.delenv("WEALTH_UPLOAD_DIR", raising=False)
+    service = WealthService(tmp_path / "w.sqlite3")
+    service.create("mariana", "Mariana")
+    rng = random.Random(seed)
+    latest: dict[tuple, int] = {}
+    for step in range(7):
+        label = rng.choice(["Wallet", "Checking"])
+        institution = rng.choice([None, "BBVA", "Banorte"])
+        currency = rng.choice(["USD", "MXN"])
+        amount = 1000 + 37 * step + seed
+        item = {"kind": "cash", "label": label, "amount": amount, "currency": currency,
+                "quote": f"tengo {amount} en {label}", **({"institution": institution} if institution else {})}
+        before = {f["key"] for f in service.inspect("mariana")["facts"]}
+        chat = service.ingest("mariana", "chat", {"items": [item]})
+        service.ingest("mariana", "confirm", {"proposal_id": chat["result"]["proposal_id"]})
+        from wealth.ingest.common import fold
+        identity = (fold(label), institution, currency)
+        after = {f["key"] for f in service.inspect("mariana")["facts"]}
+        assert len(after - before) == (0 if identity in latest else 1), (seed, step, identity)
+        latest[identity] = amount
+        held = _identities(service)
+        assert set(held) == set(latest)
+        assert all(len(v) == 1 for v in held.values())
+        assert {k: v[0][1] for k, v in held.items()} == latest
+        keys = [v[0][0] for v in held.values()]
+        assert len(keys) == len(set(keys))
 
 
 def test_a_chat_wallet_in_two_currencies_is_two_balances_never_a_sum(service):
@@ -708,8 +804,8 @@ def test_a_chat_wallet_in_two_currencies_is_two_balances_never_a_sum(service):
     service.ingest("mariana", "confirm", {"proposal_id": chat["result"]["proposal_id"],
                                           "acknowledge_discrepancies": True})
     facts = {f["key"]: f["value"] for f in service.inspect("mariana")["facts"]}
-    assert (facts["cash.wallet-usd"]["amount"], facts["cash.wallet-usd"]["currency"]) == (100, "USD")
-    assert (facts["cash.wallet-mxn"]["amount"], facts["cash.wallet-mxn"]["currency"]) == (1000, "MXN")
+    wallets = sorted((v["currency"], v["amount"]) for k, v in facts.items() if k.startswith("cash.wallet"))
+    assert wallets == [("MXN", 1000), ("USD", 100)]
     assert (facts["investment.vest"]["amount"], facts["investment.vest"]["currency"]) == (500, "USD")
     assert not any(v.get("amount") == 1100 for v in facts.values() if isinstance(v, dict))
 

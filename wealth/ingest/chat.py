@@ -20,7 +20,7 @@ from decimal import Decimal
 import re
 from typing import Any
 
-from .classify import account_type as infer_type
+from .classify import BROKERS, account_type as infer_type
 from .common import envelope, number_tokens, parse_amount, parse_percent, slug, with_institution
 from .model import build_proposal
 
@@ -102,8 +102,6 @@ _LIABILITY_WORDS = ((re.compile(r"(?i)\b(hipoteca|mortgage|infonavit|fovissste)\
                     (re.compile(r"(?i)\b(tarjeta|card|tdc)\b"), "card"),
                     (re.compile(r"(?i)\b(student|educativo|estudiantil)\b"), "student"),
                     (re.compile(r"(?i)\b(personal|n[oó]mina)\b"), "personal"))
-_BROKERS = frozenset({"gbm", "actinver", "kuspit", "cetesdirecto", "schwab", "fidelity", "vanguard", "ibkr",
-                      "merrill", "etrade", "morganstanley", "robinhood"})  # classify.INSTITUTIONS keys
 _INVESTMENT_KINDS = {"brokerage": "brokerage", "afore": "afore", "ira": "retirement", "roth_ira": "retirement",
                      "401k": "retirement", "ppr": "retirement", "hsa": "retirement"}
 
@@ -170,7 +168,7 @@ def stated_plan(proposal: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[st
         # Cash said to be at a broker ("5 mil en efectivo en GBM") is part of that brokerage account: saved as an
         # investment, so the broker's statement (which includes its cash) replaces it instead of adding to it.
         at_broker = account.get("type") in (None, "savings", "brokerage") and \
-            detect_institution(institution or name)[0] in _BROKERS
+            detect_institution(institution or name)[0] in BROKERS
         for ccy, amount in sorted(by_currency.items()):
             value: dict[str, Any] = {"amount": float(amount), "currency": ccy, "name": name}
             if institution:

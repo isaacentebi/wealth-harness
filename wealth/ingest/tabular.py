@@ -337,15 +337,22 @@ def _parse_ibkr(rows: list[list[str]], *, currency: str | None, as_of: str | Non
         elif label == "total" and record.get("Current Total"):
             account["reported_total"] = {"amount": record["Current Total"], "currency": base, "label": "Net Asset Value", "page": None}
     for label, amount in accruals:
-        # Net Asset Value counts interest and dividends earned but not yet paid: money the account is owed. It is
-        # kept as its own cash-like line (not added to the cash balance), so the saved value is the NAV.
-        account["positions"].append({
-            "symbol": "ACCRUED-" + ("DIVIDENDS" if label.startswith("dividend") else "INTEREST"),
-            "description": f"{label.capitalize()} (earned, not yet paid)", "quantity": str(amount), "price": "1",
-            "market_value": str(amount), "currency": base, "asset_type": "cash", "page": None})
+        # Net Asset Value counts interest and dividends earned but not yet paid (or, when negative, margin interest
+        # owed but not yet charged).  Owed to the account: its own cash-like line, not added to the cash balance.
+        # Owed by it: a negative cash line, which the proposal keeps as a liability of the account.  Either way
+        # positions + cash + accruals reconcile to the printed NAV and the saved value is the NAV.
+        if amount > 0:
+            account["positions"].append({
+                "symbol": "ACCRUED-" + ("DIVIDENDS" if label.startswith("dividend") else "INTEREST"),
+                "description": f"{label.capitalize()} (earned, not yet paid)", "quantity": str(amount),
+                "price": "1", "market_value": str(amount), "currency": base, "asset_type": "cash", "page": None})
+        else:
+            account["cash"].append({"amount": str(amount), "currency": base, "page": None, "label": label,
+                                    "liability_name": f"{label.capitalize()} owed (accrued, not yet charged)"})
     if accruals:
         notes.append(" and ".join(f"{label} {amount}" for label, amount in accruals)
-                     + " (earned, not yet paid) are kept in the account as a receivable, as Net Asset Value counts them.")
+                     + " are kept in the account (a receivable when earned, a liability when owed), as Net Asset "
+                       "Value counts them.")
     described = {r.get("Symbol"): r for kind, r in sections.get("Financial Instrument Information", [])
                  if kind == "Data"}
     for kind, record in sections.get("Open Positions", []):

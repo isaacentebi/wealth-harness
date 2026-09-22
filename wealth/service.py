@@ -1952,7 +1952,7 @@ class WealthService:
                     # Confirming marks the whole proposal saved: an item without a fact would vanish silently.
                     raise ValueError(f"confirm would drop {', '.join(lost)} (no fact holds it); nothing was saved")
                 snapshot = store.snapshot(client_id)
-                _separate_accounts(facts, snapshot)
+                _resolve_stated_keys(facts, snapshot)
                 if expires_on:  # the review date the person chose, as a statement confirmation honours it
                     for fact in facts:
                         fact["expires_on"] = expires_on
@@ -2244,39 +2244,81 @@ def _retire_forgotten_accounts(store: WealthStore, client_id: str, receipt: dict
     return result
 
 
-def _separate_accounts(facts: list[dict], snapshot: dict) -> None:
-    """Give a stated fact a key of its own when its key already holds a different account.
+def _stated_identity(key: str, value: dict) -> tuple[str, str, str | None, str | None]:
+    """(kind family, normalised label, institution, currency) of a stated account, debt or income."""
+    from .ingest.common import fold
+    from .situation.model import _INSTITUTION_ALIASES, institution_key
 
-    Another firm ("Wallet" at Nu, then at BBVA) gets a numbered key; another currency (a USD wallet, later an MXN
-    wallet) gets the currency as a suffix (cash.wallet-mxn). The existing fact keeps its key; nothing is merged
-    across firms or summed across currencies."""
+    family = key.split(".", 1)[0]
+    institution = value.get("institution") or value.get("lender") or None
+    name = value.get("name") or key.split(".", 1)[-1].replace("-", " ")
+    words = fold(name).split()
+    if institution:
+        # The label without the firm's own words: "BBVA Checking" at BBVA is "checking", "GBM" at GBM is "".
+        alias, tokens = institution_key(institution)
+        firm = set(tokens) | {w for n in _INSTITUTION_ALIASES.get(alias or "", ()) for w in fold(n).split()}
+        words = [w for w in words if w not in firm]
+    return family, " ".join(words), institution, value.get("currency") or None
+
+
+def _same_stated(a: tuple, b: tuple) -> bool:
+    """One account: same family and label, the same firm (absent matches only absent), a compatible currency (an
+    unknown currency, from an account said without a balance, is not a different one)."""
     from .situation.model import same_institution
 
-    taken = {f["key"]: f.get("value") for f in snapshot.get("facts") or [] if isinstance(f.get("key"), str)}
-    used = set(taken) | {f["key"] for f in facts}
+    if a[0] != b[0] or a[1] != b[1]:
+        return False
+    if (a[2] is None) != (b[2] is None) or (a[2] is not None and not same_institution(a[2], b[2])):
+        return False
+    return a[3] is None or b[3] is None or a[3] == b[3]
+
+
+def _resolve_stated_keys(facts: list[dict], snapshot: dict) -> None:
+    """The one place a stated fact's key is chosen.
+
+    An incoming account, debt or income that matches an existing stated fact of the same kind (same label, same
+    firm, compatible currency) updates that fact's key: an update never creates a key.  Otherwise it gets a new
+    key no existing fact uses, tried in a fixed order: its label (with the firm's name when one is known), then
+    that with the currency as a suffix, then numbered.  So one fact holds each (label, firm, currency) identity
+    and two identities never share a key."""
+    from .ingest.common import slug
+
+    existing: list[tuple[str, tuple, dict]] = []
+    for fact in snapshot.get("facts") or []:
+        key, value = fact.get("key"), fact.get("value")
+        if isinstance(key, str) and key.count(".") == 1 and key.split(".")[0] in _STATED_FAMILIES \
+                and isinstance(value, dict) and "proposal_id" not in value:
+            existing.append((key, _stated_identity(key, value), value))
+    used = {f.get("key") for f in snapshot.get("facts") or [] if isinstance(f.get("key"), str)}
+    claimed: set[str] = set()
     for fact in facts:
         value = fact.get("value") if isinstance(fact.get("value"), dict) else {}
-        held = taken.get(fact["key"])
-        if not isinstance(held, dict):
+        identity = _stated_identity(fact["key"], value)
+        matches = [(key, held) for key, other, held in existing if key not in claimed and _same_stated(identity, other)]
+        if len(matches) == 1:
+            key, held = matches[0]
+            if held.get("balance_unknown") and value.get("amount") is not None:
+                value["balance_unknown"] = None  # the amount is known now (merge removes the flag)
+            fact["key"] = key
+            claimed.add(key)
             continue
-        mine = value.get("institution") or value.get("lender")
-        theirs = held.get("institution") or held.get("lender")
-        currency, held_currency = value.get("currency"), held.get("currency")
-        if mine and theirs and not same_institution(mine, theirs):
-            base = fact["key"]
-        elif currency and held_currency and currency != held_currency:
-            base = f"{fact['key']}-{str(currency).lower()}"
-            if base not in used:
-                fact["key"] = base
-                used.add(base)
-                continue
-        else:
-            continue
-        counter = 2
-        while f"{base}-{counter}" in used:
-            counter += 1
-        fact["key"] = f"{base}-{counter}"
-        used.add(fact["key"])
+        family, _, institution, currency = identity
+        from .ingest.common import with_institution
+        base = f"{family}.{slug(with_institution(str(value.get('name') or fact['key'].split('.', 1)[-1]), institution), 48)}"
+        candidates = [base] + ([f"{base}-{str(currency).lower()}"] if currency else [])
+        chosen = next((c for c in candidates if c not in used), None)
+        if chosen is None:
+            counter = 2
+            while f"{candidates[-1]}-{counter}" in used:
+                counter += 1
+            chosen = f"{candidates[-1]}-{counter}"
+        fact["key"] = chosen
+        used.add(chosen)
+        claimed.add(chosen)
+        existing.append((chosen, identity, value))
+
+
+_STATED_FAMILIES = frozenset({"cash", "investment", "liability", "income"})
 
 
 def _ledger_summary(receipt: dict | None, mapping: dict) -> dict:

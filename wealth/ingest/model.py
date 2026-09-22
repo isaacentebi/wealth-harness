@@ -359,9 +359,11 @@ def build_proposal(
             cash_total[cash_ccy] = cash_total.get(cash_ccy, Decimal(0)) + amount
             key = f"CASH:{cash_ccy}|{cash_ccy}"
             if amount < 0:
-                fragment["liabilities"].append({"id": f"{account_id}:debit-{cash_ccy.lower()}", "account_id": account_id,
-                                                "name": "Negative cash balance", "type": "margin_or_overdraft",
-                                                "value": out(-amount), "currency": cash_ccy})
+                # Kept as what the account owes (a negative cash balance, margin interest accrued): never dropped.
+                fragment["liabilities"].append({
+                    "id": _unique(f"{account_id}:debit-{cash_ccy.lower()}", used_ids), "account_id": account_id,
+                    "name": str(cash.get("liability_name") or "Negative cash balance"),
+                    "type": "margin_or_overdraft", "value": out(-amount), "currency": cash_ccy})
                 continue
             position = merged.setdefault(key, {"id": "", "account_id": account_id, "instrument_id": f"CASH:{cash_ccy}",
                                                "symbol": cash_ccy, "quantity": Decimal(0), "value": Decimal(0),

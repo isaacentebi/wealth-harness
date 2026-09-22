@@ -272,8 +272,8 @@ _IN_SECTION = re.compile(r"^(deposits|depositos|abonos|credits|payments (and|&) 
 _OUT_SECTION = re.compile(r"^(withdrawals|retiros|cargos|debits|checks|purchases|compras|electronic withdrawals|atm|card purchases|"
                           r"other withdrawals|consumos|salidas)")
 _MSI_SECTION = re.compile(r"(meses sin intereses|\bmsi\b|compras diferidas|cargos diferidos|installment)")
-_MX_INSTITUTIONS = frozenset({"gbm", "actinver", "banorte", "bbva", "cetesdirecto", "nu", "hey", "kuspit"})
-_US_INSTITUTIONS = frozenset({"schwab", "fidelity", "vanguard", "merrill", "etrade", "morganstanley", "robinhood",
+_MX_INSTITUTIONS = frozenset({"gbm", "actinver", "banorte", "bbva", "cetesdirecto", "nu", "hey", "kuspit", "cuenca"})
+_US_INSTITUTIONS = frozenset({"schwab", "alpaca", "fidelity", "vanguard", "merrill", "etrade", "morganstanley", "robinhood",
                                "chase", "wellsfargo", "bofa"})
 
 

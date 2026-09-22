@@ -36,8 +36,20 @@ INSTITUTIONS: tuple[tuple[str, str, re.Pattern[str]], ...] = tuple(
         ("chase", "Chase", r"\bjpmorgan\s+chase\b|\bchase\s+bank\b"),
         ("wellsfargo", "Wells Fargo", r"\bwells\s+fargo\b"),
         ("bofa", "Bank of America", r"\bbank\s+of\s+america\b"),
+        ("alpaca", "Alpaca", r"\balpaca\b"),
+        ("cuenca", "Cuenca", r"\bcuenca\b"),
     )
 )
+# What each institution is: a broker's cash belongs to its brokerage account (a statement or sync of that
+# account covers it); a bank's is a bank balance.  Every INSTITUTIONS key is here, connectors included.
+INSTITUTION_KINDS: dict[str, str] = {
+    "gbm": "broker", "actinver": "broker", "kuspit": "broker", "cetesdirecto": "broker", "schwab": "broker",
+    "fidelity": "broker", "vanguard": "broker", "ibkr": "broker", "merrill": "broker", "etrade": "broker",
+    "morganstanley": "broker", "robinhood": "broker", "alpaca": "broker",
+    "banorte": "bank", "bbva": "bank", "santander": "bank", "nu": "bank", "hey": "bank", "chase": "bank",
+    "wellsfargo": "bank", "bofa": "bank", "cuenca": "bank",
+}
+BROKERS = frozenset(key for key, kind in INSTITUTION_KINDS.items() if kind == "broker")
 
 CASH_LABEL = re.compile(
     r"(?i)^\s*(?:total\s+)?(cash(?:\s*(?:&|and)\s*cash\s*(?:investments|equivalents))?|cash\s+balance|"
