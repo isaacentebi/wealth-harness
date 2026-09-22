@@ -214,7 +214,10 @@ _MARKET_SCHEMA = (
 # reply is on screen, are filled in later.  Content and attachment names are redacted with
 # ``ingest.redact.redact_text`` before they are written (RFC, CURP and SSN removed; CLABE,
 # card and account numbers masked to their last four digits).  Rows disappear only with
-# their client (``delete_client`` cascades) and travel in ``export_client``.
+# their client (``delete_client`` cascades) and travel in ``export_client``.  ``status`` marks
+# a turn that did not finish: ``stopped`` (the person stopped it; the words streamed so far are
+# the assistant message) or ``failed`` (the person's message went unanswered).  NULL is a
+# finished exchange; the column is added to older databases on open.
 _CONVERSATION_SCHEMA = (
     """CREATE TABLE IF NOT EXISTS conversations (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -235,7 +238,8 @@ _CONVERSATION_SCHEMA = (
     attachments_json TEXT,
     memory_json TEXT,
     views_json TEXT,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    status TEXT
 )""",
     "CREATE INDEX IF NOT EXISTS conversation_messages_client "
     "ON conversation_messages(client_id, conversation_id, seq)",
@@ -247,6 +251,7 @@ BEGIN SELECT RAISE(ABORT, 'conversation messages are append-only'); END""",
 WHEN EXISTS (SELECT 1 FROM clients WHERE id = OLD.client_id)
 BEGIN SELECT RAISE(ABORT, 'conversation messages are append-only'); END""",
 )
+MESSAGE_STATUSES = frozenset({"stopped", "failed"})  # an unfinished turn's mark (NULL: finished)
 CONVERSATION_LIMIT = 100  # messages of the current conversation loaded on startup
 _ORDER_EVENTS = frozenset({"ticket", "checks", "confirm", "blocked", "request", "response", "status",
                            "cancel", "fill_posted", "live_acknowledged", "discarded", "nonce_rejected", "error"})
@@ -526,7 +531,10 @@ def _sensitive(value: Any, field: str) -> str | None:
 
 
 def merge_patch(current: Any, patch: Any, field: str = "value") -> Any:
-    """RFC 7386 merge for objects; lists of objects with ``id`` merge by id."""
+    """RFC 7386 merge for objects; lists of objects with ``id`` merge by id; other lists are replaced.
+
+    A list of plain values (a thread's ``related`` keys) is replaced whole, as RFC 7386 does.
+    """
 
     if isinstance(patch, dict):
         merged = dict(current) if isinstance(current, dict) else {}
@@ -537,6 +545,8 @@ def merge_patch(current: Any, patch: Any, field: str = "value") -> Any:
                 merged[name] = merge_patch(merged.get(name), item, f"{field}.{name}")
         return merged
     if isinstance(patch, list) and isinstance(current, list):
+        if not any(isinstance(i, dict) for i in (*current, *patch)):
+            return patch
         if not all(isinstance(i, dict) and "id" in i for i in (*current, *patch)):
             raise ValidationError(
                 f"merge of list {field} requires objects with an id; send the full list without merge"
@@ -552,6 +562,17 @@ def _protected(row: Mapping[str, Any]) -> bool:
     """A value the person stated or confirmed themselves."""
 
     return row["source_kind"] == "user" and row["confidence"] in {"reported", "confirmed"}
+
+
+def _same_record(fact: Mapping[str, Any], row: Mapping[str, Any]) -> bool:
+    """A write that would store exactly the current record again (the source's wording may differ)."""
+
+    return (fact["value"] is not None and _json(fact["value"]) == row["value_json"]
+            and fact["source"]["kind"] == row["source_kind"]
+            and fact["source"]["observed_on"] == row["observed_on"]
+            and fact["confidence"] == row["confidence"]
+            and fact["valid_from"] == row["valid_from"]
+            and fact["expires_on"] == row["expires_on"])
 
 
 def _record_date(value: Any, fallback: Any) -> str | None:
@@ -947,7 +968,7 @@ class WealthStore:
                     self._migrate_orders()
                 if not self._has_market():
                     self._migrate_market()
-                if not self._has_conversations():
+                if not self._has_conversations() or not self._has_message_status():
                     self._migrate_conversations()
                 return
             self._db.execute("BEGIN IMMEDIATE")
@@ -967,6 +988,9 @@ class WealthStore:
             "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'conversation_messages_append_only_delete'"
         ).fetchone() is not None
 
+    def _has_message_status(self) -> bool:
+        return any(row[1] == "status" for row in self._db.execute("PRAGMA table_info(conversation_messages)"))
+
     def _migrate_conversations(self) -> None:
         """Add the chat conversation tables (idempotent and additive; no version change)."""
 
@@ -975,6 +999,8 @@ class WealthStore:
             if not self._has_conversations():
                 for statement in _CONVERSATION_SCHEMA:
                     self._db.execute(statement)
+            if not self._has_message_status():
+                self._db.execute("ALTER TABLE conversation_messages ADD COLUMN status TEXT")
             self._db.execute("COMMIT")
         except Exception:
             if self._db.in_transaction:
@@ -1572,6 +1598,7 @@ class WealthStore:
                     if row["status"] == "active"
                 }
                 needs_user: list[dict[str, Any]] = []
+                unchanged: list[str] = []
                 to_write: list[tuple[dict[str, Any], sqlite3.Row | None]] = []
                 history: list[dict[str, Any]] = []
                 for fact in normalized:
@@ -1583,6 +1610,11 @@ class WealthStore:
                         )
                     elif fact["merge"] and isinstance(fact["value"], dict):
                         fact["value"] = merge_patch({}, fact["value"])
+                    if prior_fact is not None and _same_record(fact, prior_fact):
+                        # A retried or repeated write (same value, source kind, confidence and dates): nothing
+                        # changes, so it is not a new revision and never an error.
+                        unchanged.append(key)
+                        continue
                     if (
                         prior_fact is not None
                         and _protected(prior_fact)
@@ -1626,8 +1658,9 @@ class WealthStore:
                         if not (prior_fact["confidence"] == "inferred"
                                 and fact["confidence"] != "inferred"):
                             raise ValidationError(
-                                f"{key} already has a value; send it with merge=true to "
-                                f"update fields, or pass expected_revision={current_revision} to replace it"
+                                f"{key} already has a value (client revision {current_revision}); send it with "
+                                f"merge=true and only the changed fields (no expected_revision needed), or pass "
+                                f"expected_revision={current_revision} to replace it wholesale"
                             )
                     if (fact["merge"] and prior_fact is not None
                             and (prior_fact["confidence"] == "inferred" or is_stale(dict(prior_fact)))):
@@ -1639,7 +1672,8 @@ class WealthStore:
                         try:
                             warnings.extend(validate_canonical(key, fact["value"]))
                         except SchemaError as exc:
-                            raise ValidationError(f"{exc}; see fact_contract.schema") from exc
+                            hint = "" if prior_fact is not None else self._existing_keys_hint(client_id, key)
+                            raise ValidationError(f"{exc}; see fact_contract.schema{hint}") from exc
                     to_write.append((fact, prior_fact))
                 new_revision = None
                 if to_write:
@@ -1682,11 +1716,29 @@ class WealthStore:
                 result = self._receipt(
                     client_id, new_revision, request_id, False, warnings, needs_user
                 )
+                if unchanged:
+                    result["unchanged"] = unchanged
                 self._commit()
             except Exception:
                 self._rollback()
                 raise
         return result
+
+    def _existing_keys_hint(self, client_id: str, key: str) -> str:
+        """For a new key that failed the schema: the saved keys of its kind, in case an update was meant."""
+        head, dot, _ = key.partition(".")
+        if not dot or key in {"client.profile", "spending.monthly", "preference.risk"}:
+            return ""
+        rows = self._db.execute(
+            "SELECT DISTINCT key FROM facts WHERE client_id = ? AND key LIKE ? ESCAPE '\\' "
+            "AND status = 'active' AND valid_to IS NULL ORDER BY key LIMIT 12",
+            (client_id, head.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + ".%"),
+        ).fetchall()
+        saved = [row[0] for row in rows if row[0] != key]
+        if not saved:
+            return ""
+        return (f". {key} is a new key; saved {head} keys: {', '.join(saved)}. To update one of those, "
+                "send its exact key with merge=true and only the changed fields")
 
     def _insert_fact(
         self, client_id: str, fact: Mapping[str, Any], revision: int, now: str, *,
@@ -2341,6 +2393,8 @@ class WealthStore:
             value = json.loads(row[column]) if row[column] else None
             if value:
                 message[field] = value
+        if "status" in row.keys() and row["status"] in MESSAGE_STATUSES:
+            message["status"] = row["status"]
         return message
 
     def _conversation_rows(self, client_id: str) -> list[dict[str, Any]]:
@@ -2419,9 +2473,12 @@ class WealthStore:
             extras = (attachments, list(message.get("memory") or []), list(message.get("views") or []))
             for extra in extras:
                 _validate_json(extra, "message")
+            status = message.get("status")
+            if status is not None and status not in MESSAGE_STATUSES:
+                raise ValidationError("a conversation message status must be stopped or failed")
             rows.append((_required_text(message.get("id"), "message id"), message["role"],
                          redact_text(str(message.get("content") or "")),
-                         *(_json(extra) if extra else None for extra in extras)))
+                         *(_json(extra) if extra else None for extra in extras), status))
         now = _utc_now()
         with self._lock:
             self._begin()
@@ -2433,7 +2490,8 @@ class WealthStore:
                 for row in rows:
                     self._db.execute(
                         "INSERT INTO conversation_messages(client_id, conversation_id, message_id, role, content, "
-                        "attachments_json, memory_json, views_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "attachments_json, memory_json, views_json, status, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (client_id, conversation_id, *row, now))
                 if thread_id is not None:
                     self._db.execute(

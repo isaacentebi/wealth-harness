@@ -36,7 +36,8 @@ IPS_CADENCES = ("annual", "semiannual", "quarterly")  # unsure: answered "not su
 SCHEMA: dict[str, dict[str, str]] = {
     "client.profile": {
         "name?": "what the person wants to be called",
-        "birth_year?": "YYYY (not age, so it stays true)",
+        "birth_year?": "YYYY (not age, so it stays true): 'tengo 34 años' is the Date's year minus 34",
+        "birth_year_approximate?": "true when birth_year comes from a stated age",
         "residence?": "{country: ISO-2 (MX, US), region?: state, city?}",
         "tax_residence?": "list of ISO-2 countries the person stated; never inferred",
         "citizenship?": "list of ISO-2 countries", "us_person?": "true|false",
@@ -53,23 +54,36 @@ SCHEMA: dict[str, dict[str, str]] = {
     "spending.monthly": {
         "essential?": "number", "discretionary?": "number", "total?": "number (at least one of the three)",
         "currency": "ISO 4217", "approximate?": "true|false",
+        "partial?": "true when essential (or discretionary) is only the items named (rent alone); a total is "
+                    "always the whole",
+        "components?": "the items the figure covers in their words ([\"renta\"]); a list means partial",
     },
     "cash.<id>": {
         "amount": "number (omit only with balance_unknown: true)", "currency": "ISO 4217",
         "institution?": "bank or fintech name", "balance_unknown?": "true when they have it but the amount is not known",
         "purpose?": "reserve|general|goal:<goal id>", "liquid?": "true (default for cash) | false",
         "name?": "their words", "approximate?": "true|false",
+        "annual_rate?": "decimal yield they stated (0.15 for 15%)",
     },
     "liability.<id>": {
         "kind": "|".join(LIABILITY_KINDS), "balance": "number owed", "currency": "ISO 4217",
-        "annual_rate?": "decimal (0.13)", "payment?": "number per payment_frequency",
+        "annual_rate?": "decimal (0.45 for '45%'; annual unless they say monthly)", "payment?": "number per payment_frequency",
         "payment_frequency?": "|".join(PAYMENT_FREQUENCIES), "remaining_term_months?": "integer",
         "maturity?": "YYYY-MM-DD", "lender?": "name", "in_spending?": "true if the payment is inside spending.monthly",
         "approximate?": "true|false",
+        "cat?": "decimal: the Banxico CAT a Mexican statement quotes (0.60), besides the tasa in annual_rate",
+        "minimum_payment?": "card rule {percent_of_balance, plus_interest?, floor? | percent_of_limit + credit_limit}",
+        "iva_on_interest?": "decimal IVA charged on interest (0.16), or false",
+        "denomination?": "VSM|UMA|MXN (an Infonavit/Fovissste credit in units; lender names the institution)",
+        "balance_units?": "number of VSM/UMA owed", "monthly_payment_units?": "VSM/UMA paid a month",
+        "unit_value_mxn?": "monthly peso value of one unit", "unit_growth_annual?": "decimal yearly update of the unit",
+        "months_paid?": "integer months already paid (30-year liberation)",
+        "original_principal?": "number first borrowed (US $750,000 mortgage-interest limit)",
     },
     "investment.<id>": {
         "amount": "number (a stated balance; statements replace it)", "currency": "ISO 4217",
         "institution?": "name", "kind?": "brokerage|retirement|afore|fund|other", "approximate?": "true|false",
+        "annual_rate?": "decimal yield or return they stated (0.11 for CETES at 11%)",
         "purpose?": "reserve|general|goal:<goal id> (only as the person stated it)",
         "liquidity_days?": "days to get the money out (1 daily, 28 CETES at 28 days); counts toward the reserve "
                            "when 31 or less",
@@ -292,6 +306,7 @@ def _profile(value: dict, key: str) -> None:
         _fail(f"{key}.currencies", "must be a list of ISO currency codes such as [\"MXN\", \"USD\"]")
     if value.get("reporting_currency") is not None:
         _currency(value["reporting_currency"], f"{key}.reporting_currency")
+    _bool(value.get("birth_year_approximate"), f"{key}.birth_year_approximate")
     _enum(value.get("language"), f"{key}.language", LANGUAGES)
     _text(value.get("timezone"), f"{key}.timezone", limit=64)
 
@@ -313,7 +328,8 @@ def _income(value: dict, key: str) -> None:
 
 
 def _spending(value: dict, key: str) -> None:
-    _object(value, key, {"essential", "discretionary", "total", "currency", "approximate", "note"})
+    _object(value, key, {"essential", "discretionary", "total", "currency", "approximate", "note", "partial",
+                         "components"})
     for name in ("essential", "discretionary", "total"):
         _number(value.get(name), f"{key}.{name}", required=False)
     if all(value.get(n) is None for n in ("essential", "discretionary", "total")):
@@ -321,11 +337,17 @@ def _spending(value: dict, key: str) -> None:
     _currency(value.get("currency"), f"{key}.currency")
     _bool(value.get("approximate"), f"{key}.approximate")
     _text(value.get("note"), f"{key}.note")
+    _bool(value.get("partial"), f"{key}.partial")
+    components = value.get("components")
+    if components is not None and (not isinstance(components, list) or not all(
+            isinstance(c, str) and c.strip() and len(c) <= 80 for c in components)):
+        _fail(f"{key}.components", "must be a list of short item names such as [\"renta\"]")
 
 
 def _cash(value: dict, key: str) -> None:
     _object(value, key, {"amount", "currency", "institution", "purpose", "liquid", "name", "approximate", "note",
-                         "balance_unknown"})
+                         "balance_unknown", "annual_rate"})
+    _rate(value.get("annual_rate"), f"{key}.annual_rate")
     _bool(value.get("balance_unknown"), f"{key}.balance_unknown")
     _number(value.get("amount"), f"{key}.amount", required=value.get("balance_unknown") is not True)
     _currency(value.get("currency"), f"{key}.currency")
@@ -341,7 +363,8 @@ def _liability(value: dict, key: str) -> None:
     if "proposal_id" in value:  # a statement record written by ingest confirm
         return
     _object(value, key, {"kind", "balance", "currency", "annual_rate", "payment", "payment_frequency",
-                         "remaining_term_months", "maturity", "lender", "name", "in_spending", "approximate", "note"})
+                         "remaining_term_months", "maturity", "lender", "name", "in_spending", "approximate", "note",
+                         *DEBT_ENGINE_FIELDS})
     _enum(value.get("kind"), f"{key}.kind", LIABILITY_KINDS, required=True)
     _number(value.get("balance"), f"{key}.balance")
     _currency(value.get("currency"), f"{key}.currency")
@@ -359,6 +382,32 @@ def _liability(value: dict, key: str) -> None:
     _bool(value.get("in_spending"), f"{key}.in_spending")
     _bool(value.get("approximate"), f"{key}.approximate")
     _text(value.get("note"), f"{key}.note")
+    _rate(value.get("cat"), f"{key}.cat")
+    _rate(value.get("unit_growth_annual"), f"{key}.unit_growth_annual")
+    for field in ("balance_units", "monthly_payment_units", "unit_value_mxn", "original_principal"):
+        _number(value.get(field), f"{key}.{field}", required=False)
+    iva = value.get("iva_on_interest")
+    if iva is not None and iva is not False:
+        _rate(iva, f"{key}.iva_on_interest")
+    _enum(value.get("denomination"), f"{key}.denomination", ("VSM", "UMA", "MXN"))
+    paid = value.get("months_paid")
+    if paid is not None and (isinstance(paid, bool) or not isinstance(paid, int) or not 0 <= paid <= MAX_MONTHS):
+        _fail(f"{key}.months_paid", "must be a whole number of months")
+    rule = value.get("minimum_payment")
+    if rule is not None:
+        _object(rule, f"{key}.minimum_payment", {"percent_of_balance", "plus_interest", "floor", "percent_of_limit",
+                                                  "credit_limit"})
+        _rate(rule.get("percent_of_balance"), f"{key}.minimum_payment.percent_of_balance")
+        _rate(rule.get("percent_of_limit"), f"{key}.minimum_payment.percent_of_limit")
+        for field in ("floor", "credit_limit"):
+            _number(rule.get(field), f"{key}.minimum_payment.{field}", required=False)
+        _bool(rule.get("plus_interest"), f"{key}.minimum_payment.plus_interest")
+
+
+# Optional liability fields only the debt engine (wealth/debt.py) reads.
+DEBT_ENGINE_FIELDS = ("cat", "minimum_payment", "iva_on_interest", "denomination", "balance_units", "monthly_payment_units",
+                      "unit_value_mxn", "unit_growth_annual", "months_paid", "original_principal",
+                      "origination_date", "start_date", "liberation_eligible", "update_month", "credit_limit")
 
 
 def _purpose(value: Any, path: str) -> None:
@@ -369,7 +418,8 @@ def _purpose(value: Any, path: str) -> None:
 
 def _investment(value: dict, key: str) -> None:
     _object(value, key, {"amount", "currency", "institution", "kind", "name", "approximate", "note",
-                         "balance_unknown", "purpose", "liquidity_days"})
+                         "balance_unknown", "purpose", "liquidity_days", "annual_rate"})
+    _rate(value.get("annual_rate"), f"{key}.annual_rate")
     _purpose(value.get("purpose"), f"{key}.purpose")
     days = value.get("liquidity_days")
     if days is not None and (isinstance(days, bool) or not isinstance(days, int) or not 0 <= days <= 36600):

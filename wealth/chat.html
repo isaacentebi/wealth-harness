@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="light">
   <meta name="referrer" content="no-referrer">
   <title>Wealth</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500&display=swap">
@@ -525,6 +526,33 @@
     .worktrace .step { color: var(--ink-soft); font-size: var(--fs-4); line-height: 24px; min-width: 0; }
     .worktrace .elapsed { color: var(--muted); font: 400 var(--fs-2)/24px var(--mono); font-variant-numeric: tabular-nums; }
     .worktrace .elapsed:empty { display: none; }
+    /* Streaming: the answer takes the working line's place as it is written (the same first-line box), and the
+       cobalt dot rides at its end until the finished answer replaces it with citations, views and the memory line. */
+    .message.pending.streaming .worktrace { display: none; }
+    .answer .stream-mark {
+      display: inline-block; width: 8px; height: 8px; margin-left: 6px; border-radius: 50%;
+      background: var(--cobalt); vertical-align: middle;
+      animation: feed 1.2s cubic-bezier(.45, 0, .25, 1) infinite alternate;
+    }
+    .message.pending.stopping .answer .stream-mark { background: var(--ink); animation: none; }
+
+    /* Stopped: the words written before Stop stay; one quiet line under them says so, with the way forward. */
+    .stopped {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 0 8px;
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: var(--fs-1);
+      line-height: 16px;
+    }
+    .stopped button {
+      min-height: 44px; padding: 0 8px; margin-left: -8px;
+      border: 0; background: transparent; color: var(--ink);
+      font-size: var(--fs-2); font-weight: 600;
+      text-decoration: underline; text-decoration-color: var(--hairline);
+      text-decoration-thickness: 1.5px; text-underline-offset: 6px;
+    }
+    .stopped button:hover { text-decoration-color: var(--ink); }
+    .stopped .sep { color: var(--hairline); }
 
     /* ---------- failure: statement, cause, recovery ---------- */
 
@@ -1107,13 +1135,15 @@
             policy_estate_situs: p => `${p.symbol} is US-domiciled: it counts toward US estate tax for a non-resident.`
           }
         },
-        retry: 'Retry', askAgain: 'Ask again', details: 'Details', uploading: 'Uploading…',
+        retry: 'Retry', askAgain: 'Ask again', details: 'Details', uploading: 'Uploading…', stopped: 'Stopped',
         badType: 'Use PDF, CSV or image', tooBig: 'Over 25 MB', empty: 'Empty file', uploadFailed: 'Upload failed',
         remove: name => `Remove ${name}`,
         offlineTitle: 'Wealth isn’t reachable', offlineText: 'Start it again with `uv run wealth-chat`, then reload this page.',
         errors: {
           connection: 'Lost connection to Wealth. Make sure the local server is still running, then retry.',
           gone: 'This response was interrupted when the server restarted. Retry to ask again.',
+          unanswered: 'This message wasn’t answered.',
+          stoppedEarly: 'Stopped before an answer was written.',
           busy: 'Another response is still in progress.',
           forbidden: 'This page lost its session. Reload to reconnect.',
           other: 'Something went wrong.'
@@ -1201,13 +1231,15 @@
             policy_estate_situs: p => `${p.symbol} está domiciliado en EE. UU.: cuenta para el impuesto sucesorio de EE. UU. si no resides ahí.`
           }
         },
-        retry: 'Reintentar', askAgain: 'Preguntar de nuevo', details: 'Detalles', uploading: 'Subiendo…',
+        retry: 'Reintentar', askAgain: 'Preguntar de nuevo', details: 'Detalles', uploading: 'Subiendo…', stopped: 'Detenido',
         badType: 'Usa PDF, CSV o imagen', tooBig: 'Más de 25 MB', empty: 'Archivo vacío', uploadFailed: 'No se pudo subir',
         remove: name => `Quitar ${name}`,
         offlineTitle: 'Wealth no responde', offlineText: 'Vuelve a iniciarlo con `uv run wealth-chat` y recarga esta página.',
         errors: {
           connection: 'Se perdió la conexión con Wealth. Revisa que el servidor local siga activo y reintenta.',
           gone: 'La respuesta se interrumpió porque el servidor se reinició. Reintenta para preguntar de nuevo.',
+          unanswered: 'Este mensaje no se respondió.',
+          stoppedEarly: 'Detenido antes de escribir una respuesta.',
           busy: 'Todavía hay otra respuesta en curso.',
           forbidden: 'Esta página perdió su sesión. Recarga para reconectar.',
           not_installed: 'Codex no está instalado en esta computadora. Instala Codex CLI y reintenta.',
@@ -2541,12 +2573,27 @@
         // Remembering, settled: one quiet line, no mark.
         article.append(tagLang(el('p', 'memory', remembered), lang));
       }
+      if (options.stopped) article.append(stoppedLine(lang, options.retry));
       messages.append(article);
       if (options.announce) {
         live.textContent = '';
         setTimeout(() => { live.textContent = `${T.replied} ${(body.innerText || body.textContent).slice(0, 1200)}`; }, 50);
       }
       return article;
+    }
+
+    // Under an answer the person stopped: "Stopped", and Ask again when there is something to re-send.
+    function stoppedLine(lang, retry) {
+      const line = tagLang(el('p', 'stopped'), lang);
+      line.append(el('span', '', STRINGS[lang].stopped));
+      if (retry) {
+        line.append(el('span', 'sep', '·'));
+        const button = el('button', '', STRINGS[lang].askAgain);
+        button.type = 'button';
+        button.addEventListener('click', () => { button.previousSibling.remove(); button.remove(); retry(); });
+        line.append(button);
+      }
+      return line;
     }
 
     // Worktrace row: the live mark, the step as tools run, and after fifteen seconds the time it has taken.
@@ -2583,7 +2630,46 @@
     function clearPending(node) {
       if (!node) return;
       clearInterval(node._timer);
+      clearTimeout(node._streamTimer);
       node.remove();
+    }
+
+    // The answer as it is written: chunks accumulate and the same safe markdown renderer redraws the text at most
+    // every 50 ms. A new message item (the model wrote an aside first) starts the text over. Views, citations and
+    // the memory line wait for the finished answer.
+    const STREAM_MS = 50;
+    function streamDelta(node, event) {
+      if (!node || typeof event.text !== 'string') return;
+      const item = String(event.item || '');
+      if (!node._stream) {
+        node._stream = el('div', 'answer');
+        node.classList.add('streaming');
+        node.append(node._stream);
+      }
+      if (node._streamItem !== item) { node._streamItem = item; node._streamText = ''; }
+      node._streamText += event.text;
+      if (!node._streamTimer) node._streamTimer = setTimeout(() => drawStream(node), STREAM_MS);
+    }
+
+    function drawStream(node) {
+      node._streamTimer = null;
+      if (!node.isConnected || !node._stream) return;
+      const body = el('div', 'answer');
+      // A bold or code span still being written is drawn closed, so its markers never flash as text.
+      let text = node._streamText;
+      if (!/(^|\n)\s*(```|~~~)/.test(text)) {
+        if ((text.match(/\*\*/g) || []).length % 2) text += '**';
+        if ((text.match(/`/g) || []).length % 2) text += '`';
+      }
+      renderAnswer(body, text, [], node._lang);
+      let tail = body.lastElementChild;
+      while (tail && /^(UL|OL|BLOCKQUOTE)$/.test(tail.tagName) && tail.lastElementChild) tail = tail.lastElementChild;
+      const mark = el('span', 'stream-mark');
+      mark.setAttribute('aria-hidden', 'true');
+      (tail && /^(P|LI|H[2-5])$/.test(tail.tagName) ? tail : body).append(mark);
+      node._stream.replaceWith(body);
+      node._stream = body;
+      follow();
     }
 
     function showError(userNode, error, retry) {
@@ -2591,10 +2677,11 @@
       const prior = userNode.querySelector('.alert');
       if (prior) prior.remove();
       const kind = error.kind || 'other';
-      const box = el('div', kind === 'cancelled' ? 'alert quiet' : 'alert');
+      const quiet = kind === 'cancelled' || kind === 'stoppedEarly';
+      const box = el('div', quiet ? 'alert quiet' : 'alert');
       box.setAttribute('role', 'alert');
       // Failure statement, cause, recovery. The route-broke mark replaces any warning glyph.
-      if (kind !== 'cancelled') box.append(presence('exception'));
+      if (!quiet) box.append(presence('exception'));
       const p = el('p');
       const message = errorText(Object.assign({}, error, { kind }));
       // Render `codex login` style hints as code without using innerHTML.
@@ -2604,12 +2691,12 @@
       box.append(p);
       const ways = el('div', 'ways');
       if (retry) {
-        const button = el('button', '', kind === 'cancelled' ? T.askAgain : T.retry);
+        const button = el('button', '', quiet ? T.askAgain : T.retry);
         button.type = 'button';
         button.addEventListener('click', () => { box.remove(); retry(); });
         ways.append(button);
       }
-      if (error.detail && kind !== 'cancelled') {
+      if (error.detail && !quiet) {
         // The raw cause is for diagnosis, not the first read: behind a tap.
         const more = el('details', 'detail');
         more.append(el('summary', '', T.details), el('code', '', error.detail));
@@ -3299,6 +3386,24 @@
       } finally { setup.busy = false; }
     }
 
+    // A turn's memory step can answer the open card (a name typed as free text): ask again which card is next and
+    // drop the one already answered.
+    let setupRefresh = null;
+    function refreshSetup() {
+      if (!setup.active || !setup.card || setupRefresh) return;
+      setupRefresh = (async () => {
+        try {
+          const data = await json(await api(`/api/onboarding?lang=${LANG}`));
+          const open = setup.card;
+          if (!open || setup.busy || open.inert || !open.isConnected) return;
+          if (data.card && data.card.step === open.dataset.step) return;
+          setPicture(data.picture);
+          if (data.card) showCard(data.card);
+          else { open.remove(); setup.card = null; setSetupActive(false); }
+        } catch (_) { /* the card stays; answering it still works */ } finally { setupRefresh = null; }
+      })();
+    }
+
     // After a model turn during setup, the open card follows the conversation to its end.
     function setupFollowsTurn() {
       if (!setup.active || !setup.node) return;
@@ -3425,8 +3530,11 @@
       turn.after = Math.max(turn.after || 0, event.seq || 0);
       if (event.type === 'progress' && turn.pendingNode) {
         if (!turn.stopping) setStep(turn.pendingNode, event.text);
+      } else if (event.type === 'delta') {
+        if (!turn.stopping) streamDelta(turn.pendingNode, event);
       } else if (event.type === 'memory') {
         turn.memoryEvent = event;
+        refreshSetup();
         if (turn.answerNode) {
           // Saved after the answer was shown: add the quiet line to that answer.
           const remembered = memoryPhrase(event.items, turn.lang || LANG, { event });
@@ -3449,9 +3557,18 @@
         clearPending(turn.pendingNode);
         turn.pendingNode = null;
         turn.failed = true;
-        showError(turn.userNode, event, retryFor(turn));
+        const stopped = event.kind === 'cancelled' && event.stopped;
+        if (stopped && typeof stopped.content === 'string') {
+          // What was already written stays, as a saved message, with a quiet Stopped line under it.
+          turn.answerNode = assistantMessage(stopped.content, { memory: stopped.memory, message: stopped, lang: turn.lang,
+                                                                stopped: true, retry: retryFor(turn) });
+          follow();
+        } else {
+          showError(turn.userNode, event, retryFor(turn));
+        }
       } else if (event.type === 'done') {
         finish(turn);
+        refreshSetup();
       }
     }
 
@@ -3547,7 +3664,11 @@
       const turn = current;
       if (!turn || !turn.id || turn.stopping) return;
       turn.stopping = true;
-      if (turn.pendingNode) { turn.pendingNode._step.textContent = STRINGS[turn.pendingNode._lang].stopping; setPresence(turn.pendingNode._mark, 'quiet'); }
+      if (turn.pendingNode) {
+        turn.pendingNode._step.textContent = STRINGS[turn.pendingNode._lang].stopping;
+        setPresence(turn.pendingNode._mark, 'quiet');
+        turn.pendingNode.classList.add('stopping');
+      }
       try { await api(`/api/turns/${turn.id}/cancel`, { method: 'POST' }); } catch (_) { /* the stream reports the outcome */ }
     }
 
@@ -3883,10 +4004,23 @@
       const flow = onboarding.active && onboarding.mode === 'flow';
       if (!history.length && !(state.turn && (state.turn.message || state.turn.internal)) && !flow) renderIntro(state);
       let spoken = LANG;
-      history.forEach(item => {
+      let lastUser = null;
+      // An unfinished message offers Retry only while it was not asked again later.
+      const askedLater = index => history.slice(index + 1).some(m => m && m.role === 'user' && m.content === history[index].content);
+      const again = (record, index) => (!record || askedLater(index)) ? null : () => submit(record.text, record.attachments, record.node);
+      history.forEach((item, index) => {
         if (!item || typeof item.content !== 'string') return;
-        if (item.role === 'user') { userMessage(item.content, item.attachments || []); spoken = languageOf(item.content); }
-        else if (item.role === 'assistant') assistantMessage(item.content, { memory: item.memory, message: item, lang: spoken, views: item.views });
+        if (item.role === 'user') {
+          const node = userMessage(item.content, item.attachments || []);
+          spoken = languageOf(item.content);
+          lastUser = { text: item.content, attachments: item.attachments || [], node, index };
+          if (item.status === 'failed') showError(node, { kind: 'unanswered', message: T.errors.unanswered }, again(lastUser, index));
+          if (item.status === 'stopped') showError(node, { kind: 'stoppedEarly', message: T.errors.stoppedEarly }, again(lastUser, index));
+        } else if (item.role === 'assistant') {
+          const retry = item.status === 'stopped' && lastUser ? again(lastUser, lastUser.index) : null;
+          assistantMessage(item.content, { memory: item.memory, message: item, lang: spoken, views: item.views,
+                                           stopped: item.status === 'stopped', retry });
+        }
       });
 
       input.disabled = false;

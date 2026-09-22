@@ -138,7 +138,7 @@ def test_the_picture_adds_up(mx):
     assert sum(s["value"] for s in flow["segments"]) == pytest.approx(85000, abs=0.05)
     assert [s["id"] for s in flow["segments"]][:2] == ["essentials", "other"] and flow["segments"][-1]["id"] == "unallocated"
     assert flow["debt_unknown"] == ["Banamex"]  # the card's payment is unknown, and said so
-    assert 0 < flow["savings_rate"] < 1
+    assert flow["savings_rate"] is None  # with the card's payment unknown, what is saved each month is unknown
     months = pic["spending"]["months"]
     assert len(months) >= 2 and months[0]["month"] == "2026-06" and len(pic["spending"]["top"]) <= 3
     assert pic["spending"]["top"][0]["id"] == "housing"

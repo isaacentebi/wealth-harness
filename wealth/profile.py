@@ -2618,9 +2618,12 @@ def _flow(sit: dict) -> dict:
     left = income - sum(s["value"] for s in segments)
     segments.append({"id": "unallocated", "value": round(left, 2)})
     saved = income - spent - debt
+    # When the model cannot say what is left each month (an unknown payment, or one that may already sit inside
+    # the stated spending), the savings rate is unknown too, never a figure built on a guess.
+    known = cf.get("surplus") is not None or "surplus" not in cf
     return {**base, "status": "ready", "missing": [], "segments": segments,
             "committed": [{"name": c.get("name"), "kind": c.get("kind"), "value": _r(c.get("monthly"))} for c in committed_items],
-            "savings_rate": round(saved / income, 4) if income > 0 else None}
+            "savings_rate": round(saved / income, 4) if income > 0 and known else None}
 
 
 def _spending_months(sit: dict, ledger: dict | None) -> dict | None:
@@ -2652,8 +2655,10 @@ def _spending_months(sit: dict, ledger: dict | None) -> dict | None:
             "partial": report.get("status") != "ready"}
 
 
-def _amortization(balance: float, annual_rate: float, payment: float, limit: int = 600) -> list[tuple[int, float]]:
-    rate, remaining, points, month = annual_rate / 12, balance, [(0, balance)], 0
+def _amortization(balance: float, annual_rate: float, payment: float, limit: int = 600,
+                  iva: float = 0.0) -> list[tuple[int, float]]:
+    # IVA on interest where the debt engine charges it, so the curve ends at the payoff month the card shows.
+    rate, remaining, points, month = annual_rate / 12 * (1 + iva), balance, [(0, balance)], 0
     while remaining > 0.005 and month < limit:
         remaining = remaining * (1 + rate) - payment
         month += 1
@@ -2680,7 +2685,8 @@ def _debts(sit: dict) -> list[dict]:
                "missing": ["rate" if m == "annual_rate" else "payment" for m in r.get("missing") or []],
                "points": None}
         if row["status"] == "ready" and balance and row["rate"] is not None and r.get("monthly_payment") is not None:
-            row["points"] = [[m, round(b, 2)] for m, b in _amortization(balance, row["rate"], _num(r["monthly_payment"]))]
+            row["points"] = [[m, round(b, 2)] for m, b in _amortization(balance, row["rate"], _num(r["monthly_payment"]),
+                                                                            iva=_num(r.get("iva_on_interest")) or 0.0)]
         out.append(row)
     out.sort(key=lambda d: -(d["value"] or 0))
     return out

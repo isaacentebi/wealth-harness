@@ -26,8 +26,13 @@ Consent and provenance come from the person, not the model (see ``consent.py``):
 from __future__ import annotations
 
 import os
+
+_PARENT_AT_START = os.getppid()  # before the slow imports, so a host that dies meanwhile is still noticed
+
 import re
 import sqlite3
+import threading
+import time
 from functools import wraps
 from typing import Any, Literal, Mapping
 
@@ -84,7 +89,9 @@ def _safe_reason(error: Exception) -> str:
     reason = " ".join(str(error).split())
     unknown = _UNKNOWN_TASK.match(reason)
     if unknown:  # the full task list does not fit; point at discovery instead of truncating it
-        return f"unknown task {unknown.group(1)}; call wealth_context without client_id to list tasks."
+        hint = (" The fact contract (every key's schema) comes with wealth_context(client_id, intent=<task>) or "
+                "detail=full.") if "fact" in unknown.group(1) or "schema" in unknown.group(1) else ""
+        return f"unknown task {unknown.group(1)}; call wealth_context without client_id to list tasks.{hint}"
     return (reason or "Input failed the operation contract; check field names and types.")[:600]
 
 
@@ -445,6 +452,12 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = False,
         receipt = service.remember(client_id, items, expected_revision, request_id)
         if warnings:
             receipt["warnings"] = [*warnings, *(receipt.get("warnings") or [])]
+        if receipt.get("warnings") or receipt.get("unchanged"):
+            # A receipt is never a failure: say so, so a warning or a no-op is not retried.
+            receipt["next_step"] = (
+                "Saved: every key in written is stored and every key in unchanged already held this value. "
+                + ("Items in needs_user were held for the person to decide. " if receipt.get("needs_user") else "")
+                + "Warnings are notes for the conversation, not errors; do not resend these facts.")
         return receipt
 
     @tool(annotations=RUN)
@@ -463,6 +476,7 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = False,
         policy_check {proposal {kind: trade, action, symbol, amount}} with client_id;
         speculation_check {proposal {action, instrument, amount}};
         sic_premium {sic_symbol (.MX), fetch_missing: true}; debt_payoff {monthly_amount};
+        debt {mode: amortize|prepay_vs_invest|refinance|strategies, ...};
         estate {year, decedent {us_citizen, green_card, us_domiciled}, assets [{id, type, value_usd, custody}]};
         tax {jurisdiction: US|MX_ARTICLE_129, household, ...}. Other tasks: wealth_context overview.
 
@@ -655,7 +669,59 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = False,
     )
 
 
+WATCHDOG_SECONDS = 0.5
+
+
+def _exit_now() -> None:
+    """Exit at once, from any thread. An open SQLite transaction is never committed half-way: it rolls back."""
+    os._exit(0)
+
+
+def start_orphan_watchdog(poll: float = WATCHDOG_SECONDS) -> None:
+    """Exit when the host is gone: stdin reaches EOF or this process is reparented.
+
+    Codex starts MCP servers in their own process group, so stopping a turn that
+    kills Codex's group does not reach this process; without this it would live on
+    with the turn's consent evidence. stdin is relayed through a pipe so its EOF is
+    seen here the moment it happens (the MCP transport reads the pipe as before),
+    and a thread notices a parent change (reparented to launchd/init or a subreaper).
+    Nothing is waited for: work in flight is abandoned, and SQLite rolls back any
+    transaction that had not committed, so no write is left half-done.
+    """
+    parent = _PARENT_AT_START
+    try:
+        source = os.dup(0)
+    except OSError:  # no stdin at all: the stdio transport ends by itself
+        _exit_now()
+    read_end, write_end = os.pipe()
+    os.dup2(read_end, 0)
+    os.close(read_end)
+
+    def relay() -> None:
+        try:
+            while True:
+                data = os.read(source, 65536)
+                if not data:
+                    break
+                view = memoryview(data)
+                while view:
+                    view = view[os.write(write_end, view):]
+        except OSError:
+            pass
+        _exit_now()
+
+    def watch_parent() -> None:
+        while os.getppid() == parent:
+            time.sleep(poll)
+        _exit_now()
+
+    threading.Thread(target=relay, name="wealth-stdin-relay", daemon=True).start()
+    threading.Thread(target=watch_parent, name="wealth-orphan-watchdog", daemon=True).start()
+
+
 def main() -> None:
+    if os.name == "posix":
+        start_orphan_watchdog()
     allowed = os.environ.get("WEALTH_MCP_TOOLS")
     # The full policy (~21k characters) is opt-in: WEALTH_BEHAVIOR_IN_SERVER=1. WEALTH_BEHAVIOR_IN_HOST=1,
     # which the Wealth launcher sets, always leaves it out.

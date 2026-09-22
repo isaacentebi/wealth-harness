@@ -73,13 +73,13 @@ _B = {
            "nw_unknown": "Patrimonio neto sin contar {x}: {k} (esos saldos no son cero; pregúntalos); deudas {o}",
            "unconv": "sin convertir {x}", "unvalued": "sin valuar {x}",
            "flow": "Mes: ingreso {i}{net} − gasto {s} ({src}) − deudas {d} = excedente {x}", "net": " neto",
-           "src_stated": "declarado", "src_ledger": "movimientos {n} meses", "essential_only": ", solo esenciales; el excedente aún cubre otros gastos", "without": " (falta el pago de {x}; antes de ese pago quedan {k}; pregúntalo)",
+           "src_stated": "declarado", "src_ledger": "movimientos {n} meses", "essential_only": "; total desconocido: solo esenciales {e}, así que excedente y tasa de ahorro no se saben; pregunta el gasto total", "partial": "; total desconocido: solo {c} {e}, que no es todo el gasto esencial; excedente, tasa de ahorro y meses de reserva no se saben; pregunta el gasto total", "set_aside": " (sin {x} apartados para {g})", "without": " (falta el pago de {x}; antes de ese pago quedan {k}; pregúntalo)",
            "commit": "Excedente comprometido {t} ({items}); sin asignar {u}", "over": " · sobrecomprometido",
            "reserve": "Reserva {a} = {m} meses de gasto {b}; meta {t}", "unset": "sin definir",
            "r_cash": "efectivo", "inside": " (no sé si el pago de {x} ya está dentro del gasto: el excedente es {lo} si no lo está, {hi} si sí; pregúntalo)",
            "b_essential": "esencial", "b_total": "total",
            "debt": "Deuda {n}: {b} al {r}; pago {p}/mes; {when}", "paid": "liquida {d}", "missing": "falta {x}",
-           "never": "no se liquida con ese pago", "interest": ", intereses {x}",
+           "never": "no se liquida con ese pago", "interest": ", intereses {x}", "interest_iva": ", intereses + IVA {x}",
            "goal": "Meta {n}: {detail} ({st})", "per_month": "{x}/mes", "target": "{x} para {d}",
            "inv": "Inversiones: {x}", "cash": "Efectivo: {x}", "invalid": "Datos guardados que no se pudieron leer (pide el valor correcto): {x}", "pos": "Posiciones: {x}", "units": "títulos", "top": "mayor exposición {u} {w} ({s})",
            "diff": "Diferencia {inst}: dijiste {s}; estado {x} ({d})",
@@ -95,13 +95,13 @@ _B = {
            "nw_unknown": "Net worth excluding {x}: {k} (those balances are not zero; ask for them); debts {o}",
            "unconv": "unconverted {x}", "unvalued": "unvalued {x}",
            "flow": "Month: income {i}{net} − spending {s} ({src}) − debt payments {d} = surplus {x}", "net": " net",
-           "src_stated": "stated", "src_ledger": "{n} months of transactions", "essential_only": ", essentials only; the surplus still covers other spending", "without": " (the {x} payment is missing; {k} before it; ask for it)",
+           "src_stated": "stated", "src_ledger": "{n} months of transactions", "essential_only": "; total unknown: essentials only {e}, so the surplus and savings rate are unknown; ask for total spending", "partial": "; total unknown: only {c} {e}, not all essential spending; surplus, savings rate and reserve months are unknown; ask for total spending", "set_aside": " (excluding {x} set aside for {g})", "without": " (the {x} payment is missing; {k} before it; ask for it)",
            "commit": "Surplus committed {t} ({items}); unallocated {u}", "over": " · overcommitted",
            "reserve": "Reserve {a} = {m} months of {b} spending; target {t}", "unset": "not set",
            "r_cash": "cash", "inside": " (unknown whether the {x} payment is already inside spending: surplus {lo} if not, {hi} if so; ask)",
            "b_essential": "essential", "b_total": "total",
            "debt": "Debt {n}: {b} at {r}; payment {p}/month; {when}", "paid": "paid off {d}", "missing": "missing {x}",
-           "never": "never at this payment", "interest": ", interest {x}",
+           "never": "never at this payment", "interest": ", interest {x}", "interest_iva": ", interest + IVA {x}",
            "goal": "Goal {n}: {detail} ({st})", "per_month": "{x}/month", "target": "{x} by {d}",
            "inv": "Investments: {x}", "cash": "Cash: {x}", "invalid": "Saved data that could not be read (ask for the correct value): {x}", "pos": "Positions: {x}", "units": "units", "top": "largest exposure {u} {w} ({s})",
            "diff": "Difference {inst}: stated {s}; statement {x} ({d})",
@@ -190,8 +190,12 @@ def brief(sit: Mapping[str, Any], language: str | None = None) -> str:
     if flow["income"] is not None or flow["spending"] is not None:
         src = sit["spending"]["source"]
         src_text = t["src_ledger"].format(n=sit["spending"].get("ledger_months")) if src == "ledger" else t["src_stated"]
-        if sit["spending"].get("monthly_basis") == "essential":
-            src_text += t["essential_only"]
+        spending = sit["spending"]
+        if spending.get("partial") and spending.get("total") is None:
+            src_text += t["partial"].format(c=", ".join(spending.get("components") or []) or "?",
+                                            e=fmt(spending.get("known_part")))
+        elif spending.get("total") is None and spending.get("essential") is not None:
+            src_text += t["essential_only"].format(e=fmt(spending["essential"]))
         debts = fmt(flow["debt_payments_known"]) if not flow["debt_payments_unknown"] else (
             f"{fmt(flow['debt_payments_known'])}+?" if flow["debt_payments_known"] else "?")
         line = t["flow"].format(i=fmt(flow["income"]), net=t["net"] if sit["income"].get("net") else "",
@@ -222,6 +226,9 @@ def brief(sit: Mapping[str, Any], language: str | None = None) -> str:
             # What it is made of: "60,000 efectivo + 180,000 CETES = 240,000".
             amount = " + ".join(f"{fmt(p['value'])} {t['r_cash'] if p['kind'] == 'cash' else p['label']}"
                                 for p in parts) + f" = {amount}"
+        if reserve.get("excluded_for_goals"):
+            names = [g["name"] for g in sit["goals"] if g["id"] in (reserve.get("excluded_goals") or [])]
+            amount += t["set_aside"].format(x=fmt(reserve["excluded_for_goals"]), g=", ".join(names) or "?")
         lines.append((4, t["reserve"].format(a=amount, m=fmt(reserve["months"], 1) if reserve["months"] is not None else "?",
                                              b=t["b_" + (reserve["spending_basis"] or "total")], t=target)))
     for index, row in enumerate(sit["liabilities"]):
@@ -234,7 +241,7 @@ def brief(sit: Mapping[str, Any], language: str | None = None) -> str:
         elif plan["status"] == "never":
             when = t["never"]
         else:
-            when = t["paid"].format(d=plan.get("date") or "?") + t["interest"].format(x=fmt(plan.get("interest")))
+            when = t["paid"].format(d=plan.get("date") or "?") + t["interest_iva" if plan.get("iva") else "interest"].format(x=fmt(plan.get("interest")))
         lines.append((5, t["debt"].format(n=liability_name(row, lang), b=f"{fmt(row['balance'])} {row['currency']}",
                                           r=pct(row["annual_rate"]) if row["annual_rate"] is not None else "?",
                                           p=fmt(row["monthly_payment"]), when=when)))

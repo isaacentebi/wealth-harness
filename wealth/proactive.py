@@ -276,6 +276,7 @@ class _Run:
         self.types = _account_types(ledger)
         self.rates = _Rates(situation, ledger, as_of)
         self._positions: list[dict] | None = None
+        self.deferred_debts: list[dict] = []  # 20%+ debts waiting for a one-month starter reserve
         self._own: set[str] | None = None
         self._labels: dict | None = None
 
@@ -436,67 +437,153 @@ def _debt_name(row: Mapping[str, Any], lang: str) -> str:
     return _DEBT_NAMES[lang][kind]
 
 
+STARTER_RESERVE_MONTHS = Decimal(1)   # a month of essentials comes before paying down a 20%+ debt
+
+
+def _reserve_months(run: _Run) -> Decimal | None:
+    return D((run.sit.get("reserve") or {}).get("months"))
+
+
+def _below_starter(run: _Run) -> bool:
+    """Less than one month of essentials set aside (unknown is not below: nothing is hidden on a guess)."""
+    months = _reserve_months(run)
+    return months is not None and months < STARTER_RESERVE_MONTHS
+
+
+def _interest_factor(row: Mapping[str, Any], currency: str | None) -> Decimal:
+    """Monthly interest per unit of balance: rate / 12, plus 16% IVA on Mexican consumer credit (as the debt engine)."""
+    from .debt import _IVA_KINDS, MX_IVA
+    rate = D(row.get("annual_rate")) or Decimal(0)
+    iva = MX_IVA if currency == "MXN" and (row.get("kind") or "other") in _IVA_KINDS else Decimal(0)
+    return rate / 12 * (1 + iva)
+
+
 def _high_interest(run: _Run) -> None:
     """A card or loan at 20% a year or more: paying it down beats any investment.
 
-    Says the monthly amount that clears it in a year and the interest that saves against the current
-    payment; when the payment is unknown it still says the amount and asks for the payment.
+    * A payment that does not cover the monthly interest (the balance grows) is always shown, as urgent,
+      with the payment that stops the growth.
+    * Otherwise the item waits only while the reserve is below one month of essentials (a starter
+      reserve); the reserve item then says the card comes next.  Above that, the card comes first and
+      the reserve keeps growing in parallel.
+    Says the monthly amount that clears it in a year, the interest that saves against the current payment
+    and the interest saved for each month sooner; when the payment is unknown it asks for it.  Every figure
+    comes from the debt engine (wealth/debt.py), IVA on Mexican consumer credit included, so this item and
+    the ``debt`` task agree; "20% or more" is the effective annual cost with IVA.
     """
-    from .situation.model import annuity_payment, payoff
+    from .debt import payoff_in
+    short_of_target = _reserve_first(run)
     for row in run.sit.get("liabilities") or []:
         balance, rate = D(row.get("balance")), D(row.get("annual_rate"))
-        if balance is None or balance <= 0 or rate is None or rate < HIGH_INTEREST_RATE:
+        if balance is None or balance <= 0 or rate is None:
             continue
         currency = row.get("currency") or run.currency
-        needed = annuity_payment(balance, rate, HIGH_INTEREST_PAYOFF_MONTHS)
-        fast = payoff(balance, rate, needed, run.as_of)
+        engine = payoff_in(row, run.as_of, HIGH_INTEREST_PAYOFF_MONTHS, currency=currency)
+        if engine is None or engine["effective_annual"] < HIGH_INTEREST_RATE:
+            continue
+        needed, fast = engine["payment_to_clear"], engine["fast"]
         payment = D(row.get("monthly_payment"))
-        current = payoff(balance, rate, payment, run.as_of) if payment is not None else {"status": "unknown"}
-        saved = None
+        stop_growth = balance * engine["monthly_factor"]
+        growing = payment is not None and payment <= stop_growth
+        if not growing and _below_starter(run):
+            run.deferred_debts.append(row)
+            continue
+        current = engine["current"] or {"status": "unknown"}
+        saved = sooner = per_month = None
         if current.get("status") == "ready" and fast.get("status") == "ready":
-            saved = max(D(current["interest"]) - D(fast["interest"]), Decimal(0))
+            saved = max(current["interest"] - fast["interest"], Decimal(0))
+            sooner = current["months"] - fast["months"]
+            per_month = saved / sooner if sooner > 0 else None
         rate_text = f"{num(rate * 100, 0)}%"
         name_en, name_es = _debt_name(row, "en"), _debt_name(row, "es")
         pronoun = "la" if row.get("kind") in ("card", "mortgage") else "lo"
         needed_text, fast_interest = run.money(needed, currency), run.money(D(fast.get("interest")), currency)
+        title_en = f"Your {name_en} charges {rate_text}: paying it off is your best investment"
+        title_es = f"{name_es[:1].upper() + name_es[1:]} cobra {rate_text}: pagar{pronoun} es tu mejor inversión"
         if payment is None:
             why = (f"Clearing it in {HIGH_INTEREST_PAYOFF_MONTHS} months takes about {needed_text} a month and costs "
                    f"{fast_interest} in interest. Tell me what you pay now to see how much that saves.",
                    f"Liquidar{pronoun} en {HIGH_INTEREST_PAYOFF_MONTHS} meses pide unos {needed_text} al mes y cuesta "
                    f"{fast_interest} de intereses. Dime cuánto pagas hoy para calcular cuánto te ahorras.")
             step = (f"My monthly {name_en} payment is…", f"Lo que pago al mes de {name_es} es…")
-        elif current.get("status") == "never":
-            why = (f"Your {run.money(payment, currency)} payment does not cover the interest; about {needed_text} a month "
-                   f"clears it in {HIGH_INTEREST_PAYOFF_MONTHS} months.",
-                   f"Tu pago de {run.money(payment, currency)} no cubre los intereses; con unos {needed_text} al mes "
-                   f"{pronoun} liquidas en {HIGH_INTEREST_PAYOFF_MONTHS} meses.")
-            step = (f"How do I get to {needed_text} a month on my {name_en}?",
-                    f"¿Cómo llego a {needed_text} al mes para {name_es}?")
+        elif growing:
+            stop_text = run.money(stop_growth, currency)
+            title_en = f"Your {name_en} grows every month: the payment does not cover its {rate_text} interest"
+            title_es = f"{name_es[:1].upper() + name_es[1:]} crece cada mes: el pago no cubre su interés de {rate_text}"
+            why = (f"Your {run.money(payment, currency)} payment is below the {stop_text} of interest it charges each "
+                   f"month, so the balance grows. Paying at least {stop_text} stops the growth; about {needed_text} a "
+                   f"month clears it in {HIGH_INTEREST_PAYOFF_MONTHS} months.",
+                   f"Tu pago de {run.money(payment, currency)} es menor que los {stop_text} de intereses que cobra al mes, "
+                   f"así que el saldo crece. Pagar al menos {stop_text} detiene el crecimiento; con unos {needed_text} al "
+                   f"mes {pronoun} liquidas en {HIGH_INTEREST_PAYOFF_MONTHS} meses.")
+            step = (f"How do I get to {stop_text} a month on my {name_en}?",
+                    f"¿Cómo llego a {stop_text} al mes para {name_es}?")
         else:
             saved_text = run.money(saved, currency) if saved else None
+            each_text = run.money(per_month, currency) if per_month else None
             why = (f"About {needed_text} a month clears it in {HIGH_INTEREST_PAYOFF_MONTHS} months"
-                   + (f" and saves {saved_text} in interest against your current payment." if saved_text else "."),
+                   + (f" and saves {saved_text} in interest against your current payment" if saved_text else "")
+                   + (f": {each_text} for each of the {sooner} months sooner it is gone." if each_text else "."),
                    f"Con unos {needed_text} al mes {pronoun} liquidas en {HIGH_INTEREST_PAYOFF_MONTHS} meses"
-                   + (f" y te ahorras {saved_text} de intereses frente a tu pago actual." if saved_text else "."))
+                   + (f" y te ahorras {saved_text} de intereses frente a tu pago actual" if saved_text else "")
+                   + (f": {each_text} por cada uno de los {sooner} meses que terminas antes." if each_text else "."))
             step = (f"How do I pay off my {name_en} faster?", f"¿Cómo liquido {name_es} más rápido?")
+        if short_of_target and not growing:
+            why = (why[0] + " You already have a month of reserve: pay the card first and keep building the reserve "
+                            "in parallel.",
+                   why[1] + " Ya tienes un mes de reserva: paga primero la tarjeta y sigue juntando tu reserva en paralelo.")
         before = D(run.sit["cash_flow"].get("surplus_before_unknown_debts"))
         if payment is None and before is not None and before > 0:
             left = run.money(before)
             why = (why[0] + f" Before that payment, {left} is left each month.",
                    why[1] + f" Antes de ese pago te quedan {left} al mes.")
-        title_en = f"Your {name_en} charges {rate_text}: paying it off is your best investment"
-        title_es = f"{name_es[:1].upper() + name_es[1:]} cobra {rate_text}: pagar{pronoun} es tu mejor inversión"
         run.items.append(_item(
             "high_interest_debt", row["id"], severity="act", priority="risk", title=(title_en, title_es),
             why=why, next_step=step,
             data={"liability": row["id"], "annual_rate": num(rate, 4), "balance": num(balance), "currency": currency,
                   "monthly_to_clear": num(needed), "months": HIGH_INTEREST_PAYOFF_MONTHS,
-                  "interest_if_cleared": fast.get("interest"), "monthly_payment": num(payment),
-                  "interest_at_current_payment": current.get("interest") if current.get("status") == "ready" else None,
-                  "interest_saved": num(saved), "payment_unknown": payment is None},
-            sources=[row["key"]], trigger=[row["id"], str(num(rate, 4)), payment is None]))
+                  "interest_if_cleared": num(fast.get("interest")), "monthly_payment": num(payment),
+                  "interest_at_current_payment": num(current.get("interest")) if current.get("status") == "ready" else None,
+                  "months_at_current_payment": current.get("months") if current.get("status") == "ready" else None,
+                  "effective_annual_rate": num(engine["effective_annual"], 4), "iva_on_interest": num(engine["iva"], 4),
+                  "interest_saved": num(saved), "months_sooner": sooner,
+                  "interest_saved_per_month_sooner": num(per_month), "payment_unknown": payment is None,
+                  "balance_growing": growing, "payment_to_stop_growth": num(stop_growth),
+                  "reserve_in_parallel": short_of_target and not growing},
+            sources=[row["key"]], trigger=[row["id"], str(num(rate, 4)), payment is None, growing]))
         if payment is None:
             run.missing("high_interest_debt", f"liability.{row['id']}.payment")
+
+
+def _after_starter_reserve(run: _Run) -> None:
+    """A 20%+ debt waiting for the starter reserve: the reserve item says the card comes next.
+
+    Without a reserve item to carry it (no target set), the card is shown after all, worded the same way.
+    """
+    if not run.deferred_debts:
+        return
+    reserve = next((i for i in run.items if i["kind"] == "reserve_low"), None)
+    names = [_debt_name(r, "es") for r in run.deferred_debts]
+    sentence_es = "Después de juntar un mes de reserva, esta tarjeta es tu mejor inversión." if len(names) == 1 else \
+        "Después de juntar un mes de reserva, pagar estas deudas es tu mejor inversión."
+    sentence_en = ("Once you have one month of reserve, this card is your best investment." if len(names) == 1 else
+                   "Once you have one month of reserve, paying these debts is your best investment.")
+    if reserve is not None:
+        reserve["why"] = {"en": reserve["why"]["en"] + " " + sentence_en, "es": reserve["why"]["es"] + " " + sentence_es}
+        reserve["data"]["debt_after_starter_reserve"] = [r["id"] for r in run.deferred_debts]
+        return
+    for row in run.deferred_debts:
+        rate = D(row.get("annual_rate"))
+        name_en, name_es = _debt_name(row, "en"), _debt_name(row, "es")
+        run.items.append(_item(
+            "high_interest_debt", row["id"], severity="consider", priority="risk",
+            title=(f"Your {name_en} charges {num(rate * 100, 0)}%: next after a month of reserve",
+                   f"{name_es[:1].upper() + name_es[1:]} cobra {num(rate * 100, 0)}%: lo siguiente tras un mes de reserva"),
+            why=(sentence_en, sentence_es),
+            next_step=("How do I set aside one month of expenses?", "¿Cómo junto un mes de gastos?"),
+            data={"liability": row["id"], "annual_rate": num(rate, 4), "balance": row.get("balance"),
+                  "currency": row.get("currency") or run.currency, "after_starter_reserve": True},
+            sources=[row["key"]], trigger=[row["id"], str(num(rate, 4)), "starter"]))
 
 
 _AMOUNT = re.compile(r"(?<![\d.,])(\d{1,3}(?:[,. ]\d{3})+|\d+(?:[.,]\d+)?)\s*(k|mil|thousand)?(?![\w])", re.I)
@@ -531,6 +618,11 @@ def _reserve_first(run: _Run) -> bool:
     months, target = D(reserve.get("months")), D(reserve.get("target_months"))
     if months is not None and target is not None and months < target:
         return True
+    return _reserve_threads(run)
+
+
+def _reserve_threads(run: _Run) -> bool:
+    """Open advice or a commitment that sends money to the reserve."""
     return any(t.get("kind") in ("advice", "commitment") and _RESERVE_WORDS.search(t.get("text") or "")
                for t in (run.sit.get("threads") or {}).get("open") or [])
 
@@ -542,7 +634,9 @@ def _advice_target(run: _Run, thread: Mapping[str, Any]) -> tuple[str, str] | No
     related = [k for k in thread.get("related") or [] if isinstance(k, str)]
     for liability in run.sit.get("liabilities") or []:
         if liability.get("key") in related:
-            if _reserve_first(run):
+            # High-interest on the effective rate, IVA included, as the high-interest item decides it.
+            high = _interest_factor(liability, liability.get("currency") or run.sit.get("currency")) * 12 >= HIGH_INTEREST_RATE
+            if (_below_starter(run) or _reserve_threads(run)) if high else _reserve_first(run):
                 return None
             if liability.get("kind") in _TARGETS:
                 return _TARGETS[liability["kind"]]
@@ -1406,11 +1500,30 @@ def _dca(run: _Run) -> None:
         trigger=sorted((s["plan_id"], s["due"]) for s in slipped)))
 
 
+_ARRIVED = {"liability": ("your debt", "tu deuda"), "cash": ("your cash", "tu efectivo"),
+            "investment": ("your investments", "tus inversiones"), "income": ("your income", "tu ingreso"),
+            "spending": ("your spending", "tu gasto"), "goals": ("your goals", "tus metas"),
+            "reserve": ("your reserve", "tu reserva"), "client": ("your profile", "tu perfil"),
+            "preference": ("your preferences", "tus preferencias"), "constraint": ("your limits", "tus límites")}
+
+
+def _thread_topic(thread_id: str) -> str:
+    """A thread id as words: "transferencia_saldo" -> "transferencia saldo"."""
+    words = re.sub(r"[_\-.]+", " ", str(thread_id)).strip()
+    return words or str(thread_id)
+
+
+def _arrived_name(key: str, lang: str) -> str:
+    pair = _ARRIVED.get(key.split(".", 1)[0])
+    return pair[0 if lang == "en" else 1] if pair else _thread_topic(key.split(".", 1)[-1])
+
+
 def _threads(run: _Run) -> None:
     meta = run.sit.get("meta") or {}
     ready = []
     for thread in (run.sit.get("threads") or {}).get("open") or []:
-        related = [k for k in thread.get("related") or [] if isinstance(k, str)]
+        # Another thread is advice, not an input the thread was waiting for.
+        related = [k for k in thread.get("related") or [] if isinstance(k, str) and not k.startswith("thread.")]
         if not related:
             continue
         mine = (meta.get(thread["key"]) or {}).get("revision")
@@ -1425,12 +1538,17 @@ def _threads(run: _Run) -> None:
     if not ready:
         return
     thread, newer = max(ready, key=lambda r: (r[0].get("created") or "", r[0]["id"]))
-    snippet = thread["text"] if len(thread["text"]) <= 80 else thread["text"][:77] + "..."
+    # The thread's text is a dated note of the advice in the conversation's language ("El 2026-09-22 dijo
+    # que..."), never a title: the item names the topic by the thread's id and what arrived, in each language.
+    topic = _thread_topic(thread["id"])
+    arrived_en = ", ".join(dict.fromkeys(_arrived_name(k, "en") for k in newer))
+    arrived_es = ", ".join(dict.fromkeys(_arrived_name(k, "es") for k in newer))
     run.items.append(_item(
         "thread_ready", thread["id"], severity="consider", priority="opportunity",
-        title=(f"I can now answer: {snippet}", f"Ya puedo responder: {snippet}"),
-        why=("What we were waiting for is now saved.", "Ya tengo el dato que estábamos esperando."),
-        next_step=(f"Let's pick up: {snippet}", f"Retomemos: {snippet}"),
+        title=(f"I can now update my advice on {topic}", f"Ya puedo actualizar mi consejo sobre {topic}"),
+        why=(f"New details arrived: {arrived_en}.", f"Llegaron datos nuevos: {arrived_es}."),
+        next_step=(f"What changes in your advice on {topic} with the new details?",
+                   f"¿Qué cambia en tu consejo sobre {topic} con los datos nuevos?"),
         data={"thread_id": thread["id"], "text": thread["text"], "kind": thread.get("kind"), "arrived": newer,
               "others": [t["id"] for t, _ in ready if t["id"] != thread["id"]]},
         sources=[thread["key"], *newer],
@@ -1854,6 +1972,7 @@ def evaluate(situation: Mapping[str, Any], ledger: Mapping[str, Any] | None, sna
     for trigger in TRIGGERS:
         trigger(run)
     _cohere(run)  # before ranking, so no ranking can show two items that contradict each other
+    _after_starter_reserve(run)
     entries = calendar(situation, day, jurisdiction=jurisdiction, ledger=ledger, snapshot=snapshot)
     triggered_kinds = {i["kind"] for i in run.items}
     active, future = [], []

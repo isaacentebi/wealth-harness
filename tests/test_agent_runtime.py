@@ -213,7 +213,7 @@ def test_resume_uses_recorded_session_and_falls_back_when_missing(monkeypatch, t
     assert resume_command[-2:] == [thread, "-"]
     assert "--sandbox" not in resume_command and 'sandbox_mode="read-only"' in resume_command
     assert "features.view_image=false" in resume_command
-    assert cwd == agent.PROJECT_ROOT
+    assert cwd is agent.ISOLATED  # private CODEX_HOME, empty scratch working directory
     assert "recent_conversation" not in resume_prompt
     assert calls[1][0][:3] == ["codex", "exec", "--ignore-user-config"]
     assert "earlier" in calls[1][1]
