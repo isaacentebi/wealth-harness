@@ -282,6 +282,9 @@ class Turn:
         self.memory: list[dict[str, str]] = []
         self.views: dict[str, dict[str, Any]] = {}  # offered by results this turn; only placed ones reach the page
         self.answer: str | None = None
+        self.partial = ""  # the answer as streamed so far (the current message item), kept if the turn is stopped
+        self.partial_item = ""
+        self.recorded = False  # a stopped or failed turn already joined the saved conversation
         self.error: dict[str, str] | None = None
         self.exception: BaseException | None = None
         self.control = TurnControl()
@@ -319,6 +322,21 @@ class Turn:
                 "attachments": [_public_attachment(a) for a in self.attachments],
                 "progress": self.progress, "memory": list(self.memory), "error": self.error,
                 "elapsed": round(time.time() - self.started, 1), "last_event": len(self.events)}
+
+
+def _log_failure(turn: Turn, kind: str, summary: str, detail: str) -> None:
+    """One stderr line for a failed turn: its kind and diagnostic, never the person's words."""
+    from .ingest.redact import redact_text
+
+    detail = " ".join(redact_text(str(detail or "")).split())[:300]
+    summary = " ".join(str(summary or "").split())[:200]
+    print(f"wealth-chat: turn {turn.id} failed after {time.time() - turn.started:.1f}s: kind={kind} "
+          f"summary={summary!r} detail={detail!r}", file=sys.stderr)
+
+
+# A vermilion dot on the canvas (Dot), served for /favicon.ico and /favicon.svg so no page load 404s.
+FAVICON_SVG = (b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+               b'<rect width="32" height="32" rx="7" fill="#FBF8F2"/><circle cx="16" cy="16" r="7" fill="#C84335"/></svg>')
 
 
 def _public_attachment(item: dict[str, Any]) -> dict[str, Any]:
@@ -457,7 +475,8 @@ class Chat:
                 "csrf_token": self.token, "messages": list(self.messages),
                 "onboarding": onboarding,
                 "starters": list(STARTERS) if not self.messages and not onboarding["active"] else [],
-                "turn": turn.summary() if turn and turn.status in {"running", "error", "cancelled"} and turn.answer is None else None,
+                "turn": turn.summary() if turn and turn.answer is None and (
+                    turn.status == "running" or (turn.status in {"error", "cancelled"} and not turn.recorded)) else None,
                 "uploads": {"max_bytes": MAX_UPLOAD_BYTES, "types": list(UPLOAD_TYPES),
                             "max_files": MAX_ATTACHMENTS},
                 "capabilities": {"python_analytics": True, "persistent_memory": True,
@@ -531,7 +550,7 @@ class Chat:
         try:
             state = profile_state(self.db, self.client_id)
             brief, revision, offered = situation_context(self.db, self.client_id, turn.message, self.brief_revision)
-            history = [(m["role"], m["content"]) for m in self.messages]
+            history = [(m["role"], m["content"]) for m in self.messages if m.get("status") != "failed"]
             answer = None
             for event in self._events(
                 turn.message, client_id=self.client_id, db_path=self.db, model=self.model,
@@ -552,7 +571,11 @@ class Chat:
                 elif event.type == "delta":
                     # The answer as it is written; the page redraws it and the finished answer replaces it.
                     if event.text and not turn.control.cancelled:
-                        turn.emit("delta", text=event.text, item=str(event.data.get("item") or ""))
+                        item = str(event.data.get("item") or "")
+                        if item != turn.partial_item:  # a new message item starts the text over, as on the page
+                            turn.partial_item, turn.partial = item, ""
+                        turn.partial += event.text
+                        turn.emit("delta", text=event.text, item=item)
                 elif event.type == "progress" and event.text != turn.progress:
                     turn.progress = event.text
                     turn.emit("progress", text=event.text)
@@ -596,14 +619,19 @@ class Chat:
                 handed_off = True
         except AgentError as exc:
             status = "cancelled" if exc.kind == "cancelled" else "error"
-            self._fail(turn, exc, exc.kind, exc.detail)
+            if status == "cancelled":
+                self._fail(turn, exc, exc.kind, exc.detail, stopped=self._record_stopped(turn))
+            else:
+                _log_failure(turn, exc.kind, exc.summary, exc.detail)
+                self._fail(turn, exc, exc.kind, exc.detail, failed=self._record_failed(turn))
         except (StoreError, sqlite3.Error, OSError) as exc:
-            self._fail(turn, exc, "storage", type(exc).__name__)
+            _log_failure(turn, "storage", type(exc).__name__, "")
+            self._fail(turn, exc, "storage", type(exc).__name__, failed=self._record_failed(turn))
         except Exception as exc:  # noqa: BLE001 - surface any failure to the page
-            print(f"wealth-chat: turn failed with {type(exc).__name__}", file=sys.stderr)
-            self._fail(turn, exc, "other", "")
+            _log_failure(turn, "other", type(exc).__name__, "")
+            self._fail(turn, exc, "other", "", failed=self._record_failed(turn))
         finally:
-            if not thread_saved and self.thread_id != thread_before:
+            if not thread_saved and not turn.recorded and self.thread_id != thread_before:
                 self._persist([], self.thread_id or "")  # a failed turn may still have opened the thread
             # Free the chat before announcing the end, so a reply sent the moment the answer shows is never "busy".
             self.lock.release()
@@ -643,11 +671,56 @@ class Chat:
         finally:
             turn.finish("done")
 
+    def _user_record(self, turn: Turn, status: str | None = None) -> dict[str, Any]:
+        user: dict[str, Any] = {"id": secrets.token_hex(6), "role": "user", "content": turn.message}
+        if turn.attachments:
+            user["attachments"] = [_public_attachment(a) for a in turn.attachments]
+        if status:
+            user["status"] = status
+        return user
+
+    def _record(self, turn: Turn, added: list[dict[str, Any]]) -> None:
+        self.messages = (self.messages + added)[-CONVERSATION_LIMIT:]
+        self._persist(added, self.thread_id or "")
+        turn.recorded = True
+
+    def _record_stopped(self, turn: Turn) -> dict[str, Any] | None:
+        """A stopped turn keeps what was already on screen: the person's words and the answer streamed so far.
+
+        The assistant message carries ``status: stopped`` (the page draws a quiet "Stopped" line under it). With
+        nothing streamed yet the person's message alone is kept, marked stopped. Returns the stopped reply.
+        """
+        partial = turn.partial.strip()
+        added: list[dict[str, Any]] = [] if turn.internal else [self._user_record(turn, None if partial else "stopped")]
+        reply = None
+        if partial:
+            reply = {"id": secrets.token_hex(6), "role": "assistant", "content": partial, "status": "stopped"}
+            if turn.memory:
+                reply["memory"] = list(turn.memory)
+            added.append(reply)
+        if added:
+            self._record(turn, added)
+        return reply
+
+    def _record_failed(self, turn: Turn) -> dict[str, Any] | None:
+        """An unanswered message stays in the transcript, marked failed, so a reload shows it with Retry."""
+        if turn.internal:
+            return None
+        user = self._user_record(turn, "failed")
+        self._record(turn, [user])
+        return user
+
     @staticmethod
-    def _fail(turn: Turn, exc: BaseException, kind: str, detail: str) -> None:
+    def _fail(turn: Turn, exc: BaseException, kind: str, detail: str, stopped: dict[str, Any] | None = None,
+              failed: dict[str, Any] | None = None) -> None:
         turn.exception = exc
         turn.error = {"kind": kind, "message": ERROR_TEXT.get(kind, ERROR_TEXT["other"]), "detail": detail or ""}
-        turn.emit("error", **turn.error)
+        extra: dict[str, Any] = {}
+        if stopped is not None:
+            extra["stopped"] = stopped  # the partial answer, now a saved message
+        if failed is not None:
+            extra["user_id"] = failed["id"]
+        turn.emit("error", **turn.error, **extra)
 
     def _memory_item(self, key: str) -> dict[str, str]:
         """A display item for a saved key; the page words it in the reader's language."""
@@ -812,6 +885,8 @@ def create_server(chat, port=8765, host="127.0.0.1"):
             try:
                 if url.path == "/":
                     return self.respond(200, Path(__file__).with_name("chat.html").read_bytes(), "text/html")
+                if url.path in ("/favicon.ico", "/favicon.svg"):
+                    return self.respond(200, FAVICON_SVG, "image/svg+xml")
                 if url.path == "/api/state":
                     lang = (parse_qs(url.query).get("lang") or [None])[0]
                     return self.respond(200, chat.state(lang))

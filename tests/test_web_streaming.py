@@ -138,7 +138,9 @@ def test_stop_cancels_running_turn_and_keeps_chat_usable(tmp_path, monkeypatch):
         assert events[-2]["type"] == "error" and events[-2]["kind"] == "cancelled"
         assert events[-1] == {"seq": events[-1]["seq"], "type": "done", "status": "cancelled"}
         state = json.load(urlopen(base + "/api/state", timeout=5))
-        assert state["messages"] == [] and state["turn"]["status"] == "cancelled"
+        # Nothing was written yet: the person's message stays, marked stopped, and shows once (not also as a turn).
+        assert [(m["role"], m["content"], m.get("status")) for m in state["messages"]] == [("user", "hi", "stopped")]
+        assert state["turn"] is None
         assert not chat.lock.locked()
 
 

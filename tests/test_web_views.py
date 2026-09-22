@@ -204,7 +204,7 @@ def test_page_draws_views_with_dom_and_svg_only():
     assert "viewDataTable(title, head, rows)" in view and "setAttribute('aria-hidden', 'true')" in view
     # Unknown is a dash plus a note, never zero.
     assert "return '—'" in _function("viewValue") and "STRINGS[lang].views.unknown" in view
-    assert "assistantMessage(item.content, { memory: item.memory, message: item, lang: spoken, views: item.views })" in PAGE
+    assert "assistantMessage(item.content, { memory: item.memory, message: item, lang: spoken, views: item.views," in PAGE
     assert "event.type === 'views'" in PAGE
 
 
