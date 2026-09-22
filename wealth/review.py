@@ -1602,16 +1602,17 @@ def _reference_input(ref: Mapping[str, Any] | None) -> dict | None:
         return None
     return {"low": ref.get("low", ref["rate"]), "high": ref.get("high", ref["rate"]), "unit": "decimal",
             "source": f"{ref['name']} {ref['percent']}% as of {ref['as_of']} ({origin_text(ref)}): {ref['source']}",
-            "as_of": ref["as_of"], "stale": ref["stale"]}
+            "as_of": ref["as_of"], "stale": ref["stale"], "fact_id": ref.get("fact_id")}
 
 
 def run_task(task: str, inputs: Mapping[str, Any], snapshot: Mapping[str, Any], ledger: Any, today: str,
              fact_history: Mapping[str, list] | None = None,
-             reference_rate: Callable[[str], Mapping[str, Any] | None] | None = None) -> dict:
+             reference_rate: Callable[[str, Mapping[str, Any]], Mapping[str, Any] | None] | None = None) -> dict:
     """Service entry for ``quarterly_review`` and ``fee_audit``.
 
-    ``reference_rate(currency)`` (:func:`wealth.rates.reference`) prices idle cash in the fee audit when the
-    inputs carry no ``cash_reference_rate``."""
+    ``reference_rate(currency, snapshot)`` (:func:`wealth.rates.reference`) prices idle cash in the fee audit
+    when the inputs carry no ``cash_reference_rate``; ``snapshot`` is the one the audit reads (inline ``facts``
+    included), and a saved rate it uses joins ``_evidence``."""
     if task not in TASKS:
         raise ValueError(f"review tasks are {', '.join(TASKS)}")
     inputs = dict(inputs)
@@ -1654,7 +1655,7 @@ def run_task(task: str, inputs: Mapping[str, Any], snapshot: Mapping[str, Any], 
         raise ValueError("holdings must be a list of {account_id, instrument_id, value}")
     cash_reference = inputs.get("cash_reference_rate")
     if cash_reference is None and reference_rate is not None:
-        cash_reference = _reference_input(reference_rate(currency))
+        cash_reference = _reference_input(reference_rate(currency, snapshot))
     report = audit(holdings, instruments, accounts, ledger if isinstance(ledger, Mapping) else None,
                    currency=currency, as_of=as_of, window_start=inputs.get("window_start"), residence=residence,
                    advisory=inputs.get("advisory") or (), cash_reference_rate=cash_reference,
@@ -1663,7 +1664,10 @@ def run_task(task: str, inputs: Mapping[str, Any], snapshot: Mapping[str, Any], 
     if extra_missing:
         report["missing"] = _unique(report["missing"] + extra_missing)
         report["status"] = "partial"
-    report["_evidence"] = sorted(set((sit or {}).get("evidence", {}).values()))
+    evidence = set((sit or {}).get("evidence", {}).values())
+    if (cash_reference or {}).get("fact_id") and any(s.get("title") == "Cash reference rate" for s in report["sources"]):
+        evidence.add(cash_reference["fact_id"])  # the saved rate priced the idle cash
+    report["_evidence"] = sorted(evidence)
     return report
 
 

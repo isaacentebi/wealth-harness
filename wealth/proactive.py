@@ -2127,7 +2127,8 @@ def weekly(situation: Mapping[str, Any], ledger: Mapping[str, Any] | None, snaps
         lines.append({"kind": "next_date", "data": {"id": upcoming["id"], "title": upcoming["title"], "due": upcoming["due"]}})
     return {"as_of": report["as_of"], "period": [start.isoformat(), day.isoformat()], "language": report["language"],
             "lines": lines[:WEEKLY_LINES], "unknown": report["unknown"],
-            "instructions": "Phrase each line as one short sentence with its numbers; no advice beyond the items."}
+            "instructions": "Phrase each line as one short sentence with its numbers; no advice beyond the items.",
+            "_all": report["_all"]}
 
 
 def public(report: Mapping[str, Any]) -> dict:

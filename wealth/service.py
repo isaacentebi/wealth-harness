@@ -258,6 +258,10 @@ def _published_rate(reference) -> dict | None:
     return {"rate": rate, "source": reference["source"]}
 
 
+# Saved facts a proactive item can price with outside the situation model (it records only what it reads).
+_ITEM_RATE_KEYS = frozenset({"cash_reference_rate", "cash_yield"})
+
+
 def _saved_reference_rate(snapshot: dict, today: str) -> tuple[dict | None, str | None]:
     """The saved ``cash_reference_rate`` fact a calculation may use (not inferred, not past its review date,
     like every other input) and, when it names no currency, the household's single currency if there is one."""
@@ -1333,6 +1337,9 @@ class WealthService:
                 with WealthStore(self.db_path) as store:
                     state = store.auxiliary(client_id, "monitor").get(PROACTIVE_STATE) or {}
             result = run(sit, ledger, snapshot, as_of, state=state, **options)
+        # Facts an item priced with that the picture does not read (idle_yield's saved rates) are evidence too.
+        cited = {key for item in result.get("_all") or [] for key in item.get("sources") or []} & _ITEM_RATE_KEYS
+        rate_evidence = [f["id"] for f in snapshot["facts"] if f["key"] in cited]
         result = proactive.public(result)
         if market is not None:
             result["stale_prices"] = sit.get("stale_prices") or []
@@ -1342,7 +1349,8 @@ class WealthService:
                 "assumptions": ["Triggers read only known data; a trigger with missing inputs is listed under "
                                 "result.unknown and does not fire.",
                                 "Calendar dates are statutory defaults; weekends, holidays and SAT/IRS relief can move them."],
-                "_evidence": [sit["evidence"][k] for k in sorted(sit["evidence"])]}
+                "_evidence": [sit["evidence"][k] for k in sorted(sit["evidence"])] + rate_evidence}
+
     def _order_ticket(self, inputs: dict, client_id: str | None, snapshot: dict) -> dict:
         """Propose an order ticket, or read one (inputs {ticket_id}).  Never submits, never refreshes."""
         from .execution import tickets
@@ -1418,8 +1426,9 @@ class WealthService:
             inputs, ledger, market = self._review_market(task, inputs, snapshot, ledger, today)
         on = str(inputs.get("as_of") or today)[:10]
 
-        def reference_rate(currency: str) -> dict | None:
-            saved, household = _saved_reference_rate(snapshot, today)
+        def reference_rate(currency: str, audited: dict) -> dict | None:
+            # ``audited`` is the snapshot the review reads: the client's, or one built from inline facts.
+            saved, household = _saved_reference_rate(audited, today)
             return rates_module.reference(currency, fact=saved, db_path=self.db_path, on=on, household=household)
         report = review.run_task(task, inputs, snapshot, ledger, today, fact_history=history,
                                  reference_rate=reference_rate)

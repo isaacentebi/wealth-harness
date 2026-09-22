@@ -551,6 +551,57 @@ def test_a_one_shot_process_exits_without_waiting_for_a_refresh(tmp_path):
     assert time.monotonic() - started < 15
 
 
+US = {"name": "Ann", "residence": {"country": "US"}, "tax_residence": ["US"], "us_person": True}
+_AUDIT = {k: v for k, v in CATALOG["fee_audit"]["variants"]["holdings_only"].items() if k != "cash_reference_rate"}
+_TBILL_45 = {"low": 4.5, "high": 4.5, "unit": "percent", "source": "3-month T-bill, US Treasury", "currency": "USD"}
+
+
+def _drag(report):
+    drag = next(c for c in report["result"]["components"] if c["id"] == "cash_drag")
+    return float(drag["annual_high"]), next(s for s in report["sources"] if s["title"] == "Cash reference rate")
+
+
+def test_a_clientless_fee_audit_uses_the_rate_in_its_inline_facts(db):
+    seed(db, "us")  # a fetched T-bill is cached: the inline rate must still win
+    report = WealthService(db).run("fee_audit", {**_AUDIT, "as_of": "2026-09-22",
+                                                 "facts": [{"key": "cash_reference_rate", "value": _TBILL_45}]})
+    high, source = _drag(report)
+    assert high == pytest.approx(5000 * 0.045, abs=0.01) and "stored cash_reference_rate" in source["ref"]
+    plain = WealthService(db).run("fee_audit", {**_AUDIT, "as_of": "2026-09-22"})
+    assert _drag(plain)[0] == pytest.approx(5000 * 0.04113, abs=0.01)
+
+
+def test_a_saved_rate_that_prices_the_fee_audit_is_in_its_evidence(db):
+    service, fact_id = _client(db, US, _TBILL_45)
+    report = service.run("fee_audit", {**_AUDIT, "as_of": "2026-09-22"}, client_id="ana")
+    assert _drag(report)[0] == pytest.approx(5000 * 0.045, abs=0.01)
+    assert fact_id in report["evidence_ids"]
+    assert "cash_reference_rate" not in {e["key"] for e in report["excluded_evidence"]}
+    supplied = service.run("fee_audit", {**_AUDIT, "as_of": "2026-09-22",
+                                         "cash_reference_rate": {**_TBILL_45, "low": 4, "high": 4}}, client_id="ana")
+    assert fact_id not in supplied["evidence_ids"]  # the inline rate priced it, not the saved one
+
+
+def test_a_saved_rate_that_prices_idle_cash_today_is_in_its_evidence(db):
+    service, fact_id = _client(db, MX, {"low": 7, "high": 7, "unit": "percent", "source": "CETES en mi banco",
+                                        "currency": "MXN"})
+    source = {"kind": "user", "ref": "chat", "observed_on": "2026-08-01"}
+    service.remember("ana", [{"key": "spending.monthly", "value": {"essential": 20000, "currency": "MXN"},
+                              "source": source},
+                             {"key": "cash.nu", "value": {"amount": 400000, "currency": "MXN", "purpose": "reserve"},
+                              "source": source},
+                             {"key": "reserve", "value": {"target_months": 6}, "source": source},
+                             {"key": "cash_yield", "value": {"value": 2, "unit": "percent"}, "source": source}])
+    with WealthStore(db) as store:
+        yield_id = next(f["id"] for f in store.snapshot("ana")["facts"] if f["key"] == "cash_yield")
+    for task in ("today", "weekly"):
+        report = service.run(task, {"as_of": "2026-09-22"}, client_id="ana")
+        assert {fact_id, yield_id} <= set(report["evidence_ids"]), task
+    today = service.run("today", {"as_of": "2026-09-22"}, client_id="ana")["result"]
+    item = next(i for i in today["today"] + today["upcoming"] if i["kind"] == "idle_yield")
+    assert item["data"]["reference_origin"] == "stored cash_reference_rate"
+
+
 def test_a_refresh_writes_all_its_series_in_one_transaction(db, monkeypatch):
     calls = []
     original = WealthStore.put_market
