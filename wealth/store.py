@@ -214,7 +214,10 @@ _MARKET_SCHEMA = (
 # reply is on screen, are filled in later.  Content and attachment names are redacted with
 # ``ingest.redact.redact_text`` before they are written (RFC, CURP and SSN removed; CLABE,
 # card and account numbers masked to their last four digits).  Rows disappear only with
-# their client (``delete_client`` cascades) and travel in ``export_client``.
+# their client (``delete_client`` cascades) and travel in ``export_client``.  ``status`` marks
+# a turn that did not finish: ``stopped`` (the person stopped it; the words streamed so far are
+# the assistant message) or ``failed`` (the person's message went unanswered).  NULL is a
+# finished exchange; the column is added to older databases on open.
 _CONVERSATION_SCHEMA = (
     """CREATE TABLE IF NOT EXISTS conversations (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -235,7 +238,8 @@ _CONVERSATION_SCHEMA = (
     attachments_json TEXT,
     memory_json TEXT,
     views_json TEXT,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    status TEXT
 )""",
     "CREATE INDEX IF NOT EXISTS conversation_messages_client "
     "ON conversation_messages(client_id, conversation_id, seq)",
@@ -247,6 +251,7 @@ BEGIN SELECT RAISE(ABORT, 'conversation messages are append-only'); END""",
 WHEN EXISTS (SELECT 1 FROM clients WHERE id = OLD.client_id)
 BEGIN SELECT RAISE(ABORT, 'conversation messages are append-only'); END""",
 )
+MESSAGE_STATUSES = frozenset({"stopped", "failed"})  # an unfinished turn's mark (NULL: finished)
 CONVERSATION_LIMIT = 100  # messages of the current conversation loaded on startup
 _ORDER_EVENTS = frozenset({"ticket", "checks", "confirm", "blocked", "request", "response", "status",
                            "cancel", "fill_posted", "live_acknowledged", "discarded", "nonce_rejected", "error"})
@@ -963,7 +968,7 @@ class WealthStore:
                     self._migrate_orders()
                 if not self._has_market():
                     self._migrate_market()
-                if not self._has_conversations():
+                if not self._has_conversations() or not self._has_message_status():
                     self._migrate_conversations()
                 return
             self._db.execute("BEGIN IMMEDIATE")
@@ -983,6 +988,9 @@ class WealthStore:
             "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'conversation_messages_append_only_delete'"
         ).fetchone() is not None
 
+    def _has_message_status(self) -> bool:
+        return any(row[1] == "status" for row in self._db.execute("PRAGMA table_info(conversation_messages)"))
+
     def _migrate_conversations(self) -> None:
         """Add the chat conversation tables (idempotent and additive; no version change)."""
 
@@ -991,6 +999,8 @@ class WealthStore:
             if not self._has_conversations():
                 for statement in _CONVERSATION_SCHEMA:
                     self._db.execute(statement)
+            if not self._has_message_status():
+                self._db.execute("ALTER TABLE conversation_messages ADD COLUMN status TEXT")
             self._db.execute("COMMIT")
         except Exception:
             if self._db.in_transaction:
@@ -2383,6 +2393,8 @@ class WealthStore:
             value = json.loads(row[column]) if row[column] else None
             if value:
                 message[field] = value
+        if "status" in row.keys() and row["status"] in MESSAGE_STATUSES:
+            message["status"] = row["status"]
         return message
 
     def _conversation_rows(self, client_id: str) -> list[dict[str, Any]]:
@@ -2461,9 +2473,12 @@ class WealthStore:
             extras = (attachments, list(message.get("memory") or []), list(message.get("views") or []))
             for extra in extras:
                 _validate_json(extra, "message")
+            status = message.get("status")
+            if status is not None and status not in MESSAGE_STATUSES:
+                raise ValidationError("a conversation message status must be stopped or failed")
             rows.append((_required_text(message.get("id"), "message id"), message["role"],
                          redact_text(str(message.get("content") or "")),
-                         *(_json(extra) if extra else None for extra in extras)))
+                         *(_json(extra) if extra else None for extra in extras), status))
         now = _utc_now()
         with self._lock:
             self._begin()
@@ -2475,7 +2490,8 @@ class WealthStore:
                 for row in rows:
                     self._db.execute(
                         "INSERT INTO conversation_messages(client_id, conversation_id, message_id, role, content, "
-                        "attachments_json, memory_json, views_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "attachments_json, memory_json, views_json, status, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (client_id, conversation_id, *row, now))
                 if thread_id is not None:
                     self._db.execute(
