@@ -957,7 +957,9 @@ def _stream_process(
 
     env = child_env()
     scratch: Path | None = None
-    if cwd is ISOLATED:
+    if cwd is ISOLATED and _appserver.shared_home():
+        cwd = scratch = _appserver.scratch_dir()  # the person's own Codex home, still no project .codex
+    elif cwd is ISOLATED:
         try:
             env["CODEX_HOME"] = str(_appserver.codex_home(require_login="CODEX_API_KEY" not in env))
         except _appserver.RuntimeUnavailable as exc:

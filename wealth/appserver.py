@@ -68,6 +68,9 @@ CODEX_COMMAND: tuple[str, ...] = ("codex",)
 RUNTIMES = ("exec", "appserver")
 RUNTIME_ENV = "WEALTH_RUNTIME"
 HOME_ENV = "WEALTH_CODEX_HOME"
+SHARED_HOME_ENV = "WEALTH_CODEX_SHARED_HOME"
+"""``1``: run ``codex exec`` with the user's own Codex home (for a login kept in the OS keyring, which a
+private home cannot share). The user's AGENTS.md and skills then reach Wealth; app-server is not used."""
 HANDSHAKE_SECONDS = 30.0
 CLOSE_SECONDS = 5.0
 CLIENT_INFO = {"name": "wealth", "title": "Wealth", "version": "1"}
@@ -83,8 +86,15 @@ class RuntimeUnavailable(RuntimeError):
     """app-server could not start a turn (not supported, or failed before the thread existed)."""
 
 
+def shared_home() -> bool:
+    """Whether the person chose to run exec with their own Codex home (``WEALTH_CODEX_SHARED_HOME=1``)."""
+    return os.environ.get(SHARED_HOME_ENV, "").strip() == "1"
+
+
 def runtime_setting() -> str:
     """``exec``, ``appserver`` or ``auto`` (the default: app-server when it works, else exec)."""
+    if shared_home():
+        return "exec"
     value = os.environ.get(RUNTIME_ENV, "").strip().lower()
     return value if value in RUNTIMES else "auto"
 
@@ -252,7 +262,11 @@ def codex_home(*, require_login: bool = True) -> Path:
     _check_parents(home)
     auth = user / "auth.json"
     if require_login and not auth.is_file():
-        raise RuntimeUnavailable("no auth.json to share (Codex signed out, or keyring credentials)")
+        raise RuntimeUnavailable(
+            "no auth.json to share: Codex is signed out, or keeps its login in the system keyring, which "
+            "Wealth's private Codex home cannot read. Run `codex login`; for a keyring login either set "
+            "CODEX_API_KEY, set cli_auth_credentials_store = \"file\" in ~/.codex/config.toml and log in again, "
+            f"or set {SHARED_HOME_ENV}=1 to use your own Codex home (its AGENTS.md and skills then reach Wealth)")
     uid = os.getuid() if hasattr(os, "getuid") else None
 
     def check_directory() -> None:

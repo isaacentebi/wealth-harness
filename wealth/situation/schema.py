@@ -406,7 +406,8 @@ def _liability(value: dict, key: str) -> None:
 
 # Optional liability fields only the debt engine (wealth/debt.py) reads.
 DEBT_ENGINE_FIELDS = ("cat", "minimum_payment", "iva_on_interest", "denomination", "balance_units", "monthly_payment_units",
-                      "unit_value_mxn", "unit_growth_annual", "months_paid", "original_principal")
+                      "unit_value_mxn", "unit_growth_annual", "months_paid", "original_principal",
+                      "origination_date", "start_date", "liberation_eligible", "update_month", "credit_limit")
 
 
 def _purpose(value: Any, path: str) -> None:

@@ -138,6 +138,13 @@ anything is written: it must not be, contain or be inside your own Codex home
 `$HOME` every parent must belong to you or root and not be writable by others
 (a root-owned sticky `/tmp` is fine).
 
+A Codex login kept in the system keyring (no `auth.json`) cannot be shared with
+that private home. Either sign in with `CODEX_API_KEY`, switch Codex to file
+credentials (`cli_auth_credentials_store = "file"` in `~/.codex/config.toml`,
+then `codex login`), or set `WEALTH_CODEX_SHARED_HOME=1`: Wealth then uses
+`codex exec` with your own Codex home (still in an empty working directory), so
+your `~/.codex` AGENTS.md and skills reach its turns, and answers don't stream.
+
 Before any app-server thread starts, Wealth reads the effective config back
 (`config/read` with `includeLayers`) and refuses the turn if any layer but its
 own `-c` flags is non-empty (system, managed, MDM or project config), if

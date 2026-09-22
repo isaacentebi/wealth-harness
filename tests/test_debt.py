@@ -557,3 +557,11 @@ def test_us_student_loan_and_standard_deduction_hurdle(service):
     hurdle = run(service, {**mortgage, "itemizes": True, "standard_deduction": 30000, "other_itemized_deductions": 10000})
     assert any("standard deduction" in a for a in itemized["assumptions"])
     assert hurdle["result"]["guaranteed"]["after_tax_rate"] > itemized["result"]["guaranteed"]["after_tax_rate"]
+
+
+@pytest.mark.parametrize("bad", [0, -100, "abc"])
+def test_a_refinance_offer_needs_a_positive_payment(service, bad):
+    with pytest.raises(ValueError, match="monthly_payment"):
+        service.run("debt", {"mode": "refinance", "as_of": AS_OF,
+                             "liabilities": EXAMPLES["car_loan_refinance"]["liabilities"],
+                             "offer": {"annual_rate": 0.05, "monthly_payment": bad}})

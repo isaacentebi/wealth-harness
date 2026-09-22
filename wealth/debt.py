@@ -1193,7 +1193,10 @@ def refinance(debts: list[dict], offer: Mapping[str, Any], today: date) -> dict:
     current_payment = sum((d["payment"] if d["payment"] is not None else _first_minimum(d) for d in debts), ZERO)
     term = offer.get("term_months")
     if offer.get("monthly_payment") is not None:
-        payment, basis = D(offer["monthly_payment"]), "offer's payment"
+        payment = _money_in(offer["monthly_payment"], "offer.monthly_payment")
+        if payment is None or payment <= 0:
+            raise ValueError("offer.monthly_payment must be a positive amount")
+        basis = "offer's payment"
     elif term is not None:
         if not isinstance(term, int) or term <= 0:
             raise ValueError("offer.term_months must be a positive whole number")

@@ -548,3 +548,15 @@ def test_evals_capture_both_runtimes(monkeypatch):
     assert [i[0] for i in agent._stream_appserver(["codex"], "p", 1, None, resume_thread=None)] == \
         ["line", "delta", "exit"]
     assert agent.parse_events("\n".join(evals_run._captured.lines)).tools == ("web.search",)
+
+
+def test_a_keyring_login_gets_an_actionable_message_and_a_shared_home_opt_in(tmp_path, monkeypatch):
+    from wealth import appserver
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setenv(appserver.HOME_ENV, str(tmp_path / "wealth-home"))
+    (tmp_path / ".codex").mkdir()
+    with pytest.raises(appserver.RuntimeUnavailable, match="keyring"):
+        appserver.codex_home()
+    monkeypatch.setenv(appserver.SHARED_HOME_ENV, "1")
+    assert appserver.shared_home() and appserver.runtime_setting() == "exec"
