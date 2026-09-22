@@ -5,7 +5,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any, Mapping
 
-from .model import D, _as_date, add_months, num, payoff
+from .model import D, _as_date, add_months, interest_iva, num, payoff
 
 ORDERS = ("avalanche", "snowball", "custom")
 
@@ -23,13 +23,14 @@ def _debts(rows: list[Mapping[str, Any]]) -> tuple[list[dict], list[dict]]:
             missing.append({"key": f"liability.{name}", "reason": "missing", "detail": f"{name} needs {', '.join(gaps)}"})
             continue
         ready.append({"id": name, "name": row.get("name") or row.get("kind") or name, "balance": balance, "rate": rate,
-                      "minimum": payment, "currency": row.get("currency")})
+                      "minimum": payment, "currency": row.get("currency"), "iva": interest_iva(row)})
     return ready, missing
 
 
 def _simulate(debts: list[dict], budget: Decimal, order: list[str], today: date, max_months: int = 600) -> dict:
     balances = {d["id"]: d["balance"] for d in debts}
-    rates = {d["id"]: d["rate"] / 12 for d in debts}
+    # IVA on interest where it applies, as the debt engine charges it: one set of numbers everywhere.
+    rates = {d["id"]: d["rate"] / 12 * (1 + d.get("iva", Decimal(0))) for d in debts}
     minimum = {d["id"]: d["minimum"] for d in debts}
     paid_off: dict[str, int] = {}
     interest = Decimal(0)
@@ -97,7 +98,7 @@ def debt_payoff(liabilities: list[Mapping[str, Any]], monthly_amount: Any, curre
         if not isinstance(order, list) or set(order) != known or len(order) != len(known):
             raise ValueError(f"order must list each debt id exactly once: {sorted(known)}")
     chosen = order or [d["id"] for d in sorted(ready, key=lambda d: (d["balance"], d["id"]))]
-    minimums_only = [{"id": d["id"], **payoff(d["balance"], d["rate"], d["minimum"], today)} for d in ready]
+    minimums_only = [{"id": d["id"], **payoff(d["balance"], d["rate"], d["minimum"], today, iva=d["iva"])} for d in ready]
     best = _simulate(ready, budget, avalanche, today)
     other = _simulate(ready, budget, chosen, today)
     saved = None

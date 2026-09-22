@@ -36,7 +36,8 @@ IPS_CADENCES = ("annual", "semiannual", "quarterly")  # unsure: answered "not su
 SCHEMA: dict[str, dict[str, str]] = {
     "client.profile": {
         "name?": "what the person wants to be called",
-        "birth_year?": "YYYY (not age, so it stays true)",
+        "birth_year?": "YYYY (not age, so it stays true): 'tengo 34 años' is the Date's year minus 34",
+        "birth_year_approximate?": "true when birth_year comes from a stated age",
         "residence?": "{country: ISO-2 (MX, US), region?: state, city?}",
         "tax_residence?": "list of ISO-2 countries the person stated; never inferred",
         "citizenship?": "list of ISO-2 countries", "us_person?": "true|false",
@@ -53,16 +54,20 @@ SCHEMA: dict[str, dict[str, str]] = {
     "spending.monthly": {
         "essential?": "number", "discretionary?": "number", "total?": "number (at least one of the three)",
         "currency": "ISO 4217", "approximate?": "true|false",
+        "partial?": "true when essential (or discretionary) is only the items named (rent alone); a total is "
+                    "always the whole",
+        "components?": "the items the figure covers in their words ([\"renta\"]); a list means partial",
     },
     "cash.<id>": {
         "amount": "number (omit only with balance_unknown: true)", "currency": "ISO 4217",
         "institution?": "bank or fintech name", "balance_unknown?": "true when they have it but the amount is not known",
         "purpose?": "reserve|general|goal:<goal id>", "liquid?": "true (default for cash) | false",
         "name?": "their words", "approximate?": "true|false",
+        "annual_rate?": "decimal yield they stated (0.15 for 15%)",
     },
     "liability.<id>": {
         "kind": "|".join(LIABILITY_KINDS), "balance": "number owed", "currency": "ISO 4217",
-        "annual_rate?": "decimal (0.13)", "payment?": "number per payment_frequency",
+        "annual_rate?": "decimal (0.45 for '45%'; annual unless they say monthly)", "payment?": "number per payment_frequency",
         "payment_frequency?": "|".join(PAYMENT_FREQUENCIES), "remaining_term_months?": "integer",
         "maturity?": "YYYY-MM-DD", "lender?": "name", "in_spending?": "true if the payment is inside spending.monthly",
         "approximate?": "true|false",
@@ -78,6 +83,7 @@ SCHEMA: dict[str, dict[str, str]] = {
     "investment.<id>": {
         "amount": "number (a stated balance; statements replace it)", "currency": "ISO 4217",
         "institution?": "name", "kind?": "brokerage|retirement|afore|fund|other", "approximate?": "true|false",
+        "annual_rate?": "decimal yield or return they stated (0.11 for CETES at 11%)",
         "purpose?": "reserve|general|goal:<goal id> (only as the person stated it)",
         "liquidity_days?": "days to get the money out (1 daily, 28 CETES at 28 days); counts toward the reserve "
                            "when 31 or less",
@@ -300,6 +306,7 @@ def _profile(value: dict, key: str) -> None:
         _fail(f"{key}.currencies", "must be a list of ISO currency codes such as [\"MXN\", \"USD\"]")
     if value.get("reporting_currency") is not None:
         _currency(value["reporting_currency"], f"{key}.reporting_currency")
+    _bool(value.get("birth_year_approximate"), f"{key}.birth_year_approximate")
     _enum(value.get("language"), f"{key}.language", LANGUAGES)
     _text(value.get("timezone"), f"{key}.timezone", limit=64)
 
@@ -321,7 +328,8 @@ def _income(value: dict, key: str) -> None:
 
 
 def _spending(value: dict, key: str) -> None:
-    _object(value, key, {"essential", "discretionary", "total", "currency", "approximate", "note"})
+    _object(value, key, {"essential", "discretionary", "total", "currency", "approximate", "note", "partial",
+                         "components"})
     for name in ("essential", "discretionary", "total"):
         _number(value.get(name), f"{key}.{name}", required=False)
     if all(value.get(n) is None for n in ("essential", "discretionary", "total")):
@@ -329,11 +337,17 @@ def _spending(value: dict, key: str) -> None:
     _currency(value.get("currency"), f"{key}.currency")
     _bool(value.get("approximate"), f"{key}.approximate")
     _text(value.get("note"), f"{key}.note")
+    _bool(value.get("partial"), f"{key}.partial")
+    components = value.get("components")
+    if components is not None and (not isinstance(components, list) or not all(
+            isinstance(c, str) and c.strip() and len(c) <= 80 for c in components)):
+        _fail(f"{key}.components", "must be a list of short item names such as [\"renta\"]")
 
 
 def _cash(value: dict, key: str) -> None:
     _object(value, key, {"amount", "currency", "institution", "purpose", "liquid", "name", "approximate", "note",
-                         "balance_unknown"})
+                         "balance_unknown", "annual_rate"})
+    _rate(value.get("annual_rate"), f"{key}.annual_rate")
     _bool(value.get("balance_unknown"), f"{key}.balance_unknown")
     _number(value.get("amount"), f"{key}.amount", required=value.get("balance_unknown") is not True)
     _currency(value.get("currency"), f"{key}.currency")
@@ -403,7 +417,8 @@ def _purpose(value: Any, path: str) -> None:
 
 def _investment(value: dict, key: str) -> None:
     _object(value, key, {"amount", "currency", "institution", "kind", "name", "approximate", "note",
-                         "balance_unknown", "purpose", "liquidity_days"})
+                         "balance_unknown", "purpose", "liquidity_days", "annual_rate"})
+    _rate(value.get("annual_rate"), f"{key}.annual_rate")
     _purpose(value.get("purpose"), f"{key}.purpose")
     days = value.get("liquidity_days")
     if days is not None and (isinstance(days, bool) or not isinstance(days, int) or not 0 <= days <= 36600):

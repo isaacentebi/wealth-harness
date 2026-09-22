@@ -107,7 +107,8 @@ def test_payoff_date_when_payment_or_term_is_known(tmp_path):
         for k, v in facts.items()]}, None, date(2026, 9, 21))
     car = sit["liabilities"][0]
     assert car["missing"] == [] and car["payoff"]["status"] == "ready"
-    assert car["payoff"]["months"] == 13 and car["payoff"]["date"] == "2027-10"
+    # The debt engine's schedule: 16% IVA on the interest of a peso car loan adds a month.
+    assert car["payoff"]["months"] == 14 and car["payoff"]["date"] == "2027-11"
     assert sit["cash_flow"]["surplus"] == 35000 and sit["cash_flow"]["complete"]
     by_term = situation.build({"client": {"revision": 1}, "facts": [
         {"key": "liability.car", "value": {**CANONICAL["liability.car"], "remaining_term_months": 24},

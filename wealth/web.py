@@ -446,7 +446,8 @@ class Chat:
         reveal = None
         if result.pop("completed_now"):
             sit = service.situation(self.client_id)
-            lang = language or sit["profile"].get("language") or "es"
+            lang = _onboarding.reveal_language(sit, [m.get("content") for m in self.messages if m.get("role") == "user"],
+                                               language)  # the conversation's language, then the saved one
             request = REVEAL_REQUEST.format(language="Mexican Spanish" if lang == "es" else "English")
             if uploads:
                 request += REVEAL_STATEMENTS

@@ -509,7 +509,8 @@ def _spending(facts: _Facts, ledger: Mapping[str, Any] | None, fx: _FX, currency
         facts.used["plan.resources"] = facts.all["plan.resources"].get("id")
     view = {"source": None, "key": key, "currency": currency, "total": None, "essential": None,
             "discretionary": None, "approximate": False, "legacy": legacy, "stated": None, "ledger_months": None,
-            "complete": True, "missing_fx": [], "essential_rule": finmath.ESSENTIAL_RULE}
+            "complete": True, "missing_fx": [], "essential_rule": finmath.ESSENTIAL_RULE,
+            "partial": False, "components": [], "known_part": None}
     if stated:
         cur = stated.get("currency")
         conv = {n: fx.convert(D(stated.get(n)), cur, currency) for n in ("total", "essential", "discretionary")}
@@ -521,15 +522,28 @@ def _spending(facts: _Facts, ledger: Mapping[str, Any] | None, fx: _FX, currency
             view["missing_fx"] = [f"{cur}/{currency}"]
         view.update(source="stated", approximate=bool(stated.get("approximate")),
                     total=num(conv["total"]), essential=num(conv["essential"]), discretionary=num(conv["discretionary"]))
+        # One named item ("pago 12 mil de renta") is not all essentials: it is kept as a known part, never used
+        # as the spending behind the surplus, the savings rate or reserve months.  A total is always the whole.
+        components = [c for c in stated.get("components") or [] if isinstance(c, str)]
+        partial = stated.get("partial") is True or (bool(components) and stated.get("partial") is not False)
+        if partial:
+            view.update(partial=True, components=components,
+                        known_part=num(sum((v for n, v in conv.items() if n != "total" and v is not None), Decimal(0))),
+                        essential=None, discretionary=None,
+                        total=view["total"] if stated.get("total") is not None else None)
     if from_ledger:
+        view.update(partial=False, components=[], known_part=None)
         view.update(source="ledger", total=num(from_ledger["total"]), essential=num(from_ledger["essential"]),
                     discretionary=num(from_ledger["discretionary"]), approximate=False,
                     ledger_months=from_ledger["months"], ledger_period=[from_ledger["start"], from_ledger["end"]],
                     missing_fx=from_ledger["missing_fx"], complete=not from_ledger["missing_fx"])
     # The amount used for the monthly flow and for reserve months.
     view["complete"] = not view["missing_fx"]
-    view["monthly"] = view["total"] if view["total"] is not None else view["essential"]
-    view["monthly_basis"] = "total" if view["total"] is not None else "essential" if view["essential"] is not None else None
+    # Only a total is the month's spending: with essentials alone the rest is unknown, so the surplus and the
+    # savings rate are unknown too (asked, never computed from part of the spending).
+    view["monthly"] = view["total"]
+    view["monthly_basis"] = "total" if view["total"] is not None else None
+    # Essentials size the reserve; a partial figure (one item) was cleared above, so it never does.
     view["essential_for_reserve"] = view["essential"] if view["essential"] is not None else view["total"]
     return view
 
@@ -747,26 +761,38 @@ def _dedupe_liabilities(items: list[dict]) -> tuple[list[dict], list[tuple[dict,
 
 
 def payoff(balance: Decimal | None, annual_rate: Decimal | None, monthly_payment: Decimal | None,
-           today: date, *, max_months: int = 600) -> dict:
-    """Months, date and interest to repay ``balance`` at a fixed monthly payment."""
+           today: date, *, iva: Decimal | None = None, max_months: int = 600) -> dict:
+    """Months, date and cost to repay ``balance`` at a fixed monthly payment (the debt engine's schedule).
+
+    ``iva`` is the IVA charged on interest (0.16 on Mexican consumer credit; see ``interest_iva``).
+    ``interest`` is what the debt costs: interest plus that IVA, as ``debt amortize`` reports it.
+    """
+    from ..debt import _schedule  # lazy: the debt engine imports this module
     if balance is None or annual_rate is None or monthly_payment is None:
         return {"status": "unknown"}
     if balance <= 0:
         return {"status": "paid", "months": 0, "date": today.isoformat(), "interest": 0}
-    rate = annual_rate / 12
-    if monthly_payment <= balance * rate:
+    tax = iva or Decimal(0)
+    if monthly_payment <= balance * annual_rate / 12 * (1 + tax):
         return {"status": "never", "detail": "the payment does not cover the monthly interest"}
-    remaining, interest, months = balance, Decimal(0), 0
-    while remaining > 0 and months < max_months:
-        charge = remaining * rate
-        interest += charge
-        remaining = remaining + charge - monthly_payment
-        months += 1
-    if remaining > 0:
+    plan = _schedule(balance, lambda _m: annual_rate, tax, lambda _m, _b, _c: monthly_payment, today,
+                     max_months=max_months)
+    if plan["status"] != "ready":
         return {"status": "never", "detail": f"not repaid within {max_months} months"}
-    # The last payment is smaller (what is left plus that month's interest); the interest is unchanged.
-    return {"status": "ready", "months": months, "date": add_months(today, months).isoformat()[:7],
-            "interest": num(interest)}
+    out = {"status": "ready", "months": plan["months"], "date": plan["date"],
+           "interest": num(plan["interest"] + plan["iva"])}
+    if tax:
+        out.update(interest_only=num(plan["interest"]), iva=num(plan["iva"]), iva_rate=num(tax, 4))
+    return out
+
+
+def interest_iva(item: Mapping[str, Any]) -> Decimal:
+    """IVA on this debt's interest, as the debt engine charges it (16% on MXN consumer credit, 0 on home credit)."""
+    from ..debt import _iva, _kind  # lazy: the debt engine imports this module
+    try:
+        return _iva(item, _kind(item), item.get("currency"))[0]
+    except ValueError:
+        return Decimal(0)
 
 
 def annuity_payment(balance: Decimal, annual_rate: Decimal, months: int) -> Decimal:
@@ -788,19 +814,22 @@ def _liability_view(item: dict, fx: _FX, currency: str | None, today: date) -> d
     if term is None and maturity and maturity > today:
         term = finmath.months_between(today, maturity)
     payment_basis = "stated" if monthly is not None else None
+    iva = interest_iva(item)
     if monthly is None and balance is not None and rate is not None and isinstance(term, int) and term > 0:
-        monthly, payment_basis = annuity_payment(balance, rate, term), "from remaining term"
+        # The payment that clears it in the remaining term, IVA on interest included (as the debt engine does).
+        monthly, payment_basis = annuity_payment(balance, rate * (1 + iva), term), "from remaining term"
     missing = []
     if rate is None:
         missing.append("annual_rate")
     if monthly is None:
         missing.append("payment or remaining_term_months")
-    plan = payoff(balance, rate, monthly, today) if not missing else {"status": "unknown"}
+    plan = payoff(balance, rate, monthly, today, iva=iva) if not missing else {"status": "unknown"}
     converted = fx.convert(balance, item.get("currency"), currency)
     return {
         "id": item["id"], "key": item["key"], "kind": item.get("kind") or "other", "name": item.get("name"),
         "lender": item.get("lender"), "balance": num(balance), "currency": item.get("currency"),
         "value": num(converted), "annual_rate": num(rate, 6), "monthly_payment": num(monthly),
+        "iva_on_interest": num(iva, 4),
         "payment_basis": payment_basis,
         # True: the payment is already inside spending.monthly; False: it is not; None: nobody said.
         "in_spending": item["in_spending"] if isinstance(item.get("in_spending"), bool) else None,
@@ -1659,6 +1688,23 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
     if any(r["balance_unknown"] and r["counted"] and r["liquid"] and r["purpose"] in (None, "general", "reserve")
            and r["key"] not in goal_accounts for r in (*cash_rows, *(i for i in investments if i.get("cash_like")))):
         reserve_amount = None  # money they hold but did not size: the reserve is unknown, not empty
+    # Money they said is set aside for a goal ("50 mil apartados para el enganche") without naming the account
+    # is inside the undesignated cash above: it is taken out, so the reserve never counts the down payment.
+    set_aside, set_aside_goals = Decimal(0), []
+    if reserve_amount is not None and basis != "designated":
+        earmarked = {r.get("purpose") for r in (*cash_rows, *investments)}
+        for g in goals:
+            if g["status"] != "active" or g.get("funded_amount") is None or g.get("accounts") \
+                    or f"goal:{g['id']}" in earmarked:
+                continue
+            converted = fx.convert(D(g["funded_amount"]), g.get("currency") or currency, currency)
+            if converted is None:
+                reserve_amount = None  # part of the cash is set aside in a currency we cannot convert
+                break
+            set_aside += converted
+            set_aside_goals.append(g["id"])
+        if reserve_amount is not None and set_aside:
+            reserve_amount = max(reserve_amount - set_aside, Decimal(0))
     essential = D(spending["essential_for_reserve"])
     months = reserve_amount / essential if reserve_amount is not None and essential else None
     target_amount = D(reserve_fact.get("target_amount"))
@@ -1674,11 +1720,20 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
         for r in designated:
             if r["part"] == "instrument":
                 parts.append({"kind": "instrument", "label": r["label"], "value": r["value"], "sources": [r["key"]]})
+        # The set-aside money comes out of cash first, then the instruments, so the parts still add up.
+        left = set_aside
+        for part in parts:
+            taken = min(left, D(part["value"]) or Decimal(0))
+            if taken > 0:
+                part["value"], left = num(D(part["value"]) - taken), left - taken
+        parts = [p for p in parts if (D(p["value"]) or Decimal(0)) > 0]
     reserve = {"currency": currency, "amount": num(reserve_amount), "months": num(months, 1),
                "basis": basis, "spending_basis": "essential" if spending["essential"] is not None else spending["monthly_basis"],
                "target_months": num(target_months, 1), "target_amount": num(target_amount),
                "gap": num(target_amount - reserve_amount) if target_amount is not None and reserve_amount is not None else None,
                "sources": [r["id"] for r in designated], "source_keys": [r["key"] for r in designated],
+               # Cash set aside for goals (a stated funded_amount with no account named), excluded above.
+               "excluded_for_goals": num(set_aside) if set_aside_goals else None, "excluded_goals": set_aside_goals,
                # What the reserve is made of: cash first, then each cash-like instrument by name.
                "parts": parts}
 
@@ -1693,7 +1748,11 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
     if income["monthly"] is None:
         unknowns.append({"code": "income", "field": "income.<id>"})
     if spending["monthly"] is None:
-        unknowns.append({"code": "spending", "field": "spending.monthly"})
+        unknowns.append({"code": "spending", "field": "spending.monthly",
+                         **({"known": "essential", "essential": spending["essential"]}
+                            if spending["essential"] is not None else {}),
+                         **({"partial": spending["components"] or True, "known_part": spending["known_part"]}
+                            if spending["partial"] else {})})
     for row in liabilities:
         for field in row["missing"]:
             code = "liability_rate" if field == "annual_rate" else "liability_payment"
@@ -1769,5 +1828,5 @@ def missing_for_onboarding(sit: Mapping[str, Any]) -> list[str]:
     return [step for step in ONBOARDING_STEPS if not known[step] and steps.get(step) not in ("done", "skipped")]
 
 
-__all__ = ["build", "payoff", "annuity_payment", "missing_for_onboarding", "underlying_of", "goal_name", "stated_matches", "kind_family",
+__all__ = ["build", "payoff", "interest_iva", "annuity_payment", "missing_for_onboarding", "underlying_of", "goal_name", "stated_matches", "kind_family",
            "add_months", "D", "num", "UNDERLYING"]
