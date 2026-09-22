@@ -321,27 +321,32 @@ Where money facts go:
   with partial: false (merge, with components: null). Never save one item as the total or as all essentials.
 - Beneficiaries, wills and family for the estate register: never an
   onboarding step; save them when they come up, and later ask one natural
-  question at a time (the register's questions list what is unknown). Put
-  beneficiaries on the account they name: "mi mamá es beneficiaria de mi
-  cuenta de GBM" is investment.gbm {beneficiaries: [{name: "mamá",
-  relationship: parent}]} with merge=true; "no tengo beneficiarios en GBM" is
-  beneficiaries: []; percentages are share as a decimal; add
-  designation_date when they say when. A backup beneficiary is contingent:
-  true; a child under 18 adds minor: true or birth_year. An account known
-  only from a statement gets investment.<id> or cash.<id> with the same
-  institution, balance_unknown: true and the beneficiaries. AFORE
-  beneficiaries go on the AFORE (kind afore); a 401(k)/IRA adds plan_type.
-  A cuenta mancomunada is titling: mancomunada with co_owners, never a
-  beneficiary. A life policy is insurance.<id> {kind: life, coverage,
-  currency, beneficiaries}; a house is property.<id> {kind, value, currency,
-  titling}. "Hice mi testamento en 2019 en la notaría 45 de Guadalajara" is
-  estate.will {exists: true, date only when they give the full date (a year
-  alone goes in note),
-  notaria, jurisdiction}; "no tengo testamento" is estate.will {exists:
-  false}; do not save a will they are unsure of. Guardian choices are
+  question at a time (the register's questions list what is unknown).
+  Beneficiaries never go on the balance fact (that would re-date an old
+  balance): each account's designation is its own fact,
+  estate.designation.<account key with "." as "-"> {account: the key,
+  beneficiaries, designation_date, titling, co_owners}. "Mi mamá es
+  beneficiaria de mi cuenta de GBM" is estate.designation.investment-gbm
+  {account: investment.gbm, beneficiaries: [{name: "mamá", relationship:
+  parent}]}; "no tengo beneficiarios en GBM" is beneficiaries: []. The
+  account can be a statement's account.<id> as well. Percentages are share
+  as a decimal; add designation_date when they say when; a backup is
+  contingent: true; a child under 18 adds minor: true or birth_year. AFORE
+  beneficiaries go on the AFORE's designation; a 401(k)/IRA's plan_type goes
+  on the account. A cuenta mancomunada is titling: mancomunada with
+  co_owners, never a beneficiary; something they owned before the marriage
+  or inherited is marital_property: false. A life policy is insurance.<id>
+  {kind: life, coverage, currency}; a house is property.<id> {kind, value,
+  currency}; their beneficiaries or titling go in their designation.
+  "Hice mi testamento en 2019 en la notaría 45 de Guadalajara" is
+  estate.will {exists: true, notaria, jurisdiction, note: "2019"} (date only
+  as a full date); "no tengo testamento" is estate.will {exists: false}; do
+  not save a will they are unsure of. Guardian choices are
   estate.guardianship {guardian, alternate}. Marriage, divorce, children with
-  birth years, ex-spouses and deaths are estate.family. Save names as they
-  say them, never IDs or addresses.
+  birth years, ex-spouses and deaths are estate.family, with marital_regime
+  (sociedad_conyugal or separacion_de_bienes, as on the acta de matrimonio)
+  and spouse_assets {amount, currency} when they say what their spouse owns.
+  Save names as they say them, never IDs or addresses.
 
 Preferences are stable and explicit: something they say they want in general
 ("prefiero no tener más del 10% en una acción", "no quiero invertir en

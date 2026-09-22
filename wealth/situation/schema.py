@@ -85,7 +85,6 @@ SCHEMA: dict[str, dict[str, str]] = {
         "purpose?": "reserve|general|goal:<goal id>", "liquid?": "true (default for cash) | false",
         "name?": "their words", "approximate?": "true|false",
         "annual_rate?": "decimal yield they stated (0.15 for 15%)",
-        **DESIGNATION_DOC,
     },
     "liability.<id>": {
         "kind": "|".join(LIABILITY_KINDS), "balance": "number owed", "currency": "ISO 4217",
@@ -110,20 +109,28 @@ SCHEMA: dict[str, dict[str, str]] = {
         "liquidity_days?": "days to get the money out (1 daily, 28 CETES at 28 days); counts toward the reserve "
                            "when 31 or less",
         "plan_type?": "|".join(PLAN_TYPES) + " for retirement accounts (a 401(k) has spousal-consent rules)",
-        "spousal_consent?": "true when the spouse signed consent to another 401(k) beneficiary (ERISA)",
-        **DESIGNATION_DOC,
     },
     "insurance.<id>": {
         "kind": "|".join(INSURANCE_KINDS), "coverage?": "number paid at death (suma asegurada)",
         "currency?": "ISO 4217 (required with coverage)", "insurer?": "name",
         "employer_group?": "true for a work policy (it usually ends with the job)", "name?": "their words",
-        "approximate?": "true|false",
-        **{k: v for k, v in DESIGNATION_DOC.items() if k not in ("titling?", "co_owners?", "owner_share?")},
+        "approximate?": "true|false", "country?": "ISO-2",
     },
     "property.<id>": {
         "kind": "|".join(PROPERTY_KINDS), "value?": "number they think it is worth",
         "currency?": "ISO 4217 (required with value)", "name?": "their words", "approximate?": "true|false",
+        "country?": "ISO-2",
+    },
+    "estate.designation.<slug>": {
+        "note": "who receives one account, policy or property at death, kept apart from its balance so saving a "
+                "beneficiary never refreshes a figure; <slug> is the account key with '.' as '-' "
+                "(investment.gbm -> estate.designation.investment-gbm)",
+        "account": "the key it applies to: cash.<id>, investment.<id>, insurance.<id>, property.<id> or "
+                   "account.<id> (a statement)",
         **DESIGNATION_DOC,
+        "plan_type?": "|".join(PLAN_TYPES) + " when the account itself does not say",
+        "spousal_consent?": "true when the spouse signed consent to another 401(k) beneficiary (ERISA)",
+        "marital_property?": "false when it was theirs before the marriage, inherited or a gift (not gananciales)",
     },
     "estate.will": {
         "exists": "true|false (leave the fact out when they do not know)", "date?": "YYYY-MM-DD signed",
@@ -137,7 +144,10 @@ SCHEMA: dict[str, dict[str, str]] = {
     },
     "estate.family": {
         "marital_status?": "|".join(MARITAL_STATUSES), "marriage_date?": "YYYY-MM-DD",
-        "marital_regime?": "|".join(MARITAL_REGIMES), "spouse?": "name", "divorce_date?": "YYYY-MM-DD",
+        "marital_regime?": "|".join(MARITAL_REGIMES) + " (sociedad conyugal: half of what was acquired in the "
+                           "marriage is already the spouse's)",
+        "spouse?": "name", "divorce_date?": "YYYY-MM-DD",
+        "spouse_assets?": "{amount, currency}: what the spouse owns in their own name (CCF Art. 1624); 0 when none",
         "ex_spouses?": "list of names", "children?": "list of {name, birth_date? | birth_year?}",
         "parents_living?": "0-2", "deceased?": "list of names of people who died (to catch stale beneficiaries)",
     },
@@ -540,6 +550,28 @@ def _designation(value: dict, key: str) -> None:
         _fail(f"{key}.country", "must be an ISO-2 country code such as MX or US")
 
 
+_DESIGNATION_TARGET = re.compile(r"^(cash|investment|insurance|property|account)\.[A-Za-z0-9][A-Za-z0-9_.-]{0,119}$")
+
+
+def designation_key(account: str) -> str:
+    """``estate.designation.<slug>`` for an account key (``investment.gbm`` -> ``estate.designation.investment-gbm``)."""
+    return "estate.designation." + account.replace(".", "-")
+
+
+def _estate_designation(value: dict, key: str) -> None:
+    _object(value, key, {"account", *DESIGNATION_FIELDS, "plan_type", "spousal_consent", "marital_property", "note"})
+    account = value.get("account")
+    if not isinstance(account, str) or not _DESIGNATION_TARGET.match(account):
+        _fail(f"{key}.account", "is required: the key it applies to, such as investment.gbm or account.gbm-1")
+    if key != designation_key(account):
+        _fail(key, f"must be {designation_key(account)!r} for account {account!r}")
+    _designation(value, key)
+    _enum(value.get("plan_type"), f"{key}.plan_type", PLAN_TYPES)
+    _bool(value.get("spousal_consent"), f"{key}.spousal_consent")
+    _bool(value.get("marital_property"), f"{key}.marital_property")
+    _text(value.get("note"), f"{key}.note")
+
+
 def _insurance(value: dict, key: str) -> None:
     _object(value, key, {"kind", "coverage", "currency", "insurer", "employer_group", "name", "approximate", "note",
                          "beneficiaries", "designation_date", "country"})
@@ -600,7 +632,13 @@ def _guardianship(value: dict, key: str) -> None:
 
 def _family(value: dict, key: str) -> None:
     _object(value, key, {"marital_status", "marriage_date", "marital_regime", "spouse", "divorce_date", "ex_spouses",
-                         "children", "parents_living", "deceased", "note"})
+                         "children", "parents_living", "deceased", "note", "spouse_assets"})
+    assets = value.get("spouse_assets")
+    if assets is not None:
+        _object(assets, f"{key}.spouse_assets", {"amount", "currency", "approximate"})
+        _number(assets.get("amount"), f"{key}.spouse_assets.amount")
+        _currency(assets.get("currency"), f"{key}.spouse_assets.currency")
+        _bool(assets.get("approximate"), f"{key}.spouse_assets.approximate")
     _enum(value.get("marital_status"), f"{key}.marital_status", MARITAL_STATUSES)
     _enum(value.get("marital_regime"), f"{key}.marital_regime", MARITAL_REGIMES)
     _iso_date(value.get("marriage_date"), f"{key}.marriage_date")
@@ -836,6 +874,8 @@ def _validator(key: str) -> Callable[[Any, str], None] | None:
         return _risk
     if key in ESTATE_VALIDATORS:
         return ESTATE_VALIDATORS[key]
+    if key.startswith("estate.designation."):
+        return _estate_designation
     head, _, rest = key.partition(".")
     if not rest or "." in rest:
         return None
@@ -902,4 +942,4 @@ def validate(key: str, value: Any) -> list[str]:
 
 
 __all__ = ["SCHEMA", "SchemaError", "validate", "MAX_AMOUNT", "out_of_range", "country_code", "COUNTRIES", "ONBOARDING_STEPS", "LANGUAGES", "FREQUENCIES", "INCOME_KINDS",
-           "LIABILITY_KINDS", "GOAL_ACTIONS", "TITLINGS", "RELATIONSHIPS", "PLAN_TYPES", "DESIGNATION_FIELDS", "THREAD_KINDS", "THREAD_STATUSES", "DROP_REACTIONS", "EXPERIENCE"]
+           "LIABILITY_KINDS", "GOAL_ACTIONS", "TITLINGS", "RELATIONSHIPS", "PLAN_TYPES", "DESIGNATION_FIELDS", "designation_key", "THREAD_KINDS", "THREAD_STATUSES", "DROP_REACTIONS", "EXPERIENCE"]

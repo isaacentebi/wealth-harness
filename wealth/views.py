@@ -1093,6 +1093,13 @@ def _clip(text: str, limit: int = 120) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
+def _amount_or_range(value: Any, bounds: Any, cur: Any) -> dict[str, Any]:
+    """An exact amount, or the range the engine gave when unknown facts leave it open."""
+    if value is None and isinstance(bounds, Mapping):
+        return span(bounds.get("low"), bounds.get("high"), cur)
+    return money(value, cur)
+
+
 def _estate_register(result: Mapping, envelope: Mapping, task: str) -> list[dict]:
     """Accounts to heirs (mechanism and who), with the completeness score; then the estimated amount per heir."""
     rows = [r for r in result.get("rows") or [] if isinstance(r, Mapping)]
@@ -1101,7 +1108,8 @@ def _estate_register(result: Mapping, envelope: Mapping, task: str) -> list[dict
     cur = result.get("currency")
     unknown = L("not recorded", "sin registrar")
     out_rows = []
-    ordered = sorted(rows, key=lambda r: -(_dec(r.get("estate_value")) or Decimal(-1)))
+    ordered = sorted(rows, key=lambda r: -(_dec(r.get("estate_value") if r.get("estate_value") is not None
+                                                else (r.get("estate_value_range") or {}).get("high")) or Decimal(-1)))
     for row in ordered[:MAX_ROWS]:
         names = [h.get("name") for h in row.get("heirs") or [] if isinstance(h, Mapping) and h.get("name")]
         who_en = ", ".join(_name(n) for n in names[:3]) or unknown["en"]
@@ -1110,7 +1118,7 @@ def _estate_register(result: Mapping, envelope: Mapping, task: str) -> list[dict
         mark = " ⚠" if row.get("gaps") else ""
         out_rows.append({"label": L(_clip(f"{_name(row.get('label'))}{mark} · {how['en']} → {who_en}"),
                                     _clip(f"{_name(row.get('label'))}{mark} · {how['es']} → {who_es}")),
-                         "value": money(row.get("estate_value"), cur)})
+                         "value": _amount_or_range(row.get("estate_value"), row.get("estate_value_range"), cur)})
     score = (result.get("completeness") or {}).get("score")
     specs = [_spec(task, "ticket", L("What happens to each account", "Qué pasa con cada cuenta"),
                    {"rows": out_rows, "total": {"label": L("Estate plan completeness", "Avance de tu plan de herencia"),
@@ -1122,10 +1130,12 @@ def _estate_register(result: Mapping, envelope: Mapping, task: str) -> list[dict
         for heir in heirs[:MAX_ROWS]:
             name = heir.get("name")
             label = name if isinstance(name, Mapping) and set(name) == {"en", "es"} else _name(name)
-            heir_rows.append({"label": label, "value": money(heir.get("amount"), cur)})
+            heir_rows.append({"label": label, "value": _amount_or_range(heir.get("amount"), heir.get("amount_range"),
+                                                                        cur)})
         specs.append(_spec(task, "ticket", L("Estimated amount per heir", "Monto estimado por heredero"),
                            {"rows": heir_rows, "total": {"label": L("Estate", "Patrimonio"),
-                                                         "value": money(result.get("total"), cur)}},
+                                                         "value": _amount_or_range(result.get("total"),
+                                                                                   result.get("total_range"), cur)}},
                            envelope, result))
     return specs
 

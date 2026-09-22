@@ -320,7 +320,8 @@ def fact_contract() -> dict:
         "confidence": "confirmed: the person explicitly confirmed it | reported (default): the person stated it "
                       "or a document shows it | inferred: an interpretation. Only a user source may be confirmed.",
         "keys": ["client.profile", "income.<id>", "spending.monthly", "cash.<id>", "liability.<id>",
-                 "investment.<id>", "insurance.<id>", "property.<id>", "estate.will", "estate.guardianship",
+                 "investment.<id>", "insurance.<id>", "property.<id>", "estate.designation.<slug>", "estate.will",
+                 "estate.guardianship",
                  "estate.family", "goals", "reserve", "thread.<id>", "preference.*", "constraint.*", "onboarding",
                  "policy.ips (written by accepting an IPS decision)",
                  "thesis.*", "research.<SYMBOL>", "planning.project", "planning.income", "planning.ladder",

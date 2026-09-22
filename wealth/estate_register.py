@@ -1,8 +1,9 @@
 """Estate and beneficiary register: what happens to each account at death.
 
 :func:`register` reads the canonical picture (``wealth.situation.build``) and
-the raw facts that carry designations (``cash.<id>``, ``investment.<id>``,
-``insurance.<id>``, ``property.<id>``, ``estate.will``, ``estate.guardianship``,
+the facts that describe the estate (``estate.designation.<slug>`` joined to
+``cash.<id>``, ``investment.<id>``, ``insurance.<id>``, ``property.<id>`` or a
+statement's ``account.<id>``; ``estate.will``, ``estate.guardianship``,
 ``estate.family``) and returns, for the person's own death:
 
 * ``rows``: one per account, policy or property, with the mechanism that moves
@@ -19,6 +20,16 @@ the raw facts that carry designations (``cash.<id>``, ``investment.<id>``,
 * ``questions``: what is unknown and worth asking (unknown is never "none");
 * ``completeness``: a 0-100 score with its parts.
 
+Designations live in their own ``estate.designation.<slug>`` facts so that
+naming a beneficiary never re-dates a balance; beneficiaries saved inline on
+an account by older writes are still read, and the designation fact wins.
+
+Amounts are ranges when the facts that decide them are unknown: with an
+unknown marital regime (sociedad conyugal keeps half of the gananciales out
+of the estate) and, in a Mexican intestate succession with descendants, with
+unknown spouse's assets (CCF Arts. 1624-1625: the spouse takes a child's share
+only if they lack property, or what equals it).
+
 Everything is an estimate of how the rules usually work, never legal advice
 or drafting: a notario (Mexico) or estate attorney (US) confirms it.  The
 caveats and statutes live in ``assumptions`` and ``sources`` only.
@@ -30,7 +41,7 @@ from decimal import Decimal
 from typing import Any, Mapping
 
 from .situation.model import D, humanize, num
-from .situation.schema import SchemaError, validate
+from .situation.schema import SchemaError, designation_key, validate
 
 LIC_URL = "https://www.diputados.gob.mx/LeyesBiblio/pdf/LIC.pdf"
 LMV_URL = "https://www.diputados.gob.mx/LeyesBiblio/pdf/LMV.pdf"
@@ -91,6 +102,7 @@ SCORE_WEIGHTS = {"designations": 60, "will": 30, "guardian": 10}
 GAP_CODES = ("no_beneficiary", "afore_beneficiaries", "shares_not_100", "minor_direct", "beneficiary_predeceased",
              "beneficiary_ex_spouse", "designation_old", "designation_before_event", "erisa_spousal_consent",
              "us_situs_nra", "no_will", "will_before_event", "will_old", "no_guardian")
+_MARITAL_PRODUCTS = frozenset({"bank", "broker", "investment", "ppr", "property"})
 REVIEW_GAPS = frozenset({"designation_old", "designation_before_event"})
 FACT_PREFIXES = ("cash.", "investment.", "insurance.", "property.", "estate.", "client.profile", "account.")
 
@@ -195,6 +207,11 @@ class _Family:
         self.married = status in ("married", "free_union") if status else None
         self.spouse = self.raw.get("spouse") if isinstance(self.raw.get("spouse"), str) else None
         self.regime = self.raw.get("marital_regime")
+        # True: sociedad conyugal / community property; False: separate; None: unknown.
+        self.common = {"sociedad_conyugal": True, "community_property": True, "separacion_de_bienes": False,
+                       "separate_property": False}.get(self.regime)
+        assets = self.raw.get("spouse_assets")
+        self.spouse_assets = assets if isinstance(assets, dict) else None
         self.marriage = _date(self.raw.get("marriage_date"))
         self.divorce = _date(self.raw.get("divorce_date"))
         self.ex = {_fold(n) for n in self.raw.get("ex_spouses") or [] if isinstance(n, str)}
@@ -343,14 +360,34 @@ def _accounts(sit: Mapping[str, Any], facts: dict[str, dict], convert: _Converte
             if value.get("value") is not None and amount is None:
                 notes.append(f"{key}: no exchange rate for {value.get('currency')}; its value is unknown here.")
             out.append({"key": key, "value": value, "row": {}, "amount": amount, "statement_keys": []})
+    # Designations are their own facts; they override any legacy inline fields on the account.
+    designations = {}
+    for key, fact in sorted(facts.items()):
+        value = fact.get("value")
+        if key.startswith("estate.designation.") and isinstance(value, dict) and isinstance(value.get("account"), str):
+            designations[value["account"]] = (key, {k: v for k, v in value.items() if k not in ("account", "note")})
+    for entry in out:
+        found = designations.pop(entry["key"], None)
+        if found:
+            entry["designation_key"] = found[0]
+            entry["value"] = {**entry["value"], **found[1]}
+    for account, (key, value) in designations.items():
+        notes.append(f"{key} names {account}, which is not in the picture (forgotten, or a typo); it is listed "
+                     "without an amount.")
+        out.append({"key": account, "value": value, "row": {}, "amount": None, "statement_keys": [],
+                    "designation_key": key, "orphan": True})
     return out, notes
 
 
 # ------------------------------------------------------------------ succession rules
 
 
-def _intestate(country: str | None, family: _Family) -> tuple[list[dict], str | None]:
-    """Heirs by law as ``[{name, relationship, share}]`` and the rule applied, or ([], None) when unknown."""
+def _intestate(country: str | None, family: _Family, *, lft: bool = False) -> tuple[list[dict], str | None]:
+    """Heirs by law as ``[{name, relationship, share}]`` and the rule applied, or ([], None) when unknown.
+
+    In Mexico a spouse with descendants gets ``share: None`` and ``art_1624``: the share depends on the
+    spouse's own property and is set per scenario (see :func:`_spouse_fraction`).  ``lft`` is the LFT
+    Art. 501 order for an AFORE without designation (spouse and children alike, approximated)."""
     living_children = [c for c in family.children if _fold(c["name"]) not in family.deceased]
     spouse = family.married
     spouse_name = family.spouse or ("cónyuge" if country == "MX" else "spouse")
@@ -378,18 +415,23 @@ def _intestate(country: str | None, family: _Family) -> tuple[list[dict], str | 
             return [], None
         return heirs, rule
     # Mexico (Código Civil Federal; state codes follow the same order)
-    if living_children:
+    if living_children and spouse and not lft:
+        heirs = [{"name": c["name"], "relationship": "child", "share": None, "art_1624": "child"}
+                 for c in living_children]
+        heirs.append({"name": spouse_name, "relationship": "spouse", "share": None, "art_1624": "spouse"})
+        rule = ("CCF Arts. 1607, 1624-1625: children equally; the spouse or concubino takes a child's share only "
+                "if they lack property of their own, or what brings theirs up to a child's share")
+    elif living_children:
         count = len(living_children) + (1 if spouse else 0)
         share = Decimal(1) / count
         heirs = [{"name": c["name"], "relationship": "child", "share": share} for c in living_children]
         if spouse:
             heirs.append({"name": spouse_name, "relationship": "spouse", "share": share})
-        rule = ("CCF Arts. 1607, 1624: children equally; the spouse or concubino takes a child's share "
-                "(when they lack property of their own, assumed)" if spouse else "CCF Art. 1607: children equally")
+        rule = "LFT Art. 501 (approximated as equal parts)" if spouse else "CCF Art. 1607: children equally"
     elif spouse and family.parents:
         heirs = [{"name": spouse_name, "relationship": "spouse", "share": Decimal("0.5")},
                  {"name": "padres", "relationship": "parent", "share": Decimal("0.5")}]
-        rule = "CCF Art. 1626: half to the spouse, half to the parents"
+        rule = "CCF Arts. 1626, 1628: half to the spouse, half to the parents, whatever the spouse owns"
     elif spouse:
         heirs = [{"name": spouse_name, "relationship": "spouse", "share": Decimal(1)}]
         rule = "CCF Art. 1629: the spouse, with no descendants or parents (siblings would take a third, Art. 1627)"
@@ -399,6 +441,18 @@ def _intestate(country: str | None, family: _Family) -> tuple[list[dict], str | 
     else:
         return [], None
     return heirs, rule
+
+
+def _spouse_fraction(mass: Decimal, children: int, spouse_assets: Decimal | None) -> Decimal:
+    """CCF Arts. 1624-1625: the part of an intestate mass the spouse takes next to ``children`` descendants.
+
+    A child's portion is p = (mass - x) / children; the spouse gets x = p - assets when that is positive
+    (x = p, a child's share, when they own nothing).  Solving: x = (mass - children * assets) / (children + 1).
+    ``spouse_assets`` None means unlimited (they own at least a child's portion): nothing."""
+    if spouse_assets is None or mass <= 0:
+        return Decimal(0) if spouse_assets is None else Decimal(1) / (children + 1)
+    x = (mass - children * spouse_assets) / (children + 1)
+    return min(max(x, Decimal(0)), mass / (children + 1)) / mass
 
 
 def _will_heirs(will: Mapping[str, Any]) -> list[dict]:
@@ -491,6 +545,17 @@ def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mappin
     gaps: list[dict] = []
     questions: list[dict] = []
     events = family.events()
+    # Regime scenarios: True counts only the person's half of marital property.
+    regimes = [True, False] if family.married and family.common is None else [bool(family.married and family.common)]
+    if family.married and family.common is None:
+        questions.append({"code": "marital_regime_unknown", "field": "estate.family.marital_regime"})
+        assumptions.append("The marital regime is unknown: amounts are a range from sociedad conyugal (half of what "
+                           "was acquired in the marriage is already the spouse's and is not in the estate) to "
+                           "separación de bienes (all of it is).")
+    elif family.married and family.common:
+        assumptions.append("Sociedad conyugal (or community property): only the person's half of what was acquired "
+                           "in the marriage is in the estate; accounts marked marital_property false count whole. "
+                           "AFORE and life insurance follow their own laws and are not halved.")
 
     def gap(code: str, row: dict | None, amount: Decimal | None, en: str, es: str, **extra: Any) -> None:
         gaps.append({"code": code, "key": row["key"] if row else None, "label": row["label"] if row else None,
@@ -510,13 +575,41 @@ def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mappin
         if owner_share is None:
             owner_share = Decimal(1) / (1 + len(co_owners)) if titling in ("joint", "mancomunada") and co_owners \
                 else (Decimal("0.5") if titling in ("joint", "mancomunada") else Decimal(1))
-        mine = amount * owner_share if amount is not None else None
+        # Under sociedad conyugal (or community property) half of what was acquired in the marriage is already
+        # the spouse's: only the person's half is in the estate.  AFORE and life insurance follow their own laws.
+        marital = bool(family.married) and product in _MARITAL_PRODUCTS and value.get("marital_property") is not False \
+            and titling not in ("fideicomiso", "trust")
+        held = amount * owner_share if amount is not None else None
+        values = {flag: (amount * owner_share * (Decimal("0.5") if flag and marital else 1)
+                         if amount is not None else None) for flag in regimes}
+        known = [v for v in values.values() if v is not None]
+        mine_lo, mine = (min(known), max(known)) if known else (None, None)
         beneficiaries = value.get("beneficiaries")
         row: dict[str, Any] = {"key": key, "label": label, "product": product, "country": country,
-                               "titling": titling, "value": _money(amount), "estate_value": _money(mine),
+                               "titling": titling, "value": _money(amount),
+                               "estate_value": _money(mine) if mine_lo == mine else None,
+                               "estate_value_range": {"low": _money(mine_lo), "high": _money(mine)}
+                               if mine_lo != mine else None,
                                "currency": currency, "owner_share": _money(owner_share) if owner_share != 1 else None,
                                "designation_date": value.get("designation_date"), "notes": [], "heirs": [],
-                               "bypasses_court": None}
+                               "bypasses_court": None, "_values": values, "_hi": mine, "_marital": marital}
+        if entry.get("designation_key"):
+            row["designation_key"] = entry["designation_key"]
+        elif any(value.get(f) is not None for f in ("beneficiaries", "titling", "designation_date")):
+            row["designation_key"] = "inline"  # saved on the account by an older write; still read
+        if entry.get("orphan"):
+            row["orphan"] = True
+        if marital and family.common is not False:
+            row["notes"].append({"en": ("Under sociedad conyugal half of this is already your spouse's and is not in "
+                                        "your estate" if family.common else "If you married under sociedad conyugal, "
+                                        "half of this is already your spouse's") + (
+                                        "; the institution pays the beneficiaries, and your spouse can claim their "
+                                        "half." if primary_named(value) else "."),
+                                 "es": ("En sociedad conyugal la mitad de esto ya es de tu cónyuge y no entra en tu "
+                                        "herencia" if family.common else "Si te casaste por sociedad conyugal, la "
+                                        "mitad de esto ya es de tu cónyuge") + (
+                                        "; la institución paga a los beneficiarios y tu cónyuge puede reclamar su "
+                                        "mitad." if primary_named(value) else ".")})
         if entry.get("statement_only"):
             row["statement_only"] = True
         if entry.get("stale"):
@@ -624,7 +717,7 @@ def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mappin
             row["bypasses_court"] = False
             heirs, rule = _intestate(country, family)
         elif mechanism == "legal_beneficiaries":
-            heirs, rule = _intestate("MX", family)
+            heirs, rule = _intestate("MX", family, lft=True)
             rule = "LFT Art. 501 order (spouse or concubine and children, then dependent parents); approximated"
         elif mechanism == "plan_default":
             heirs = ([{"name": family.spouse or "spouse", "relationship": "spouse", "share": Decimal(1)}]
@@ -636,17 +729,7 @@ def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mappin
         row["mechanism_label"] = _mechanism_label(mechanism, product, country, value) \
             if mechanism in ("beneficiary", "trust", "survivorship", "legal_beneficiaries", "plan_default", "will",
                              "intestate", "unknown") else None
-        for heir in heirs:
-            share = heir["share"]
-            heir_out = {"name": heir["name"], "relationship": heir.get("relationship"),
-                        "share": _money(share) if share is not None else None,
-                        "amount": _money(mine * share) if mine is not None and share is not None else None}
-            if heir.get("contingent"):
-                heir_out["contingent"] = True
-            if heir.get("fallback"):
-                heir_out["name"] = None
-                heir_out["via"] = "will_or_intestate"
-            row["heirs"].append(heir_out)
+        row["_heirs"] = heirs
 
         # Minors named directly
         for heir in heirs:
@@ -668,21 +751,20 @@ def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mappin
         if designable and mechanism not in ("beneficiary", "trust", "survivorship"):
             if beneficiaries == [] and product == "afore":
                 gap("afore_beneficiaries", row, mine,
-                    f"Your AFORE ({label}, {_short(mine, currency)}) has no designated beneficiaries.",
-                    f"Tu AFORE ({label}, {_short(mine, currency)}) no tiene beneficiarios designados.")
+                    f"Your AFORE ({label}, {_short(held, currency)}) has no designated beneficiaries.",
+                    f"Tu AFORE ({label}, {_short(held, currency)}) no tiene beneficiarios designados.")
             elif beneficiaries == [] and product == "insurance":
                 gap("no_beneficiary", row, mine,
-                    f"Your {label} life policy ({_short(mine, currency)}) has no beneficiaries.",
-                    f"Tu seguro de vida {label} ({_short(mine, currency)}) no tiene beneficiarios.")
+                    f"Your {label} life policy ({_short(held, currency)}) has no beneficiaries.",
+                    f"Tu seguro de vida {label} ({_short(held, currency)}) no tiene beneficiarios.")
             elif beneficiaries == []:
                 gap("no_beneficiary", row, mine,
-                    f"Your {label} account ({_short(mine, currency)}) has no beneficiaries.",
-                    f"Tu cuenta de {label} ({_short(mine, currency)}) no tiene beneficiarios.")
+                    f"Your {label} account ({_short(held, currency)}) has no beneficiaries.",
+                    f"Tu cuenta de {label} ({_short(held, currency)}) no tiene beneficiarios.")
             elif beneficiaries is None:
                 questions.append({"code": "beneficiaries_unknown", "key": key, "label": label,
                                   "amount": _money(mine), "currency": currency,
-                                  "field": f"{key}.beneficiaries" if not entry.get("statement_only") else
-                                  "investment.<id> or cash.<id> with this institution and beneficiaries",
+                                  "field": f"{designation_key(key)}.beneficiaries",
                                   "afore": product == "afore" or None})
         # An old designation, or one older than a marriage or a child
         designated = _date(value.get("designation_date"))
@@ -736,9 +818,11 @@ def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mappin
                                        "en 10 años (SECURE Act), salvo excepciones."})
         rows.append(row)
 
+    _settle_heirs(rows, family, regimes, convert, questions, assumptions)
+
     # Will
     marriage_or_child = [e for e in events if e[1] in ("marriage", "child")]
-    passing_by_will = sum((D(r["estate_value"]) or Decimal(0) for r in rows
+    passing_by_will = sum((r["_hi"] or Decimal(0) for r in rows
                            if r["mechanism"] in ("will", "intestate") or r.get("fallback")), Decimal(0))
     mx = residence == "MX" or any(r["country"] == "MX" for r in rows)
     september = today.month == 9
@@ -777,12 +861,15 @@ def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mappin
                     f"Your will is from {signed.year}, over {review_years} years ago." + mes_en,
                     f"Tu testamento es de {signed.year}, de hace más de {review_years} años." + mes_es)
     # Guardianship
-    total_estate = sum((D(r["estate_value"]) or Decimal(0) for r in rows), Decimal(0))
+    total_estate = sum((r["_hi"] or Decimal(0) for r in rows), Decimal(0))
+    total_low = sum((min((v for v in r["_values"].values() if v is not None), default=Decimal(0)) for r in rows),
+                    Decimal(0))
     guardian_state = "not_applicable"
     if family.minors:
         guardian_state = "done" if guardian_named else "missing"
         if not guardian_named:
-            to_minors = sum((D(h["amount"]) or Decimal(0) for r in rows for h in r["heirs"]
+            to_minors = sum((D(h["amount"] if h["amount"] is not None else (h.get("amount_range") or {}).get("high"))
+                             or Decimal(0) for r in rows for h in r["heirs"]
                              if h["name"] and family.child_age(h["name"]) is not None
                              and family.child_age(h["name"]) < ADULT_AGE), Decimal(0))
             gap("no_guardian", None, to_minors or total_estate,
@@ -809,17 +896,24 @@ def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mappin
         for heir in row["heirs"]:
             name = heir["name"] or {"en": "Will or intestate heirs", "es": "Herederos por testamento o intestado"}
             key = name if isinstance(name, str) else "_fallback"
-            entry = totals.setdefault(key, {"name": name, "amount": None, "unknown_parts": 0, "via": []})
-            if heir["amount"] is None:
+            entry = totals.setdefault(key, {"name": name, "low": None, "high": None, "unknown_parts": 0, "via": []})
+            span = heir.get("amount_range") or ({"low": heir["amount"], "high": heir["amount"]}
+                                                if heir["amount"] is not None else None)
+            if span is None:
                 entry["unknown_parts"] += 1
             else:
-                entry["amount"] = (entry["amount"] or Decimal(0)) + D(heir["amount"])
+                entry["low"] = (entry["low"] or Decimal(0)) + D(span["low"])
+                entry["high"] = (entry["high"] or Decimal(0)) + D(span["high"])
             if row["mechanism"] not in entry["via"]:
                 entry["via"].append(row["mechanism"])
-    heirs_out = sorted(({"name": v["name"], "amount": _money(v["amount"]), "currency": currency,
-                         "complete": v["unknown_parts"] == 0, "via": v["via"]} for v in totals.values()),
-                       key=lambda h: -(D(h["amount"]) or Decimal(0)))
-    unassigned = sum((D(r["estate_value"]) or Decimal(0) for r in rows if not r["heirs"]), Decimal(0))
+    heirs_out = sorted(({"name": v["name"], "amount": _money(v["high"]) if v["low"] == v["high"] else None,
+                         "amount_range": {"low": _money(v["low"]), "high": _money(v["high"])}
+                         if v["low"] != v["high"] else None,
+                         "currency": currency, "complete": v["unknown_parts"] == 0, "via": v["via"]}
+                        for v in totals.values()),
+                       key=lambda h: -(D(h["amount"] if h["amount"] is not None
+                                         else (h["amount_range"] or {}).get("high")) or Decimal(0)))
+    unassigned = sum((r["_hi"] or Decimal(0) for r in rows if not r["heirs"]), Decimal(0))
 
     gaps.sort(key=lambda g: (-(D(g["amount_at_risk"]) if g["amount_at_risk"] is not None else Decimal(1)),
                              GAP_CODES.index(g["code"]), g["key"] or ""))
@@ -836,7 +930,9 @@ def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mappin
     result = {
         "as_of": today.isoformat(), "currency": currency, "jurisdiction": residence,
         "rows": rows, "heirs": heirs_out, "unassigned": _money(unassigned) if unassigned else None,
-        "total": _money(total_estate), "gaps": gaps, "questions": questions, "completeness": score,
+        "total": _money(total_estate) if total_low == total_estate else None,
+        "total_range": {"low": _money(total_low), "high": _money(total_estate)} if total_low != total_estate else None,
+        "gaps": gaps, "questions": questions, "completeness": score,
         "will": {"state": will_state, **({k: will.get(k) for k in ("exists", "date", "notaria", "jurisdiction", "kind")
                                           if will.get(k) is not None} if will else {})},
         "guardian": {"state": guardian_state, "name": guardian, "minors": family.minors or None},
@@ -845,8 +941,8 @@ def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mappin
         "review_years": review_years, "trade_call": None,
     }
     for row in rows:
-        for heir in row["heirs"]:
-            heir.pop("_person", None)
+        for internal in ("_values", "_hi", "_heirs", "_marital"):
+            row.pop(internal, None)
     sources = [dict(SOURCES[k], checked_on=CHECKED_ON) for k in (
         "lic_56", "lmv_201", "lss_193", "lsar", "lscs", "ccf_intestate", "mes_testamento", "secure", "irs_rmd",
         "erisa", "egelhoff", "upc")]
@@ -856,8 +952,10 @@ def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mappin
         "Beneficiary designations (LIC Art. 56 bank deposits, LMV Art. 201 brokerage, LSS Art. 193 AFORE, life "
         "policies, US TOD/POD and plan beneficiaries) pay outside the juicio sucesorio or probate and usually "
         "prevail over the will for that account.",
-        "Intestate shares follow the Código Civil Federal order (descendants with the spouse taking a child's "
-        "share, then spouse and parents, then collaterals) or, in the US, a Uniform Probate Code approximation.",
+        "Intestate shares follow the Código Civil Federal order (descendants; the spouse next to them only up to "
+        "a child's share, net of what they own, Arts. 1624-1625; spouse and parents half each, Art. 1626; then "
+        "siblings and collaterals) or, in the US, a Uniform Probate Code approximation. Gap amounts use the upper "
+        "end of any range.",
         "A designation older than the review period, or older than a marriage, divorce or child, is flagged for "
         f"review ({review_years} years).",
         "Stated accounts covered by a statement take the statement's value; statement accounts nobody described "
@@ -869,6 +967,68 @@ def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mappin
     return {"status": status, "result": result, "missing": missing if rows or will is not None
             else ["cash.<id> / investment.<id> / insurance.<id> / property.<id>", "estate.will"],
             "warnings": warnings, "sources": sources, "assumptions": assumptions}
+
+
+def primary_named(value: Mapping[str, Any]) -> bool:
+    return any(isinstance(b, dict) and not b.get("contingent") for b in value.get("beneficiaries") or [])
+
+
+def _settle_heirs(rows: list[dict], family: _Family, regimes: list[bool], convert: _Converter,
+                  questions: list[dict], assumptions: list[str]) -> None:
+    """Amounts per heir across the scenarios that unknown facts leave open; a range when they differ."""
+    # Scenarios: marital regime x the spouse's own property (unknown: nothing, or at least a child's portion).
+    assets = family.spouse_assets
+    stated = convert(D(assets.get("amount")), assets.get("currency")) if assets else None
+    art_1624 = [r for r in rows if r["mechanism"] == "intestate" and any(h.get("art_1624") for h in r["_heirs"])]
+    own_options: list[Decimal | None] = [stated] if stated is not None else [Decimal(0), None]
+    children = next((sum(1 for h in r["_heirs"] if h.get("art_1624") == "child") for r in art_1624), 0)
+    scenarios = []
+    for flag in regimes:
+        mass = sum((r["_values"][flag] or Decimal(0) for r in art_1624), Decimal(0))
+        # The spouse's half of the gananciales is property of their own for Art. 1624.
+        # (equal to the person's half of each marital account in this scenario).
+        halves = sum((r["_values"][flag] or Decimal(0) for r in rows if r["_marital"]), Decimal(0)) \
+            if flag else Decimal(0)
+        for own in own_options:
+            fraction = _spouse_fraction(mass, children, None if own is None else own + halves) if children else None
+            scenarios.append((flag, fraction))
+    open_question = any(len({f for regime, f in scenarios if regime == flag}) > 1 for flag in regimes)
+    if art_1624 and stated is None and open_question:
+        questions.append({"code": "spouse_assets_unknown", "field": "estate.family.spouse_assets"})
+        assumptions.append("What the spouse owns is unknown: next to descendants their intestate share is a range "
+                           "from nothing (they own at least a child's portion) to a child's share (they own nothing), "
+                           "CCF Arts. 1624-1625.")
+    for row in rows:
+        for heir in row["_heirs"]:
+            amounts, shares = [], []
+            for flag, fraction in scenarios:
+                share = heir["share"]
+                if heir.get("art_1624") and fraction is not None:
+                    share = fraction if heir["art_1624"] == "spouse" else (1 - fraction) / children
+                value = row["_values"][flag]
+                shares.append(share)
+                amounts.append(value * share if value is not None and share is not None else None)
+            out: dict[str, Any] = {"name": heir["name"], "relationship": heir.get("relationship")}
+            known_shares = [s for s in shares if s is not None]
+            if known_shares and min(known_shares) != max(known_shares):
+                out["share"], out["share_range"] = None, {"low": num(min(known_shares), 4),
+                                                          "high": num(max(known_shares), 4)}
+            else:
+                out["share"] = num(known_shares[0], 4) if known_shares else None
+            known_amounts = [a for a in amounts if a is not None]
+            if None in amounts or not known_amounts:
+                out["amount"] = None
+            elif min(known_amounts) != max(known_amounts):
+                out["amount"], out["amount_range"] = None, {"low": _money(min(known_amounts)),
+                                                            "high": _money(max(known_amounts))}
+            else:
+                out["amount"] = _money(known_amounts[0])
+            if heir.get("contingent"):
+                out["contingent"] = True
+            if heir.get("fallback"):
+                out["name"] = None
+                out["via"] = "will_or_intestate"
+            row["heirs"].append(out)
 
 
 def plan_is_erisa(value: Mapping[str, Any]) -> bool:
@@ -887,13 +1047,13 @@ def _score(rows: list[dict], will_state: str, guardian_state: str) -> dict:
             return Decimal(1)
         return Decimal("0.5") if set(row["gaps"]) <= REVIEW_GAPS else Decimal(0)
 
-    values = [D(r["estate_value"]) for r in designable]
+    values = [r["_hi"] for r in designable]
     by_value = bool(designable) and None not in values and sum(values, Decimal(0)) > 0
     parts: dict[str, dict] = {}
     if designable:
         if by_value:
             total = sum(values, Decimal(0))
-            covered = sum((D(r["estate_value"]) * ok(r) for r in designable), Decimal(0))
+            covered = sum((r["_hi"] * ok(r) for r in designable), Decimal(0))
         else:
             total, covered = Decimal(len(designable)), sum((ok(r) for r in designable), Decimal(0))
         parts["designations"] = {"weight": SCORE_WEIGHTS["designations"], "earned": covered / total,

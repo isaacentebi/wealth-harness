@@ -666,22 +666,38 @@ as `estate_gap` items once the person has told Wealth anything about their
 estate. The You page shows one collapsed Herencia / Estate line. Statutes and
 the not-legal-advice caveat are in `sources` and `assumptions`.
 
-Fields: `cash.<id>` and `investment.<id>` take `beneficiaries`
-(`[{name, relationship?, share?, contingent?, minor?, birth_year?, deceased?,
-via_trust?}]`, where `[]` means none), `designation_date`, `titling`
-(`individual`, `joint`, `mancomunada`, `fideicomiso`, `trust`), `co_owners`,
-`owner_share` and `country`. Investments also take `plan_type` and
-`spousal_consent`. New keys: `insurance.<id>` (`kind`, `coverage`,
-`beneficiaries`), `property.<id>` (`kind`, `value`, `titling`), `estate.will`
+Designations are their own facts, so naming a beneficiary never re-dates a
+balance: `estate.designation.<slug>`, where the slug is the account key with
+`.` as `-` (`investment.gbm` becomes `estate.designation.investment-gbm`). Each
+takes `account` (the `cash.`, `investment.`, `insurance.`, `property.` or
+statement `account.` key), `beneficiaries` (`[{name, relationship?, share?,
+contingent?, minor?, birth_year?, deceased?, via_trust?}]`, where `[]` means
+none), `designation_date`, `titling` (`individual`, `joint`, `mancomunada`,
+`fideicomiso`, `trust`), `co_owners`, `owner_share`, `country`, `plan_type`,
+`spousal_consent` and `marital_property` (false for what was owned before the
+marriage or inherited). Beneficiaries saved inline on an account by older
+writes are still read; the designation fact wins. Other keys: `insurance.<id>`
+(`kind`, `coverage`), `property.<id>` (`kind`, `value`), `estate.will`
 (`exists`, `date`, `notaria`, `jurisdiction`, `heirs`), `estate.guardianship`
 (`guardian`, `alternate`) and `estate.family` (`marital_status`,
-`marriage_date`, `marital_regime`, `spouse`, `children`, `ex_spouses`,
-`deceased`, `parents_living`).
+`marriage_date`, `marital_regime`, `spouse_assets`, `spouse`, `children`,
+`ex_spouses`, `deceased`, `parents_living`).
+
+Mexican intestate shares follow the Código Civil Federal. Next to
+descendants, the spouse takes a child's share only if they own nothing, or
+what brings their own property up to a child's share (Arts. 1624-1625). Next
+to parents, the spouse takes half whatever they own (Arts. 1626, 1628). Under
+sociedad conyugal, half of what was acquired in the marriage is already the
+spouse's. It is not in the estate, and it counts as the spouse's own property
+for Art. 1624. When the regime or the spouse's property is unknown, amounts
+come back as `estate_value_range` and `amount_range`, the fields to ask for
+appear in `missing`, and the views draw a range.
 
 ```sh
 printf '%s' '{"task":"estate_register","inputs":{"as_of":"2026-09-22","facts":[
   {"key":"client.profile","value":{"residence":{"country":"MX"}}},
-  {"key":"investment.gbm","value":{"amount":217000,"currency":"MXN","institution":"GBM","beneficiaries":[]}},
+  {"key":"investment.gbm","value":{"amount":217000,"currency":"MXN","institution":"GBM"}},
+  {"key":"estate.designation.investment-gbm","value":{"account":"investment.gbm","beneficiaries":[]}},
   {"key":"estate.will","value":{"exists":false}}]}}' | uv run wealth run
 ```
 
