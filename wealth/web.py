@@ -506,7 +506,8 @@ class Chat:
             if meta is None:
                 raise ValueError("An attachment is no longer available. Attach it again.")
             files.append(meta)
-        if not self.lock.acquire(blocking=False):
+        # A short grace: the previous turn may be tidying up the instant its answer shows.
+        if not self.lock.acquire(timeout=2):
             raise BlockingIOError("A response is already in progress. Please wait.")
         try:
             self.reasoning = reasoning
@@ -600,9 +601,10 @@ class Chat:
         finally:
             if not thread_saved and self.thread_id != thread_before:
                 self._persist([], self.thread_id or "")  # a failed turn may still have opened the thread
+            # Free the chat before announcing the end, so a reply sent the moment the answer shows is never "busy".
+            self.lock.release()
             if not handed_off:
                 turn.finish(status)
-            self.lock.release()
 
     def _queue_memory(self, turn: Turn, reply: dict[str, Any], brief: str | None) -> None:
         """Start this exchange's memory step after every earlier one (saves stay serial and in order).
