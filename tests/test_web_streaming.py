@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -12,6 +13,7 @@ from urllib.request import Request, urlopen
 
 import pytest
 
+from tests._pages import page_text
 from wealth import agent, web
 from wealth.agent import AgentError, TurnEvent
 from wealth.store import StoreError
@@ -227,14 +229,70 @@ def test_security_headers_and_socket_timeout(tmp_path):
         csp = response.headers["Content-Security-Policy"]
         assert "frame-ancestors 'none'" in csp
         assert "font-src https://fonts.gstatic.com" in csp and "https://fonts.googleapis.com" in csp
+        for path in ("/", "/profile", "/review"):
+            directives = dict(d.strip().split(" ", 1) for d in
+                              urlopen(base + path, timeout=5).headers["Content-Security-Policy"].split(";"))
+            assert directives["script-src"] == "'self'"  # the pages run only their /static scripts
+            assert "'unsafe-inline'" in directives["style-src"]
         assert server.RequestHandlerClass.timeout == 30
     with pytest.raises(ValueError):
         web.create_server(chat, 0, "0.0.0.0")
 
 
-def test_page_never_injects_html_from_model_text():
+@pytest.mark.parametrize("name", sorted(web.STATIC_FILES))
+def test_static_files_come_with_their_type_and_the_page_headers(tmp_path, name):
+    chat = web.Chat(tmp_path / "w.sqlite3", "personal")
+    with serving(chat) as (base, _):
+        response = urlopen(f"{base}/static/{name}", timeout=5)  # no token: the pages load it before they have one
+        assert response.status == 200 and response.read() == (web.STATIC_DIR / name).read_bytes()
+        kind = {"css": "text/css", "js": "text/javascript"}[name.rsplit(".", 1)[1]]
+        assert web.STATIC_FILES[name] == kind
+        assert response.headers["Content-Type"] == f"{kind}; charset=utf-8"  # nosniff drops any other type
+        for header, value in web.SECURITY_HEADERS:
+            assert response.headers[header] == value
+
+
+def test_static_takes_only_a_local_origin_and_an_exact_name(tmp_path):
+    chat = web.Chat(tmp_path / "w.sqlite3", "personal")
+    with serving(chat) as (_, server):
+        port = server.server_port
+
+        def status(path, **headers):
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            connection.request("GET", path, headers=headers)
+            code = connection.getresponse().status
+            connection.close()
+            return code
+
+        name = sorted(web.STATIC_FILES)[0]
+        assert status(f"/static/{name}") == 200
+        assert status(f"/static/{name}", Host=f"evil.example:{port}") == 403
+        assert status(f"/static/{name}", Origin="http://evil.example") == 403
+        for path in ("/static/../web.py", "/static/%2e%2e/web.py", "/static/..%2fweb.py", "/static/", "/static/nope.js",
+                     f"/static/{name}/", f"/static/./{name}", f"/static//{name}", "/static/chat.html"):
+            assert status(path) == 404, path
+
+
+def test_every_static_reference_in_the_pages_is_served():
     from pathlib import Path
-    page = Path(web.__file__).with_name("chat.html").read_text(encoding="utf-8")
+    root = Path(web.__file__).parent
+    referenced = set()
+    for page in ("chat.html", "profile.html", "review.html"):
+        referenced |= set(re.findall(r'(?:href|src)="/static/([^"]+)"', (root / page).read_text(encoding="utf-8")))
+    assert referenced == set(web.STATIC_FILES)  # every reference is served, and nothing is served unreferenced
+    assert all((web.STATIC_DIR / name).is_file() for name in web.STATIC_FILES)
+
+
+@pytest.mark.parametrize("page", ["chat.html", "profile.html", "review.html"])
+def test_pages_carry_no_inline_script_for_the_policy_to_block(page):
+    from pathlib import Path
+    html = Path(web.__file__).with_name(page).read_text(encoding="utf-8")
+    assert re.findall(r"<script\b[^>]*>", html) == [f'<script src="/static/{page.removesuffix(".html")}.js">']
+    assert not re.search(r"\son[a-z]+\s*=", html) and "javascript:" not in html
+
+
+def test_page_never_injects_html_from_model_text():
+    page = page_text("chat")
     for sink in ("innerHTML =", "innerHTML=", "outerHTML", "insertAdjacentHTML", "document.write"):
         assert sink not in page
     assert "event.isComposing" in page and "(pointer: coarse)" in page
@@ -250,8 +308,7 @@ def test_friendly_names():
 
 
 def _page() -> str:
-    from pathlib import Path
-    return Path(web.__file__).with_name("chat.html").read_text(encoding="utf-8")
+    return page_text("chat")
 
 
 def test_page_citations_presence_and_send_markup():

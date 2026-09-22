@@ -9,12 +9,12 @@ import re
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import pytest
 
+from tests._pages import page_text
 from test_execution import PAPER_ENV, FakeAlpaca, no_network  # noqa: F401 - the autouse fixture guards this module too
 from wealth import web
 from wealth.execution import tickets
@@ -22,7 +22,7 @@ from wealth.execution.brokers import alpaca_orders
 from wealth.service import WealthService
 from wealth.store import WealthStore
 
-PAGE = Path(web.__file__).with_name("chat.html").read_text(encoding="utf-8")
+PAGE = page_text("chat")
 
 
 @pytest.fixture

@@ -3,10 +3,10 @@ and the audit that followed.  Each test is built from those personas' answers an
 from __future__ import annotations
 
 from datetime import date
-from pathlib import Path
 
 import pytest
 
+from tests._pages import page_text
 from tests.fixtures.ingest import statements as fx
 from wealth import onboarding as ob
 from wealth import proactive, review, situation
@@ -412,7 +412,7 @@ def test_an_unclassified_holding_blocks_band_judgement():
 
 
 def test_the_review_page_hides_what_is_unknown():
-    page = (Path(review.__file__).with_name("review.html")).read_text(encoding="utf-8")
+    page = page_text("review")
     assert "['next', (s.next_quarter.items || []).length ? next(s.next_quarter) : null]" in page
     assert "feesUnknown" in page and "data.sections ? periodName(data.period) : t('title')" in page
 

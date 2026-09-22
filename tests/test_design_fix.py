@@ -5,12 +5,12 @@ import re
 from datetime import date
 from pathlib import Path
 
-from wealth import profile, web
+from tests._pages import page_text
+from wealth import profile
 
-ROOT = Path(web.__file__).parent
-CHAT = (ROOT / "chat.html").read_text(encoding="utf-8")
-YOU = (ROOT / "profile.html").read_text(encoding="utf-8")
-REVIEW = (ROOT / "review.html").read_text(encoding="utf-8")
+CHAT = page_text("chat")
+YOU = page_text("profile")
+REVIEW = page_text("review")
 
 
 def _fn(page: str, name: str) -> str:

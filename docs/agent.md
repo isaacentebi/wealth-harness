@@ -203,8 +203,9 @@ of reasoning effort; explicit requests for detail can still receive long answers
 
 The browser server binds only to a loopback address (`127.0.0.1`, or `::1` with
 `--host ::1`), checks the Host and Origin headers, requires a session token on
-every request that reads a turn or changes state, and sends no referrer. This is
-a local personal interface, not a hosted multi-user service.
+every request that reads a turn or changes state, and sends no referrer. Its
+content security policy runs only the pages' own scripts from `/static`, never
+inline script. This is a local personal interface, not a hosted multi-user service.
 
 ## Speed
 
