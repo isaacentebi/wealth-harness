@@ -586,7 +586,8 @@ CATALOG: dict[str, dict[str, Any]] = {
                      "expected_return {conservative, base, source}, risk_free {rate, source} (default: a saved "
                      "cash_reference_rate, else CETES 28 days for MXN; the T-bill rate is asked), investment (a name), "
                      "reserve {months, target_months} (default: the saved picture)",
-                     "refinance: offer {kind refinance|balance_transfer|consolidation, annual_rate (after any promo), "
+                     "refinance: offer {kind refinance|balance_transfer|consolidation, annual_rate (after any promo; with a promo and "
+                     "no rate given, the current rate is assumed and said), "
                      "promo_rate + promo_months, fee, fee_percent, fees_financed, term_months | monthly_payment, "
                      "deferred_interest}",
                      "strategies: order (a custom order to compare), quick_win_months (hybrid, default 3)"],

@@ -51,7 +51,7 @@ def test_brief_shows_the_fixed_interest():
     sit = build(_snap({**BASE, "liability.card": {"kind": "card", "balance": 1000, "currency": "MXN", "annual_rate": 0.12,
                                                   "payment": 300, "payment_frequency": "monthly"}}), None, TODAY)
     line = next(l for l in situation.brief(sit, "en").splitlines() if l.startswith("Debt"))
-    assert line.endswith("interest 22") and "-" not in line.split("interest")[-1]
+    assert line.endswith("interest + IVA 26") and "-" not in line.split("interest")[-1]
 
 
 # -- unknown is never zero (findings 3, 5, 6) --------------------------------------

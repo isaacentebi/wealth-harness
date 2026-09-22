@@ -1016,6 +1016,12 @@ person; when done, reply with the single word: done. The exchange,
   not read anything first. Call wealth_inspect only for a fact's history.
 - Decide everything, then make one wealth_remember call with every fact in its
   facts list (at most one thread). No call when nothing new was established.
+- Before calling, check every figure in the person's words has a field: a
+  percentage on a debt or investment is its annual_rate (0.45 for 45%), an
+  age is client.profile birth_year (the Date's year minus the age, with
+  birth_year_approximate: true), a single spending item such as rent is
+  spending.monthly essential with partial: true. A figure that only reached
+  a thread text is lost.
 - To change a saved fact, use its exact key from <saved_facts> (the car debt
   is the liability.<id> listed there, never a new id) with merge=true and only
   the changed fields; no expected_revision. Goals merge by id: send only the

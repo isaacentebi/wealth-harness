@@ -193,7 +193,7 @@ def normalize(row: Mapping[str, Any], index: int, today: date) -> tuple[dict | N
     if rule is not None:
         debt["rule"] = _rule(rule, ident, missing)
     if payment is None and debt["rule"] is None and term is not None and balance is not None and rate is not None:
-        debt["payment"], debt["payment_basis"] = annuity_payment(balance, rate, term), "from remaining term"
+        debt["payment"], debt["payment_basis"] = annuity_payment(balance, rate * (ONE + iva), term), "from remaining term"
     if payment is None and debt["rule"] is not None:
         debt["payment_basis"] = "minimum rule"
     if indexed:
@@ -1041,9 +1041,13 @@ def refinance(debts: list[dict], offer: Mapping[str, Any], today: date) -> dict:
         raise ValueError("an offer replaces debts in one currency")
     currency = next(iter(currencies))
     rate = _ratio(offer.get("annual_rate"), "offer.annual_rate")
+    promo_rate = _ratio(offer.get("promo_rate"), "offer.promo_rate")
+    assumed_rate = None
+    if rate is None and promo_rate is not None and len({d["rate"] for d in debts}) == 1:
+        # "0% for 12 months" with no rate after it: assume the rate they pay today (stated, never hidden).
+        rate = assumed_rate = debts[0]["rate"]
     if rate is None:
         raise ValueError("offer.annual_rate is required (the rate after any promo; the tasa)")
-    promo_rate = _ratio(offer.get("promo_rate"), "offer.promo_rate")
     promo_months = offer.get("promo_months")
     if (promo_rate is None) != (promo_months is None):
         raise ValueError("offer.promo_rate and offer.promo_months go together")
@@ -1056,6 +1060,9 @@ def refinance(debts: list[dict], offer: Mapping[str, Any], today: date) -> dict:
     iva, iva_note = _iva(offer, "card" if kind == "balance_transfer" else "personal" if kind == "consolidation"
                          else debts[0]["kind"], currency)
     assumptions = [iva_note] if iva_note else []
+    if assumed_rate is not None:
+        assumptions.append(f"The offer gave no rate after the promotion: it is assumed to be your current rate "
+                           f"({num(assumed_rate * 100, 2)}% a year); the offer's terms are exact.")
     current_payment = sum((d["payment"] if d["payment"] is not None else _first_minimum(d) for d in debts), ZERO)
     term = offer.get("term_months")
     if offer.get("monthly_payment") is not None:
@@ -1063,7 +1070,7 @@ def refinance(debts: list[dict], offer: Mapping[str, Any], today: date) -> dict:
     elif term is not None:
         if not isinstance(term, int) or term <= 0:
             raise ValueError("offer.term_months must be a positive whole number")
-        payment, basis = annuity_payment(balance + (fee if financed else ZERO), rate, term), "offer's term"
+        payment, basis = annuity_payment(balance + (fee if financed else ZERO), rate * (ONE + iva), term), "offer's term"
     else:
         payment, basis = current_payment, "your current payment"
         assumptions.append(f"The new debt is paid at your current payment ({num(current_payment)} a month).")
@@ -1089,7 +1096,7 @@ def refinance(debts: list[dict], offer: Mapping[str, Any], today: date) -> dict:
     warnings: list[str] = []
     if promo_months is not None:
         at_end = new["rows"][promo_months - 1]["balance"] if len(new["rows"]) >= promo_months else ZERO
-        to_clear = annuity_payment(start, promo_rate, promo_months) if promo_rate is not None else None
+        to_clear = annuity_payment(start, promo_rate * (ONE + iva), promo_months) if promo_rate is not None else None
         after = sum((r["interest"] + r["iva"] for r in new["rows"][promo_months:]), ZERO)
         risk.update(promo_ends_before_payoff=at_end > CENT, balance_at_promo_end=num(at_end),
                     payment_to_clear_within_promo=num(to_clear), interest_after_promo=num(after),

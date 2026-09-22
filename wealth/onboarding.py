@@ -1093,6 +1093,28 @@ def remaining(sit: Mapping[str, Any]) -> list[str]:
     return [step.id for step in _visible(sit) if not settled(sit, step)]
 
 
+def conversation_language(person_messages: Any) -> str | None:
+    """es or en when the person's own messages clearly show it; None when there is too little to tell."""
+    from .agent import _SPANISH  # lazy: the agent module is heavy and imports the service
+    text = " ".join(str(m or "") for m in person_messages or [])
+    hits = len(_SPANISH.findall(text))
+    if hits >= 2:
+        return "es"
+    if hits == 0 and len(re.findall(r"[A-Za-z]{2,}", text)) >= 6:
+        return "en"
+    return None
+
+
+def reveal_language(sit: Mapping[str, Any], person_messages: Any = (), page_language: str | None = None) -> str:
+    """The language of the setup reveal: the one the person has been writing in, else the saved one, else
+    the page's.  An all-Spanish conversation gets a Spanish reveal even on an English page."""
+    saved = (sit.get("profile") or {}).get("language")
+    for choice in (conversation_language(person_messages), saved, page_language):
+        if choice in ("es", "en"):
+            return choice
+    return "es"
+
+
 def next_step(sit: Mapping[str, Any], language: str | None = None) -> dict | None:
     """The next unanswered card in order, or ``None`` when every step is settled (see :func:`settled`)."""
     for step in _visible(sit):
@@ -1375,6 +1397,7 @@ def brief_line(sit: Mapping[str, Any]) -> str | None:
     return head + ("; " + "; ".join(parts) if parts else "") + " (answered, unsure and skipped are not asked again)"
 
 
-__all__ = ["STEPS", "BY_ID", "apply", "brief_line", "build_facts", "card", "in_flow", "money_text", "next_step",
-           "parse_amount", "parse_free_text", "picture", "progress", "remaining", "settled", "skip", "step_status",
+__all__ = ["STEPS", "BY_ID", "apply", "brief_line", "build_facts", "card", "conversation_language", "in_flow", "money_text", "next_step",
+           "parse_amount", "parse_free_text", "picture", "progress", "remaining", "reveal_language", "settled", "skip",
+           "step_status",
            "target_chooser"]

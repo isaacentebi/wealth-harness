@@ -1493,11 +1493,30 @@ def _dca(run: _Run) -> None:
         trigger=sorted((s["plan_id"], s["due"]) for s in slipped)))
 
 
+_ARRIVED = {"liability": ("your debt", "tu deuda"), "cash": ("your cash", "tu efectivo"),
+            "investment": ("your investments", "tus inversiones"), "income": ("your income", "tu ingreso"),
+            "spending": ("your spending", "tu gasto"), "goals": ("your goals", "tus metas"),
+            "reserve": ("your reserve", "tu reserva"), "client": ("your profile", "tu perfil"),
+            "preference": ("your preferences", "tus preferencias"), "constraint": ("your limits", "tus límites")}
+
+
+def _thread_topic(thread_id: str) -> str:
+    """A thread id as words: "transferencia_saldo" -> "transferencia saldo"."""
+    words = re.sub(r"[_\-.]+", " ", str(thread_id)).strip()
+    return words or str(thread_id)
+
+
+def _arrived_name(key: str, lang: str) -> str:
+    pair = _ARRIVED.get(key.split(".", 1)[0])
+    return pair[0 if lang == "en" else 1] if pair else _thread_topic(key.split(".", 1)[-1])
+
+
 def _threads(run: _Run) -> None:
     meta = run.sit.get("meta") or {}
     ready = []
     for thread in (run.sit.get("threads") or {}).get("open") or []:
-        related = [k for k in thread.get("related") or [] if isinstance(k, str)]
+        # Another thread is advice, not an input the thread was waiting for.
+        related = [k for k in thread.get("related") or [] if isinstance(k, str) and not k.startswith("thread.")]
         if not related:
             continue
         mine = (meta.get(thread["key"]) or {}).get("revision")
@@ -1512,12 +1531,17 @@ def _threads(run: _Run) -> None:
     if not ready:
         return
     thread, newer = max(ready, key=lambda r: (r[0].get("created") or "", r[0]["id"]))
-    snippet = thread["text"] if len(thread["text"]) <= 80 else thread["text"][:77] + "..."
+    # The thread's text is a dated note of the advice in the conversation's language ("El 2026-09-22 dijo
+    # que..."), never a title: the item names the topic by the thread's id and what arrived, in each language.
+    topic = _thread_topic(thread["id"])
+    arrived_en = ", ".join(dict.fromkeys(_arrived_name(k, "en") for k in newer))
+    arrived_es = ", ".join(dict.fromkeys(_arrived_name(k, "es") for k in newer))
     run.items.append(_item(
         "thread_ready", thread["id"], severity="consider", priority="opportunity",
-        title=(f"I can now answer: {snippet}", f"Ya puedo responder: {snippet}"),
-        why=("What we were waiting for is now saved.", "Ya tengo el dato que estábamos esperando."),
-        next_step=(f"Let's pick up: {snippet}", f"Retomemos: {snippet}"),
+        title=(f"I can now update my advice on {topic}", f"Ya puedo actualizar mi consejo sobre {topic}"),
+        why=(f"New details arrived: {arrived_en}.", f"Llegaron datos nuevos: {arrived_es}."),
+        next_step=(f"What changes in your advice on {topic} with the new details?",
+                   f"¿Qué cambia en tu consejo sobre {topic} con los datos nuevos?"),
         data={"thread_id": thread["id"], "text": thread["text"], "kind": thread.get("kind"), "arrived": newer,
               "others": [t["id"] for t, _ in ready if t["id"] != thread["id"]]},
         sources=[thread["key"], *newer],
