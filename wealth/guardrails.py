@@ -34,7 +34,7 @@ from __future__ import annotations
 import math
 import re
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 CHECKED_ON = "2026-09-21"
 
@@ -828,6 +828,202 @@ def _uncovered_shorts(legs: list[dict]) -> bool:
     return calls > _EPS or puts > _EPS or short_spot or geared
 
 
+def _fx_rate_rule(proposal: Mapping[str, Any], currency: Any, reporting: Any, limits_out: dict[str, Any],
+                  missing: list[str], rule: Callable[..., None]) -> float | None:
+    """The rate from the proposal's currency into the picture's (1.0 when they match); None when unknown."""
+    fx_rate = _num(proposal.get("fx_rate"))
+    if proposal.get("fx_rate") is not None and (fx_rate is None or fx_rate <= 0):
+        raise ValueError("proposal.fx_rate must be a positive number")
+    if currency and reporting and currency != reporting:
+        rate = fx_rate
+        limits_out.update(currency=reporting, proposal_currency=currency, fx_rate=fx_rate)
+        if rate is None:
+            missing.append(f"proposal.fx_rate (1 {currency} in {reporting})")
+            rule("currency", "warn",
+                 f"The amounts are in {currency} and your savings in {reporting}; give the exchange rate so I can "
+                 "compare them.",
+                 f"Los montos están en {currency} y tus ahorros en {reporting}; dame el tipo de cambio para "
+                 "compararlos.")
+    else:
+        rate = 1.0
+    return rate
+
+
+def _reserve_rule(sit: Mapping[str, Any], pol: Mapping[str, Any], missing: list[str],
+                  rule: Callable[..., None]) -> float:
+    """Zero cap while the reserve is short; returns the cap share."""
+    reserve = sit.get("reserve") or {}
+    gap = _num(reserve.get("gap"))
+    cap_share = pol["cap_share"]
+    if gap is None:
+        missing.append("reserve (amount and target)")
+        rule("reserve", "warn", "I can't tell yet whether your emergency reserve is full; play money comes after it.",
+             "Aún no sé si tu fondo de emergencia está completo; el dinero de juego va después de él.")
+    elif gap > 0:
+        cap_share = 0.0
+        rule("reserve", "decline",
+             f"Your reserve is {_money(gap, reserve.get('currency'))} short of its target, so the play-money cap is 0% "
+             "until it is full.",
+             f"A tu fondo de emergencia le faltan {_money(gap, reserve.get('currency'))} para su meta; mientras tanto "
+             "el tope de dinero de juego es 0%.", gap=gap)
+    else:
+        rule("reserve", "pass", "", "")
+    return cap_share
+
+
+def _costly_debt_rule(sit: Mapping[str, Any], cap_share: float, missing: list[str],
+                      rule: Callable[..., None]) -> float:
+    """Zero cap while debt costs more than the threshold; returns the cap share."""
+    threshold = PARAMETERS["speculation_debt_rate"]["value"]
+    costly, unknown_rate = [], []
+    for debt in sit.get("liabilities") or []:
+        if (_num(debt.get("balance")) or 0) <= 0:
+            continue
+        rate_ = _num(debt.get("annual_rate"))
+        if rate_ is None:
+            unknown_rate.append(debt.get("name") or debt.get("id"))
+        elif rate_ > threshold:
+            costly.append((debt.get("name") or debt.get("id"), rate_))
+    if costly:
+        cap_share = 0.0
+        names = ", ".join(f"{n} at {_pct(r)}" for n, r in costly)
+        names_es = ", ".join(f"{n} al {_pct(r)}" for n, r in costly)
+        rule("costly_debt", "decline",
+             f"Paying down {names} earns a sure {_pct(max(r for _, r in costly))}; the play-money cap is 0% until "
+             f"no debt costs more than {_pct(threshold)}.",
+             f"Pagar {names_es} te da un {_pct(max(r for _, r in costly))} seguro; el tope de dinero de juego es 0% "
+             f"hasta que ninguna deuda cueste más de {_pct(threshold)}.")
+    elif unknown_rate:
+        missing += [f"liability rate: {n}" for n in unknown_rate]
+        rule("costly_debt", "warn", f"I don't know the rate on {', '.join(map(str, unknown_rate))}; above "
+             f"{_pct(threshold)} it should come first.",
+             f"No sé la tasa de {', '.join(map(str, unknown_rate))}; si pasa de {_pct(threshold)} va primero.")
+    else:
+        rule("costly_debt", "pass", "", "")
+    return cap_share
+
+
+def _ips_leverage_rule(proposal: Mapping[str, Any], work: Mapping[str, Any], kind: str | None,
+                       ips: Mapping[str, Any] | None, payoff_out: Mapping[str, Any] | None,
+                       rule: Callable[..., None]) -> str:
+    """Leverage against the IPS; returns the position side."""
+    side = str(work.get("side") or "long").lower()
+    if payoff_out is not None and proposal.get("legs") is not None:
+        levered = _uncovered_shorts(payoff_out["legs"])
+    else:
+        levered = kind == "leverage" or (_num(proposal.get("leverage")) or 1) > 1 or (
+            kind == "options" and side == "short" and proposal.get("covered") is not True)
+    allowed = ((ips or {}).get("constraints") or {}).get("leverage", {}).get("allowed") if isinstance(ips, Mapping) else None
+    if levered and ips is not None and not allowed:
+        rule("ips_leverage", "decline", "Your investment policy rules out leverage, margin and short selling.",
+             "Tu política de inversión excluye apalancamiento, margen y ventas en corto.")
+    return side
+
+
+def _cap_rule(sit: Mapping[str, Any], proposal: Mapping[str, Any], worst: float | None, unbounded: bool,
+              short_exposure: bool, payoff_out: Mapping[str, Any] | None, cap_share: float, rate: float | None,
+              conv: Callable[[float | None], float | None], shown: Any, limits_out: dict[str, Any],
+              missing: list[str], rule: Callable[..., None],
+              ) -> tuple[float | None, Mapping[str, Any], float | None, float | None]:
+    """The play-money cap on liquid net worth; returns ``(liquid, sleeve, held, cap)``."""
+    liquid = _num((sit.get("net_worth") or {}).get("liquid"))
+    amount = _num(proposal.get("amount"))
+    if amount is not None and amount <= 0:  # a negative "buy" would shrink the sleeve and slip under the cap
+        raise ValueError("proposal.amount must be a positive number")
+    sleeve = proposal.get("sleeve") if isinstance(proposal.get("sleeve"), Mapping) else {}
+    held = _num(sleeve.get("value"))
+    # What counts against the cap: the money put in, or for a written option the capital it puts at risk.
+    counted = worst if short_exposure else (amount if amount is not None else
+                                            (payoff_out or {}).get("capital_at_risk"))
+    counted_how = ("the capital a written option puts at risk" if short_exposure else "the amount put in")
+    if counted is None and not unbounded:
+        missing.append("proposal.amount" if not short_exposure else "the capital at risk (strike and contracts)")
+    cap = None
+    if liquid is None:
+        missing.append("liquid net worth (cash and investments)")
+        rule("cap", "decline" if cap_share > 0 else "pass",
+             "I can't size play money until I know your liquid savings and investments.",
+             "No puedo dimensionar dinero de juego hasta conocer tus ahorros e inversiones líquidas.")
+    else:
+        cap = cap_share * liquid
+        limits_out.update(cap=round(cap, 2), cap_share=cap_share, liquid_net_worth=liquid)
+        if held is None:
+            missing.append("proposal.sleeve.value (play money already held)")
+        counted_rep = conv(counted)
+        after = (held or 0) + (counted_rep or 0)
+        limits_out["counts_against_cap"] = counted_how
+        limits_out["sleeve_after"] = round(after, 2) if held is not None and counted_rep is not None else None
+        if cap_share == 0 or unbounded:
+            pass  # the reason is already given by the reserve, debt or position-loss rule
+        elif counted is not None and rate is None:
+            rule("cap", "warn", "", "")
+        elif counted_rep is not None and after > cap + 1e-9:
+            rule("cap", "decline",
+                 f"This would put {_money(after, shown)} in play money, above the {_pct(cap_share)} cap of "
+                 f"{_money(cap, shown)}.",
+                 f"Esto dejaría {_money(after, shown)} en dinero de juego, arriba del tope de {_pct(cap_share)} "
+                 f"({_money(cap, shown)}).", after=after, cap=cap)
+        elif held is None:
+            rule("cap", "warn",
+                 f"The cap is {_money(cap, shown)} ({_pct(cap_share)}); I don't know what is already in play money, "
+                 "so count it against the cap.",
+                 f"El tope es {_money(cap, shown)} ({_pct(cap_share)}); no sé cuánto tienes ya en dinero de juego, "
+                 "así que cuéntalo contra el tope.")
+        else:
+            rule("cap", "pass", "", "", after=after, cap=cap)
+    return liquid, sleeve, held, cap
+
+
+def _position_loss_rule(worst: float | None, unbounded: bool, how: str, liquid: float | None, rate: float | None,
+                        conv: Callable[[float | None], float | None], shown: Any, cap_share: float,
+                        pol: Mapping[str, Any], limits_out: dict[str, Any], missing: list[str],
+                        rule: Callable[..., None]) -> None:
+    """The worst case of this one position against the single-position loss limit."""
+    worst_rep = conv(worst)
+    limits_out["worst_case_loss"] = None if unbounded or worst_rep is None else round(worst_rep, 2)
+    limits_out["worst_case_basis"] = how
+    if unbounded:
+        rule("position_loss", "decline",
+             "This position has no ceiling on what it can lose, so it can't fit a play-money budget.",
+             "Esta posición no tiene techo de pérdida, así que no cabe en un presupuesto de dinero de juego.")
+    elif liquid is not None and worst is not None and rate is None:
+        rule("position_loss", "warn", "", "")
+    elif liquid is not None and worst_rep is not None:
+        max_loss = pol["max_position_loss_share"] * liquid
+        limits_out["max_position_loss"] = round(max_loss, 2)
+        if worst_rep > max_loss + 1e-9:
+            rule("position_loss", "decline" if cap_share > 0 else "pass",
+                 f"The worst case here is {_money(worst_rep, shown)} ({how}), above the "
+                 f"{_pct(pol['max_position_loss_share'])} single-position limit of {_money(max_loss, shown)}.",
+                 f"En el peor caso pierdes {_money(worst_rep, shown)}, arriba del límite por posición de "
+                 f"{_pct(pol['max_position_loss_share'])} ({_money(max_loss, shown)}).")
+        else:
+            rule("position_loss", "pass", "", "")
+    elif worst is None:
+        rule("position_loss", "warn", f"I can't work out the worst case yet ({how}).",
+             f"Aún no puedo calcular el peor caso ({how}).")
+        missing.append(f"worst case: {how}")
+
+
+def _drawdown_rule(held: float | None, sleeve: Mapping[str, Any], pol: Mapping[str, Any], limits_out: dict[str, Any],
+                   rules: list[dict], rule: Callable[..., None]) -> None:
+    """Pause adding once the play-money sleeve is down the drawdown stop from its high."""
+    value, peak = held, _num(sleeve.get("peak"))
+    if value is not None and peak:
+        drawdown = max(0.0, 1 - value / peak)
+        limits_out["sleeve_drawdown"] = round(drawdown, 4)
+        if drawdown >= pol["drawdown_stop"] - 1e-9:  # an exact 30% fall (0.7/1.0 in floats is 0.2999...) stops
+            rule("drawdown_stop", "decline",
+                 f"Play money is {_pct(drawdown)} below its high; the plan pauses adding at {_pct(pol['drawdown_stop'])}. "
+                 "A written look back at what happened comes first.",
+                 f"El dinero de juego está {_pct(drawdown)} abajo de su máximo; el plan pausa nuevas compras al "
+                 f"{_pct(pol['drawdown_stop'])}. Primero conviene revisar por escrito qué pasó.", drawdown=drawdown)
+        else:
+            rule("drawdown_stop", "pass", "", "")
+    else:
+        rules.append({"rule": "drawdown_stop", "status": "not_checked", "needs": "sleeve.value and sleeve.peak"})
+
+
 def speculation_check(proposal: Mapping[str, Any], situation: Mapping[str, Any] | None,
                       ips: Mapping[str, Any] | None = None, policy: Mapping[str, Any] | None = None,
                       *, context: Mapping[str, Any] | None = None) -> dict:
@@ -903,21 +1099,7 @@ def speculation_check(proposal: Mapping[str, Any], situation: Mapping[str, Any] 
                             symbol=proposal.get("symbol"))
 
     # -- the proposal's currency against the picture's
-    fx_rate = _num(proposal.get("fx_rate"))
-    if proposal.get("fx_rate") is not None and (fx_rate is None or fx_rate <= 0):
-        raise ValueError("proposal.fx_rate must be a positive number")
-    if currency and reporting and currency != reporting:
-        rate = fx_rate
-        limits_out.update(currency=reporting, proposal_currency=currency, fx_rate=fx_rate)
-        if rate is None:
-            missing.append(f"proposal.fx_rate (1 {currency} in {reporting})")
-            rule("currency", "warn",
-                 f"The amounts are in {currency} and your savings in {reporting}; give the exchange rate so I can "
-                 "compare them.",
-                 f"Los montos están en {currency} y tus ahorros en {reporting}; dame el tipo de cambio para "
-                 "compararlos.")
-    else:
-        rate = 1.0
+    rate = _fx_rate_rule(proposal, currency, reporting, limits_out, missing, rule)
 
     def conv(value: float | None) -> float | None:
         return None if value is None or rate is None else value * rate
@@ -925,60 +1107,11 @@ def speculation_check(proposal: Mapping[str, Any], situation: Mapping[str, Any] 
     shown = reporting if rate is not None and reporting else currency
 
     # -- zero cap while the reserve is short or expensive debt is open
-    reserve = sit.get("reserve") or {}
-    gap = _num(reserve.get("gap"))
-    cap_share = pol["cap_share"]
-    if gap is None:
-        missing.append("reserve (amount and target)")
-        rule("reserve", "warn", "I can't tell yet whether your emergency reserve is full; play money comes after it.",
-             "Aún no sé si tu fondo de emergencia está completo; el dinero de juego va después de él.")
-    elif gap > 0:
-        cap_share = 0.0
-        rule("reserve", "decline",
-             f"Your reserve is {_money(gap, reserve.get('currency'))} short of its target, so the play-money cap is 0% "
-             "until it is full.",
-             f"A tu fondo de emergencia le faltan {_money(gap, reserve.get('currency'))} para su meta; mientras tanto "
-             "el tope de dinero de juego es 0%.", gap=gap)
-    else:
-        rule("reserve", "pass", "", "")
-    threshold = PARAMETERS["speculation_debt_rate"]["value"]
-    costly, unknown_rate = [], []
-    for debt in sit.get("liabilities") or []:
-        if (_num(debt.get("balance")) or 0) <= 0:
-            continue
-        rate_ = _num(debt.get("annual_rate"))
-        if rate_ is None:
-            unknown_rate.append(debt.get("name") or debt.get("id"))
-        elif rate_ > threshold:
-            costly.append((debt.get("name") or debt.get("id"), rate_))
-    if costly:
-        cap_share = 0.0
-        names = ", ".join(f"{n} at {_pct(r)}" for n, r in costly)
-        names_es = ", ".join(f"{n} al {_pct(r)}" for n, r in costly)
-        rule("costly_debt", "decline",
-             f"Paying down {names} earns a sure {_pct(max(r for _, r in costly))}; the play-money cap is 0% until "
-             f"no debt costs more than {_pct(threshold)}.",
-             f"Pagar {names_es} te da un {_pct(max(r for _, r in costly))} seguro; el tope de dinero de juego es 0% "
-             f"hasta que ninguna deuda cueste más de {_pct(threshold)}.")
-    elif unknown_rate:
-        missing += [f"liability rate: {n}" for n in unknown_rate]
-        rule("costly_debt", "warn", f"I don't know the rate on {', '.join(map(str, unknown_rate))}; above "
-             f"{_pct(threshold)} it should come first.",
-             f"No sé la tasa de {', '.join(map(str, unknown_rate))}; si pasa de {_pct(threshold)} va primero.")
-    else:
-        rule("costly_debt", "pass", "", "")
+    cap_share = _reserve_rule(sit, pol, missing, rule)
+    cap_share = _costly_debt_rule(sit, cap_share, missing, rule)
 
     # -- leverage against the IPS (a written option on margin is leverage; covered or cash-secured is not)
-    side = str(work.get("side") or "long").lower()
-    if payoff_out is not None and proposal.get("legs") is not None:
-        levered = _uncovered_shorts(payoff_out["legs"])
-    else:
-        levered = kind == "leverage" or (_num(proposal.get("leverage")) or 1) > 1 or (
-            kind == "options" and side == "short" and proposal.get("covered") is not True)
-    allowed = ((ips or {}).get("constraints") or {}).get("leverage", {}).get("allowed") if isinstance(ips, Mapping) else None
-    if levered and ips is not None and not allowed:
-        rule("ips_leverage", "decline", "Your investment policy rules out leverage, margin and short selling.",
-             "Tu política de inversión excluye apalancamiento, margen y ventas en corto.")
+    side = _ips_leverage_rule(proposal, work, kind, ips, payoff_out, rule)
 
     # -- worst case: from the payoff when there is one
     if payoff_out is not None:
@@ -991,93 +1124,14 @@ def speculation_check(proposal: Mapping[str, Any], situation: Mapping[str, Any] 
         short_exposure = True  # a spread or any written leg is sized by what it can lose, not by the premium
 
     # -- the cap on liquid net worth
-    liquid = _num((sit.get("net_worth") or {}).get("liquid"))
-    amount = _num(proposal.get("amount"))
-    if amount is not None and amount <= 0:  # a negative "buy" would shrink the sleeve and slip under the cap
-        raise ValueError("proposal.amount must be a positive number")
-    sleeve = proposal.get("sleeve") if isinstance(proposal.get("sleeve"), Mapping) else {}
-    held = _num(sleeve.get("value"))
-    # What counts against the cap: the money put in, or for a written option the capital it puts at risk.
-    counted = worst if short_exposure else (amount if amount is not None else
-                                            (payoff_out or {}).get("capital_at_risk"))
-    counted_how = ("the capital a written option puts at risk" if short_exposure else "the amount put in")
-    if counted is None and not unbounded:
-        missing.append("proposal.amount" if not short_exposure else "the capital at risk (strike and contracts)")
-    cap = None
-    if liquid is None:
-        missing.append("liquid net worth (cash and investments)")
-        rule("cap", "decline" if cap_share > 0 else "pass",
-             "I can't size play money until I know your liquid savings and investments.",
-             "No puedo dimensionar dinero de juego hasta conocer tus ahorros e inversiones líquidas.")
-    else:
-        cap = cap_share * liquid
-        limits_out.update(cap=round(cap, 2), cap_share=cap_share, liquid_net_worth=liquid)
-        if held is None:
-            missing.append("proposal.sleeve.value (play money already held)")
-        counted_rep = conv(counted)
-        after = (held or 0) + (counted_rep or 0)
-        limits_out["counts_against_cap"] = counted_how
-        limits_out["sleeve_after"] = round(after, 2) if held is not None and counted_rep is not None else None
-        if cap_share == 0 or unbounded:
-            pass  # the reason is already given by the reserve, debt or position-loss rule
-        elif counted is not None and rate is None:
-            rule("cap", "warn", "", "")
-        elif counted_rep is not None and after > cap + 1e-9:
-            rule("cap", "decline",
-                 f"This would put {_money(after, shown)} in play money, above the {_pct(cap_share)} cap of "
-                 f"{_money(cap, shown)}.",
-                 f"Esto dejaría {_money(after, shown)} en dinero de juego, arriba del tope de {_pct(cap_share)} "
-                 f"({_money(cap, shown)}).", after=after, cap=cap)
-        elif held is None:
-            rule("cap", "warn",
-                 f"The cap is {_money(cap, shown)} ({_pct(cap_share)}); I don't know what is already in play money, "
-                 "so count it against the cap.",
-                 f"El tope es {_money(cap, shown)} ({_pct(cap_share)}); no sé cuánto tienes ya en dinero de juego, "
-                 "así que cuéntalo contra el tope.")
-        else:
-            rule("cap", "pass", "", "", after=after, cap=cap)
+    liquid, sleeve, held, cap = _cap_rule(sit, proposal, worst, unbounded, short_exposure, payoff_out, cap_share,
+                                          rate, conv, shown, limits_out, missing, rule)
 
     # -- single-position loss
-    worst_rep = conv(worst)
-    limits_out["worst_case_loss"] = None if unbounded or worst_rep is None else round(worst_rep, 2)
-    limits_out["worst_case_basis"] = how
-    if unbounded:
-        rule("position_loss", "decline",
-             "This position has no ceiling on what it can lose, so it can't fit a play-money budget.",
-             "Esta posición no tiene techo de pérdida, así que no cabe en un presupuesto de dinero de juego.")
-    elif liquid is not None and worst is not None and rate is None:
-        rule("position_loss", "warn", "", "")
-    elif liquid is not None and worst_rep is not None:
-        max_loss = pol["max_position_loss_share"] * liquid
-        limits_out["max_position_loss"] = round(max_loss, 2)
-        if worst_rep > max_loss + 1e-9:
-            rule("position_loss", "decline" if cap_share > 0 else "pass",
-                 f"The worst case here is {_money(worst_rep, shown)} ({how}), above the "
-                 f"{_pct(pol['max_position_loss_share'])} single-position limit of {_money(max_loss, shown)}.",
-                 f"En el peor caso pierdes {_money(worst_rep, shown)}, arriba del límite por posición de "
-                 f"{_pct(pol['max_position_loss_share'])} ({_money(max_loss, shown)}).")
-        else:
-            rule("position_loss", "pass", "", "")
-    elif worst is None:
-        rule("position_loss", "warn", f"I can't work out the worst case yet ({how}).",
-             f"Aún no puedo calcular el peor caso ({how}).")
-        missing.append(f"worst case: {how}")
+    _position_loss_rule(worst, unbounded, how, liquid, rate, conv, shown, cap_share, pol, limits_out, missing, rule)
 
     # -- drawdown stop
-    value, peak = held, _num(sleeve.get("peak"))
-    if value is not None and peak:
-        drawdown = max(0.0, 1 - value / peak)
-        limits_out["sleeve_drawdown"] = round(drawdown, 4)
-        if drawdown >= pol["drawdown_stop"] - 1e-9:  # an exact 30% fall (0.7/1.0 in floats is 0.2999...) stops
-            rule("drawdown_stop", "decline",
-                 f"Play money is {_pct(drawdown)} below its high; the plan pauses adding at {_pct(pol['drawdown_stop'])}. "
-                 "A written look back at what happened comes first.",
-                 f"El dinero de juego está {_pct(drawdown)} abajo de su máximo; el plan pausa nuevas compras al "
-                 f"{_pct(pol['drawdown_stop'])}. Primero conviene revisar por escrito qué pasó.", drawdown=drawdown)
-        else:
-            rule("drawdown_stop", "pass", "", "")
-    else:
-        rules.append({"rule": "drawdown_stop", "status": "not_checked", "needs": "sleeve.value and sleeve.peak"})
+    _drawdown_rule(held, sleeve, pol, limits_out, rules, rule)
 
     if payoff_out is not None:
         payoff_out["sizing"] = _payoff_sizing(payoff_out, conv, shown, sit, cap, held, cap_share)
