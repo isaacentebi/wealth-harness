@@ -383,3 +383,99 @@ def test_normalize_symbol_handles_share_classes_and_bmv_conventions():
     assert {normalize_symbol(value) for value in ("WALMEX*", "WALMEX.MX", "WALMEX* MM", "BMV:WALMEX")} == {"WALMEX"}
     assert normalize_symbol("GFNORTEO.MX") == "GFNORTEO"
     assert normalize_symbol("") is None
+
+
+# --- automatic look-through from research ------------------------------------------------------
+
+def _fund_research(symbol, holdings, *, as_of="2026-09-01", stock=0.99):
+    """A saved research.<SYMBOL> fund packet, as the research task stores it."""
+    return {"status": "ready", "sources": [{"id": "S1", "title": f"{symbol} fact sheet", "as_of": as_of,
+                                            "url": "https://example.com", "kind": "fund"}],
+            "result": {"symbol": symbol, "entity_type": "fund", "as_of": as_of,
+                       "fund_facts": [{"label": "asset_classes", "value": {"stockPosition": stock, "bondPosition": 0},
+                                       "source_ids": ["S1"]}],
+                       "fund_holdings": [{"symbol": s, "weight": w, "source_ids": ["S1"]} for s, w in holdings]}}
+
+
+def _auto_household(**updates):
+    return household(
+        positions=[
+            {"id": "p-vti", "account_id": "a1", "instrument_id": "VTI", "symbol": "VTI", "quantity": 200, "value": 60000,
+             "currency": "USD", "asset_class": "etf"},
+            {"id": "p-qqq", "account_id": "a1", "instrument_id": "QQQ", "symbol": "QQQ", "quantity": 50, "value": 30000,
+             "currency": "USD", "asset_class": "etf"},
+            {"id": "p-msft", "account_id": "a1", "instrument_id": "isin:US5949181045", "symbol": "MSFT", "quantity": 20,
+             "value": 10000, "currency": "USD", "asset_class": "equity"},
+        ],
+        income_exposures=[{"id": "salary", "description": "Microsoft salary", "currency": "USD", "annual_amount": 200000,
+                           "sector": "technology", "employer_instrument_id": "isin:US5949181045"}],
+        **updates)
+
+
+def _auto_context():
+    return {"research.VTI": _fund_research("VTI", [("AAPL", 0.06), ("MSFT", 0.06), ("NVDA", 0.05)]),
+            "research.QQQ": _fund_research("QQQ", [("AAPL", 0.09), ("MSFT", 0.08), ("NVDA", 0.08)])}
+
+
+def test_exposure_uses_saved_research_holdings_for_true_exposure_and_overlap():
+    packet = run("exposure", {"household": _auto_household(), "evaluation_date": "2026-09-20"}, _auto_context())
+    result = packet["result"]
+    sources = {row["instrument_id"]: row for row in result["lookthrough_sources"]}
+    assert sources["VTI"]["origin"] == "saved_research" and sources["VTI"]["as_of"] == "2026-09-01"
+    assert sources["VTI"]["asset_class"] == "equity"
+    top = {row["instrument_id"]: row for row in result["top_underlying"]}
+    # MSFT: 10,000 direct + 6% of 60,000 + 8% of 30,000 = 16,000; the fund's MSFT maps onto the direct ISIN.
+    msft = top["isin:US5949181045"]
+    assert (msft["direct_value"], msft["via_funds_value"], msft["total_value"]) == ("10000", "6000", "16000")
+    assert result["top_underlying"][0]["instrument_id"] == "isin:US5949181045"
+    matrix = result["overlap_matrix"]
+    assert matrix["positions"] == ["p-vti", "p-qqq"]
+    assert matrix["matrix"][0][1] == "0.17" and matrix["matrix"][1][0] == "0.17"
+    # The unreported 83% / 75% of each fund is still unknown by name but equity by asset class.
+    classes = {row["name"]: row["value"] for row in result["exposures"]["asset_class"]}
+    assert "unknown" not in classes and classes["equity"] == "100000"
+    assert result["coverage"]["lookthrough_complete"] is False
+    assert any("research" in a for a in packet["assumptions"])
+
+
+def test_employer_concentration_includes_fund_lookthrough_and_salary():
+    result = run("exposure", {"household": _auto_household(), "evaluation_date": "2026-09-20"}, _auto_context())
+    row = result["result"]["employer_concentration"][0]
+    assert row["stock_value"] == "16000" and row["stock_weight_of_known_assets"] == "0.16"
+    assert row["annual_income_in_reporting_currency"] == "200000"
+    assert row["at_risk_if_employer_fails"] == "216000" and row["stock_to_income_years"] == "0.08"
+    assert any("your employer" in w for w in result["warnings"])
+
+
+def test_without_research_or_network_funds_stay_opaque_with_a_reason():
+    packet = run("exposure", {"household": _auto_household(), "evaluation_date": "2026-09-20"}, {})
+    rows = {row["instrument_id"]: row for row in packet["result"]["lookthrough_sources"]}
+    assert rows["VTI"]["status"] == "unavailable" and "offline" in rows["VTI"]["reason"]
+    assert packet["result"]["overlap_matrix"] is None
+    stale = {"research.VTI": _fund_research("VTI", [("AAPL", 0.06)], as_of="2026-01-01")}
+    stale_packet = run("exposure", {"household": _auto_household(), "evaluation_date": "2026-09-20"}, stale)
+    assert {r["instrument_id"]: r["status"] for r in stale_packet["result"]["lookthrough_sources"]}["VTI"] == "stale"
+
+
+def test_live_lookthrough_only_when_market_data_is_online(monkeypatch):
+    from wealth import research
+    calls = []
+
+    def fake_fetch(symbol, entity_type, retrieved_on):
+        calls.append(symbol)
+        return {"fund_holdings": [{"symbol": "AAPL", "weight": 0.07}],
+                "fund_facts": [{"label": "asset_classes", "value": {"stockPosition": 0.995}}]}
+
+    monkeypatch.setattr(research, "_fetch_yfinance", fake_fetch)
+    monkeypatch.setattr(research, "_LIVE_FUND_CACHE", {})
+    run("exposure", {"household": _auto_household(), "evaluation_date": "2026-09-20"}, {})
+    assert calls == []  # tests run with WEALTH_OFFLINE=1: nothing is fetched
+    monkeypatch.setenv("WEALTH_OFFLINE", "0")
+    packet = run("exposure", {"household": _auto_household(), "evaluation_date": "2026-09-20"}, {})
+    rows = {row["instrument_id"]: row for row in packet["result"]["lookthrough_sources"]}
+    assert rows["VTI"]["origin"] == "live_yahoo" and rows["VTI"]["as_of"] is None and "retrieved" in rows["VTI"]["note"]
+    assert sorted(calls) == ["QQQ", "VTI"]  # funds only; the direct MSFT holding is not looked up
+    run("exposure", {"household": _auto_household(), "evaluation_date": "2026-09-20"}, {})
+    assert sorted(calls) == ["QQQ", "VTI"]  # one pull per fund per day
+    off = run("exposure", {"household": _auto_household(), "evaluation_date": "2026-09-20", "live_lookthrough": False}, {})
+    assert {r["instrument_id"]: r["status"] for r in off["result"]["lookthrough_sources"]}["VTI"] == "unavailable"

@@ -64,6 +64,9 @@ USC_416_URL = "https://www.govinfo.gov/content/pkg/USCODE-2023-title42/html/USCO
 IRC_401_URL = "https://www.govinfo.gov/content/pkg/USCODE-2023-title26/html/USCODE-2023-title26-subtitleA-chap1-subchapD-partI-subpartA-sec401.htm"
 ECFR_RMD_URL = "https://www.ecfr.gov/current/title-26/part-1/section-1.401(a)(9)-9"
 IRC_223_URL = "https://www.law.cornell.edu/uscode/text/26/223"
+IRC_86_URL = "https://www.law.cornell.edu/uscode/text/26/86"
+CMS_2026_PREMIUMS_URL = "https://www.cms.gov/newsroom/fact-sheets/2026-medicare-parts-b-premiums-deductibles"
+SSA_IRMAA_URL = "https://www.ssa.gov/benefits/medicare/medicare-premiums.html"
 
 
 def _lss(article: str, rule: str) -> dict[str, Any]:
@@ -253,6 +256,26 @@ PARAMETERS: dict[str, dict[Any, dict[str, Any]]] = {
                        reported_value=73, verify_with="final Treasury regulations resolving the 1959 overlap between 401(a)(9)(C)(v)(I) and (II)"),
         "1960+": _entry(75, "verified", {"title": "IRC 401(a)(9)(C)(v)(II): attains age 74 after December 31, 2032", "url": IRC_401_URL}, checked_on=CHECKED),
     },
+    # IRC 86(c): base and adjusted base amounts for the taxation of Social Security benefits; fixed in the statute
+    # (not inflation-indexed).  A married person filing separately who lived with the spouse has zero base amounts.
+    "us_ss_taxation_thresholds": {ANY: _entry(
+        {"single": ["25000", "34000"], "head_of_household": ["25000", "34000"],
+         "qualifying_surviving_spouse": ["25000", "34000"], "married_filing_jointly": ["32000", "44000"],
+         "married_filing_separately": ["0", "0"]}, "statutory",
+        {"title": "IRC 86(c)(1)-(2): base amount 25,000 (32,000 joint; 0 separate living together) and adjusted base "
+                  "amount 34,000 (44,000 joint); 50% then 85% inclusion tiers (86(a))", "url": IRC_86_URL})},
+    # Medicare Part B premium and IRMAA (Part B and Part D income-related amounts) by MAGI from two years earlier.
+    # Rows: [MAGI upper bound (None = no bound), Part B monthly premium, Part D monthly IRMAA].
+    "us_irmaa": {2026: _entry({
+        "standard_part_b_monthly": "202.90", "magi_year": 2024,
+        "single": [["109000", "202.90", "0"], ["137000", "284.10", "14.50"], ["171000", "405.80", "37.50"],
+                   ["205000", "527.50", "60.40"], ["500000", "649.20", "83.30"], [None, "689.90", "91.00"]],
+        "married_filing_jointly": [["218000", "202.90", "0"], ["274000", "284.10", "14.50"], ["342000", "405.80", "37.50"],
+                                   ["410000", "527.50", "60.40"], ["750000", "649.20", "83.30"], [None, "689.90", "91.00"]],
+        "married_filing_separately": [["109000", "202.90", "0"], ["391000", "649.20", "83.30"], [None, "689.90", "91.00"]]},
+        "verified", {"title": "CMS, 2026 Medicare Parts A & B Premiums and Deductibles fact sheet (2025-11-14); income-related "
+                              "Part D amounts from the same release; bounds are 'less than or equal to' except the top tier",
+                     "url": CMS_2026_PREMIUMS_URL}, checked_on=CHECKED)},
     "rmd_uniform_lifetime_table": {ANY: _entry(_UNIFORM_LIFETIME, "verified", {"title": "Treas. Reg. 1.401(a)(9)-9(c), Table 2 (eCFR as of 2026-01-01)", "url": ECFR_RMD_URL}, checked_on=CHECKED)},
 }
 
@@ -1278,26 +1301,67 @@ def _tax(table: dict[str, Any], status: str, ordinary_gross: float, gain: float,
 STRATEGIES = ("taxable_first", "proportional", "taxable_first_with_roth_conversions")
 
 
+def taxable_social_security(benefit: float, other_income: float, base: float, adjusted_base: float) -> float:
+    """IRC 86: the taxable part of a year's Social Security ``benefit``.
+
+    ``other_income`` is modified AGI without the benefit (tax-exempt interest included); provisional income adds
+    half the benefit.  Up to ``base``: none; between the bases: half the excess, at most half the benefit; above
+    ``adjusted_base``: 85% of that excess plus the lesser of the tier-one amount and half the benefit, at most 85% of
+    the benefit.
+    """
+    if benefit <= 0:
+        return 0.0
+    provisional = other_income + 0.5 * benefit
+    if provisional <= base:
+        return 0.0
+    if provisional <= adjusted_base:
+        return min(0.5 * benefit, 0.5 * (provisional - base))
+    return min(0.85 * benefit, 0.85 * (provisional - adjusted_base) + min(0.5 * benefit, 0.5 * (adjusted_base - base)))
+
+
+def irmaa_annual(magi: float, table: dict[str, Any], status: str, enrollees: int) -> float:
+    """Yearly Part B + Part D income-related amounts above the standard premium for ``enrollees`` people."""
+    key = "married_filing_jointly" if status == "married_filing_jointly" else \
+        "married_filing_separately" if status == "married_filing_separately" else "single"
+    standard = float(table["standard_part_b_monthly"])
+    for bound, part_b, part_d in table[key]:
+        if bound is None or magi <= float(bound):
+            return 12 * enrollees * (float(part_b) - standard + float(part_d))
+    return 0.0
+
+
 def simulate_withdrawals(cfg: dict[str, Any], strategy: str, params: _Params) -> dict[str, Any]:
-    """Year-by-year decumulation in real dollars with federal tax from the bracket engine."""
+    """Year-by-year decumulation in real dollars with federal tax from the bracket engine.
+
+    Social Security (when supplied) is cash that covers spending and is taxed under IRC 86; IRMAA (when a table
+    is available) is charged from Medicare age on the MAGI of two years earlier and paid from withdrawals.
+    """
     table = cfg["table"]
     status = cfg["filing_status"]
     taxable, basis = cfg["taxable"], cfg["taxable_basis"]
     deferred, roth = cfg["tax_deferred"], cfg["roth"]
     r = cfg["real_return"]
     rows = []
-    total_tax = 0.0
+    total_tax = total_irmaa = 0.0
     shortfall_years = 0
     first_shortfall_age = None
+    ss = cfg.get("social_security") or {}
+    irmaa = cfg.get("irmaa")
+    magis: list[float] = []
     for i in range(cfg["years"]):
         age = cfg["start_age"] + i
         rmd = 0.0
         if cfg["rmd_age"] is not None and age >= cfg["rmd_age"] and deferred > 0:
             rmd = min(rmd_amount(deferred, age, params) or 0.0, deferred)
         top = cfg["conversion_ceiling"] if strategy == "taxable_first_with_roth_conversions" else None
-        need = cfg["spending"]
+        benefit = ss.get("annual_benefit", 0.0) if ss and age >= ss.get("start_age", 0) else 0.0
+        # IRC 86 bases are fixed in nominal dollars, so in this real-dollar model they shrink with inflation.
+        erosion = (1 + ss.get("threshold_inflation", 0.0)) ** (cfg["tax_year"] - 2026 + i) if ss else 1.0
+        base, adjusted = (ss["thresholds"][0] / erosion, ss["thresholds"][1] / erosion) if ss else (0.0, 0.0)
+        need = max(cfg["spending"] - benefit, 0.0)
+        ss_surplus = max(benefit - cfg["spending"], 0.0)
         gross = need
-        w_tax = w_def = w_roth = conv = gain = tax = 0.0
+        w_tax = w_def = w_roth = conv = gain = tax = taxable_ss = magi = charge = 0.0
         short = 0.0
         for _ in range(100):
             remaining = max(gross - rmd, 0.0)
@@ -1318,14 +1382,22 @@ def simulate_withdrawals(cfg: dict[str, Any], strategy: str, params: _Params) ->
                 room = top + cfg["deduction"] - (cfg["other_income"] + rmd + w_def)
                 conv = max(min(room, avail_def - w_def), 0.0)
             gain = w_tax * max(1 - basis / taxable, 0.0) if taxable > 0 else 0.0
-            tax = _tax(table, status, cfg["other_income"] + rmd + w_def + conv, gain, cfg["deduction"])
-            new_gross = need + tax
+            ordinary = cfg["other_income"] + rmd + w_def + conv
+            taxable_ss = taxable_social_security(benefit, ordinary + gain, base, adjusted)
+            tax = _tax(table, status, ordinary + taxable_ss, gain, cfg["deduction"])
+            magi = ordinary + gain + taxable_ss
+            charge = 0.0
+            if irmaa is not None and age >= irmaa["start_age"]:
+                basis_magi = magis[i - 2] if i >= 2 else (irmaa["prior_magi"][i] if irmaa["prior_magi"] else magi)
+                charge = irmaa_annual(basis_magi, irmaa["table"], status, irmaa["enrollees"])
+            new_gross = need + tax + charge
             if abs(new_gross - gross) < 0.005:
                 gross = new_gross
                 break
             gross = new_gross
+        magis.append(magi)
         cash = rmd + w_tax + w_def + w_roth
-        excess = max(cash - (need + tax), 0.0)
+        excess = max(cash - (need + tax + charge), 0.0) + ss_surplus
         if taxable > 0:
             basis -= basis * w_tax / taxable
         taxable -= w_tax
@@ -1334,20 +1406,93 @@ def simulate_withdrawals(cfg: dict[str, Any], strategy: str, params: _Params) ->
         deferred -= rmd + w_def + conv
         roth += conv - w_roth
         total_tax += tax
+        total_irmaa += charge
         if short > 0.01:
             shortfall_years += 1
             first_shortfall_age = first_shortfall_age if first_shortfall_age is not None else age
         rows.append({"age": age, "rmd": _r(rmd), "from_taxable": _r(w_tax), "from_tax_deferred": _r(w_def), "from_roth": _r(w_roth),
-                     "roth_conversion": _r(conv), "realized_gain": _r(gain), "federal_tax": _r(tax), "shortfall": _r(max(short, 0.0))})
+                     "roth_conversion": _r(conv), "realized_gain": _r(gain), "social_security": _r(benefit),
+                     "taxable_social_security": _r(taxable_ss), "magi": _r(magi), "irmaa": _r(charge),
+                     "federal_tax": _r(tax), "shortfall": _r(max(short, 0.0))})
         taxable *= 1 + r
         deferred *= 1 + r
         roth *= 1 + r
     terminal = cfg["terminal_rates"]
     after_tax = (taxable - max(taxable - basis, 0.0) * terminal["taxable_gain"] + roth + deferred * (1 - terminal["tax_deferred"]))
-    return {"strategy": strategy, "total_federal_tax_usd": _r(total_tax), "years_with_shortfall": shortfall_years,
+    return {"strategy": strategy, "total_federal_tax_usd": _r(total_tax), "total_irmaa_usd": _r(total_irmaa),
+            "total_tax_and_irmaa_usd": _r(total_tax + total_irmaa), "years_with_shortfall": shortfall_years,
             "first_shortfall_age": first_shortfall_age,
             "ending_balances_usd": {"taxable": _r(taxable), "taxable_basis": _r(basis), "tax_deferred": _r(deferred), "roth": _r(roth)},
             "ending_after_tax_wealth_usd": _r(after_tax), "years": rows}
+
+
+CONVERSION_SWEEP = (0.10, 0.12, 0.22, 0.24)
+
+
+def _social_security_income(data: dict[str, Any], status: str, params: _Params, missing: list[str],
+                            assumptions: list[str], warnings: list[str]) -> dict[str, Any] | None:
+    """Social Security received during decumulation (``social_security_annual_benefit_usd`` from
+    ``social_security_start_age``), taxed with the IRC 86 thresholds; ``None`` when not supplied."""
+    if "social_security_annual_benefit_usd" not in data:
+        warnings.append("No Social Security benefit was supplied (withdrawals.social_security_annual_benefit_usd); "
+                        "none is modelled, so its taxation is left out.")
+        return None
+    benefit = _num(data["social_security_annual_benefit_usd"], "withdrawals.social_security_annual_benefit_usd", minimum=0)
+    if "social_security_start_age" not in data:
+        missing.append("withdrawals.social_security_start_age (benefit counted from start_age)")
+    start = _int(data.get("social_security_start_age", data["start_age"]), "withdrawals.social_security_start_age",
+                 minimum=62, maximum=70) if "social_security_start_age" in data else None
+    table = params.get("us_ss_taxation_thresholds")
+    if table is None:
+        return None
+    key = "married_filing_jointly" if status == "married_filing_jointly" else status
+    thresholds = [float(v) for v in table[key]]
+    inflation = _num(data.get("threshold_inflation", 0.025), "withdrawals.threshold_inflation", minimum=0, maximum=0.2)
+    if "threshold_inflation" not in data:
+        assumptions.append("The IRC 86 thresholds are fixed in nominal dollars; in this real-dollar model they are "
+                           "deflated at 2.5% a year from 2026 (assumption; set threshold_inflation).")
+    if status == "married_filing_separately":
+        warnings.append("Married filing separately: zero IRC 86 base amounts assume the spouses lived together; "
+                        "apart all year, the single thresholds apply.")
+    assumptions.append(f"Social Security: {benefit:,.0f} a year in today's dollars (COLA keeps it real) received as "
+                       "cash toward spending; provisional income = other income + realized gains + conversions + "
+                       "half the benefit; tax-exempt interest is taken as zero.")
+    return {"annual_benefit": benefit, "start_age": start if start is not None else _int(data["start_age"], "start_age"),
+            "thresholds": thresholds, "threshold_inflation": inflation}
+
+
+def _irmaa_config(data: dict[str, Any], status: str, year: int, params: _Params, assumptions: list[str],
+                  warnings: list[str]) -> dict[str, Any] | None:
+    """IRMAA settings: the table for ``year`` (else the latest one, with a dated warning), enrollees, Medicare age
+    and the MAGI of the two years before the first simulated year."""
+    if data.get("irmaa") is False:
+        warnings.append("IRMAA was switched off for this run (withdrawals.irmaa = false).")
+        return None
+    table_years = sorted(y for y in PARAMETERS["us_irmaa"] if isinstance(y, int))
+    chosen = year if year in table_years else max([y for y in table_years if y <= year] or table_years)
+    table = params.get("us_irmaa", chosen)
+    if table is None:
+        return None
+    if chosen != year:
+        warnings.append(f"No IRMAA table for {year}; the {chosen} CMS brackets (MAGI year {table['magi_year']}) are used "
+                        f"and held constant in real terms.")
+    enrollees = data.get("medicare_enrollees", 2 if status == "married_filing_jointly" else 1)
+    enrollees = _int(enrollees, "withdrawals.medicare_enrollees", minimum=0, maximum=2)
+    if "medicare_enrollees" not in data:
+        assumptions.append(f"IRMAA: {enrollees} Medicare enrollee(s), both the same age as start_age when two "
+                           "(assumption; set medicare_enrollees).")
+    start = _int(data.get("medicare_start_age", 65), "withdrawals.medicare_start_age", minimum=65, maximum=110)
+    prior = data.get("magi_prior_two_years_usd")
+    if prior is not None:
+        if not isinstance(prior, list) or len(prior) != 2:
+            raise ValueError("withdrawals.magi_prior_two_years_usd must be [MAGI two years before, MAGI one year before]")
+        prior = [_num(v, "withdrawals.magi_prior_two_years_usd[]", minimum=0) for v in prior]
+    else:
+        assumptions.append("IRMAA in the first two simulated years uses that year's own MAGI (the real two-year "
+                           "lookback reads earlier returns; set magi_prior_two_years_usd).")
+    assumptions.append(f"IRMAA ({chosen} CMS table) is charged from age {start} on MAGI two years earlier, paid from "
+                       "withdrawals; brackets held constant in real terms; the life-changing-event appeal is not modelled.")
+    return {"table": table, "table_year": chosen, "enrollees": enrollees, "start_age": start, "prior_magi": prior}
 
 
 def withdrawal_ordering(data: dict[str, Any], params: _Params, missing: list[str], assumptions: list[str],
@@ -1395,7 +1540,14 @@ def withdrawal_ordering(data: dict[str, Any], params: _Params, missing: list[str
     target = data.get("conversion_target_rate", 0.12)
     target = _num(target, "withdrawals.conversion_target_rate", minimum=0, maximum=0.37)
     if "conversion_target_rate" not in data:
-        assumptions.append("Roth conversions fill ordinary taxable income to the top of the 12% bracket (assumption).")
+        assumptions.append("The taxable_first_with_roth_conversions strategy fills ordinary taxable income to the top of "
+                           "the 12% bracket (assumption); conversion_sweep compares the 10/12/22/24% ceilings.")
+    sweep_rates = data.get("conversion_sweep_rates", list(CONVERSION_SWEEP))
+    if not isinstance(sweep_rates, list) or not sweep_rates:
+        raise ValueError("withdrawals.conversion_sweep_rates must be a nonempty list of bracket rates")
+    sweep_rates = [_num(r, "withdrawals.conversion_sweep_rates[]", minimum=0, maximum=0.35) for r in sweep_rates]
+    social = _social_security_income(data, status, params, missing, assumptions, warnings)
+    irmaa = _irmaa_config(data, status, year, params, assumptions, warnings)
     terminal = data.get("terminal_rates", {"tax_deferred": 0.22, "taxable_gain": 0.15})
     if not isinstance(terminal, dict):
         raise ValueError("withdrawals.terminal_rates must be an object")
@@ -1410,20 +1562,48 @@ def withdrawal_ordering(data: dict[str, Any], params: _Params, missing: list[str
            "other_income": _num(data.get("other_ordinary_income_usd", 0), "withdrawals.other_ordinary_income_usd", minimum=0),
            "deduction": deduction, "start_age": start_age, "years": _int(data["years"], "withdrawals.years", minimum=1, maximum=60),
            "real_return": _num(data["real_return"], "withdrawals.real_return", minimum=-0.5, maximum=0.5),
-           "rmd_age": rmd_start, "conversion_ceiling": _bracket_top(table, status, target), "terminal_rates": terminal}
+           "rmd_age": rmd_start, "conversion_ceiling": _bracket_top(table, status, target), "terminal_rates": terminal,
+           "tax_year": year, "social_security": social, "irmaa": irmaa}
     if "other_ordinary_income_usd" not in data:
-        missing.append("withdrawals.other_ordinary_income_usd (taxable Social Security, pensions; treated as 0)")
+        missing.append("withdrawals.other_ordinary_income_usd (pensions and other ordinary income; treated as 0)")
     results = {s: simulate_withdrawals(cfg, s, params) for s in STRATEGIES}
     best = max(results.values(), key=lambda x: (-x["years_with_shortfall"], x["ending_after_tax_wealth_usd"]))
+    sweep = {}
+    for rate in sweep_rates:
+        ceiling = _bracket_top(table, status, rate)
+        run = simulate_withdrawals({**cfg, "conversion_ceiling": ceiling}, "taxable_first_with_roth_conversions", params)
+        sweep[f"{rate:g}"] = {"conversion_ceiling_taxable_income_usd": ceiling,
+                              "lifetime_roth_conversions_usd": _r(sum(y["roth_conversion"] for y in run["years"])),
+                              "lifetime_federal_tax_usd": run["total_federal_tax_usd"],
+                              "lifetime_irmaa_usd": run["total_irmaa_usd"],
+                              "lifetime_tax_and_irmaa_usd": run["total_tax_and_irmaa_usd"],
+                              "ending_after_tax_wealth_usd": run["ending_after_tax_wealth_usd"],
+                              "years_with_shortfall": run["years_with_shortfall"]}
+    candidates = {**{s: (v["years_with_shortfall"], v["ending_after_tax_wealth_usd"], v["total_tax_and_irmaa_usd"])
+                     for s, v in results.items() if s != "taxable_first_with_roth_conversions"},
+                  **{f"roth_conversions_to_{int(round(float(r) * 100))}pct": (v["years_with_shortfall"],
+                     v["ending_after_tax_wealth_usd"], v["lifetime_tax_and_irmaa_usd"]) for r, v in sweep.items()}}
+    best_name = max(candidates, key=lambda k: (-candidates[k][0], candidates[k][1], -candidates[k][2], k))
     assumptions.append(f"Withdrawals: real dollars; the {year} brackets are held constant in real terms; taxable-account "
                        "dividends are not taxed separately; the conversion tax is paid from withdrawals; RMDs use the Uniform "
                        "Lifetime Table on the start-of-year balance.")
-    warnings.append("Federal tax only (no state tax, IRMAA, ACA credits, or the taxation of Social Security benefits beyond "
-                    "what is supplied in other_ordinary_income_usd).")
+    warnings.append("Federal tax plus IRMAA only: no state tax, ACA credits, the age-65 additional standard deduction or "
+                    "the temporary 2025-2028 senior deduction; other_ordinary_income_usd is taxed in full.")
     return {"tax_year_brackets": year, "filing_status": status, "deduction_usd": deduction, "rmd_start_age": rmd_start,
             "conversion_ceiling_taxable_income_usd": cfg["conversion_ceiling"],
             "strategies": results, "highest_ending_after_tax_wealth": best["strategy"],
-            "comparison": {s: {"total_federal_tax_usd": v["total_federal_tax_usd"], "ending_after_tax_wealth_usd": v["ending_after_tax_wealth_usd"],
+            "conversion_sweep": sweep,
+            "best_strategy": {"name": best_name, "years_with_shortfall": candidates[best_name][0],
+                              "ending_after_tax_wealth_usd": candidates[best_name][1],
+                              "lifetime_tax_and_irmaa_usd": candidates[best_name][2],
+                              "rule": "fewest shortfall years, then highest after-tax ending wealth, then lowest "
+                                      "lifetime federal tax plus IRMAA"},
+            "social_security_taxation": None if not social else {
+                "annual_benefit_usd": social["annual_benefit"], "start_age": social["start_age"],
+                "thresholds_nominal_usd": social["thresholds"], "threshold_inflation": social["threshold_inflation"]},
+            "irmaa": None if irmaa is None else {"table_year": irmaa["table_year"], "enrollees": irmaa["enrollees"],
+                                                 "start_age": irmaa["start_age"]},
+            "comparison": {s: {"total_federal_tax_usd": v["total_federal_tax_usd"], "total_irmaa_usd": v["total_irmaa_usd"], "ending_after_tax_wealth_usd": v["ending_after_tax_wealth_usd"],
                                "years_with_shortfall": v["years_with_shortfall"]} for s, v in results.items()}}
 
 

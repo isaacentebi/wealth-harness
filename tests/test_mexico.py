@@ -226,6 +226,56 @@ def test_art185_is_limited_by_remaining_global_cap_room():
     assert existing["result"]["remaining_room"]["global_cap_mxn"] == "70000.00"
 
 
+_MORTGAGE = {"casa_habitacion": True, "financial_system_lender": True, "real_interest_paid_mxn": 80000,
+             "credit_udis": 400000}
+
+
+def test_mortgage_real_interest_counts_inside_the_global_cap():
+    # 150,000 cap: 50,000 general + 80,000 real mortgage interest fit; the Art. 185 room shrinks to 20,000.
+    report = mexico.personal_deductions(_deduction_inputs(
+        deductions={"general_mxn": 50000, "retirement_151v_mxn": 0, "art185_mxn": 0}, mortgage=_MORTGAGE))
+    assert report["status"] == "ready", report["missing"]
+    result = report["result"]
+    assert result["allowed"]["general_mxn"] == "50000.00"
+    assert result["allowed"]["mortgage_real_interest_mxn"] == "80000.00"
+    assert result["remaining_room"]["art185_mxn"] == "20000.00"
+    assert result["mortgage_interest"]["deductible_before_cap_mxn"] == "80000.00"
+    assert result["mortgage_interest"]["cut_by_global_cap_mxn"] == "0.00"
+    assert any("fraccion IV" in s["title"] for s in report["sources"])
+    # With 100,000 of general deductions the cap leaves 50,000 for the interest.
+    capped = mexico.personal_deductions(_deduction_inputs(
+        deductions={"general_mxn": 100000, "retirement_151v_mxn": 0, "art185_mxn": 0}, mortgage=_MORTGAGE))
+    assert capped["result"]["allowed"]["mortgage_real_interest_mxn"] == "50000.00"
+    assert capped["result"]["mortgage_interest"]["cut_by_global_cap_mxn"] == "30000.00"
+    assert capped["result"]["allowed"]["total_personal_deductions_mxn"] == "150000.00"
+
+
+def test_mortgage_above_750000_udis_keeps_the_proportional_interest():
+    # 8,500,000 MXN of credit at 8.5 MXN per UDI = 1,000,000 UDIs; 750,000 / 1,000,000 of the interest counts.
+    mortgage = {**{k: v for k, v in _MORTGAGE.items() if k != "credit_udis"}, "credit_amount_mxn": 8500000,
+                "udi_value_at_origination": "8.5", "udi_source": "Banxico SIE, UDI on the contract date"}
+    report = mexico.personal_deductions(_deduction_inputs(
+        deductions={"general_mxn": 0, "retirement_151v_mxn": 0, "art185_mxn": 0}, mortgage=mortgage))
+    block = report["result"]["mortgage_interest"]
+    assert block["credit_udis"] == "1000000.00" and block["deductible_before_cap_mxn"] == "60000.00"  # 80,000 x 0.75
+    assert any("750,000 UDIs" in w for w in report["warnings"])
+
+
+def test_mortgage_unknowns_stay_null_with_a_reason():
+    report = mexico.personal_deductions(_deduction_inputs(mortgage={"real_interest_paid_mxn": 80000}))
+    block = report["result"]["mortgage_interest"]
+    assert block["deductible_before_cap_mxn"] is None and block["reason"]
+    assert report["result"]["allowed"]["mortgage_real_interest_mxn"] is None
+    assert report["status"] == "partial"
+    assert {"mortgage.casa_habitacion=true", "mortgage.financial_system_lender=true"} <= set(report["missing"])
+    assert any(m.startswith("mortgage.credit_udis") for m in report["missing"])
+    # The lender's constancia figure is enough on its own once the home and lender are confirmed.
+    constancia = mexico.personal_deductions(_deduction_inputs(mortgage={
+        "casa_habitacion": True, "financial_system_lender": True, "constancia_deductible_real_interest_mxn": 42000}))
+    assert constancia["result"]["mortgage_interest"]["deductible_before_cap_mxn"] == "42000.00"
+    assert not [m for m in constancia["missing"] if m.startswith("mortgage")]
+
+
 def test_personal_deductions_fail_closed():
     assert mexico.personal_deductions({})["status"] == "needs_input"
     missing_existing = mexico.personal_deductions(_deduction_inputs(deductions={"general_mxn": 1}))

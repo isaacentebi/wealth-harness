@@ -898,6 +898,75 @@ def _last_trade_date(year: int) -> date:
     return day
 
 
+def _harvest_tickets(rows: list[dict[str, Any]], cumulative: list[dict[str, Any]],
+                     model: _TaxModel, sale_date: date) -> dict[str, Any]:
+    """Draft ``order_ticket`` inputs for the ranked harvest: one ticket per account, one sell line per instrument.
+
+    Each line carries the lot ids it relieves (specific identification), each lot's marginal current-year tax
+    reduction in plan order, and the wash-sale ``repurchase_not_before`` date.  The draft is only a proposal: the
+    model passes ``inputs`` to the ``order_ticket`` task and the person confirms on the card.  Lots whose loss a
+    wash sale would disallow, or that add only to carryforwards, are left out and listed with the reason.
+    """
+    from .execution.tickets import order_symbol  # lazy: execution is optional for tax screens
+
+    marginal = {step["through_lot_id"]: step["marginal_tax_reduction"] for step in cumulative}
+    groups: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    exclusions: list[dict[str, Any]] = []
+    for row in rows:
+        lot = row["_lot"]
+        symbol = order_symbol(lot.instrument_id)
+        saving = marginal.get(lot.id)
+        if row["_recognized"] >= 0:
+            exclusions.append({"lot_id": lot.id, "reason": "wash_sale",
+                               "detail": "Purchases of the same or substantially identical shares within 30 days "
+                                         "would disallow the whole loss."})
+        elif saving is not None and Decimal(saving) <= 0:
+            exclusions.append({"lot_id": lot.id, "reason": "carryforward_only",
+                               "detail": "Adds to loss carryforwards with no current-year federal tax reduction "
+                                         "under the supplied return facts."})
+        elif symbol is None:
+            exclusions.append({"lot_id": lot.id, "reason": "not_tradable_here",
+                               "detail": f"{lot.instrument_id} is not a US ticker the order card can trade."})
+        else:
+            groups.setdefault(lot.account_id, {}).setdefault(symbol, []).append({
+                "lot_id": lot.id, "quantity": _quantity(lot.quantity), "estimated_tax_saving": saving,
+                "character": row["character"], "repurchase_not_before": row["repurchase_not_before"],
+                "account_id": lot.account_id})
+    drafts = []
+    for account_id in sorted(groups):
+        orders = []
+        for symbol, lots in sorted(groups[account_id].items()):
+            quantity = sum((Decimal(lot["quantity"]) for lot in lots), Decimal(0))
+            orders.append({"symbol": symbol, "side": "sell", "qty": _quantity(quantity), "type": "limit",
+                           "account_id": account_id, "reason": "tax-loss harvest", "tags": ["tax_loss_harvest"],
+                           "lots": lots})
+        savings = [lot["estimated_tax_saving"] for order in orders for lot in order["lots"]]
+        total = None if any(v is None for v in savings) else sum((Decimal(v) for v in savings), Decimal(0))
+        repurchase = max(lot["repurchase_not_before"] for order in orders for lot in order["lots"])
+        saving_text = (f"an estimated USD {_money(total)} lower federal tax for {sale_date.year} (an estimate from the "
+                       "supplied return facts, not guaranteed)" if total is not None
+                       else "a tax reduction that cannot be estimated without filing status and return facts")
+        drafts.append({
+            "account_id": account_id,
+            "estimated_tax_saving": _money(total) if total is not None else None,
+            "repurchase_not_before": repurchase,
+            "inputs": {"source": "user_request", "orders": orders,
+                       "rationale": (f"Tax-loss harvest: sell {sum(len(o['lots']) for o in orders)} loss lot(s) by "
+                                     f"specific identification for {saving_text}. Do not buy the same or substantially "
+                                     f"identical securities in any household account before {repurchase}.")},
+        })
+    return {
+        "order_tickets": drafts,
+        "order_ticket_exclusions": exclusions,
+        "order_ticket_note": ("Proposals only: pass order_tickets[i].inputs to the order_ticket task; nothing is sent "
+                              "until the person confirms the card. Each line lists the lot ids to relieve; ask the broker "
+                              "for specific-lot relief (its default method, often FIFO, may pick other lots and change "
+                              "the tax result). Savings are marginal in plan order and are null when the tax model "
+                              "lacks inputs." + ("" if model.ready else " Filing status and return facts are missing, "
+                                                 "so no saving is estimated.")),
+    }
+
+
 def _harvest_report(book: _Book, model: _TaxModel, excluded: set[str]) -> tuple[dict[str, Any], list[str]]:
     sale_date = book.sale_date
     loss_plans = []
@@ -966,6 +1035,7 @@ def _harvest_report(book: _Book, model: _TaxModel, excluded: set[str]) -> tuple[
             "marginal_tax_reduction": _money(step) if step is not None else None,
             "carryforward_after": carry,
         })
+    tickets = _harvest_tickets(rows, cumulative, model, sale_date)
     for row in rows:
         for key in ("_benefit", "_recognized", "_lot"):
             row.pop(key)
@@ -981,6 +1051,7 @@ def _harvest_report(book: _Book, model: _TaxModel, excluded: set[str]) -> tuple[
         "marginal_rates_before_scenario": model.marginal_rates(),
         "short_term_gains_turning_long_term": gain_watch,
         "interpretation": "Losses beyond the point where marginal tax reduction reaches zero only add to carryforwards; ranking is by current-year federal tax reduction per dollar of recognized loss.",
+        **tickets,
     }
     warnings = []
     if sale_date > deadline:

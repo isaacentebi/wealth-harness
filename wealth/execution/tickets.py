@@ -305,7 +305,80 @@ def _normalize_order(raw: Any, index: int) -> dict[str, Any]:
             line[name] = raw[name][:40]
     if isinstance(raw.get("tags"), list):
         line["tags"] = [str(t)[:40] for t in raw["tags"][:10]]
+    if raw.get("lots") is not None:
+        line.update(_normalize_lots(raw["lots"], field, side, qty))
     return line
+
+
+MAX_LOTS = 50
+_LOT_FIELDS = frozenset({"lot_id", "quantity", "estimated_tax_saving", "repurchase_not_before", "character",
+                         "account_id"})
+
+
+def _normalize_lots(raw: Any, field: str, side: str, qty: str | None) -> dict[str, Any]:
+    """The tax lots a sell relieves (specific identification), each with its estimated saving.
+
+    ``lots`` is ``[{lot_id, quantity?, estimated_tax_saving?, repurchase_not_before?, character?, account_id?}]``,
+    typically copied from ``tax`` ``harvest_report`` (``result.order_tickets[].inputs``).  The line then carries
+    the lots, the sum of their savings (``null`` when any lot's saving is unknown) and the latest wash-sale
+    ``repurchase_not_before`` date.  Nothing here changes what is sent to the broker.
+    """
+    if side != "sell":
+        raise ValueError(f"{field}.lots: only a sell relieves tax lots")
+    if not isinstance(raw, list) or not 1 <= len(raw) <= MAX_LOTS:
+        raise ValueError(f"{field}.lots must be a list of 1-{MAX_LOTS} lots")
+    lots: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for j, item in enumerate(raw):
+        path = f"{field}.lots[{j}]"
+        if not isinstance(item, Mapping):
+            errors.append(f"{path} must be an object")
+            continue
+        unknown = sorted(set(item) - _LOT_FIELDS)
+        if unknown:
+            errors.append(f"{path} has unknown fields {unknown}; lots carry {sorted(_LOT_FIELDS)}")
+        lot_id = item.get("lot_id")
+        if not isinstance(lot_id, str) or not lot_id.strip() or len(lot_id) > 64:
+            errors.append(f"{path}.lot_id must be a lot id (text, at most 64 characters)")
+            continue
+        lot: dict[str, Any] = {"lot_id": lot_id.strip()}
+        try:
+            if item.get("quantity") is not None:
+                lot["quantity"] = _s(_dec(item["quantity"], f"{path}.quantity"))
+            saving = item.get("estimated_tax_saving")
+            lot["estimated_tax_saving"] = None if saving is None else _s(
+                _money(_dec(saving, f"{path}.estimated_tax_saving", positive=False)))
+        except ValueError as exc:
+            errors.append(str(exc))
+        day = item.get("repurchase_not_before")
+        if day is not None:
+            try:
+                lot["repurchase_not_before"] = datetime.strptime(str(day), "%Y-%m-%d").date().isoformat()
+            except ValueError:
+                errors.append(f"{path}.repurchase_not_before must be YYYY-MM-DD")
+        if item.get("character") is not None:
+            if item["character"] not in ("short_term", "long_term"):
+                errors.append(f"{path}.character must be short_term or long_term")
+            else:
+                lot["character"] = item["character"]
+        if isinstance(item.get("account_id"), str):
+            lot["account_id"] = item["account_id"][:40]
+        lots.append(lot)
+    ids = [lot["lot_id"] for lot in lots]
+    if len(set(ids)) != len(ids):
+        errors.append(f"{field}.lots lists a lot twice")
+    if not errors and qty is not None and all("quantity" in lot for lot in lots):
+        total = sum((Decimal(lot["quantity"]) for lot in lots), Decimal(0))
+        if total != Decimal(qty):
+            errors.append(f"{field}.lots quantities add up to {_s(total)}, not the order qty {qty}")
+    if errors:
+        raise ValueError("; ".join(errors))
+    savings = [lot.get("estimated_tax_saving") for lot in lots]
+    dates = [lot["repurchase_not_before"] for lot in lots if lot.get("repurchase_not_before")]
+    return {"lots": lots,
+            "estimated_tax_saving": None if any(v is None for v in savings)
+            else _s(sum((Decimal(v) for v in savings), Decimal(0))),
+            "repurchase_not_before": max(dates) if dates else None}
 
 
 # -- the pre-trade checks ------------------------------------------------------------
@@ -791,7 +864,7 @@ def public_ticket(ticket: Mapping[str, Any], *, include_nonce: bool = False, now
         row = {k: line.get(k) for k in ("index", "side", "symbol", "type", "time_in_force", "limit_price",
                                          "last_price", "estimated_amount", "estimated_tax", "estimated_cost",
                                          "account", "state", "broker_order_id", "filled_qty", "filled_avg_price",
-                                         "reason")}
+                                         "reason", "lots", "estimated_tax_saving", "repurchase_not_before")}
         row["qty"] = line.get("order_qty") or line.get("qty")
         row["notional"] = line.get("notional")
         lines.append({k: v for k, v in row.items() if v is not None})
