@@ -438,10 +438,11 @@ def build_proposal(
         tx_reconciled = None
         if raw.get("transactions") or raw.get("flows") or raw.get("debt_flows"):
             kind_for_tx = account_type if account_type != "unspecified" else ("brokerage" if raw.get("positions") else "checking")
-            rows, tx_warnings = normalize_transactions(raw.get("transactions") or [], account_id=account_id,
-                                                       currency=account_currency, account_kind=kind_for_tx,
-                                                       comma=comma, redact_text=redact_text)
+            rows, tx_warnings, unread = normalize_transactions(raw.get("transactions") or [], account_id=account_id,
+                                                               currency=account_currency, account_kind=kind_for_tx,
+                                                               comma=comma, redact_text=redact_text)
             warnings.extend(tx_warnings)
+            reasons.extend(unread)  # a movement the parser could not read makes the whole proposal a review
             all_transactions.extend(rows)
             tx_reconciled = _check_transactions(account_id, account_currency, raw, rows, comma, differences, assertions,
                                                 statement.get("period_start"), as_of)

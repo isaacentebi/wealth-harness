@@ -93,6 +93,18 @@ _RATE = re.compile(r"(?i)\b(apr|annual percentage rate|tasa de inter[eé]s(?: an
 _RATE_OTHER = re.compile(r"(?i)\b(mensual|monthly|moratori[ao]|penalty|promedio|cat|bruta)\b")
 _CAT = re.compile(r"(?i)\bCAT\b(?:\s+promedio)?\s*:?\s*(?P<r>\d{1,3}(?:[.,]\d+)?)\s*%")
 _PAIR_AMOUNT = re.compile(r"(?<![\w.,/$])(?:\(\s*)?[-−–]?\$?\s?\d{1,3}(?:,\d{3})*\.\d{2}(?:\s*\))?(?![\w/%]|[.,]\d)")
+_PAGINATION = re.compile(r"(?i)\b(p[aá]gina|pag\.?|p[aá]g\.?|page|hoja|folio|p\.)\s*\d+\s*(de|of|/|-)?\s*\d*")
+_STAMP = re.compile(r"(?i)\b(impreso|printed|generado|generated|emitido|fecha de impresi[oó]n)\b.*$")
+
+
+def _heading_key(text: str) -> str:
+    """A heading as compared across pages: without pagination, dates, times, printed-at stamps or bare numbers."""
+    text = _STAMP.sub(" ", _PAGINATION.sub(" ", _without_dates(text)))
+    text = re.sub(r"\b\d{1,2}:\d{2}(:\d{2})?\b|\d+", " ", text)
+    return fold(text)
+
+
+_ALIGNED = 3  # characters: a right-aligned value ends within this of its column header's right edge
 _CONTINUED = re.compile(r"\b(continuacion|continua|cont|continued|continuation)\b")
 _TICKER_IN_DESC = re.compile(r"\(([A-Z][A-Z0-9.]{0,6})\)\s*$")
 _ES_WORDS = ("saldo", "cuenta", "periodo", "emisora", "titulos", "fecha", "corte", "efectivo", "cartera", "moneda",
@@ -318,9 +330,14 @@ def _assign(cells: list[tuple[str, int, int]], columns: list[dict[str, Any]], nu
     textual = [c for c in columns if c["field"] not in numeric_fields]
     row: dict[str, str] = {}
     distance: dict[str, int] = {}
+    money = [c for c in numeric if c["field"] not in ("quantity", "price", "installment_number")]
     for text, start, end in cells:
         if _is_reference(text, long_numbers=numeric_fields is _TX_NUMERIC):
-            numeric_like = False
+            # A bare run of digits is a reference inside the text, but money when it sits right-aligned under an
+            # amount column (a 1000000 Cargo printed without separators).
+            nearest = min(columns, key=lambda c: min(abs(c["start"] - start), abs(c["end"] - end)))
+            numeric_like = not text.startswith("0") and (
+                any(abs(c["end"] - end) <= _ALIGNED for c in money) or nearest in money)
         else:
             numeric_like = _is_amount(text) or re.fullmatch(r"[-(]?\$?\s?[\d.,]+%?\)?", text) is not None
         if numeric_like:
@@ -405,7 +422,9 @@ def parse_statement_text(pages: list[tuple[int, str]], *, aliases: dict[str, lis
 
     def heading(text: str) -> None:
         nonlocal new_section
-        folded = fold(text)
+        folded = _heading_key(text)
+        if not folded:
+            return  # page chrome: "Página 2 de 3", "Hoja 2/3", a printed-at stamp
         page_headings.add(folded)
         if folded not in earlier_headings and not _CONTINUED.search(folded):
             new_section = True

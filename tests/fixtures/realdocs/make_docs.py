@@ -174,6 +174,10 @@ def gbm_statement(path: Path, *, split_sic: bool = False) -> dict:
         doc.right(W - 36, 740, "Periodo: del 01/08/2026 al 31/08/2026", 8)
         if number > 1:
             doc.right(W - 36, 729, "Contrato: 10457832      " + PERSON, 7)
+        if split_sic:  # chrome that changes on every page: pagination and a printed-at stamp
+            doc.text(36, 714, f"Hoja {number}/{pages}", 6)
+            doc.right(W - 36, 714, f"Page {number} of {pages}", 6)
+            doc.text(36, 60, f"Impreso el 01/09/2026 08:1{number} hrs", 5.5)
         doc.rule(722, width=1.2)
 
     def footer(number: int) -> None:

@@ -112,6 +112,44 @@ def test_a_holdings_section_split_across_pages_keeps_its_subtotal():
         {k: (v["quantity"], v["value"]) for k, v in whole.items()}
 
 
+_BANK = """BBVA Mexico  Estado de Cuenta
+Periodo DEL 01/08/2026 AL 31/08/2026
+No. de Cuenta   0482917365
+MONEDA NACIONAL
+Saldo Anterior                         100,000.00
+Saldo Final                          {closing}
+
+FECHA      DESCRIPCION                          REFERENCIA          CARGOS            ABONOS
+05/AGO     SPEI ENVIADO SANTANDER               4829107715        {amount}
+15/AGO     PAGO DE NOMINA                       0150826                           42,500.00
+"""
+
+
+def _bank(amount: str, closing: str) -> dict:
+    from wealth.ingest.model import build_proposal
+    from wealth.ingest.statement import parse_statement_text
+
+    parsed = parse_statement_text([(1, _BANK.format(amount=amount.rjust(15), closing=closing))])
+    return build_proposal(parsed["statement"], kind="document", provenance={"kind": "document", "ref": "x"})
+
+
+def test_a_bare_amount_under_its_column_is_money_and_a_reference_is_not():
+    """Before: a Cargo printed without separators (1000000) was taken for a reference, folded into the
+    description, the movement skipped, and the proposal still ready_to_confirm."""
+    proposal = _bank("1000000", "-857,500.00")
+    rows = [(t["date"], t["amount"]) for t in proposal["result"]["transactions"]]
+    assert rows == [("2026-08-05", "-1000000"), ("2026-08-15", "42500")]
+    assert proposal["result"]["transactions"][0]["description"].startswith("SPEI ENVIADO SANTANDER")
+    assert proposal["status"] == "ready_to_confirm", proposal["result"]["review_reasons"]
+
+
+def test_a_movement_whose_amount_cannot_be_read_is_never_dropped_silently():
+    proposal = _bank("--", "142,500.00")
+    assert proposal["status"] == "needs_review"
+    assert any("SPEI ENVIADO SANTANDER" in r and "no readable amount" in r
+               for r in proposal["result"]["review_reasons"])
+
+
 def test_a_movement_whose_direction_cannot_be_told_needs_review():
     """Self-review: an unsigned "Importe" with no running balance and no telling concept was kept as money in."""
     from wealth.ingest.model import build_proposal

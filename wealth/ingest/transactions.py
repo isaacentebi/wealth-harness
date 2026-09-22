@@ -191,20 +191,29 @@ def dedupe_hash(account_id: str, when: str, amount: str, description: str, occur
 
 
 def normalize(rows: list[Mapping[str, Any]], *, account_id: str, currency: str, account_kind: str,
-              comma: bool | None, redact_text) -> tuple[list[dict[str, Any]], list[str]]:
-    """Turn parsed rows into signed, typed, hashed transactions plus warnings."""
+              comma: bool | None, redact_text) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+    """Turn parsed rows into signed, typed, hashed transactions plus warnings and the rows that were not read.
+
+    A dated movement without a readable amount is never dropped quietly: it is named in the third list, which
+    the proposal turns into a review reason."""
     warnings: list[str] = []
+    unread: list[str] = []
     result: list[dict[str, Any]] = []
     seen: dict[tuple[str, str, str], int] = {}
     for row in rows:
         when = row.get("date")
         if not when:
             warnings.append(f"A transaction in {account_id} has no readable date and was skipped.")
+            unread.append(f"A movement in {account_id} has no readable date"
+                          + (f" ({redact_text(str(row.get('description') or ''))[:60]})" if row.get("description")
+                             else "") + " and was not read.")
             continue
         description = " ".join(str(row.get("description") or "").split())
         amount = _signed(row, account_kind, comma)
         if amount is None:
             warnings.append(f"Transaction '{description[:40]}' on {when} in {account_id} has no readable amount and was skipped.")
+            unread.append(f"The movement '{redact_text(description)[:60]}' on {when} in {account_id} has no readable "
+                          "amount and was not read; confirm it from the statement.")
             continue
         quantity = parse_amount(row.get("quantity"), decimal_comma=comma)
         price = parse_amount(row.get("price"), decimal_comma=comma)
@@ -230,7 +239,7 @@ def normalize(rows: list[Mapping[str, Any]], *, account_id: str, currency: str, 
             "page": row.get("page"), "installment": _installment(row.get("installment"), comma),
         }
         result.append(entry)
-    return result, warnings
+    return result, warnings, unread
 
 
 def _signed(row: Mapping[str, Any], account_kind: str, comma: bool | None) -> Decimal | None:
