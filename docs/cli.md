@@ -559,8 +559,11 @@ or a side-by-side.
   USD, from a saved `cash_reference_rate` or `risk_free`. The result gives the
   `breakeven` return, the net-worth difference at `horizon_months` per
   scenario, and a `verdict` (`prepay`, `close_call`, `invest`, `depends`,
-  `build_reserve_first`) with a `confidence`. It never recommends prepaying
-  while the reserve is below target.
+  `build_reserve_first`) with a `confidence`. A debt at 20% or more (not a
+  mortgage) is paid first once the reserve holds one month of essentials, and
+  the reserve keeps filling in parallel (`reserve.in_parallel`). Below that
+  month it waits. Lower-rate debt, such as a mortgage or a car loan, is never
+  prepaid while the reserve is below its full target.
 - **`refinance`**: an `offer` (`refinance`, `balance_transfer` or
   `consolidation`; rate, fees, term, promo) against the current path. It gives
   `interest_saved` net of fees, the `breakeven_month` when fees are paid back,
@@ -578,9 +581,13 @@ printf '%s' '{"task":"debt","inputs":{"mode":"prepay_vs_invest","debt":{"id":"mo
   "reserve":{"months":6,"target_months":6}}}' | uv run wealth run
 ```
 
-The proactive `high_interest_debt` item (20% a year or more) now also says the
-interest saved for each month sooner the debt is gone. It stays silent while
-the reserve is below target.
+The proactive `high_interest_debt` item (20% a year or more) also says the
+interest saved for each month sooner the debt is gone. When the payment does
+not cover the monthly interest (and IVA), the balance grows: the item is always
+shown, as urgent, with `payment_to_stop_growth`. Otherwise it waits only while
+the reserve is below one month of essentials. The reserve item then adds
+"Después de juntar un mes de reserva, esta tarjeta es tu mejor inversión".
+Advice to prepay lower-rate debt still waits for the full reserve target.
 
 ## Harvest tickets, idle cash, look-through and Roth conversions
 

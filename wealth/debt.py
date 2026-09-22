@@ -39,6 +39,8 @@ INDEXATION_ASSUMED = Decimal("0.04")      # annual VSM/UMA update when none is s
 LIBERATION_MONTHS = 360                   # Infonavit/Fovissste cancel what is left after 30 years of payments
 US_MORTGAGE_DEBT_LIMIT = Decimal(750000)  # IRC 163(h)(3)(F): acquisition debt after 2017-12-15
 MONTHLY_ROWS_DEFAULT = 12
+HIGH_INTEREST_RATE = Decimal("0.20")      # as proactive: a debt this costly beats any safe return
+STARTER_RESERVE_MONTHS = ONE              # a 20%+ debt waits only for one month of essentials
 SERIES_POINTS = 120
 MAX_DEBTS = 12
 
@@ -870,16 +872,28 @@ def prepay_vs_invest(debt: dict, inputs: Mapping[str, Any], today: date, *, juri
         decided_by = [m["key"] for m in missing if m["key"] in ("marginal_rate", "itemizes", "mx_mortgage.within_global_cap")
                       or m["key"].startswith("mortgage.")]
     reserve_status = _reserve_status(reserve)
-    prepay_allowed = reserve_status != "below_target"
+    # A 20%+ consumer debt only waits for a starter reserve (one month of essentials); lower-rate debt
+    # (a mortgage, a car) waits for the full target.
+    high = debt["kind"] not in ("mortgage", *INDEXED_KINDS) and debt["rate"] >= HIGH_INTEREST_RATE
+    parallel = False
     condition = None
-    if reserve_status == "below_target":
+    if reserve_status == "below_starter" or (reserve_status == "below_target" and not high):
         verdict, confidence = "build_reserve_first", "high"
-        warnings.append("Your emergency reserve is below its target: put the extra there first. Money prepaid into a "
-                        "debt cannot be taken back out in an emergency.")
+        warnings.append(("Your emergency reserve is below one month of essentials: set that month aside first, then "
+                         "this debt is your best investment." if high else
+                         "Your emergency reserve is below its target: put the extra there first.")
+                        + " Money prepaid into a debt cannot be taken back out in an emergency.")
+    elif reserve_status == "below_target":  # high-rate debt with at least a starter reserve
+        verdict, confidence, parallel = "prepay", "high", True
+        warnings.append("You have at least a month of reserve: pay this debt first and keep building the reserve to "
+                        "its target in parallel.")
     elif reserve_status == "unknown" and verdict in ("prepay", "close_call", "depends"):
-        condition = "Only once your emergency reserve is at its target (not known yet)."
+        condition = ("Only once you have at least one month of essentials set aside (not known yet)." if high else
+                     "Only once your emergency reserve is at its target (not known yet).")
         missing.append({"key": "reserve", "reason": "missing",
-                        "detail": "Reserve months and target: prepaying only makes sense with the reserve full."})
+                        "detail": "Reserve months and target: prepaying only makes sense with the reserve "
+                                  + ("at one month or more." if high else "full.")})
+    prepay_allowed = verdict != "build_reserve_first"
     guaranteed = {
         "after_tax_rate": num(central["debt_after_tax_rate"], 4),
         "after_tax_rate_range": _range([c["debt_after_tax_rate"] for c in cases]),
@@ -901,6 +915,13 @@ def prepay_vs_invest(debt: dict, inputs: Mapping[str, Any], today: date, *, juri
                     "case or lose money over years, and the gap between the cases is that risk."),
     }
     text = _verdict_text(verdict, guaranteed["after_tax_rate"], investing["after_tax"], breakeven, investment)
+    if parallel:
+        text = {"en": text["en"] + " Keep building your reserve to its target in parallel.",
+                "es": text["es"] + " Sigue juntando tu reserva hasta la meta en paralelo."}
+    elif verdict == "build_reserve_first" and high:
+        text = {"en": "Set aside one month of essentials first; after that, this debt is your best investment.",
+                "es": "Primero junta un mes de gastos esenciales; después de juntar un mes de reserva, esta deuda es tu "
+                      "mejor inversión."}
     result = {
         "mode": "prepay_vs_invest", "as_of": today.isoformat(), "currency": currency, "jurisdiction": jurisdiction,
         "debt": {"id": debt["id"], "name": debt["name"], "kind": debt["kind"], "balance": num(debt["balance"]),
@@ -914,7 +935,8 @@ def prepay_vs_invest(debt: dict, inputs: Mapping[str, Any], today: date, *, juri
                                  "after-tax rate) for the extra to be worth more invested than prepaid."
                       if breakeven is not None else "No return in -90%..300% changes the answer at this horizon."},
         "verdict": verdict, "confidence": confidence, "verdict_text": text, "condition": condition,
-        "decided_by": decided_by, "reserve": {"status": reserve_status, **({k: reserve.get(k) for k in ("months", "target_months")}
+        "decided_by": decided_by, "reserve": {"status": reserve_status, "in_parallel": parallel,
+                                                   "rule": "starter (one month)" if high else "full target", **({k: reserve.get(k) for k in ("months", "target_months")}
                                                                            if reserve else {})},
         "prepay_recommended": verdict == "prepay" and prepay_allowed,
         "cases": [{k: (num(v, 4) if isinstance(v, Decimal) else v) for k, v in c.items() if not k.startswith("_")} for c in cases],
@@ -986,9 +1008,12 @@ def _breakeven(balance, debt_monthly, payment, extra, lump, horizon, gains_tax) 
 
 
 def _reserve_status(reserve: Mapping[str, Any] | None) -> str:
+    """below_starter (under one month of essentials), below_target, at_target, or unknown."""
     if not reserve:
         return "unknown"
     months, target = D(reserve.get("months")), D(reserve.get("target_months"))
+    if months is not None and months < STARTER_RESERVE_MONTHS:
+        return "below_starter"
     if months is None or target is None:
         return "unknown"
     return "below_target" if months < target else "at_target"

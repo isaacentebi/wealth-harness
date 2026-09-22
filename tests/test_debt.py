@@ -166,18 +166,46 @@ def test_breakeven_return_makes_both_paths_equal(service):
     assert abs(at["result"]["scenarios"]["base"]["net_worth_difference"]) < 200  # of ~300k: the return is rounded
 
 
-def test_mx_card_vs_cetes_is_prepay_and_the_reserve_comes_first(service):
+def test_mx_card_vs_cetes_is_prepay(service):
     result = run(service, EXAMPLES["mx_card_prepay_vs_cetes"])["result"]
     assert result["verdict"] == "prepay" and result["confidence"] == "high"
     assert result["investing"]["risk_free"]["name"] == "CETES 28 days"
     # CETES: real interest taxed at the marginal rate, 6.25% - 30% x (6.25% - 4%).
     assert result["investing"]["after_tax"]["risk_free"] == pytest.approx(0.05575, abs=1e-4)
     assert result["investing"]["gains_tax"] == 0.1  # Art. 129
-    short = run(service, {**EXAMPLES["mx_card_prepay_vs_cetes"], "reserve": {"months": 1, "target_months": 3}})
-    assert short["result"]["verdict"] == "build_reserve_first" and short["result"]["prepay_recommended"] is False
-    assert any("reserve is below its target" in w for w in short["warnings"])
+
+
+def test_a_20_percent_card_with_a_starter_reserve_is_paid_first_and_the_reserve_continues(service):
+    between = run(service, {**EXAMPLES["mx_card_prepay_vs_cetes"], "reserve": {"months": 1.5, "target_months": 3}})
+    result = between["result"]
+    assert result["verdict"] == "prepay" and result["prepay_recommended"] is True
+    assert result["reserve"] == {"status": "below_target", "in_parallel": True, "rule": "starter (one month)",
+                                 "months": 1.5, "target_months": 3}
+    assert "in parallel" in result["verdict_text"]["en"] and "en paralelo" in result["verdict_text"]["es"]
+    assert any("keep building the reserve" in w for w in between["warnings"])
+
+
+def test_a_20_percent_card_below_one_month_of_reserve_waits_for_the_starter(service):
+    short = run(service, {**EXAMPLES["mx_card_prepay_vs_cetes"], "reserve": {"months": 0.5, "target_months": 3}})
+    result = short["result"]
+    assert result["reserve"]["status"] == "below_starter"
+    assert result["verdict"] == "build_reserve_first" and result["prepay_recommended"] is False
+    assert "después de juntar un mes de reserva, esta deuda es tu mejor inversión" in result["verdict_text"]["es"]
     unknown = run(service, {k: v for k, v in EXAMPLES["mx_card_prepay_vs_cetes"].items() if k != "reserve"})
-    assert unknown["result"]["condition"] and "reserve" in [m["key"] for m in unknown["missing"]]
+    assert "one month of essentials" in unknown["result"]["condition"]
+    assert "reserve" in [m["key"] for m in unknown["missing"]]
+
+
+def test_low_rate_debt_keeps_the_full_reserve_first_rule(service):
+    car = {"id": "car", "kind": "auto", "balance": 85000, "annual_rate": 0.14, "monthly_payment": 3200, "currency": "MXN"}
+    inputs = {"mode": "prepay_vs_invest", "as_of": AS_OF, "debt": car, "extra_monthly": 2000, "marginal_rate": 0.3}
+    short = run(service, {**inputs, "reserve": {"months": 2, "target_months": 3}})["result"]
+    assert short["verdict"] == "build_reserve_first" and short["reserve"]["rule"] == "full target"
+    mortgage = run(service, {**EXAMPLES["us_mortgage_prepay_vs_vti"], "reserve": {"months": 5, "target_months": 6}})
+    assert mortgage["result"]["verdict"] == "build_reserve_first"
+    assert any("below its target" in w for w in mortgage["warnings"])
+    full = run(service, {**inputs, "reserve": {"months": 3, "target_months": 3}})["result"]
+    assert full["verdict"] != "build_reserve_first"
 
 
 def test_mx_mortgage_reuses_the_real_interest_deduction(service):
@@ -279,9 +307,9 @@ def test_stored_debts_their_extras_and_the_reserve_come_from_the_picture(service
     assert len(report["evidence_ids"]) >= 2
     prepay = run(service, {"mode": "prepay_vs_invest", "as_of": AS_OF, "debt": "tarjeta", "extra_monthly": 2000,
                            "marginal_rate": 0.3}, client_id="ana")
-    # 60,000 of cash against 30,000 of essentials a month: 2 of 3 months, so the reserve comes first.
-    assert prepay["result"]["reserve"]["status"] == "below_target"
-    assert prepay["result"]["verdict"] == "build_reserve_first" and prepay["result"]["jurisdiction"] == "MX"
+    # 60,000 of cash against 30,000 of essentials a month: 2 of 3 months, past the one-month starter reserve.
+    assert prepay["result"]["reserve"]["status"] == "below_target" and prepay["result"]["reserve"]["in_parallel"]
+    assert prepay["result"]["verdict"] == "prepay" and prepay["result"]["jurisdiction"] == "MX"
 
 
 @pytest.mark.parametrize("name", ["example", *EXAMPLES])
@@ -328,13 +356,61 @@ def test_high_interest_item_says_interest_saved_per_month_sooner():
     assert "for each of the" in item["why"]["en"] and "por cada uno de los" in item["why"]["es"]
 
 
-def test_high_interest_item_is_silent_while_the_reserve_is_below_target():
-    short = _picture(_said("cash.nu", {"amount": 30000, "currency": "MXN", "institution": "Nu"}),
-                     _said("reserve", {"target_months": 3}))
-    found = proactive.evaluate(build(short, None, AS_OF), None, {"facts": []}, AS_OF)
-    assert "high_interest_debt" not in {i["kind"] for i in found["candidates"]}
-    assert "reserve_low" in {i["kind"] for i in found["candidates"]}
-    full = _picture(_said("cash.nu", {"amount": 120000, "currency": "MXN", "institution": "Nu"}),
-                    _said("reserve", {"target_months": 3}))
-    found = proactive.evaluate(build(full, None, AS_OF), None, {"facts": []}, AS_OF)
-    assert "high_interest_debt" in {i["kind"] for i in found["candidates"]}
+def _found(*extra, card=None):
+    picture = _picture(*extra)
+    if card is not None:
+        picture["facts"] = [f for f in picture["facts"] if f["key"] != "liability.card"] + [_said("liability.card", card)]
+    return proactive.evaluate(build(picture, None, AS_OF), None, {"facts": []}, AS_OF)
+
+
+def _kinds(found):
+    return {i["kind"]: i for i in found["candidates"]}
+
+
+def _cash(amount):
+    return _said("cash.nu", {"amount": amount, "currency": "MXN", "institution": "Nu"})
+
+
+def test_a_growing_balance_is_always_shown_with_the_payment_that_stops_it():
+    growing = {"kind": "card", "balance": 40000, "annual_rate": 0.60, "currency": "MXN", "payment": 1500,
+               "payment_frequency": "monthly"}
+    # No reserve at all: still shown, because 60% + IVA on 40,000 is 2,320 a month and 1,500 does not cover it.
+    item = _kinds(_found(_cash(5000), _said("reserve", {"target_months": 3}), card=growing))["high_interest_debt"]
+    assert item["severity"] == "act" and item["data"]["balance_growing"] is True
+    assert item["data"]["payment_to_stop_growth"] == pytest.approx(40000 * 0.05 * 1.16, abs=0.01)
+    assert item["title"]["es"].startswith("Tu tarjeta crece cada mes") and "$2,320" in item["why"]["es"]
+    assert "stops the growth" in item["why"]["en"]
+
+
+def test_a_20_percent_card_waits_only_below_one_month_of_reserve():
+    # 15,000 of cash against 30,000 of essentials: half a month, below the starter reserve.
+    found = _kinds(_found(_cash(15000), _said("reserve", {"target_months": 3})))
+    assert "high_interest_debt" not in found
+    reserve = found["reserve_low"]
+    assert "Después de juntar un mes de reserva, esta tarjeta es tu mejor inversión." in reserve["why"]["es"]
+    assert reserve["data"]["debt_after_starter_reserve"] == ["card"]
+    # With no reserve target there is no reserve item to carry it: the card is shown, worded the same way.
+    alone = _kinds(_found(_cash(15000)))["high_interest_debt"]
+    assert alone["why"]["es"] == "Después de juntar un mes de reserva, esta tarjeta es tu mejor inversión."
+
+
+def test_a_20_percent_card_with_a_starter_reserve_comes_first_and_the_reserve_continues():
+    # 60,000 against 30,000 of essentials: 2 of 3 months, so the card comes first and the reserve keeps growing.
+    found = _kinds(_found(_cash(60000), _said("reserve", {"target_months": 3})))
+    item = found["high_interest_debt"]
+    assert item["data"]["reserve_in_parallel"] is True and "en paralelo" in item["why"]["es"]
+    assert "reserve_low" in found
+    full = _kinds(_found(_cash(120000), _said("reserve", {"target_months": 3})))["high_interest_debt"]
+    assert full["data"]["reserve_in_parallel"] is False and "en paralelo" not in full["why"]["es"]
+
+
+def test_advice_to_prepay_low_rate_debt_keeps_the_full_reserve_rule():
+    from datetime import date
+    car = _said("liability.car", {"kind": "auto", "balance": 85000, "annual_rate": 0.13, "currency": "MXN",
+                                  "payment": 3200, "payment_frequency": "monthly"})
+    picture = _picture(_cash(60000), _said("reserve", {"target_months": 3}), car)
+    sit = build(picture, None, AS_OF)
+    run_ = proactive._Run(sit, None, picture, date.fromisoformat(AS_OF), {"MX"})
+    assert proactive._advice_target(run_, {"text": "Pon el extra al coche", "related": ["liability.car"]}) is None
+    assert proactive._advice_target(run_, {"text": "Pon el extra a la tarjeta", "related": ["liability.card"]}) == \
+        ("to the card", "a la tarjeta")
