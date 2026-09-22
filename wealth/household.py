@@ -31,6 +31,8 @@ from pathlib import Path
 import re
 from typing import Any, Callable
 
+from . import _common
+
 
 _CURRENCY = re.compile(r"[A-Z]{3}")
 _ENTITIES = (
@@ -159,23 +161,8 @@ def _number(value: Any, field: str, *, nonnegative: bool = False) -> Decimal:
     return result
 
 
-def _date(value: Any, field: str) -> date:
-    if not isinstance(value, str):
-        raise ValueError(f"{field} must be an ISO date")
-    try:
-        parsed = date.fromisoformat(value)
-    except ValueError as exc:
-        raise ValueError(f"{field} must be an ISO date") from exc
-    if parsed.isoformat() != value:
-        raise ValueError(f"{field} must be an ISO date")
-    return parsed
-
-
-def _out(value: Decimal) -> str:
-    if value == 0:
-        return "0"
-    rendered = format(value.normalize(), "f")
-    return rendered.rstrip("0").rstrip(".") if "." in rendered else rendered
+_date = _common.iso_date
+_out = _common.decimal_text
 
 
 def latest_plausible_today() -> date:

@@ -41,7 +41,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from .situation.model import D, humanize, institution_key, num, same_institution
 from .situation.schema import SchemaError, designation_key, validate
@@ -682,6 +682,160 @@ def _mechanism_label(mechanism: str, product: str, country: str | None, value: M
 # ------------------------------------------------------------------ the register
 
 
+def _regime_scenarios(family: _Family, questions: list[dict], assumptions: list[str]) -> list[bool]:
+    """Regime scenarios: True counts only the person's half of marital property (both when the regime is unknown)."""
+    regimes = [True, False] if family.married and family.common is None else [bool(family.married and family.common)]
+    if family.free_union:
+        assumptions.append("Concubinato (free union) has no marital regime: nothing is shared by law, so balances "
+                           "count whole. A concubino inherits like a spouse only if the couple lived together as "
+                           "if married for the five years before the death, or had a child together, both free of "
+                           "marriage (CCF Art. 1635); with more than one concubino, none inherits.")
+    if family.married and family.common is None:
+        questions.append({"code": "marital_regime_unknown", "field": "estate.family.marital_regime"})
+        assumptions.append("The marital regime is unknown: amounts are a range from sociedad conyugal (half of what "
+                           "was acquired in the marriage is already the spouse's and is not in the estate) to "
+                           "separación de bienes (all of it is).")
+    elif family.married and family.common:
+        assumptions.append("Sociedad conyugal (or community property): only the person's half of what was acquired "
+                           "in the marriage is in the estate; accounts marked marital_property false count whole. "
+                           "AFORE and life insurance follow their own laws and are not halved.")
+    return regimes
+
+
+def _mechanism_notes(row: dict, country: str | None, product: str, titling: str, mechanism: str,
+                     heirs: list[dict]) -> None:
+    """Notes that explain the mechanism (country specifics)."""
+    if country == "MX" and product == "bank":
+        row["notes"].append({"en": "LIC Art. 56 beneficiaries receive only this account's balance, in the stated "
+                                   "percentages; with none, it goes by will or intestate succession.",
+                             "es": "Los beneficiarios del Art. 56 LIC reciben solo el saldo de esta cuenta en los "
+                                   "porcentajes indicados; sin ellos, pasa por testamento o intestado."})
+    if titling == "mancomunada":
+        row["notes"].append({"en": "A cuenta mancomunada is not a beneficiary: the co-holder keeps their own part; "
+                                   "yours goes to your beneficiaries or heirs.",
+                             "es": "Una cuenta mancomunada no es un beneficiario: el cotitular conserva su parte; "
+                                   "la tuya va a tus beneficiarios o herederos."})
+    if product == "afore":
+        row["notes"].append({"en": "Designate in the AFORE app or branch; without it, the balance follows the LFT "
+                                   "Art. 501 order.",
+                             "es": "Se designa en la app AforeMóvil o en sucursal; sin designación, el saldo "
+                                   "sigue el orden del Art. 501 LFT."})
+    if product == "us_retirement" and mechanism == "beneficiary" and \
+            any(h.get("relationship") != "spouse" for h in heirs if h.get("name")):
+        row["notes"].append({"en": "Non-spouse beneficiaries generally must empty an inherited IRA or 401(k) "
+                                   "within 10 years (SECURE Act), unless an eligible designated beneficiary.",
+                             "es": "Beneficiarios que no son cónyuge suelen tener que vaciar la cuenta heredada "
+                                   "en 10 años (SECURE Act), salvo excepciones."})
+
+
+def _will_check(will: Mapping[str, Any] | None, events: list, rows: list[dict], residence: str | None, today: date,
+                review_years: int, questions: list[dict], gap: Callable[..., None]) -> str:
+    """Whether there is a will and whether it predates a marriage or a child, or is old; returns its state."""
+    marriage_or_child = [e for e in events if e[1] in ("marriage", "child")]
+    passing_by_will = sum((r["_hi"] or Decimal(0) for r in rows
+                           if r["mechanism"] in ("will", "intestate") or r.get("fallback")), Decimal(0))
+    mx = residence == "MX" or any(r["country"] == "MX" for r in rows)
+    september = today.month == 9
+    mes_en = (" It is Mes del Testamento: notaries offer up to 50% off this September." if september else
+              " Every September (Mes del Testamento) notaries offer up to 50% off.") if mx else ""
+    mes_es = (" Es el Mes del Testamento: las notarías dan hasta 50% de descuento este septiembre." if september else
+              " Cada septiembre (Mes del Testamento) las notarías dan hasta 50% de descuento.") if mx else ""
+    will_state = "unknown"
+    if will is None:
+        questions.append({"code": "will_unknown", "field": "estate.will.exists"})
+    elif not will.get("exists"):
+        will_state = "missing"
+        gap("no_will", None, passing_by_will,
+            "No will: what has no beneficiary goes through intestate succession." + mes_en,
+            "Sin testamento: lo que no tiene beneficiario pasa por un juicio intestamentario." + mes_es,
+            mes_del_testamento=mx or None)
+    else:
+        will_state = "done"
+        signed = _date(will.get("date"))
+        if signed is None:
+            questions.append({"code": "will_date_unknown", "field": "estate.will.date"})
+        else:
+            later = [e for e in marriage_or_child if e[0] > signed]
+            if later:
+                when, event, who = later[0]
+                will_state = "review"
+                gap("will_before_event", None, passing_by_will,
+                    f"Your will ({signed.year}) predates your " + ("marriage" if event == "marriage" else
+                                                                  f"child {who}'s birth") + f" ({when.year})." + mes_en,
+                    f"Tu testamento ({signed.year}) es anterior a " + ("tu matrimonio" if event == "marriage" else
+                                                                      f"que naciera {who}") + f" ({when.year})."
+                    + mes_es, event=event)
+            elif (today - signed).days / 365.25 > review_years:
+                will_state = "review"
+                gap("will_old", None, passing_by_will,
+                    f"Your will is from {signed.year}, over {review_years} years ago." + mes_en,
+                    f"Tu testamento es de {signed.year}, de hace más de {review_years} años." + mes_es)
+    return will_state
+
+
+def _guardianship_check(family: _Family, guardian_named: bool, rows: list[dict], total_estate: Decimal,
+                        gap: Callable[..., None]) -> str:
+    """Minor children need a named guardian (tutor); returns the guardian state."""
+    guardian_state = "not_applicable"
+    if family.minors:
+        guardian_state = "done" if guardian_named else "missing"
+        if not guardian_named:
+            to_minors = sum((D(h["amount"] if h["amount"] is not None else (h.get("amount_range") or {}).get("high"))
+                             or Decimal(0) for r in rows for h in r["heirs"]
+                             if h["name"] and family.child_age(h["name"]) is not None
+                             and family.child_age(h["name"]) < ADULT_AGE), Decimal(0))
+            gap("no_guardian", None, to_minors or total_estate,
+                "Minor children and no guardian (tutor) named: a judge would choose one.",
+                "Hijos menores y ningún tutor designado: un juez elegiría a uno.")
+    elif not family.minors_known:
+        guardian_state = "unknown"
+    return guardian_state
+
+
+def _us_situs_check(sit: Mapping[str, Any], profile: Mapping[str, Any], inputs: Mapping[str, Any],
+                    convert: _Converter, today: date, questions: list[dict], gap: Callable[..., None]) -> dict:
+    """US-situs assets for a non-resident alien (wealth.estate): the gap above the exemption and what is unknown."""
+    us_situs = _us_situs(sit, profile, inputs.get("us_situs"), convert, today)
+    if us_situs.get("gap"):
+        amount = convert(D(us_situs["us_situs_total_usd"]), "USD")
+        gap("us_situs_nra", None, amount,
+            f"US-situs assets of US${D(us_situs['us_situs_total_usd']):,.0f} are over the US$60,000 a non-resident "
+            "can leave free of US estate tax; Form 706-NA would be needed.",
+            f"Tienes US${D(us_situs['us_situs_total_usd']):,.0f} en activos con situs en EE.UU., arriba de los "
+            "US$60,000 exentos para un no residente; se tendría que presentar el Formato 706-NA.",
+            tax_range_usd=us_situs.get("estimated_tax_range_usd"), task="estate")
+    if us_situs.get("missing"):
+        questions.append({"code": "us_situs_status", "field": us_situs["missing"]})
+    return us_situs
+
+
+def _heirs_summed(rows: list[dict], currency: str | None) -> list[dict]:
+    """Each heir's total across the rows (a range where any part is), largest first."""
+    totals: dict[str, dict] = {}
+    for row in rows:
+        for heir in row["heirs"]:
+            name = heir["name"] or {"en": "Will or intestate heirs", "es": "Herederos por testamento o intestado"}
+            key = name if isinstance(name, str) else "_fallback"
+            entry = totals.setdefault(key, {"name": name, "low": None, "high": None, "unknown_parts": 0, "via": []})
+            span = heir.get("amount_range") or ({"low": heir["amount"], "high": heir["amount"]}
+                                                if heir["amount"] is not None else None)
+            if span is None:
+                entry["unknown_parts"] += 1
+            else:
+                entry["low"] = (entry["low"] or Decimal(0)) + D(span["low"])
+                entry["high"] = (entry["high"] or Decimal(0)) + D(span["high"])
+            if row["mechanism"] not in entry["via"]:
+                entry["via"].append(row["mechanism"])
+    heirs_out = sorted(({"name": v["name"], "amount": _money(v["high"]) if v["low"] == v["high"] else None,
+                         "amount_range": {"low": _money(v["low"]), "high": _money(v["high"])}
+                         if v["low"] != v["high"] else None,
+                         "currency": currency, "complete": v["unknown_parts"] == 0, "via": v["via"]}
+                        for v in totals.values()),
+                       key=lambda h: -(D(h["amount"] if h["amount"] is not None
+                                         else (h["amount_range"] or {}).get("high")) or Decimal(0)))
+    return heirs_out
+
+
 def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mapping[str, Any] | None = None,
              as_of: date | str | None = None) -> dict:
     """The register as a service envelope (status, result, missing, warnings, sources, assumptions)."""
@@ -726,21 +880,7 @@ def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mappin
     questions: list[dict] = []
     events = family.events()
     # Regime scenarios: True counts only the person's half of marital property.
-    regimes = [True, False] if family.married and family.common is None else [bool(family.married and family.common)]
-    if family.free_union:
-        assumptions.append("Concubinato (free union) has no marital regime: nothing is shared by law, so balances "
-                           "count whole. A concubino inherits like a spouse only if the couple lived together as "
-                           "if married for the five years before the death, or had a child together, both free of "
-                           "marriage (CCF Art. 1635); with more than one concubino, none inherits.")
-    if family.married and family.common is None:
-        questions.append({"code": "marital_regime_unknown", "field": "estate.family.marital_regime"})
-        assumptions.append("The marital regime is unknown: amounts are a range from sociedad conyugal (half of what "
-                           "was acquired in the marriage is already the spouse's and is not in the estate) to "
-                           "separación de bienes (all of it is).")
-    elif family.married and family.common:
-        assumptions.append("Sociedad conyugal (or community property): only the person's half of what was acquired "
-                           "in the marriage is in the estate; accounts marked marital_property false count whole. "
-                           "AFORE and life insurance follow their own laws and are not halved.")
+    regimes = _regime_scenarios(family, questions, assumptions)
 
     def gap(code: str, row: dict | None, amount: Decimal | None, en: str, es: str, **extra: Any) -> None:
         estimate = (row or {}).get("_est") if amount is None else None
@@ -1049,28 +1189,7 @@ def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mappin
                     "no consent is on record.",
                     f"{label}: un 401(k) es para tu cónyuge salvo que firme su consentimiento para otros "
                     "beneficiarios; no hay consentimiento registrado.")
-        # Notes that explain the mechanism (country specifics)
-        if country == "MX" and product == "bank":
-            row["notes"].append({"en": "LIC Art. 56 beneficiaries receive only this account's balance, in the stated "
-                                       "percentages; with none, it goes by will or intestate succession.",
-                                 "es": "Los beneficiarios del Art. 56 LIC reciben solo el saldo de esta cuenta en los "
-                                       "porcentajes indicados; sin ellos, pasa por testamento o intestado."})
-        if titling == "mancomunada":
-            row["notes"].append({"en": "A cuenta mancomunada is not a beneficiary: the co-holder keeps their own part; "
-                                       "yours goes to your beneficiaries or heirs.",
-                                 "es": "Una cuenta mancomunada no es un beneficiario: el cotitular conserva su parte; "
-                                       "la tuya va a tus beneficiarios o herederos."})
-        if product == "afore":
-            row["notes"].append({"en": "Designate in the AFORE app or branch; without it, the balance follows the LFT "
-                                       "Art. 501 order.",
-                                 "es": "Se designa en la app AforeMóvil o en sucursal; sin designación, el saldo "
-                                       "sigue el orden del Art. 501 LFT."})
-        if product == "us_retirement" and mechanism == "beneficiary" and \
-                any(h.get("relationship") != "spouse" for h in heirs if h.get("name")):
-            row["notes"].append({"en": "Non-spouse beneficiaries generally must empty an inherited IRA or 401(k) "
-                                       "within 10 years (SECURE Act), unless an eligible designated beneficiary.",
-                                 "es": "Beneficiarios que no son cónyuge suelen tener que vaciar la cuenta heredada "
-                                       "en 10 años (SECURE Act), salvo excepciones."})
+        _mechanism_notes(row, country, product, titling, mechanism, heirs)
         rows.append(row)
 
     for field in family_asks:
@@ -1083,99 +1202,17 @@ def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mappin
                            "spouse's share is a range, not all of it.")
     _settle_heirs(rows, family, regimes, convert, questions, assumptions)
 
-    # Will
-    marriage_or_child = [e for e in events if e[1] in ("marriage", "child")]
-    passing_by_will = sum((r["_hi"] or Decimal(0) for r in rows
-                           if r["mechanism"] in ("will", "intestate") or r.get("fallback")), Decimal(0))
-    mx = residence == "MX" or any(r["country"] == "MX" for r in rows)
-    september = today.month == 9
-    mes_en = (" It is Mes del Testamento: notaries offer up to 50% off this September." if september else
-              " Every September (Mes del Testamento) notaries offer up to 50% off.") if mx else ""
-    mes_es = (" Es el Mes del Testamento: las notarías dan hasta 50% de descuento este septiembre." if september else
-              " Cada septiembre (Mes del Testamento) las notarías dan hasta 50% de descuento.") if mx else ""
-    will_state = "unknown"
-    if will is None:
-        questions.append({"code": "will_unknown", "field": "estate.will.exists"})
-    elif not will.get("exists"):
-        will_state = "missing"
-        gap("no_will", None, passing_by_will,
-            "No will: what has no beneficiary goes through intestate succession." + mes_en,
-            "Sin testamento: lo que no tiene beneficiario pasa por un juicio intestamentario." + mes_es,
-            mes_del_testamento=mx or None)
-    else:
-        will_state = "done"
-        signed = _date(will.get("date"))
-        if signed is None:
-            questions.append({"code": "will_date_unknown", "field": "estate.will.date"})
-        else:
-            later = [e for e in marriage_or_child if e[0] > signed]
-            if later:
-                when, event, who = later[0]
-                will_state = "review"
-                gap("will_before_event", None, passing_by_will,
-                    f"Your will ({signed.year}) predates your " + ("marriage" if event == "marriage" else
-                                                                  f"child {who}'s birth") + f" ({when.year})." + mes_en,
-                    f"Tu testamento ({signed.year}) es anterior a " + ("tu matrimonio" if event == "marriage" else
-                                                                      f"que naciera {who}") + f" ({when.year})."
-                    + mes_es, event=event)
-            elif (today - signed).days / 365.25 > review_years:
-                will_state = "review"
-                gap("will_old", None, passing_by_will,
-                    f"Your will is from {signed.year}, over {review_years} years ago." + mes_en,
-                    f"Tu testamento es de {signed.year}, de hace más de {review_years} años." + mes_es)
+    will_state = _will_check(will, events, rows, residence, today, review_years, questions, gap)
     # Guardianship
     total_estate = sum((r["_hi"] or Decimal(0) for r in rows), Decimal(0))
     total_low = sum((min((v for v in r["_values"].values() if v is not None), default=Decimal(0)) for r in rows),
                     Decimal(0))
-    guardian_state = "not_applicable"
-    if family.minors:
-        guardian_state = "done" if guardian_named else "missing"
-        if not guardian_named:
-            to_minors = sum((D(h["amount"] if h["amount"] is not None else (h.get("amount_range") or {}).get("high"))
-                             or Decimal(0) for r in rows for h in r["heirs"]
-                             if h["name"] and family.child_age(h["name"]) is not None
-                             and family.child_age(h["name"]) < ADULT_AGE), Decimal(0))
-            gap("no_guardian", None, to_minors or total_estate,
-                "Minor children and no guardian (tutor) named: a judge would choose one.",
-                "Hijos menores y ningún tutor designado: un juez elegiría a uno.")
-    elif not family.minors_known:
-        guardian_state = "unknown"
+    guardian_state = _guardianship_check(family, guardian_named, rows, total_estate, gap)
     # US-situs assets for a non-resident alien (wealth.estate)
-    us_situs = _us_situs(sit, profile, inputs.get("us_situs"), convert, today)
-    if us_situs.get("gap"):
-        amount = convert(D(us_situs["us_situs_total_usd"]), "USD")
-        gap("us_situs_nra", None, amount,
-            f"US-situs assets of US${D(us_situs['us_situs_total_usd']):,.0f} are over the US$60,000 a non-resident "
-            "can leave free of US estate tax; Form 706-NA would be needed.",
-            f"Tienes US${D(us_situs['us_situs_total_usd']):,.0f} en activos con situs en EE.UU., arriba de los "
-            "US$60,000 exentos para un no residente; se tendría que presentar el Formato 706-NA.",
-            tax_range_usd=us_situs.get("estimated_tax_range_usd"), task="estate")
-    if us_situs.get("missing"):
-        questions.append({"code": "us_situs_status", "field": us_situs["missing"]})
+    us_situs = _us_situs_check(sit, profile, inputs, convert, today, questions, gap)
 
     # Heirs summed
-    totals: dict[str, dict] = {}
-    for row in rows:
-        for heir in row["heirs"]:
-            name = heir["name"] or {"en": "Will or intestate heirs", "es": "Herederos por testamento o intestado"}
-            key = name if isinstance(name, str) else "_fallback"
-            entry = totals.setdefault(key, {"name": name, "low": None, "high": None, "unknown_parts": 0, "via": []})
-            span = heir.get("amount_range") or ({"low": heir["amount"], "high": heir["amount"]}
-                                                if heir["amount"] is not None else None)
-            if span is None:
-                entry["unknown_parts"] += 1
-            else:
-                entry["low"] = (entry["low"] or Decimal(0)) + D(span["low"])
-                entry["high"] = (entry["high"] or Decimal(0)) + D(span["high"])
-            if row["mechanism"] not in entry["via"]:
-                entry["via"].append(row["mechanism"])
-    heirs_out = sorted(({"name": v["name"], "amount": _money(v["high"]) if v["low"] == v["high"] else None,
-                         "amount_range": {"low": _money(v["low"]), "high": _money(v["high"])}
-                         if v["low"] != v["high"] else None,
-                         "currency": currency, "complete": v["unknown_parts"] == 0, "via": v["via"]}
-                        for v in totals.values()),
-                       key=lambda h: -(D(h["amount"] if h["amount"] is not None
-                                         else (h["amount_range"] or {}).get("high")) or Decimal(0)))
+    heirs_out = _heirs_summed(rows, currency)
     unassigned = sum((r["_hi"] or Decimal(0) for r in rows if not r["heirs"]), Decimal(0))
 
     def at_risk(item: Mapping[str, Any]) -> Decimal:

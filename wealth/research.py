@@ -16,6 +16,7 @@ import math
 from typing import Any
 from urllib.parse import urlparse
 
+from . import _common
 from .household import (
     current_funds, fx_converter, lookthrough, normalize_symbol, ownership_shares, validate_household,
 )
@@ -91,16 +92,7 @@ def _text(value: Any, field: str) -> str:
     return value.strip()
 
 
-def _iso_date(value: Any, field: str) -> date:
-    if not isinstance(value, str):
-        raise ValueError(f"{field} must be an ISO date")
-    try:
-        parsed = date.fromisoformat(value)
-    except ValueError as exc:
-        raise ValueError(f"{field} must be an ISO date") from exc
-    if parsed.isoformat() != value:
-        raise ValueError(f"{field} must be an ISO date")
-    return parsed
+_iso_date = _common.iso_date
 
 
 def _number(value: Any, field: str, *, nonnegative: bool = False, positive: bool = False) -> Decimal:
@@ -119,11 +111,7 @@ def _number(value: Any, field: str, *, nonnegative: bool = False, positive: bool
     return result
 
 
-def _out(value: Decimal) -> str:
-    if value == 0:
-        return "0"
-    rendered = format(value.normalize(), "f")
-    return rendered.rstrip("0").rstrip(".") if "." in rendered else rendered
+_out = _common.decimal_text
 
 
 def _currency(value: Any, field: str) -> str:
@@ -145,8 +133,7 @@ def _mapping(value: Any, field: str) -> dict[str, Any]:
     return value
 
 
-def _missing(key: str, reason: str, detail: str) -> dict[str, str]:
-    return {"key": key, "reason": reason, "detail": detail}
+_missing = _common.missing
 
 
 def _base() -> dict[str, Any]:

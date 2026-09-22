@@ -7,6 +7,7 @@ from pathlib import Path
 
 from tests._pages import page_text
 from wealth import profile
+from wealth.profile import picture as profile_picture
 
 CHAT = page_text("chat")
 YOU = page_text("profile")
@@ -213,7 +214,7 @@ def test_returns_need_priced_instruments_not_a_balance_carried_forward(tmp_path)
 
 
 def test_reference_is_named_once():
-    assert "referencia ACWI" not in Path(profile.__file__).read_text(encoding="utf-8").split("def _market_picture")[1]
+    assert "referencia ACWI" not in Path(profile_picture.__file__).read_text(encoding="utf-8").split("def _market_picture")[1]
 
 
 def test_risk_summary_reads_as_their_own_reaction():

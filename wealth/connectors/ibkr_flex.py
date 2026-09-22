@@ -60,7 +60,6 @@ import shutil
 import ssl
 import subprocess
 import sys
-import time
 from typing import Any, Callable, Iterable, Mapping
 import urllib.error
 import urllib.parse
@@ -70,6 +69,7 @@ import xml.etree.ElementTree as ET
 from ..ingest.common import envelope, out, slug
 from ..ingest.model import _summary, build_proposal, diff_proposals, proposal_digest
 from ..ingest.redact import last4, mask_account
+from . import _rest
 
 
 NAME = "ibkr_flex"
@@ -280,12 +280,8 @@ def urllib_transport(url: str, timeout: float) -> bytes:
 default_transport: Transport = urllib_transport
 
 
-def default_sleep(seconds: float) -> None:
-    time.sleep(seconds)
-
-
-def default_clock() -> float:
-    return time.monotonic()
+default_sleep = _rest.default_sleep
+default_clock = _rest.default_clock
 
 
 # -- XML --------------------------------------------------------------------

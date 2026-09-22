@@ -12,6 +12,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any, Mapping
 
+from .. import _common
 from .model import humanize, kind_family
 
 BRIEF_MAX_LINES = 15
@@ -25,8 +26,7 @@ _COUNTRY_NAMES = {"es": {"MX": "México", "US": "Estados Unidos", "CA": "Canadá
                   "en": {"MX": "Mexico", "US": "the United States", "CA": "Canada", "ES": "Spain"}}
 
 
-def _lang(language: str | None) -> str:
-    return "es" if str(language or "").lower().startswith("es") else "en"
+_lang = _common.lang
 
 
 def _whole(value: Any, places: int | None = 0) -> str:

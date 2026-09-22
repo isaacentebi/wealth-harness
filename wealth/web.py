@@ -827,15 +827,20 @@ def create_server(chat, port=8765, host="127.0.0.1"):
             return self.local_request() and secrets.compare_digest(
                 self.headers.get("X-Wealth-Token", ""), chat.token)
 
+        def _send(self, status, headers, security=None):
+            """The status line, ``headers`` in order, then the security headers (``SECURITY_HEADERS`` by default)."""
+            self.send_response(status)
+            for name, value in headers:
+                self.send_header(name, value)
+            for name, value in SECURITY_HEADERS if security is None else security:
+                self.send_header(name, value)
+            self.end_headers()
+
         def respond(self, status, value, content_type="application/json"):
             data = json.dumps(value).encode() if content_type == "application/json" else value
-            self.send_response(status)
             binary = content_type.startswith("image/") and not content_type.endswith("+xml")
-            self.send_header("Content-Type", content_type if binary else content_type + "; charset=utf-8")
-            self.send_header("Content-Length", str(len(data)))
-            for name, header in SECURITY_HEADERS:
-                self.send_header(name, header)
-            self.end_headers()
+            self._send(status, [("Content-Type", content_type if binary else content_type + "; charset=utf-8"),
+                                ("Content-Length", str(len(data)))])
             try:
                 self.wfile.write(data)
             except (BrokenPipeError, ConnectionResetError, TimeoutError):
@@ -987,12 +992,7 @@ def create_server(chat, port=8765, host="127.0.0.1"):
                 after = 0
             after = max(0, after)
             self.close_connection = True
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-            self.send_header("X-Accel-Buffering", "no")
-            for name, header in SECURITY_HEADERS:
-                self.send_header(name, header)
-            self.end_headers()
+            self._send(200, [("Content-Type", "text/event-stream; charset=utf-8"), ("X-Accel-Buffering", "no")])
             try:
                 while True:
                     events = turn.wait_events(after, 15)
@@ -1109,13 +1109,9 @@ def create_server(chat, port=8765, host="127.0.0.1"):
             if url.path == "/api/tax-pack":
                 return self.tax_pack(service, parse_qs(url.query))
             data = json.dumps(export_payload(service, chat.client_id), default=str, indent=1).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Disposition", 'attachment; filename="wealth-export.json"')
-            self.send_header("Content-Length", str(len(data)))
-            for name, header in SECURITY_HEADERS:
-                self.send_header(name, header)
-            self.end_headers()
+            self._send(200, [("Content-Type", "application/json; charset=utf-8"),
+                             ("Content-Disposition", 'attachment; filename="wealth-export.json"'),
+                             ("Content-Length", str(len(data)))])
             self.wfile.write(data)
 
         def tax_pack(self, service, query):
@@ -1149,13 +1145,10 @@ def create_server(chat, port=8765, host="127.0.0.1"):
                 if name not in files:
                     raise ValueError("No such section; use one of the section ids.")
                 data, kind = files[name].encode(), "text/csv"
-            self.send_response(200)
-            self.send_header("Content-Type", kind + "; charset=utf-8")
-            self.send_header("Content-Disposition", f'attachment; filename="{name}"')
-            self.send_header("Content-Length", str(len(data)))
-            for header, value in PRINTABLE_SECURITY_HEADERS if fmt == "html" else SECURITY_HEADERS:
-                self.send_header(header, value)
-            self.end_headers()
+            self._send(200, [("Content-Type", kind + "; charset=utf-8"),
+                             ("Content-Disposition", f'attachment; filename="{name}"'),
+                             ("Content-Length", str(len(data)))],
+                       PRINTABLE_SECURITY_HEADERS if fmt == "html" else SECURITY_HEADERS)
             self.wfile.write(data)
 
         def profile_write(self, body, *, key=None, form=False):

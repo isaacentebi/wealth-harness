@@ -86,6 +86,26 @@ def money(amount: float | Decimal, currency_code: str) -> dict[str, Any]:
     return {"currency": currency_code, "amount": round(float(amount), 2)}
 
 
+def decimal_sum(values: Iterable[Decimal | None]) -> Decimal | None:
+    """Exact total of ``values``, or ``None`` as soon as one of them is unknown."""
+    total = Decimal(0)
+    for value in values:
+        if value is None:
+            return None
+        total += value
+    return total
+
+
+def missing(key: str, reason: str, detail: str) -> dict[str, str]:
+    """One ``missing`` row of the shared envelope."""
+    return {"key": key, "reason": reason, "detail": detail}
+
+
+def lang(language: str | None) -> str:
+    """``"es"`` for any Spanish language tag, otherwise ``"en"``."""
+    return "es" if str(language or "").lower().startswith("es") else "en"
+
+
 def historical_cvar(losses: Any, confidence: float) -> float:
     """Mean of the losses at or beyond the empirical ``confidence`` quantile.
 

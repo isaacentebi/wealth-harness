@@ -71,14 +71,14 @@ Surfaces
 | `behavior.py`, `instructions.md` | The shared conversation policy, and the compact contract the MCP server gives other hosts |
 | `catalog.py` | Task catalog: purpose, inputs and a runnable example per task; connectors |
 | `onboarding.py` | Deterministic onboarding cards that write canonical facts |
-| `profile.py` | Read model and fact edits for the You page |
+| `profile/` | Read model and fact edits for the You page: `classify` (fact groups and rows), `overviews`, `perf`, `memory`, `writes` (fact payloads), `surfaces` (profile, today, review, connections), `picture` (chart figures) |
 | `views.py` | Engine-drawn view specs (ticket, allocation, series, comparison, payoff) and SVG/PNG rendering |
 
 Memory and the picture
 
 | Module | Role |
 | --- | --- |
-| `store.py` | SQLite: client-scoped facts, revisions, history, contradictions, decisions, ledger tables, `orders` audit |
+| `store.py`, `store_schema.py` | SQLite (DDL in `store_schema.py`): client-scoped facts, revisions, history, contradictions, decisions, ledger tables, `orders` audit |
 | `recall.py` | Bounded keyword and concept retrieval; optional host-supplied vectors |
 | `situation/schema.py` | Canonical fact schema, validated on every write |
 | `situation/model.py` | `build`: one picture from facts and ledger |
@@ -132,10 +132,10 @@ Financial engines
 | `protection.py` | Life, disability, health and estate checklist; life-event router |
 | `guardrails.py` | Play-money cap, panic circuit breaker, cool-off flags, scam screen |
 | `review.py` | Quarterly review and fee audit |
-| `taxpack.py` | The annual tax pack (MX and US working papers), its CSV files and printable page |
+| `taxpack/` | The annual tax pack (MX and US working papers), its CSV files and printable page: `sources`, `book` (the year read once), `mx`, `us`, `deadlines`, `task` (`run_task`), `render` |
 | `proactive.py` | Today's ranked nudges, the weekly letter, the annual calendar |
 | `monitor.py` | Opt-in, caller-driven rule evaluation |
-| `managers.py` | SEC 13F search, holdings, profiles, comparison and mirror sizing |
+| `managers/` | SEC 13F search, holdings, profiles, comparison and mirror sizing: `edgar` (client and parsing), `positions`, `analytics`, `sleeve` (mirror), `follow`, `example`, `tasks` |
 | `_common.py` | Shared validators and result helpers |
 
 Execution

@@ -256,35 +256,21 @@ def _proposal_summary(result: Mapping[str, Any], inputs: Mapping[str, Any]) -> s
     return "\n".join(lines)
 
 
-def build_server(db_path: str | None = None, *, include_behavior: bool = False,
-                 tools: frozenset[str] | None = None, environ: Mapping[str, str] | None = None) -> MCPServer:
-    """Build the MCP server; ``tools`` limits it to those tool names (all when None).
+class _ConsentGate:
+    """The consent gate of one server: what a save would change (its subject) and whether the person agreed.
 
-    The instructions carry the tool rules and a compact conversation contract
-    (``HOST_CONTRACT``). ``include_behavior=True`` appends the full policy in
-    ``instructions.md`` instead, for a host that has no other copy of it; the
-    Wealth launcher passes that policy to the model directly.
-
-    ``environ`` (default ``os.environ``) carries the launcher's per-turn consent
-    evidence; see ``consent.py``.
+    It holds the server's service, the turn's consent evidence and the one-time confirmation codes;
+    ``build_server`` binds its methods to the names its tools call.
     """
-    service = WealthService(db_path)
-    registered_tools: list[Tool] = []
-    environ = os.environ if environ is None else environ
-    turn = _consent.Turn.from_env(environ)
-    # In a Wealth turn with web search on, raw page text must not enter the model's context (it could
-    # leave in a query); the launcher turns search off for turns and threads that read files.
-    search_live = turn.session is not None and environ.get("WEALTH_TURN_WEB_SEARCH") == "1"
-    def persist_codes(client: str, update) -> None:
-        # Pending codes outlive this process: hosts that start the server for every turn can still finish.
-        with WealthStore(service.db_path) as store:
-            store.update_auxiliary(client, "consent", update)
 
-    confirmations = _consent.Confirmations(persist=persist_codes)
-    saves_facts = tools is None or "wealth_remember" in tools  # else the fact contract is dead weight
+    def __init__(self, service: WealthService, turn: _consent.Turn,
+                 confirmations: _consent.Confirmations) -> None:
+        self.service = service
+        self.turn = turn
+        self.confirmations = confirmations
 
-    def require(kind: str, allowed: bool, subject: tuple[Any, str] | None = None,
-                confirm: bool = False, code: str | None = None) -> dict[str, Any] | None:
+    def require(self, kind: str, allowed: bool, subject: tuple[Any, str] | None = None,
+                      confirm: bool = False, code: str | None = None) -> dict[str, Any] | None:
         """Gate a save on the person's consent; returns a ``needs_person`` result to send back instead, or None.
 
         In a Wealth turn the person's own message decides and the memory step never can.
@@ -293,21 +279,21 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = False,
         the second completes it with ``confirm=true`` and that code. ``subject`` is
         None when the service would save nothing (unknown id, or a replayed save).
         """
-        if turn.session == "memory":
+        if self.turn.session == "memory":
             raise _consent_error(f"the memory step cannot {kind}; only the conversation can, on the person's answer.")
-        if turn.session is not None:
+        if self.turn.session is not None:
             if not allowed:
                 raise _consent_error(f"the person's current message does not {kind}. {_ASK}.")
             return None
-        if turn.require:
+        if self.turn.require:
             raise _consent_error(f"this host requires the person's message to {kind} "
                                  "(WEALTH_REQUIRE_TURN_CONSENT=1) and none was provided. " + _ASK + ".")
-        if turn.host_handles or subject is None:
+        if self.turn.host_handles or subject is None:
             return None  # the host confirms natively (WEALTH_HOST_HANDLES_CONSENT=1), or nothing would be saved
         target, summary = subject
         digest, client = _consent.digest_of(target), target.get("client")
         if confirm is True:
-            if confirmations.redeem(digest, code, client):
+            if self.confirmations.redeem(digest, code, client):
                 return None
             raise _consent_error(
                 "confirmation_code is missing, wrong, expired or already used, or what it covered has changed; "
@@ -315,15 +301,15 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = False,
                 "person, and wait for their answer.")
         return {
             "status": "needs_person",
-            "result": {"summary": summary, "confirmation_code": confirmations.issue(digest, client),
+            "result": {"summary": summary, "confirmation_code": self.confirmations.issue(digest, client),
                        "expires_in_minutes": _consent.CODE_TTL_SECONDS // 60, "next_step": _SECOND_CALL},
             "missing": [{"key": "person_confirmation", "reason": "missing",
                          "detail": f"The person has not yet agreed to {kind}."}],
             "warnings": [], "sources": [], "assumptions": [],
         }
 
-    def ingest_subject(client_id: str, action: str, inputs: Mapping[str, Any]) -> tuple[Any, str] | None:
-        state = service._ingest_state(client_id)
+    def ingest_subject(self, client_id: str, action: str, inputs: Mapping[str, Any]) -> tuple[Any, str] | None:
+        state = self.service._ingest_state(client_id)
         pid = inputs.get("proposal_id")
         if action == "confirm":
             record = (state.get("pending") or {}).get(pid) if isinstance(pid, str) else None
@@ -351,14 +337,14 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = False,
         return target, (f"Record {len(entry_ids)} held line(s) from the statement dated {result.get('as_of')} as "
                         "separate transactions, not duplicates of lines already saved.")
 
-    def placed_subject(client_id: str, inputs: Mapping[str, Any]) -> tuple[Any, str] | None:
+    def placed_subject(self, client_id: str, inputs: Mapping[str, Any]) -> tuple[Any, str] | None:
         """What recording "the person placed this manual ticket" would change, and its summary (None: refused)."""
         from .execution import tickets as _tickets
 
         ticket_id = inputs.get("ticket_id")
         if set(inputs) != {"ticket_id", "placed"} or inputs.get("placed") is not True or not isinstance(ticket_id, str):
             return None  # the service refuses malformed inputs
-        with WealthStore(service.db_path) as store:
+        with WealthStore(self.service.db_path) as store:
             stored = (store.auxiliary(client_id, "execution").get("tickets") or {}).get(ticket_id)
         if not _tickets.placeable_manually(stored):
             return None  # unknown, already handled, or a ticket Wealth places itself: the service refuses it
@@ -369,9 +355,9 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = False,
                    "nothing; the next statement or sync confirms it):\n" + view["manual"]["en"])
         return target, summary
 
-    def decision_subject(client_id: str, inputs: Mapping[str, Any]) -> tuple[Any, str] | None:
+    def decision_subject(self, client_id: str, inputs: Mapping[str, Any]) -> tuple[Any, str] | None:
         decision_id = inputs.get("decision_id")
-        decisions = service.inspect(client_id).get("decisions") or []
+        decisions = self.service.inspect(client_id).get("decisions") or []
         found = next((d for d in decisions if d.get("id") == decision_id), None)
         if found is None:
             return None  # the service refuses an unknown decision
@@ -382,9 +368,9 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = False,
         return target, (f"Accept the decision {_cut(found.get('title'), 100)!r}: {_cut(found.get('rationale'), 220)} "
                         "Accepting records it; it places no order.")
 
-    def contradiction_subject(client_id: str, contradiction_id: str, choice: str,
-                              valid_from: str | None) -> tuple[Any, str] | None:
-        pending = service.contradictions(client_id).get("contradictions") or []
+    def contradiction_subject(self, client_id: str, contradiction_id: str, choice: str,
+                                    valid_from: str | None) -> tuple[Any, str] | None:
+        pending = self.service.contradictions(client_id).get("contradictions") or []
         found = next((c for c in pending if c.get("id") == contradiction_id), None)
         if found is None:
             return None  # the service refuses an unknown or settled contradiction
@@ -395,11 +381,11 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = False,
                    "changed": "both were true in turn; it changed" + (f" on {valid_from}" if valid_from else "")}
         return target, f"Answer {_cut(found.get('question'), 220)!r} with: {meaning.get(choice, choice)}."
 
-    def document_figures(client_id: str, matched: list[dict]) -> set[float]:
+    def document_figures(self, client_id: str, matched: list[dict]) -> set[float]:
         """Figures held by the stored proposals of the cited statements (never one flagged as addressing a model)."""
         shas = {str(s.get("sha256") or "").lower() for s in matched} - {""}
         refs = {str(s.get("ref") or "").lower() for s in matched} - {""}
-        state = service._ingest_state(client_id)
+        state = self.service._ingest_state(client_id)
         figures: set[float] = set()
         for bucket in ("pending", "confirmed"):
             for record in (state.get(bucket) or {}).values():
@@ -413,12 +399,12 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = False,
                 figures |= _consent.document_figures(result)
         return figures
 
-    def vet_facts(client_id: str, facts: list[dict]) -> list[str]:
+    def vet_facts(self, client_id: str, facts: list[dict]) -> list[str]:
         """Apply the provenance rules in place; returns warnings for the receipt."""
         warnings: list[str] = []
         sources: list[dict] | None = None
         current: dict[str, dict] | None = None
-        texts = [turn.message, turn.recent]
+        texts = [self.turn.message, self.turn.recent]
         for fact in facts:
             key, source = fact["key"], fact["source"]
             if fact.get("confidence") == "confirmed":
@@ -428,7 +414,7 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = False,
             kind = source["kind"]
             if kind == "document":
                 if sources is None:
-                    sources = service.ingested_sources(client_id)
+                    sources = self.service.ingested_sources(client_id)
                 matched = _matching_sources(source["ref"], sources)
                 if not matched:
                     raise ToolError(
@@ -436,14 +422,14 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = False,
                         "wealth_ingest (its document:sha256 ref or file name). Read the file with wealth_ingest "
                         "first, or save what the person said with source.kind=user.")
                 if fact.get("value") is not None:
-                    missing = _consent.ungrounded(fact["value"], document_figures(client_id, matched))
+                    missing = _consent.ungrounded(fact["value"], self.document_figures(client_id, matched))
                     if missing:
                         source["kind"], fact["confidence"] = "inference", "inferred"
                         shown = ", ".join(f"{n:g}" for n in missing[:3])
                         warnings.append(f"{key}: saved as inferred, not as the statement's figure: the statement's "
                                         f"reviewed figures do not include {shown}. Ask the person before relying "
                                         "on it")
-            elif kind == "user" and turn.session is not None and fact.get("value") is not None:
+            elif kind == "user" and self.turn.session is not None and fact.get("value") is not None:
                 missing = _consent.supported(fact.get("value"), texts)
                 if missing:
                     source["kind"], fact["confidence"] = "inference", "inferred"
@@ -452,7 +438,7 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = False,
                                     f"{shown}. Ask them to confirm the figure before relying on it")
             elif kind == "tool":
                 if current is None:
-                    snapshot = service.inspect(client_id, keys=[f["key"] for f in facts])
+                    snapshot = self.service.inspect(client_id, keys=[f["key"] for f in facts])
                     current = {f["key"]: f for f in snapshot.get("facts") or []}
                 prior = current.get(key) or {}
                 if (prior.get("source") or {}).get("kind") == "user":
@@ -460,6 +446,42 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = False,
                     warnings.append(f"{key}: a tool result cannot replace what the person said; it was held "
                                     "as an inference to ask them about")
         return warnings
+
+
+def build_server(db_path: str | None = None, *, include_behavior: bool = False,
+                 tools: frozenset[str] | None = None, environ: Mapping[str, str] | None = None) -> MCPServer:
+    """Build the MCP server; ``tools`` limits it to those tool names (all when None).
+
+    The instructions carry the tool rules and a compact conversation contract
+    (``HOST_CONTRACT``). ``include_behavior=True`` appends the full policy in
+    ``instructions.md`` instead, for a host that has no other copy of it; the
+    Wealth launcher passes that policy to the model directly.
+
+    ``environ`` (default ``os.environ``) carries the launcher's per-turn consent
+    evidence; see ``consent.py``.
+    """
+    service = WealthService(db_path)
+    registered_tools: list[Tool] = []
+    environ = os.environ if environ is None else environ
+    turn = _consent.Turn.from_env(environ)
+    # In a Wealth turn with web search on, raw page text must not enter the model's context (it could
+    # leave in a query); the launcher turns search off for turns and threads that read files.
+    search_live = turn.session is not None and environ.get("WEALTH_TURN_WEB_SEARCH") == "1"
+    def persist_codes(client: str, update) -> None:
+        # Pending codes outlive this process: hosts that start the server for every turn can still finish.
+        with WealthStore(service.db_path) as store:
+            store.update_auxiliary(client, "consent", update)
+
+    confirmations = _consent.Confirmations(persist=persist_codes)
+    saves_facts = tools is None or "wealth_remember" in tools  # else the fact contract is dead weight
+
+    gate = _ConsentGate(service, turn, confirmations)
+    require = gate.require
+    ingest_subject = gate.ingest_subject
+    placed_subject = gate.placed_subject
+    decision_subject = gate.decision_subject
+    contradiction_subject = gate.contradiction_subject
+    vet_facts = gate.vet_facts
 
     def tool(*, annotations: ToolAnnotations):
         # MCP 2.x otherwise generates argument models which ignore extra fields.

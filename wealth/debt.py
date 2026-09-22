@@ -763,44 +763,10 @@ def _after_tax_lump(rate: Decimal, gains_tax: Decimal, years: Decimal, inflation
     return (grown - max(grown - cost, ZERO) * gains_tax) ** (ONE / years) - ONE
 
 
-def prepay_vs_invest(debt: dict, inputs: Mapping[str, Any], today: date, *, jurisdiction: str | None,
-                     reserve: Mapping[str, Any] | None, risk_free: Mapping[str, Any] | None) -> dict:
+def _prepay_deduction(debt: dict, inputs: Mapping[str, Any], jurisdiction: str, missing: list[dict],
+                      warnings: list[str], assumptions: list[str], sources: list[dict]) -> tuple[list[Decimal], str]:
+    """Which shares of the debt's interest lower tax (one case, or two when an input is unknown), and why."""
     from . import mexico
-    if debt["indexed"]:
-        raise ValueError("prepay_vs_invest needs a debt in money; for Infonavit/Fovissste in VSM/UMA use mode amortize")
-    extra = _money_in(inputs.get("extra_monthly"), "extra_monthly") or ZERO
-    lump = _money_in(inputs.get("lump_sum"), "lump_sum") or ZERO
-    if extra <= 0 and lump <= 0:
-        raise ValueError("prepay_vs_invest needs extra_monthly or lump_sum (a positive amount)")
-    currency = debt["currency"]
-    jurisdiction = (jurisdiction or ("MX" if currency == "MXN" else "US" if currency == "USD" else None))
-    if jurisdiction not in ("MX", "US"):
-        raise ValueError("jurisdiction must be MX or US (or give the debt a currency of MXN or USD)")
-    missing: list[dict] = []
-    warnings: list[str] = []
-    assumptions: list[str] = []
-    sources: list[dict] = []
-    payment = debt["payment"]
-    if payment is None:  # a card on the minimum rule: this month's minimum, held fixed
-        payment = _first_minimum(debt)
-        assumptions.append(f"The card's payment is held at this month's minimum ({num(payment)}).")
-    baseline = _plan(debt, today, payment=payment)
-    horizon = inputs.get("horizon_months")
-    if horizon is None:
-        if baseline["status"] != "ready":
-            raise ValueError("the current payment never repays this debt; give horizon_months")
-        horizon = min(baseline["months"], 360)
-        assumptions.append(f"The horizon is the debt's payoff at the current payment: {horizon} months.")
-    if not isinstance(horizon, int) or isinstance(horizon, bool) or not 1 <= horizon <= MAX_MONTHS:
-        raise ValueError(f"horizon_months must be a whole number from 1 to {MAX_MONTHS}")
-    years = Decimal(horizon) / 12
-
-    # -- tax on the debt side: which cases does the unknown leave open?
-    marginal = _ratio(inputs.get("marginal_rate"), "marginal_rate", high=ONE)
-    marginals = [marginal] if marginal is not None else list(MARGINAL_BOUNDS[jurisdiction])
-    if marginal is None:
-        missing.append({"key": "marginal_rate", "reason": "missing",
-                        "detail": "Your marginal income-tax rate; the range uses the lowest and highest brackets."})
     deduction_share: list[Decimal] = [ZERO]
     deduction_note = "No interest deduction applies to this debt."
     if debt["kind"] in ("mortgage", *INDEXED_KINDS) and jurisdiction == "US":
@@ -875,8 +841,12 @@ def prepay_vs_invest(debt: dict, inputs: Mapping[str, Any], today: date, *, juri
                 missing.append({"key": "mx_mortgage.within_global_cap", "reason": "missing",
                                 "detail": "Does the deduction fit within the Art. 151 global cap (the lesser of five "
                                           "annual UMAs or 15% of income)?"})
+    return deduction_share, deduction_note
 
-    # -- the investing side
+
+def _prepay_expected_returns(inputs: Mapping[str, Any], currency: str,
+                             assumptions: list[str]) -> tuple[Decimal, Decimal, str]:
+    """``(conservative, base, source)``: the stated expected returns, else the dated table for the currency."""
     expected = inputs.get("expected_return")
     table = EXPECTED_RETURNS.get(currency)
     if isinstance(expected, Mapping):
@@ -892,13 +862,14 @@ def prepay_vs_invest(debt: dict, inputs: Mapping[str, Any], today: date, *, juri
         raise ValueError(f"expected_return {{conservative, base, source}} is needed for {currency}")
     if conservative > base:
         raise ValueError("expected_return.conservative must not exceed base")
-    account = inputs.get("account", "taxable")
-    if account not in ("taxable", "tax_free"):
-        raise ValueError("account must be taxable or tax_free (a Roth IRA, or a PPR held to 65)")
-    inflation_mx = _ratio(inputs.get("inflation"), "inflation", high=ONE) or MX_INFLATION_ASSUMED
-    channel = inputs.get("investment_channel")
-    if channel not in (None, "mx_intermediary", "foreign_broker"):
-        raise ValueError("investment_channel must be mx_intermediary (a Mexican casa de bolsa) or foreign_broker")
+    return conservative, base, return_source
+
+
+def _prepay_gains_tax(inputs: Mapping[str, Any], account: str, jurisdiction: str, channel: str | None,
+                      inflation_mx: Decimal, assumptions: list[str],
+                      sources: list[dict]) -> tuple[Decimal | None, Decimal, bool]:
+    """``(gains_tax, gains_inflation, gains_at_marginal)`` for selling the investment at the horizon."""
+    from . import mexico
     gains_inflation = ZERO      # annual inflation that updates the cost basis (Mexico taxes the real gain)
     gains_at_marginal = False   # gains taxed at each case's marginal rate instead of a flat rate
     if account == "tax_free":
@@ -929,7 +900,12 @@ def prepay_vs_invest(debt: dict, inputs: Mapping[str, Any], today: date, *, juri
             gains_tax = US_LTCG_ASSUMED
             assumptions.append("US long-term capital gains are taxed at 15% when sold at the horizon (the common "
                                "bracket; give capital_gains_rate for yours).")
-    investment = str(inputs.get("investment") or ("an equity index fund"))
+    return gains_tax, gains_inflation, gains_at_marginal
+
+
+def _prepay_risk_free(risk_free: Mapping[str, Any] | None, jurisdiction: str, missing: list[dict],
+                      warnings: list[str], assumptions: list[str], sources: list[dict]) -> Decimal | None:
+    """The risk-free rate (CETES or T-bills) with its staleness and origin notes; None when unknown."""
     rf_rate = D(risk_free.get("rate")) if risk_free else None
     if rf_rate is None:
         missing.append({"key": "risk_free", "reason": "missing",
@@ -944,8 +920,14 @@ def prepay_vs_invest(debt: dict, inputs: Mapping[str, Any], today: date, *, juri
         if risk_free.get("origin") == "builtin":
             assumptions.append(f"The risk-free rate is Wealth's built-in dated value ({risk_free.get('name')}, "
                                f"{risk_free.get('as_of')}): no fetched rate was available.")
-    federal =_ratio(inputs.get("federal_marginal_rate"), "federal_marginal_rate", high=ONE)
+    return rf_rate
 
+
+def _prepay_cases(debt: dict, marginals: list[Decimal], deduction_share: list[Decimal], rf_rate: Decimal | None,
+                  jurisdiction: str, inflation_mx: Decimal, federal: Decimal | None, gains_at_marginal: bool,
+                  gains_tax: Decimal | None, conservative: Decimal, base: Decimal, years: Decimal,
+                  gains_inflation: Decimal) -> list[dict]:
+    """One case per marginal rate and deduction share: after-tax rates on both sides and the verdict."""
     cases = []
     for m in marginals:
         for share in dict.fromkeys(deduction_share):
@@ -966,9 +948,15 @@ def prepay_vs_invest(debt: dict, inputs: Mapping[str, Any], today: date, *, juri
                           "debt_after_tax_rate": debt_eff, "risk_free_after_tax": rf_after,
                           "conservative_after_tax": cons_after, "base_after_tax": base_after,
                           "verdict": verdict, "confidence": confidence})
+    return cases
+
+
+def _prepay_scenarios(debt: dict, cases: list[dict], rf_rate: Decimal | None, conservative: Decimal, base: Decimal,
+                      payment: Decimal, extra: Decimal, lump: Decimal, horizon: int,
+                      basis_monthly: Decimal) -> dict[str, dict]:
+    """Net worth at the horizon, prepaying against investing, at the risk-free, conservative and base returns."""
     central = cases[0]
     scenarios = {}
-    basis_monthly = _monthly_from_annual(gains_inflation)
     for name, pre, invest_monthly in (
             ("risk_free", rf_rate, _monthly_from_annual(central["risk_free_after_tax"]) if rf_rate is not None else None),
             ("conservative", conservative, _monthly_from_annual(conservative)),
@@ -994,8 +982,11 @@ def prepay_vs_invest(debt: dict, inputs: Mapping[str, Any], today: date, *, juri
             "debt_paid_off_month_if_prepay": paths["prepay"]["debt_paid_off_month"],
             "debt_paid_off_month_if_invest": paths["invest"]["debt_paid_off_month"],
             "interest_saved_by_prepaying": num(paths["invest"]["interest"] - paths["prepay"]["interest"])}
-    breakeven = _breakeven(debt["balance"], central["_monthly"], payment, extra, lump, horizon, central["_gains_tax"],
-                           basis_monthly)
+    return scenarios
+
+
+def _prepay_combined_verdict(cases: list[dict], missing: list[dict]) -> tuple[str, str, list[str]]:
+    """One verdict when every case agrees (at the lowest confidence), else ``depends`` and what decides it."""
     verdicts = {(c["verdict"], c["confidence"]) for c in cases}
     kinds = {v for v, _ in verdicts}
     if len(kinds) == 1:
@@ -1007,6 +998,12 @@ def prepay_vs_invest(debt: dict, inputs: Mapping[str, Any], today: date, *, juri
         verdict, confidence = "depends", "low"
         decided_by = [m["key"] for m in missing if m["key"] in ("marginal_rate", "itemizes", "mx_mortgage.within_global_cap")
                       or m["key"].startswith("mortgage.")]
+    return verdict, confidence, decided_by
+
+
+def _prepay_reserve_gate(debt: dict, reserve: Mapping[str, Any] | None, verdict: str, confidence: str,
+                         missing: list[dict], warnings: list[str]) -> tuple[str, str, str, bool, bool, str | None]:
+    """The emergency reserve comes first; returns ``(verdict, confidence, reserve_status, high, parallel, condition)``."""
     reserve_status = _reserve_status(reserve)
     # A 20%+ consumer debt only waits for a starter reserve (one month of essentials); lower-rate debt
     # (a mortgage, a car) waits for the full target.
@@ -1029,6 +1026,75 @@ def prepay_vs_invest(debt: dict, inputs: Mapping[str, Any], today: date, *, juri
         missing.append({"key": "reserve", "reason": "missing",
                         "detail": "Reserve months and target: prepaying only makes sense with the reserve "
                                   + ("at one month or more." if high else "full.")})
+    return verdict, confidence, reserve_status, high, parallel, condition
+
+
+def prepay_vs_invest(debt: dict, inputs: Mapping[str, Any], today: date, *, jurisdiction: str | None,
+                     reserve: Mapping[str, Any] | None, risk_free: Mapping[str, Any] | None) -> dict:
+    if debt["indexed"]:
+        raise ValueError("prepay_vs_invest needs a debt in money; for Infonavit/Fovissste in VSM/UMA use mode amortize")
+    extra = _money_in(inputs.get("extra_monthly"), "extra_monthly") or ZERO
+    lump = _money_in(inputs.get("lump_sum"), "lump_sum") or ZERO
+    if extra <= 0 and lump <= 0:
+        raise ValueError("prepay_vs_invest needs extra_monthly or lump_sum (a positive amount)")
+    currency = debt["currency"]
+    jurisdiction = (jurisdiction or ("MX" if currency == "MXN" else "US" if currency == "USD" else None))
+    if jurisdiction not in ("MX", "US"):
+        raise ValueError("jurisdiction must be MX or US (or give the debt a currency of MXN or USD)")
+    missing: list[dict] = []
+    warnings: list[str] = []
+    assumptions: list[str] = []
+    sources: list[dict] = []
+    payment = debt["payment"]
+    if payment is None:  # a card on the minimum rule: this month's minimum, held fixed
+        payment = _first_minimum(debt)
+        assumptions.append(f"The card's payment is held at this month's minimum ({num(payment)}).")
+    baseline = _plan(debt, today, payment=payment)
+    horizon = inputs.get("horizon_months")
+    if horizon is None:
+        if baseline["status"] != "ready":
+            raise ValueError("the current payment never repays this debt; give horizon_months")
+        horizon = min(baseline["months"], 360)
+        assumptions.append(f"The horizon is the debt's payoff at the current payment: {horizon} months.")
+    if not isinstance(horizon, int) or isinstance(horizon, bool) or not 1 <= horizon <= MAX_MONTHS:
+        raise ValueError(f"horizon_months must be a whole number from 1 to {MAX_MONTHS}")
+    years = Decimal(horizon) / 12
+
+    # -- tax on the debt side: which cases does the unknown leave open?
+    marginal = _ratio(inputs.get("marginal_rate"), "marginal_rate", high=ONE)
+    marginals = [marginal] if marginal is not None else list(MARGINAL_BOUNDS[jurisdiction])
+    if marginal is None:
+        missing.append({"key": "marginal_rate", "reason": "missing",
+                        "detail": "Your marginal income-tax rate; the range uses the lowest and highest brackets."})
+    deduction_share, deduction_note = _prepay_deduction(debt, inputs, jurisdiction, missing, warnings, assumptions,
+                                                        sources)
+
+    # -- the investing side
+    conservative, base, return_source = _prepay_expected_returns(inputs, currency, assumptions)
+    account = inputs.get("account", "taxable")
+    if account not in ("taxable", "tax_free"):
+        raise ValueError("account must be taxable or tax_free (a Roth IRA, or a PPR held to 65)")
+    inflation_mx = _ratio(inputs.get("inflation"), "inflation", high=ONE) or MX_INFLATION_ASSUMED
+    channel = inputs.get("investment_channel")
+    if channel not in (None, "mx_intermediary", "foreign_broker"):
+        raise ValueError("investment_channel must be mx_intermediary (a Mexican casa de bolsa) or foreign_broker")
+    gains_tax, gains_inflation, gains_at_marginal = _prepay_gains_tax(inputs, account, jurisdiction, channel,
+                                                                      inflation_mx, assumptions, sources)
+    investment = str(inputs.get("investment") or ("an equity index fund"))
+    rf_rate = _prepay_risk_free(risk_free, jurisdiction, missing, warnings, assumptions, sources)
+    federal =_ratio(inputs.get("federal_marginal_rate"), "federal_marginal_rate", high=ONE)
+
+    cases = _prepay_cases(debt, marginals, deduction_share, rf_rate, jurisdiction, inflation_mx, federal,
+                          gains_at_marginal, gains_tax, conservative, base, years, gains_inflation)
+    central = cases[0]
+    basis_monthly = _monthly_from_annual(gains_inflation)
+    scenarios = _prepay_scenarios(debt, cases, rf_rate, conservative, base, payment, extra, lump, horizon,
+                                  basis_monthly)
+    breakeven = _breakeven(debt["balance"], central["_monthly"], payment, extra, lump, horizon, central["_gains_tax"],
+                           basis_monthly)
+    verdict, confidence, decided_by = _prepay_combined_verdict(cases, missing)
+    verdict, confidence, reserve_status, high, parallel, condition = _prepay_reserve_gate(
+        debt, reserve, verdict, confidence, missing, warnings)
     prepay_allowed = verdict != "build_reserve_first"
     guaranteed = {
         "after_tax_rate": num(central["debt_after_tax_rate"], 4),
