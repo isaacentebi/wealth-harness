@@ -254,7 +254,8 @@ BEGIN SELECT RAISE(ABORT, 'conversation messages are append-only'); END""",
 MESSAGE_STATUSES = frozenset({"stopped", "failed"})  # an unfinished turn's mark (NULL: finished)
 CONVERSATION_LIMIT = 100  # messages of the current conversation loaded on startup
 _ORDER_EVENTS = frozenset({"ticket", "checks", "confirm", "blocked", "request", "response", "status",
-                           "cancel", "fill_posted", "live_acknowledged", "discarded", "nonce_rejected", "error"})
+                           "cancel", "fill_posted", "live_acknowledged", "discarded", "nonce_rejected", "error",
+                           "reply_blocked", "placed_manually", "reconciled", "withdrawn"})
 _AUXILIARY = frozenset({"embeddings", "monitor", "ingest", "execution"})
 # The base tables of a new database (version 3 without the ledger and contradictions).
 _BASE_SCHEMA = """

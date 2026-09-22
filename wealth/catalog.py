@@ -1086,8 +1086,11 @@ CATALOG: dict[str, dict[str, Any]] = {
                     "annual_inflation": 0.04, "simulations": 500, "seed": 7},
     },
     "order_ticket": {
-        "purpose": "Prepare an order ticket when the person asks to act (Alpaca; paper unless the person enabled live "
-                   "trading). Wealth stores the exact orders with pre-trade checks (tradable/fractionable, cash buying "
+        "purpose": "Prepare an order ticket when the person asks to act. The account's institution picks the broker: "
+                   "Alpaca (paper unless the person enabled live trading), Interactive Brokers through the gateway the "
+                   "person runs (paper when logged into a DU... account), or, for any broker without an API (GBM, "
+                   "Vest, Schwab, Fidelity...), a place-it-yourself card with the exact symbol and listing (SIC or "
+                   "BMV), fees and FX that the person marks 'Ya la puse' once placed. Wealth stores the exact orders with pre-trade checks (tradable/fractionable, cash buying "
                    "power, the accepted IPS, live per-order and daily limits, duplicates, market hours, a limit price "
                    "collared around the last trade, estimated tax and cost) and returns a ticket id and a summary. It "
                    "never places an order: the person reviews and confirms the card in the app. inputs {ticket_id} "
@@ -1098,10 +1101,13 @@ CATALOG: dict[str, dict[str, Any]] = {
         "optional": ["source: rebalance|manager_mirror|user_request (default user_request)",
                      "orders[].type: limit (default) | market (paper only)", "orders[].limit_price (default: last "
                      "trade +/- half the collar)", "orders[].time_in_force: day (default) | gtc (whole shares)",
-                     "orders[].account_id, estimated_tax, estimated_cost, asset_class, sleeve, domicile, tags",
+                     "orders[].account_id (one account per ticket; it picks the broker), estimated_tax, "
+                     "estimated_cost, asset_class, sleeve, domicile, tags",
+                     "orders[].exchange: SIC | BMV | BIVA for a Mexican broker (default: SIC for foreign shares, BMV "
+                     "for known Mexican issuers)",
                      "orders[].lots (sells only) [{lot_id, quantity?, estimated_tax_saving?, repurchase_not_before?, "
                      "character?, account_id?}] (from tax harvest_report order_tickets)"],
-        "notes": "Result: ticket {id, mode PAPER|LIVE, status, total, lines [{side, symbol, qty, limit_price, "
+        "notes": "Result: ticket {id, broker alpaca|ibkr|manual, broker_label, mode paper|live|manual, status, total, lines [{side, symbol, qty, limit_price, "
                  "estimated_amount, state}], notices [{code, status: warn|violation|block|unknown, message}]} and "
                  "summary. Tell the person to confirm on the card; never say an order was placed or filled until "
                  "its line state says so. Without client_id the result is a preview that cannot be confirmed.",

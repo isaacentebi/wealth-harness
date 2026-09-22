@@ -30,9 +30,12 @@ sales. It runs on your computer, and your data stays in a local SQLite file.
 - **Statements are the source of truth.** Upload a PDF or CSV statement, or sync
   Interactive Brokers, Alpaca or Cuenca. Wealth reconciles it with what you told
   it, shows the differences and saves nothing until you say yes.
-- **Read-write brokers, tap to confirm.** Connectors only read. For Alpaca the
-  model can prepare an order ticket with pre-trade checks; only your tap on its
-  card sends it. Paper trading is the default.
+- **Read-write brokers, tap to confirm.** Connectors only read. The model can
+  prepare an order ticket with pre-trade checks; only your tap on its card sends
+  it, to Alpaca or to Interactive Brokers through the gateway you run. Paper
+  trading is the default. For brokers without an API (GBM, Vest, Schwab,
+  Fidelity) the card says exactly what to place, SIC or BMV included, and your
+  next statement confirms it.
 - **Memory you can see.** Every fact records where it came from and when it was
   last checked, and you can edit, confirm or delete it on the You page.
 
@@ -135,6 +138,8 @@ Every task with its inputs and an example: [docs/cli.md](docs/cli.md#tasks).
   until you say yes. Keys live in the OS keychain or environment variables,
   never in the database, logs or chat.
 - **Only you place an order.** No tool, command or "yes" in chat places one.
+  Orders go to Alpaca or IBKR (paper unless you opt in) or onto a card you
+  place yourself.
   Live trading needs a server-side opt-in, a typed confirmation the first time
   and per-order and daily limits. Wealth never moves money or sends messages.
   Threat model: [docs/trading.md](docs/trading.md).
