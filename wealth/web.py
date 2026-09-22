@@ -337,6 +337,13 @@ def _log_failure(turn: Turn, kind: str, summary: str, detail: str) -> None:
 # A vermilion dot on the canvas (Dot), served for /favicon.ico and /favicon.svg so no page load 404s.
 FAVICON_SVG = (b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
                b'<rect width="32" height="32" rx="7" fill="#FBF8F2"/><circle cx="16" cy="16" r="7" fill="#C84335"/></svg>')
+# The pages' own CSS and JS under /static/<name>, by exact name only: the request path never reaches the filesystem.
+# The type must be right: nosniff makes a browser drop a stylesheet or script served under any other type.
+STATIC_DIR = Path(__file__).with_name("static")
+STATIC_FILES = {
+    "chat.css": "text/css",
+    "chat.js": "text/javascript",
+}
 
 
 def _public_attachment(item: dict[str, Any]) -> dict[str, Any]:
@@ -884,6 +891,11 @@ def create_server(chat, port=8765, host="127.0.0.1"):
                 return self.respond(403, {"error": "Local origin required.", "kind": "forbidden"})
             url = urlsplit(self.path)
             try:
+                if url.path.startswith("/static/"):
+                    name = url.path[len("/static/"):]
+                    if name not in STATIC_FILES:
+                        return self.respond(404, {"error": "Not found."})
+                    return self.respond(200, (STATIC_DIR / name).read_bytes(), STATIC_FILES[name])
                 if url.path == "/":
                     return self.respond(200, Path(__file__).with_name("chat.html").read_bytes(), "text/html")
                 if url.path in ("/favicon.ico", "/favicon.svg"):

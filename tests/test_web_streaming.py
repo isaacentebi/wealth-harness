@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -231,6 +232,50 @@ def test_security_headers_and_socket_timeout(tmp_path):
         assert server.RequestHandlerClass.timeout == 30
     with pytest.raises(ValueError):
         web.create_server(chat, 0, "0.0.0.0")
+
+
+@pytest.mark.parametrize("name", sorted(web.STATIC_FILES))
+def test_static_files_come_with_their_type_and_the_page_headers(tmp_path, name):
+    chat = web.Chat(tmp_path / "w.sqlite3", "personal")
+    with serving(chat) as (base, _):
+        response = urlopen(f"{base}/static/{name}", timeout=5)  # no token: the pages load it before they have one
+        assert response.status == 200 and response.read() == (web.STATIC_DIR / name).read_bytes()
+        kind = {"css": "text/css", "js": "text/javascript"}[name.rsplit(".", 1)[1]]
+        assert web.STATIC_FILES[name] == kind
+        assert response.headers["Content-Type"] == f"{kind}; charset=utf-8"  # nosniff drops any other type
+        for header, value in web.SECURITY_HEADERS:
+            assert response.headers[header] == value
+
+
+def test_static_takes_only_a_local_origin_and_an_exact_name(tmp_path):
+    chat = web.Chat(tmp_path / "w.sqlite3", "personal")
+    with serving(chat) as (_, server):
+        port = server.server_port
+
+        def status(path, **headers):
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            connection.request("GET", path, headers=headers)
+            code = connection.getresponse().status
+            connection.close()
+            return code
+
+        name = sorted(web.STATIC_FILES)[0]
+        assert status(f"/static/{name}") == 200
+        assert status(f"/static/{name}", Host=f"evil.example:{port}") == 403
+        assert status(f"/static/{name}", Origin="http://evil.example") == 403
+        for path in ("/static/../web.py", "/static/%2e%2e/web.py", "/static/..%2fweb.py", "/static/", "/static/nope.js",
+                     f"/static/{name}/", f"/static/./{name}", f"/static//{name}", "/static/chat.html"):
+            assert status(path) == 404, path
+
+
+def test_every_static_reference_in_the_pages_is_served():
+    from pathlib import Path
+    root = Path(web.__file__).parent
+    referenced = set()
+    for page in ("chat.html", "profile.html", "review.html"):
+        referenced |= set(re.findall(r'(?:href|src)="/static/([^"]+)"', (root / page).read_text(encoding="utf-8")))
+    assert referenced == set(web.STATIC_FILES)  # every reference is served, and nothing is served unreferenced
+    assert all((web.STATIC_DIR / name).is_file() for name in web.STATIC_FILES)
 
 
 def test_page_never_injects_html_from_model_text():
