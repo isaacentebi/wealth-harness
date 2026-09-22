@@ -801,6 +801,30 @@ class WealthService:
                 if not got["series"]:
                     return inputs, note
                 return {**inputs, "prices": {k: s["points"] for k, s in got["series"].items()}}, note
+            if task == "stress":
+                # Partial shocks spread to the other holdings by beta: two years of cached/provider history.
+                from . import market as market_module
+                symbols = market_module.stress_price_symbols(inputs, context)
+                if not symbols:
+                    return inputs, None
+                end = datetime.now(timezone.utc).date()
+                got = provider.history(symbols, end - timedelta(days=730), end, adjusted=True,
+                                       budget=REVIEW_PRICE_BUDGET)
+                note = {"prices": [{"instrument_id": k, "source": s["source"], "first": s["first"], "last": s["last"],
+                                    "stale": s["stale"]} for k, s in got["series"].items()],
+                        "missing": got["missing"], "offline": got["offline"], "pending": got["pending"],
+                        "stale_prices": [{"symbol": k, "date": s["last"], "source": s["source"]}
+                                         for k, s in got["series"].items() if s["stale"]]}
+                if not got["series"]:
+                    return inputs, note
+                days: dict[str, dict] = {}
+                for key, s in got["series"].items():
+                    for point in s["points"]:
+                        days.setdefault(point["date"], {"date": point["date"]})[key.upper()] = float(point["price"])
+                beta_prices = {"source": "price cache (adjusted closes) for betas",
+                               "rows": [days[d] for d in sorted(days)],
+                               "currencies": {k.upper(): s["currency"] for k, s in got["series"].items()}}
+                return {**inputs, "beta_prices": beta_prices}, note
         except Exception as exc:  # noqa: BLE001 - without provider prices the task asks for them as before
             return inputs, {"prices": [], "missing": [{"symbol": "*", "reason": f"{type(exc).__name__}: {exc}"}],
                             "stale_prices": []}

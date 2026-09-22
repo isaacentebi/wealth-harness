@@ -9,6 +9,11 @@ declined.
   policy (a cap on liquid net worth, a single-position loss limit and a
   drawdown stop) and returns ``allow`` / ``allow_with_warning`` /
   ``decline_to_recommend`` with plain reasons and the education card.
+  A sell of an option writes it (sell to open) unless it says it closes;
+  writing is sized by the capital it puts at risk.
+* :func:`payoff` draws the P&L of option legs (single or multi-leg), shares,
+  crypto and leveraged positions across a price grid: max loss and gain (or
+  no ceiling), breakevens and the capital at risk.
 * :func:`education_card` explains options, leverage, crypto and fintech
   yield: maximum loss, liquidation and deposit-insurance coverage.
 * :func:`panic_check` answers "sell everything" after a drawdown above 10%
@@ -397,6 +402,331 @@ def cool_off(now: Any = None, tz: str | None = None, last_move: Mapping[str, Any
                     f"{PARAMETERS['cool_off_window_minutes']['value']} minutes, or 23:00-05:00 local time."}
 
 
+# ------------------------------------------------------------------ payoff sandbox
+
+OPTION_MULTIPLIER = 100
+_OPTION_LEGS = ("call", "put")
+_SPOT_LEGS = ("stock", "spot", "crypto", "underlying", "etf")
+_LEVERED_LEGS = ("leveraged", "margin", "perp", "perpetual", "future", "futures", "cfd")
+PAYOFF_GRID_POINTS = 25
+_EPS = 1e-9
+
+
+def _option_type(proposal: Mapping[str, Any], instrument: str) -> str:
+    """call or put: ``option_type`` wins, then the instrument name (``put``), else call."""
+    explicit = str(proposal.get("option_type") or "").lower()
+    if explicit:
+        if explicit not in _OPTION_LEGS:
+            raise ValueError("proposal.option_type must be call or put")
+        return explicit
+    return "put" if instrument == "put" else "call"
+
+
+def _leg_number(leg: Mapping[str, Any], key: str, where: str, *, positive: bool = True,
+                required: bool = True, default: float | None = None) -> float | None:
+    value = leg.get(key)
+    if value is None:
+        if required and default is None:
+            raise ValueError(f"{where}.{key} is required")
+        return default
+    out = _num(value)
+    if out is None or (positive and out <= 0) or (not positive and out < 0):
+        raise ValueError(f"{where}.{key} must be a {'positive' if positive else 'non-negative'} number")
+    return out
+
+
+def _normal_leg(raw: Any, index: int) -> dict:
+    where = f"legs[{index}]"
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"{where} must be an object")
+    kind = str(raw.get("type") or "").lower()
+    side = str(raw.get("side") or "long").lower()
+    if side not in ("long", "short"):
+        raise ValueError(f"{where}.side must be long or short")
+    if kind in _OPTION_LEGS:
+        multiplier = _leg_number(raw, "multiplier", where, default=OPTION_MULTIPLIER)
+        contracts = _leg_number(raw, "contracts", where)
+        return {"type": kind, "side": side, "strike": _leg_number(raw, "strike", where),
+                "premium": _leg_number(raw, "premium", where, positive=False),
+                "contracts": contracts, "multiplier": multiplier, "quantity": contracts * multiplier,
+                "cash_secured": side == "short" and (raw.get("cash_secured") is True or raw.get("covered") is True)}
+    if kind in _SPOT_LEGS:
+        entry = _leg_number(raw, "entry_price", where)
+        quantity = _leg_number(raw, "quantity", where, required=False)
+        if quantity is None:
+            amount = _leg_number(raw, "amount", where, required=False)
+            if amount is None:
+                raise ValueError(f"{where} needs quantity or amount")
+            quantity = amount / entry
+        return {"type": "spot", "asset": kind, "side": side, "entry_price": entry, "quantity": quantity}
+    if kind in _LEVERED_LEGS:
+        entry = _leg_number(raw, "entry_price", where)
+        margin = _leg_number(raw, "margin", where, required=False)
+        if margin is None:
+            margin = _leg_number(raw, "amount", where)
+        leverage = _leg_number(raw, "leverage", where)
+        if leverage < 1:
+            raise ValueError(f"{where}.leverage must be at least 1")
+        exposure = margin * leverage
+        liquidation = None if leverage == 1 else (entry * (1 - 1 / leverage) if side == "long"
+                                                  else entry * (1 + 1 / leverage))
+        return {"type": "leveraged", "side": side, "entry_price": entry, "margin": margin, "leverage": leverage,
+                "exposure": exposure, "quantity": exposure / entry,
+                "liquidation_price": None if liquidation is None else round(liquidation, 6),
+                "negative_balance_protection": raw.get("negative_balance_protection") is True}
+    raise ValueError(f"{where}.type must be call, put, stock, crypto or leveraged")
+
+
+def _leg_pnl(leg: Mapping[str, Any], price: float, *, gap: bool = False) -> float:
+    """P&L at expiry (options) or at ``price`` (spot, leveraged).  ``gap`` ignores the liquidation floor."""
+    sign = 1.0 if leg["side"] == "long" else -1.0
+    if leg["type"] in _OPTION_LEGS:
+        intrinsic = max(price - leg["strike"], 0.0) if leg["type"] == "call" else max(leg["strike"] - price, 0.0)
+        return sign * (intrinsic - leg["premium"]) * leg["quantity"]
+    raw = sign * leg["quantity"] * (price - leg["entry_price"])
+    if leg["type"] == "leveraged" and leg["liquidation_price"] is not None:
+        if gap and not leg["negative_balance_protection"]:
+            return raw
+        return max(raw, -leg["margin"])
+    return raw
+
+
+def _slope_at_infinity(legs: list[dict], *, gap: bool) -> float:
+    slope = 0.0
+    for leg in legs:
+        if leg["type"] == "put":
+            continue
+        if leg["type"] == "leveraged" and leg["side"] == "short" and leg["liquidation_price"] is not None \
+                and not (gap and not leg["negative_balance_protection"]):
+            continue  # a short liquidated on the way up loses its margin and no more
+        slope += (1.0 if leg["side"] == "long" else -1.0) * leg["quantity"]
+    return slope
+
+
+def _strategy(legs: list[dict]) -> str:
+    options = [leg for leg in legs if leg["type"] in _OPTION_LEGS]
+    spots = [leg for leg in legs if leg["type"] == "spot"]
+    levered = [leg for leg in legs if leg["type"] == "leveraged"]
+    if levered and len(legs) == 1:
+        return f"leveraged_{levered[0]['side']}"
+    if spots and len(legs) == 1:
+        return f"{'crypto' if spots[0]['asset'] == 'crypto' else 'spot'}_{spots[0]['side']}"
+    if len(options) == 1 and len(legs) == 1:
+        leg = options[0]
+        if leg["side"] == "long":
+            return f"long_{leg['type']}"
+        return "cash_secured_put" if leg["type"] == "put" and leg["cash_secured"] else f"naked_short_{leg['type']}"
+    if len(options) == 1 and len(spots) == 1 and len(legs) == 2:
+        opt, stock = options[0], spots[0]
+        if opt["type"] == "call" and opt["side"] == "short" and stock["side"] == "long" \
+                and stock["quantity"] >= opt["quantity"] - _EPS:
+            return "covered_call"
+        if opt["type"] == "put" and opt["side"] == "long" and stock["side"] == "long":
+            return "protective_put"
+    if len(options) == 2 and len(legs) == 2:
+        a, b = sorted(options, key=lambda leg: leg["strike"])
+        if a["type"] == b["type"] and a["side"] != b["side"] and abs(a["quantity"] - b["quantity"]) < _EPS \
+                and a["strike"] != b["strike"]:
+            if a["type"] == "call":
+                return "bull_call_spread" if a["side"] == "long" else "bear_call_spread"
+            return "bull_put_spread" if a["side"] == "long" else "bear_put_spread"
+        if {a["type"], b["type"]} == {"call", "put"} and a["side"] == b["side"] == "long":
+            return "long_straddle" if a["strike"] == b["strike"] else "long_strangle"
+    return "custom"
+
+
+_STRATEGY_TEXT = {
+    "long_call": ("A long call: you can lose only the premium paid; the gain grows if the price rises past the "
+                  "breakeven.", "Una call comprada: sólo puedes perder la prima pagada; la ganancia crece si el "
+                  "precio sube más allá del punto de equilibrio."),
+    "long_put": ("A long put: you can lose only the premium paid; it gains as the price falls below the breakeven.",
+                 "Una put comprada: sólo puedes perder la prima pagada; gana si el precio baja del punto de "
+                 "equilibrio."),
+    "naked_short_call": ("A call written without the shares: the premium is the most you can make and the loss has "
+                         "no ceiling if the price keeps rising.", "Una call vendida sin tener las acciones: la prima "
+                         "es lo más que ganas y la pérdida no tiene techo si el precio sigue subiendo."),
+    "naked_short_put": ("A put written on margin: the premium is the most you can make; if the price collapses you "
+                        "buy the shares at the strike, losing up to strike x shares less the premium.",
+                        "Una put vendida con margen: la prima es lo más que ganas; si el precio se desploma compras "
+                        "las acciones al strike y pierdes hasta strike x acciones menos la prima."),
+    "cash_secured_put": ("A cash-secured put: the premium is the most you can make; the cash set aside buys the "
+                         "shares at the strike if the price falls, so the loss is strike x shares less the premium.",
+                         "Una put cubierta con efectivo: la prima es lo más que ganas; el efectivo apartado compra "
+                         "las acciones al strike si el precio cae, y la pérdida es strike x acciones menos la prima."),
+    "covered_call": ("A covered call: the premium cushions a fall in the shares you own, and gains above the strike "
+                     "are given up.", "Una call cubierta: la prima amortigua una caída de las acciones que tienes y "
+                     "renuncias a la ganancia arriba del strike."),
+    "protective_put": ("A protective put: the put sets a floor under the shares for the cost of the premium.",
+                       "Una put protectora: la put pone un piso a las acciones a cambio de la prima."),
+    "bull_call_spread": ("A bull call spread: both the loss (the net premium) and the gain (the strike gap less the "
+                         "premium) are capped.", "Un spread alcista con calls: tanto la pérdida (la prima neta) como "
+                         "la ganancia (la distancia entre strikes menos la prima) tienen tope."),
+    "bear_call_spread": ("A bear call spread: the net credit is the most you keep; the loss is capped at the strike "
+                         "gap less that credit.", "Un spread bajista con calls: el crédito neto es lo más que te "
+                         "quedas; la pérdida tiene tope en la distancia entre strikes menos ese crédito."),
+    "bull_put_spread": ("A bull put spread: the net credit is the most you keep; the loss is capped at the strike "
+                        "gap less that credit.", "Un spread alcista con puts: el crédito neto es lo más que te "
+                        "quedas; la pérdida tiene tope en la distancia entre strikes menos ese crédito."),
+    "bear_put_spread": ("A bear put spread: both the loss (the net premium) and the gain (the strike gap less the "
+                        "premium) are capped.", "Un spread bajista con puts: tanto la pérdida (la prima neta) como la "
+                        "ganancia (la distancia entre strikes menos la prima) tienen tope."),
+    "long_straddle": ("A long straddle: the loss is capped at both premiums; it gains on a large move either way.",
+                      "Un straddle comprado: la pérdida tiene tope en ambas primas; gana con un movimiento grande "
+                      "hacia cualquier lado."),
+    "long_strangle": ("A long strangle: the loss is capped at both premiums; it needs a large move either way.",
+                      "Un strangle comprado: la pérdida tiene tope en ambas primas; necesita un movimiento grande "
+                      "hacia cualquier lado."),
+    "leveraged_long": ("A leveraged long: small falls are multiplied; near the liquidation price the broker closes "
+                       "it and the margin is gone.", "Una posición larga apalancada: las caídas pequeñas se "
+                       "multiplican; cerca del precio de liquidación el broker la cierra y el margen se pierde."),
+    "leveraged_short": ("A leveraged short: small rises are multiplied; near the liquidation price the broker "
+                        "closes it and the margin is gone.", "Una posición corta apalancada: las subidas pequeñas "
+                        "se multiplican; cerca del precio de liquidación el broker la cierra y el margen se pierde."),
+    "crypto_long": ("Crypto bought outright: the whole amount can go to zero, and nothing insures it.",
+                    "Cripto comprada al contado: todo el monto puede llegar a cero y nada lo asegura."),
+    "crypto_short": ("A crypto short: the gain is capped and the loss has no ceiling.",
+                     "Un corto en cripto: la ganancia tiene tope y la pérdida no tiene techo."),
+    "spot_long": ("Shares bought outright: the whole amount can go to zero; the gain has no ceiling.",
+                  "Acciones compradas al contado: todo el monto puede llegar a cero; la ganancia no tiene techo."),
+    "spot_short": ("A short sale: the gain is capped at the sale price and the loss has no ceiling.",
+                   "Una venta en corto: la ganancia tiene tope en el precio de venta y la pérdida no tiene techo."),
+    "custom": ("A combination of legs: the table shows what it makes or loses at each price.",
+               "Una combinación de patas: la tabla muestra cuánto gana o pierde a cada precio."),
+}
+
+
+def _grid_prices(legs: list[dict], spot: float | None, grid: Any, breakevens: list[float]) -> list[float]:
+    if grid is not None:
+        if not isinstance(grid, list) or not grid or len(grid) > 200:
+            raise ValueError("grid must be a list of 1 to 200 prices")
+        prices = [_num(p) for p in grid]
+        if any(p is None or p < 0 for p in prices):
+            raise ValueError("grid prices must be non-negative numbers")
+        return sorted({round(p, 6) for p in prices})
+    anchors = [leg.get("strike") or leg.get("entry_price") for leg in legs]
+    anchors += [leg["liquidation_price"] for leg in legs if leg.get("liquidation_price")] + list(breakevens)
+    ref = spot if spot is not None else sorted(anchors)[len(anchors) // 2]
+    low = max(0.0, min([ref * 0.5, *[a * 0.9 for a in anchors]]))
+    high = max([ref * 1.5, *[a * 1.1 for a in anchors]])
+    step = (high - low) / (PAYOFF_GRID_POINTS - 1)
+    prices = {round(low + i * step, 2) for i in range(PAYOFF_GRID_POINTS)}
+    prices |= {round(a, 2) for a in anchors}
+    if spot is not None:
+        prices.add(round(spot, 2))
+    return sorted(prices)
+
+
+def payoff(legs: Any, *, spot: Any = None, grid: Any = None, currency: str | None = None,
+           symbol: str | None = None) -> dict:
+    """Deterministic P&L of one or more legs at expiry (options) or at a price (spot, leveraged).
+
+    ``legs``: ``[{type: call|put, side: long|short, strike, premium (per share), contracts, multiplier? (100),
+    cash_secured?} | {type: stock|crypto|spot, side, entry_price, quantity | amount} | {type: leveraged, side,
+    entry_price, margin | amount, leverage, negative_balance_protection?}]``.  Options are held to one common
+    expiry; a leveraged leg is closed where its loss equals the margin posted.
+
+    Returns the price grid with P&L, max loss and max gain (``None`` with ``*_unbounded`` when there is no
+    ceiling), breakevens and the capital at risk, with a one-line explanation in English and Spanish.
+    """
+    if not isinstance(legs, list) or not legs:
+        raise ValueError("legs must be a nonempty list")
+    if len(legs) > 8:
+        raise ValueError("at most 8 legs")
+    norm = [_normal_leg(leg, i) for i, leg in enumerate(legs)]
+    spot_value = _num(spot)
+    if spot is not None and (spot_value is None or spot_value <= 0):
+        raise ValueError("spot must be a positive number")
+
+    def total(price: float, gap: bool = False) -> float:
+        return sum(_leg_pnl(leg, price, gap=gap) for leg in norm)
+
+    # The payoff is piecewise linear: its extremes on [0, inf) sit at zero, a kink, or run off to infinity.
+    kinks = sorted({0.0, *[leg["strike"] for leg in norm if leg["type"] in _OPTION_LEGS],
+                    *[leg["liquidation_price"] for leg in norm if leg.get("liquidation_price")]})
+    path_slope, gap_slope = _slope_at_infinity(norm, gap=False), _slope_at_infinity(norm, gap=True)
+    path_values = [total(p) for p in kinks]
+    gain_unbounded = path_slope > _EPS
+    loss_unbounded = gap_slope < -_EPS
+    max_gain = None if gain_unbounded else max(path_values)
+    max_loss = None if loss_unbounded else max(0.0, -min(total(p, True) for p in kinks))
+    path_loss = None if path_slope < -_EPS else max(0.0, -min(path_values))
+    breakevens: list[float] = []
+    for (a, fa), (b, fb) in zip(zip(kinks, path_values), zip(kinks[1:], path_values[1:])):
+        if abs(fa) < _EPS:
+            breakevens.append(a)
+        elif fa * fb < 0:
+            breakevens.append(a - fa * (b - a) / (fb - fa))
+    last, flast = kinks[-1], path_values[-1]
+    if abs(flast) < _EPS:
+        breakevens.append(last)
+    elif abs(path_slope) > _EPS and -flast / path_slope > 0:
+        breakevens.append(last - flast / path_slope)
+    breakevens = sorted({round(b, 2) for b in breakevens if b > 0})
+    net_premium = sum(leg["premium"] * leg["quantity"] * (1 if leg["side"] == "short" else -1)
+                      for leg in norm if leg["type"] in _OPTION_LEGS)
+    strategy = _strategy(norm)
+    en, es = _STRATEGY_TEXT[strategy]
+    grid_rows = [{"price": p, "pnl": round(total(p), 2)} for p in _grid_prices(norm, spot_value, grid, breakevens)]
+    assumptions = []
+    if any(leg["type"] in _OPTION_LEGS for leg in norm):
+        assumptions.append("Options are valued at expiry (intrinsic value less premium), all on one expiry date; "
+                           "before expiry prices also carry time value. Early assignment, commissions and taxes are "
+                           "left out.")
+    if any(leg["type"] == "leveraged" for leg in norm):
+        assumptions.append("A leveraged leg is closed where its loss equals the margin posted (entry x (1 - "
+                           "1/leverage) for a long); maintenance margin and fees make real liquidation come sooner, "
+                           "and funding costs are left out.")
+        if any(leg["type"] == "leveraged" and not leg["negative_balance_protection"] for leg in norm):
+            assumptions.append("Without negative-balance protection a price gap past liquidation can lose more than "
+                               "the margin; max_loss counts that gap, the grid shows an orderly liquidation.")
+    return {
+        "symbol": symbol, "currency": currency, "strategy": strategy, "legs": norm, "spot": spot_value,
+        "grid": grid_rows, "max_loss": None if max_loss is None else round(max_loss, 2),
+        "max_loss_unbounded": loss_unbounded,
+        "max_loss_basis": ("no ceiling: the loss keeps growing as the price rises" if loss_unbounded else
+                           "the largest loss over every price from zero up"),
+        "loss_if_liquidated": (round(path_loss, 2) if path_loss is not None and max_loss is not None
+                               and abs(path_loss - max_loss) >= 0.005 else None),
+        "max_gain": None if max_gain is None else round(max_gain, 2), "max_gain_unbounded": gain_unbounded,
+        "breakevens": breakevens, "net_premium": round(net_premium, 2),
+        "capital_at_risk": None if max_loss is None else round(max_loss, 2),
+        "capital_at_risk_reason": "unbounded: no finite amount covers this position" if loss_unbounded else None,
+        "explanation": {"en": en, "es": es}, "assumptions": assumptions,
+    }
+
+
+def _proposal_legs(proposal: Mapping[str, Any], kind: str | None, instrument: str, writing: bool) -> list | None:
+    """Legs for the payoff from ``proposal.legs`` or the single-leg fields; None when too little is known."""
+    if proposal.get("legs") is not None:
+        return proposal["legs"]
+    amount = _num(proposal.get("amount"))
+    if kind == "options":
+        strike, contracts = _num(proposal.get("strike")), _num(proposal.get("contracts"))
+        premium = _num(proposal.get("premium"))
+        if premium is None and amount is not None and contracts:
+            premium = amount / (contracts * OPTION_MULTIPLIER)
+        side = "short" if writing else str(proposal.get("side") or "long").lower()
+        option_type = _option_type(proposal, instrument)
+        if strike is None or contracts is None or premium is None:
+            return None
+        if side == "short" and option_type == "call" and proposal.get("covered") is True:
+            return None  # the shares already held are part of this payoff: pass legs with the stock to see it
+        return [{"type": option_type, "side": side, "strike": strike, "premium": premium, "contracts": contracts,
+                 "cash_secured": proposal.get("covered") is True}]
+    entry = _num(proposal.get("entry_price"))
+    if entry is None or amount is None:
+        return None
+    side = "short" if writing or instrument == "short" else str(proposal.get("side") or "long").lower()
+    leverage = _num(proposal.get("leverage"))
+    if kind == "leverage" and leverage:
+        return [{"type": "leveraged", "side": side, "entry_price": entry, "margin": amount, "leverage": leverage,
+                 "negative_balance_protection": proposal.get("negative_balance_protection") is True}]
+    if kind in ("crypto", "single_stock") or instrument == "short":
+        return [{"type": "crypto" if kind == "crypto" else "stock", "side": side, "entry_price": entry,
+                 "amount": amount}]
+    return None
+
+
 # ------------------------------------------------------------------ speculation sleeve
 
 
@@ -420,22 +750,36 @@ def _policy(ips: Mapping[str, Any] | None, override: Mapping[str, Any] | None) -
     return policy, basis
 
 
+def _premium_total(proposal: Mapping[str, Any]) -> float | None:
+    """Premium in money: ``amount``, else ``premium`` (per share) x 100 x contracts."""
+    amount = _num(proposal.get("amount"))
+    if amount is not None:
+        return amount
+    premium, contracts = _num(proposal.get("premium")), _num(proposal.get("contracts"))
+    return premium * OPTION_MULTIPLIER * contracts if premium is not None and contracts is not None else None
+
+
 def _worst_loss(proposal: Mapping[str, Any], kind: str | None) -> tuple[float | None, bool, str]:
-    """(worst-case loss, unbounded?, how it was worked out) for a buy."""
+    """(worst-case loss, unbounded?, how it was worked out) for opening a position."""
     amount = _num(proposal.get("amount"))
     instrument = str(proposal.get("instrument") or "").lower()
     side = str(proposal.get("side") or "long").lower()
-    if instrument == "short" or (kind == "options" and side == "short" and proposal.get("covered") is not True
-                                 and str(proposal.get("option_type") or "call").lower() == "call"):
-        return None, True, "a short position or an uncovered call has no loss ceiling"
     if kind == "options" and side == "short":
-        strike = _num(proposal.get("strike"))
-        contracts = _num(proposal.get("contracts"))
-        if proposal.get("covered") is True:
-            return amount, False, "a covered position: the loss is on the shares already held"
+        option_type = _option_type(proposal, instrument)
+        covered = proposal.get("covered") is True
+        if option_type == "call":
+            if covered:
+                return 0.0, False, ("a covered call: no new downside beyond the shares already held (the premium "
+                                    "cushions them); gains above the strike are given up")
+            return None, True, "an uncovered call has no loss ceiling"
+        strike, contracts = _num(proposal.get("strike")), _num(proposal.get("contracts"))
+        label = "a cash-secured put" if covered else "an uncovered put"
         if strike is not None and contracts is not None:
-            return strike * 100 * contracts - (amount or 0), False, "an uncovered put: strike x 100 x contracts less premium"
-        return None, False, "an uncovered put: needs strike and contracts"
+            return (strike * OPTION_MULTIPLIER * contracts - (_premium_total(proposal) or 0), False,
+                    f"{label}: strike x 100 x contracts less premium")
+        return None, False, f"{label}: needs strike and contracts"
+    if instrument == "short":
+        return None, True, "a short position has no loss ceiling"
     leverage = _num(proposal.get("leverage"))
     if leverage is None and instrument in ("margin", "cfd", "future", "futures", "perp", "perpetual"):
         return None, False, "leverage multiple unknown"
@@ -446,20 +790,62 @@ def _worst_loss(proposal: Mapping[str, Any], kind: str | None) -> tuple[float | 
     return amount, False, "the amount paid can go to zero"
 
 
+_OPEN_EFFECTS = {"open", "to_open", "sell_to_open", "buy_to_open", "write"}
+_CLOSE_EFFECTS = {"close", "to_close", "sell_to_close", "buy_to_close"}
+
+
+def _position_effect(proposal: Mapping[str, Any], action: str, kind: str | None,
+                     instrument: str) -> tuple[str, bool]:
+    """``(open | close, guessed?)``.  A sell of an option opens (writes) unless it says it closes."""
+    raw = str(proposal.get("position_effect") or "").lower()
+    if raw:
+        if raw in _OPEN_EFFECTS:
+            return "open", False
+        if raw in _CLOSE_EFFECTS:
+            return "close", False
+        raise ValueError("proposal.position_effect must be open or close")
+    if action != "sell":
+        return "open", False
+    if instrument == "short" or proposal.get("legs") is not None:
+        return "open", False
+    if kind == "options":
+        # covered: true/false only describes a written option; with neither, writing is the reading that
+        # cannot understate the risk.
+        return "open", proposal.get("covered") is None
+    return "close", False
+
+
+def _uncovered_shorts(legs: list[dict]) -> bool:
+    """Short calls beyond the long calls and shares, or short puts beyond the long puts and cash set aside."""
+    def qty(kind: str, side: str, *, secured: bool | None = None) -> float:
+        return sum(leg["quantity"] for leg in legs if leg["type"] == kind and leg["side"] == side
+                   and (secured is None or leg.get("cash_secured") is secured))
+    shares = sum(leg["quantity"] for leg in legs if leg["type"] == "spot" and leg["side"] == "long")
+    calls = qty("call", "short") - qty("call", "long") - shares
+    puts = qty("put", "short", secured=False) - qty("put", "long")
+    short_spot = any(leg["type"] in ("spot", "leveraged") and leg["side"] == "short" for leg in legs)
+    geared = any(leg["type"] == "leveraged" and leg["leverage"] > 1 for leg in legs)
+    return calls > _EPS or puts > _EPS or short_spot or geared
+
+
 def speculation_check(proposal: Mapping[str, Any], situation: Mapping[str, Any] | None,
                       ips: Mapping[str, Any] | None = None, policy: Mapping[str, Any] | None = None,
                       *, context: Mapping[str, Any] | None = None) -> dict:
     """Size a speculative idea against the play-money policy.
 
-    ``proposal``: ``{action: buy|sell|explain, instrument, amount?, currency?, symbol?, leverage?,
-    side?: long|short, option_type?: call|put, covered?, strike?, contracts?, negative_balance_protection?,
-    sleeve?: {value, peak}}``.  ``sleeve.value`` is what is already in play money and ``peak`` its high.
+    ``proposal``: ``{action: buy|sell|explain, instrument, amount?, currency?, fx_rate?, symbol?, leverage?,
+    side?: long|short, position_effect?: open|close, option_type?: call|put, covered?, strike?, contracts?,
+    premium?, entry_price?, spot?, grid?, legs?, negative_balance_protection?, sleeve?: {value, peak}}``.
+    ``sleeve.value`` is what is already in play money and ``peak`` its high.  A ``sell`` of an option writes
+    it (sell to open) unless ``position_effect`` is ``close``; ``covered`` marks a covered call or a
+    cash-secured put.  ``legs`` (see :func:`payoff`), or enough single-leg fields, add a ``payoff``.
+    ``fx_rate`` converts one unit of ``currency`` into the picture's currency.
     ``situation``: :func:`wealth.situation.build` output.  ``ips``: accepted IPS (leverage and an optional
     ``constraints.speculation``).  ``policy``: the person's ``{cap_share, max_position_loss_share, drawdown_stop}``.
     ``context``: ``{now, timezone, last_move}`` for the cool-off flag.
 
-    Returns ``{verdict, reasons, limits, education, cool_off, the_person_decides}``.  ``explain`` and
-    ``sell`` never decline: explaining mechanics and reducing risk are always fine.
+    Returns ``{verdict, reasons, limits, payoff, education, cool_off, the_person_decides}``.  ``explain`` and
+    closing a position never decline: explaining mechanics and reducing risk are always fine.
     """
     if not isinstance(proposal, Mapping):
         raise ValueError("proposal must be an object")
@@ -473,7 +859,8 @@ def speculation_check(proposal: Mapping[str, Any], situation: Mapping[str, Any] 
     if kind is None:
         raise ValueError(f"proposal.instrument must be one of {', '.join(sorted(INSTRUMENTS))}")
     sit = situation or {}
-    currency = proposal.get("currency") or sit.get("currency")
+    reporting = sit.get("currency") or (sit.get("net_worth") or {}).get("currency")
+    currency = proposal.get("currency") or reporting
     rules, missing, reasons = [], [], []
     education = education_card(instrument, udi_value=(context or {}).get("udi_value"))
     tz = (context or {}).get("timezone") or ((sit.get("profile") or {}).get("timezone"))
@@ -486,18 +873,56 @@ def speculation_check(proposal: Mapping[str, Any], situation: Mapping[str, Any] 
         if status != "pass":
             reasons.append(_msg(code, en, es))
 
-    if action == "explain":
+    effect, guessed = _position_effect(proposal, action, kind, instrument)
+    writing = action == "sell" and effect == "open"
+    work = {**proposal, "side": "short"} if writing and kind == "options" else dict(proposal)
+    legs = _proposal_legs(work, kind, instrument, writing)
+    if action == "explain" and legs is None:
         return {"verdict": "allow", "reasons": [], "rules": [], "limits": limits_out, "education": education,
-                "cool_off": flag, "the_person_decides": True, "trade_call": None, "missing": [],
+                "cool_off": flag, "the_person_decides": True, "trade_call": None, "missing": [], "payoff": None,
                 "policy": {**pol, "basis": basis}}
-    if action == "sell":
+    if effect == "close" and action != "explain":
         rule("reduce_risk", "pass", "", "")
-        return {"verdict": "allow", "reasons": [_msg("reduce_risk", "Selling reduces play-money risk; nothing in the "
-                                                     "policy stands against it.",
-                                                     "Vender reduce el riesgo del dinero de juego; la política no se "
-                                                     "opone.")],
+        return {"verdict": "allow", "reasons": [_msg("reduce_risk", "Closing a position reduces play-money risk; "
+                                                     "nothing in the policy stands against it.",
+                                                     "Cerrar una posición reduce el riesgo del dinero de juego; la "
+                                                     "política no se opone.")],
                 "rules": rules, "limits": limits_out, "education": education, "cool_off": flag,
-                "the_person_decides": True, "trade_call": None, "missing": [], "policy": {**pol, "basis": basis}}
+                "the_person_decides": True, "trade_call": None, "missing": [], "payoff": None,
+                "position_effect": "close", "policy": {**pol, "basis": basis}}
+    if guessed:
+        missing.append("proposal.position_effect (open to write the option, close to exit one you hold)")
+        rule("position_effect", "warn",
+             "I read this sell as writing (selling to open) an option, which creates risk. If it closes an option "
+             "you already hold, it reduces risk instead: say position_effect close.",
+             "Leo esta venta como emitir (vender para abrir) una opción, lo que crea riesgo. Si cierra una opción "
+             "que ya tienes, reduce el riesgo: indica position_effect close.")
+    payoff_out = None
+    if legs is not None:
+        payoff_out = payoff(legs, spot=proposal.get("spot"), grid=proposal.get("grid"), currency=currency,
+                            symbol=proposal.get("symbol"))
+
+    # -- the proposal's currency against the picture's
+    fx_rate = _num(proposal.get("fx_rate"))
+    if proposal.get("fx_rate") is not None and (fx_rate is None or fx_rate <= 0):
+        raise ValueError("proposal.fx_rate must be a positive number")
+    if currency and reporting and currency != reporting:
+        rate = fx_rate
+        limits_out.update(currency=reporting, proposal_currency=currency, fx_rate=fx_rate)
+        if rate is None:
+            missing.append(f"proposal.fx_rate (1 {currency} in {reporting})")
+            rule("currency", "warn",
+                 f"The amounts are in {currency} and your savings in {reporting}; give the exchange rate so I can "
+                 "compare them.",
+                 f"Los montos están en {currency} y tus ahorros en {reporting}; dame el tipo de cambio para "
+                 "compararlos.")
+    else:
+        rate = 1.0
+
+    def conv(value: float | None) -> float | None:
+        return None if value is None or rate is None else value * rate
+
+    shown = reporting if rate is not None and reporting else currency
 
     # -- zero cap while the reserve is short or expensive debt is open
     reserve = sit.get("reserve") or {}
@@ -521,11 +946,11 @@ def speculation_check(proposal: Mapping[str, Any], situation: Mapping[str, Any] 
     for debt in sit.get("liabilities") or []:
         if (_num(debt.get("balance")) or 0) <= 0:
             continue
-        rate = _num(debt.get("annual_rate"))
-        if rate is None:
+        rate_ = _num(debt.get("annual_rate"))
+        if rate_ is None:
             unknown_rate.append(debt.get("name") or debt.get("id"))
-        elif rate > threshold:
-            costly.append((debt.get("name") or debt.get("id"), rate))
+        elif rate_ > threshold:
+            costly.append((debt.get("name") or debt.get("id"), rate_))
     if costly:
         cap_share = 0.0
         names = ", ".join(f"{n} at {_pct(r)}" for n, r in costly)
@@ -543,23 +968,40 @@ def speculation_check(proposal: Mapping[str, Any], situation: Mapping[str, Any] 
     else:
         rule("costly_debt", "pass", "", "")
 
-    # -- leverage against the IPS
-    levered = kind == "leverage" or (_num(proposal.get("leverage")) or 1) > 1 or (
-        kind == "options" and str(proposal.get("side") or "long").lower() == "short")
+    # -- leverage against the IPS (a written option on margin is leverage; covered or cash-secured is not)
+    side = str(work.get("side") or "long").lower()
+    if payoff_out is not None and proposal.get("legs") is not None:
+        levered = _uncovered_shorts(payoff_out["legs"])
+    else:
+        levered = kind == "leverage" or (_num(proposal.get("leverage")) or 1) > 1 or (
+            kind == "options" and side == "short" and proposal.get("covered") is not True)
     allowed = ((ips or {}).get("constraints") or {}).get("leverage", {}).get("allowed") if isinstance(ips, Mapping) else None
     if levered and ips is not None and not allowed:
         rule("ips_leverage", "decline", "Your investment policy rules out leverage, margin and short selling.",
              "Tu política de inversión excluye apalancamiento, margen y ventas en corto.")
 
+    # -- worst case: from the payoff when there is one
+    if payoff_out is not None:
+        worst, unbounded = payoff_out["max_loss"], payoff_out["max_loss_unbounded"]
+        how = f"payoff of a {payoff_out['strategy'].replace('_', ' ')}: {payoff_out['max_loss_basis']}"
+    else:
+        worst, unbounded, how = _worst_loss(work, kind)
+    short_exposure = writing or (kind == "options" and side == "short") or instrument == "short"
+
     # -- the cap on liquid net worth
     liquid = _num((sit.get("net_worth") or {}).get("liquid"))
     amount = _num(proposal.get("amount"))
     if amount is not None and amount <= 0:  # a negative "buy" would shrink the sleeve and slip under the cap
-        raise ValueError("proposal.amount must be a positive number for a buy")
+        raise ValueError("proposal.amount must be a positive number")
     sleeve = proposal.get("sleeve") if isinstance(proposal.get("sleeve"), Mapping) else {}
     held = _num(sleeve.get("value"))
-    if amount is None:
-        missing.append("proposal.amount")
+    # What counts against the cap: the money put in, or for a written option the capital it puts at risk.
+    counted = worst if short_exposure else (amount if amount is not None else
+                                            (payoff_out or {}).get("capital_at_risk"))
+    counted_how = ("the capital a written option puts at risk" if short_exposure else "the amount put in")
+    if counted is None and not unbounded:
+        missing.append("proposal.amount" if not short_exposure else "the capital at risk (strike and contracts)")
+    cap = None
     if liquid is None:
         missing.append("liquid net worth (cash and investments)")
         rule("cap", "decline" if cap_share > 0 else "pass",
@@ -570,45 +1012,51 @@ def speculation_check(proposal: Mapping[str, Any], situation: Mapping[str, Any] 
         limits_out.update(cap=round(cap, 2), cap_share=cap_share, liquid_net_worth=liquid)
         if held is None:
             missing.append("proposal.sleeve.value (play money already held)")
-        after = (held or 0) + (amount or 0)
-        limits_out["sleeve_after"] = round(after, 2) if held is not None and amount is not None else None
-        if cap_share == 0:
-            pass  # the reason is already given by the reserve or debt rule
-        elif amount is not None and after > cap + 1e-9:
+        counted_rep = conv(counted)
+        after = (held or 0) + (counted_rep or 0)
+        limits_out["counts_against_cap"] = counted_how
+        limits_out["sleeve_after"] = round(after, 2) if held is not None and counted_rep is not None else None
+        if cap_share == 0 or unbounded:
+            pass  # the reason is already given by the reserve, debt or position-loss rule
+        elif counted is not None and rate is None:
+            rule("cap", "warn", "", "")
+        elif counted_rep is not None and after > cap + 1e-9:
             rule("cap", "decline",
-                 f"This would put {_money(after, currency)} in play money, above the {_pct(cap_share)} cap of "
-                 f"{_money(cap, currency)}.",
-                 f"Esto dejaría {_money(after, currency)} en dinero de juego, arriba del tope de {_pct(cap_share)} "
-                 f"({_money(cap, currency)}).", after=after, cap=cap)
+                 f"This would put {_money(after, shown)} in play money, above the {_pct(cap_share)} cap of "
+                 f"{_money(cap, shown)}.",
+                 f"Esto dejaría {_money(after, shown)} en dinero de juego, arriba del tope de {_pct(cap_share)} "
+                 f"({_money(cap, shown)}).", after=after, cap=cap)
         elif held is None:
             rule("cap", "warn",
-                 f"The cap is {_money(cap, currency)} ({_pct(cap_share)}); I don't know what is already in play money, "
+                 f"The cap is {_money(cap, shown)} ({_pct(cap_share)}); I don't know what is already in play money, "
                  "so count it against the cap.",
-                 f"El tope es {_money(cap, currency)} ({_pct(cap_share)}); no sé cuánto tienes ya en dinero de juego, "
+                 f"El tope es {_money(cap, shown)} ({_pct(cap_share)}); no sé cuánto tienes ya en dinero de juego, "
                  "así que cuéntalo contra el tope.")
         else:
             rule("cap", "pass", "", "", after=after, cap=cap)
 
     # -- single-position loss
-    worst, unbounded, how = _worst_loss(proposal, kind)
-    limits_out["worst_case_loss"] = None if unbounded else (round(worst, 2) if worst is not None else None)
+    worst_rep = conv(worst)
+    limits_out["worst_case_loss"] = None if unbounded or worst_rep is None else round(worst_rep, 2)
     limits_out["worst_case_basis"] = how
     if unbounded:
         rule("position_loss", "decline",
              "This position has no ceiling on what it can lose, so it can't fit a play-money budget.",
              "Esta posición no tiene techo de pérdida, así que no cabe en un presupuesto de dinero de juego.")
-    elif liquid is not None and worst is not None:
+    elif liquid is not None and worst is not None and rate is None:
+        rule("position_loss", "warn", "", "")
+    elif liquid is not None and worst_rep is not None:
         max_loss = pol["max_position_loss_share"] * liquid
         limits_out["max_position_loss"] = round(max_loss, 2)
-        if worst > max_loss + 1e-9:
+        if worst_rep > max_loss + 1e-9:
             rule("position_loss", "decline" if cap_share > 0 else "pass",
-                 f"The worst case here is {_money(worst, currency)} ({how}), above the {_pct(pol['max_position_loss_share'])} "
-                 f"single-position limit of {_money(max_loss, currency)}.",
-                 f"En el peor caso pierdes {_money(worst, currency)}, arriba del límite por posición de "
-                 f"{_pct(pol['max_position_loss_share'])} ({_money(max_loss, currency)}).")
+                 f"The worst case here is {_money(worst_rep, shown)} ({how}), above the "
+                 f"{_pct(pol['max_position_loss_share'])} single-position limit of {_money(max_loss, shown)}.",
+                 f"En el peor caso pierdes {_money(worst_rep, shown)}, arriba del límite por posición de "
+                 f"{_pct(pol['max_position_loss_share'])} ({_money(max_loss, shown)}).")
         else:
             rule("position_loss", "pass", "", "")
-    elif worst is None and not unbounded:
+    elif worst is None:
         rule("position_loss", "warn", f"I can't work out the worst case yet ({how}).",
              f"Aún no puedo calcular el peor caso ({how}).")
         missing.append(f"worst case: {how}")
@@ -629,20 +1077,56 @@ def speculation_check(proposal: Mapping[str, Any], situation: Mapping[str, Any] 
     else:
         rules.append({"rule": "drawdown_stop", "status": "not_checked", "needs": "sleeve.value and sleeve.peak"})
 
+    if payoff_out is not None:
+        payoff_out["sizing"] = _payoff_sizing(payoff_out, conv, shown, sit, cap, held, cap_share)
     if flag and flag["flag"]:
         reasons += flag["flags"]
     statuses = {r["status"] for r in rules}
-    if "decline" in statuses:
+    if action == "explain":
+        verdict = "allow"
+    elif "decline" in statuses:
         verdict = "decline_to_recommend"
     elif "warn" in statuses or (flag and flag["flag"]):
         verdict = "allow_with_warning"
     else:
         verdict = "allow"
-    return {"verdict": verdict, "reasons": [r for r in reasons if r.get("en")], "rules": rules, "limits": limits_out,
+    return {"verdict": verdict, "reasons": [r for r in reasons if r.get("en")] if action != "explain" else [],
+            "rules": rules, "limits": limits_out, "payoff": payoff_out, "position_effect": effect,
             "education": education, "cool_off": flag, "missing": missing, "trade_call": None,
             "the_person_decides": True, "policy": {**pol, "basis": basis},
             "note": "decline_to_recommend means Wealth will not recommend it; the mechanics are still explained and "
                     "the choice stays with the person."}
+
+
+def _payoff_sizing(out: Mapping[str, Any], conv: Any, currency: str | None, sit: Mapping[str, Any],
+                   cap: float | None, held: float | None, cap_share: float) -> dict:
+    """The payoff's capital at risk against net worth and the play-money budget; unknown stays None with why."""
+    at_risk = conv(out["capital_at_risk"])
+    total = _num((sit.get("net_worth") or {}).get("total"))
+    sizing: dict[str, Any] = {"currency": currency, "capital_at_risk": None if at_risk is None else round(at_risk, 2),
+                              "net_worth": total, "speculation_budget": None if cap is None else round(cap, 2),
+                              "budget_remaining": None if cap is None or held is None else round(cap - held, 2)}
+    if out["max_loss_unbounded"]:
+        why = "the loss has no ceiling, so no share of anything bounds it"
+    elif at_risk is None:
+        why = "the exchange rate into the picture's currency is unknown"
+    else:
+        why = None
+    if why is None and (total is None or total <= 0):
+        sizing.update(share_of_net_worth=None, share_of_net_worth_reason="net worth is unknown or not positive")
+    else:
+        sizing.update(share_of_net_worth=None if why else round(at_risk / total, 6), share_of_net_worth_reason=why)
+    if why is None and cap is None:
+        sizing.update(share_of_speculation_budget=None,
+                      share_of_speculation_budget_reason="liquid net worth is unknown, so the budget is unknown")
+    elif why is None and cap <= 0:
+        sizing.update(share_of_speculation_budget=None,
+                      share_of_speculation_budget_reason=f"the play-money budget is 0 (cap {_pct(cap_share)}) "
+                                                         "while the reserve is short or costly debt is open")
+    else:
+        sizing.update(share_of_speculation_budget=None if why else round(at_risk / cap, 6),
+                      share_of_speculation_budget_reason=why)
+    return sizing
 
 
 # ------------------------------------------------------------------ panic circuit breaker
@@ -1081,7 +1565,8 @@ def run_task(task: str, inputs: Mapping[str, Any], situation: Mapping[str, Any],
         return {"status": status, "result": result, "missing": missing, "warnings": [],
                 "sources": sources + result["education"]["sources"],
                 "assumptions": ["Play-money limits are Wealth's policy rules, not forecasts; the person may set a "
-                                "lower cap or a cap up to 10%."]}
+                                "lower cap or a cap up to 10%.",
+                                *((result.get("payoff") or {}).get("assumptions") or [])]}
     if task == "panic_check":
         allowed = {"request", "context"}
         unknown = sorted(set(inputs) - allowed)
@@ -1123,5 +1608,5 @@ def _no_trade_call_text(value: Any) -> Iterable[str]:
             yield from _no_trade_call_text(v)
 
 
-__all__ = ["DEFAULT_POLICY", "GUARDRAIL_FACT_KEYS", "HISTORICAL_DRAWDOWNS", "PARAMETERS", "TASKS", "cool_off",
+__all__ = ["DEFAULT_POLICY", "GUARDRAIL_FACT_KEYS", "HISTORICAL_DRAWDOWNS", "PARAMETERS", "TASKS", "cool_off", "payoff",
            "education_card", "panic_check", "run_task", "scam_check", "speculation_check"]

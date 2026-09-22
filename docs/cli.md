@@ -141,6 +141,43 @@ direct inputs override them for that call. `save_as` (`analysis.<name>`,
 printf '%s' '{"task":"debt_payoff","client_id":"ana","inputs":{"monthly_amount":3000}}' | uv run wealth run
 ```
 
+**Risk tasks.** `speculation_check` reads a `sell` of an option as writing it
+(sell to open) unless `position_effect` is `close`, and sizes it by the capital
+it puts at risk: an uncovered put risks strike x 100 x contracts less the
+premium, an uncovered call has no ceiling. With `proposal.legs` (calls, puts,
+stock, crypto, leveraged), or strike, contracts and premium, `result.payoff`
+gives P&L at expiry over a price grid, max loss and max gain (`null` with
+`*_unbounded`), breakevens, capital at risk and its share of net worth and of
+the play-money budget, with an en/es explanation; the chat draws it as two
+tickets. `action` `explain` returns the payoff without a verdict:
+
+```sh
+printf '%s' '{"task":"speculation_check","client_id":"ana","inputs":{"proposal":{"action":"explain",
+  "instrument":"options","symbol":"SPY","spot":650,"legs":[
+  {"type":"call","side":"long","strike":650,"premium":12,"contracts":1},
+  {"type":"call","side":"short","strike":670,"premium":5,"contracts":1}]}}}' | uv run wealth run
+```
+
+`stress` accepts partial shocks: holdings without one move by their beta to the
+scenario's `factor` (default: the first shocked symbol), estimated from price
+history (supplied `prices`/`beta_prices`, or the price cache), else from
+explicit `betas`, else from a stated asset-class default when the factor is an
+equity index. `fx_shocks` (`{"USDMXN": 0.15}` = 15% more pesos per dollar)
+convert each holding's own-currency return into the reporting currency; the
+holding's currency comes from `positions[].native_currency` or
+`asset_currencies`, and stays unknown otherwise. A return nobody can work out
+is `null` with a reason, and the scenario total with it.
+
+```sh
+printf '%s' '{"task":"stress","client_id":"ana","inputs":{"scenarios":[
+  {"name":"US selloff, peso weaker","shocks":{"SPY":-0.25},"fx_shocks":{"USDMXN":0.15}}]}}' | uv run wealth run
+```
+
+`analyze` adds `result.tail_risk`: historical 1-day and 1-month 95% VaR and
+CVaR of today's weights (at least 250 and 500 daily returns), parametric
+normal VaR/CVaR as the fallback, and each position's contribution (historical
+CVaR and Euler parametric VaR, both adding up to the total).
+
 **client inspect / export** read facts, and **decision** cites them. A proposal
 needs the current revision and eligible evidence:
 
