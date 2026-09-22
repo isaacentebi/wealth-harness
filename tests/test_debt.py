@@ -97,10 +97,21 @@ def test_fixed_rate_mortgage_from_the_remaining_term_matches_the_annuity(service
     assert debt["total_iva"] is None and "escrow" in debt["note"]
 
 
-def test_a_card_without_a_payment_or_rule_is_missing_never_zero(service):
-    report = service.run("debt", {"mode": "amortize", "liabilities": [{"id": "c", "kind": "card", "balance": 5000,
-                                                                        "annual_rate": 0.3, "currency": "MXN"}]})
-    assert report["status"] == "needs_input" and report["missing"][0]["key"] == "liability.c.monthly_payment"
+def test_a_card_without_a_payment_runs_on_the_flagged_minimum_rule_and_a_stated_payment_wins(service):
+    card = {"id": "c", "kind": "card", "balance": 5000, "annual_rate": 0.3, "currency": "MXN"}
+    report = service.run("debt", {"mode": "amortize", "liabilities": [card]})
+    [debt] = report["result"]["debts"]
+    assert report["status"] == "ready" and debt["payment_basis"] == "assumed minimum rule"
+    assert any(a.startswith("ASSUMED: c has no stated payment") and "Banxico" in a for a in report["assumptions"])
+    # 1.5% of the balance plus a month's interest and IVA (0.3 / 12 x 1.16), at least 1.25% of the balance.
+    assert debt["minimum_rule"]["percent_of_balance"] == pytest.approx(0.015)
+    stated = service.run("debt", {"mode": "amortize", "liabilities": [{**card, "monthly_payment": 800}]})
+    assert stated["result"]["debts"][0]["payment_basis"] == "stated"
+    assert not any(a.startswith("ASSUMED") for a in stated["assumptions"])
+    other = service.run("debt", {"mode": "amortize", "liabilities": [{**card, "kind": "personal"}]})
+    assert other["status"] == "needs_input" and other["missing"][0]["key"] == "liability.c.monthly_payment"
+    [retry] = other["retry_with"]["wealth_run"]["inputs"]["liabilities"]
+    assert retry["balance"] == 5000 and retry["monthly_payment"].startswith("<c needs its monthly payment")
     rule = service.run("debt", {"mode": "amortize", "liabilities": [{"id": "c", "kind": "card", "balance": 5000,
                                 "annual_rate": 0.3, "currency": "USD", "minimum_payment": {"percent_of_balance": 0.01}}]})
     assert rule["status"] == "needs_input" and rule["missing"][0]["key"] == "liability.c.minimum_payment.floor"
@@ -224,11 +235,19 @@ def test_mx_mortgage_reuses_the_real_interest_deduction(service):
     assert "Art. 151" in deducted["guaranteed"]["tax"]
 
 
-def test_us_without_a_t_bill_rate_asks_for_it(service):
+def test_us_without_a_t_bill_rate_uses_the_dated_auction_constant(service):
+    from wealth.proactive import TBILL_13W_REFERENCE
     inputs = {k: v for k, v in EXAMPLES["us_mortgage_prepay_vs_vti"].items() if k != "risk_free"}
     report = service.run("debt", inputs)
-    assert report["status"] == "partial" and "risk_free" in [m["key"] for m in report["missing"]]
-    assert report["result"]["scenarios"]["risk_free"]["net_worth_difference"] is None
+    assert "risk_free" not in [m["key"] for m in report["missing"]]
+    risk_free = report["result"]["investing"]["risk_free"]
+    assert risk_free["rate"] == pytest.approx(float(TBILL_13W_REFERENCE["rate"]), abs=1e-4)
+    assert "Treasury" in risk_free["source"] and risk_free["as_of"] == TBILL_13W_REFERENCE["as_of"]
+    assert report["result"]["scenarios"]["risk_free"]["net_worth_difference"] is not None
+    # Another currency with nothing saved still asks for its rate.
+    euro = service.run("debt", {**inputs, "debt": {**inputs["debt"], "currency": "EUR"},
+                                "jurisdiction": "US", "expected_return": {"conservative": 0.04, "base": 0.06}})
+    assert "risk_free" in [m["key"] for m in euro["missing"]]
 
 
 def test_lump_sum_prepays_at_once(service):

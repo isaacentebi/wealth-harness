@@ -237,3 +237,27 @@ def test_the_card_reprices_in_place_when_the_price_moved():
         assert text in PAGE
     # Never two filled vermilion buttons: while an order card waits, the send arrow is drawn in ink outline.
     assert ".app:has(.order .primary:not(:disabled)) .send:not(:disabled):not(.stopping) { background: transparent;" in PAGE
+
+
+def test_a_place_it_yourself_card_is_marked_placed_by_the_same_tap_route(tmp_path, monkeypatch):
+    from decimal import Decimal
+
+    from wealth.execution.brokers import manual
+
+    monkeypatch.setattr(manual, "default_quote", lambda db_path: lambda symbol, listing, currency: {
+        "price": "9500", "date": "2026-09-18", "currency": "MXN"})
+    monkeypatch.setattr(manual, "default_fx", lambda db_path: lambda base, quote: Decimal("19"))
+    with serving(tmp_path) as (chat, base):
+        with WealthStore(chat.db) as store:
+            store.post_ledger("ana", {"batch_id": "gbm", "source": {"kind": "document", "ref": "gbm.pdf"},
+                                      "accounts": [{"id": "gbm-1", "institution": "GBM", "type": "brokerage",
+                                                    "currency": "MXN"}], "transactions": []})
+        ticket_id = propose(chat, [{"symbol": "VOO", "side": "buy", "qty": 1, "account_id": "gbm-1",
+                                    "exchange": "SIC"}])
+        status, listed = call(base, "/api/orders", token=chat.token)
+        card = next(t for t in listed["tickets"] if t["id"] == ticket_id)
+        assert card["broker"] == "manual" and "en el SIC" in card["manual"]["es"] and card["nonce"]
+        status, body = call(base, f"/api/orders/{ticket_id}/confirm", token=chat.token, body={"nonce": card["nonce"]})
+        assert status == 200 and body["ticket"]["status"] == "placed"
+        assert body["ticket"]["lines"][0]["state"] == "awaiting"
+    assert "Ya la puse" in PAGE and "navigator.clipboard.writeText" in PAGE

@@ -14,6 +14,7 @@ from .safety import (IMAGE_KINDS, LIMITS, MAX_ROWS, UnsafeInput, check_xlsx, fla
                      read_upload, resolve_upload, sniff)
 from .statement import parse_statement_text
 from .tabular import parse_export, read_rows
+from .taxdoc import detect_tax_document, ingest_tax_pages
 
 
 _MEDIA = {"pdf": "application/pdf", "csv": "text/csv", "png": "image/png", "jpeg": "image/jpeg", "gif": "image/gif",
@@ -89,6 +90,10 @@ def _ingest_image(data: bytes, name: str, kind: str, *, owner_id, aliases, toler
     provenance = provenance_for(data, name, _MEDIA[kind], parser="host-text")
     flag_instructions(provenance, [source_text or ""])
     if source_text:
+        detected = detect_tax_document([(1, source_text)])
+        if detected is not None:
+            return ingest_tax_pages([(1, source_text)], detected, provenance=provenance, warnings=[
+                "Values come from text the host read from an image; confirm them against the image."])
         parsed = parse_statement_text([(1, source_text)], aliases=aliases)
         if parsed["parsed"]:
             return build_proposal(parsed["statement"], kind="document", provenance=provenance, owner_id=owner_id,

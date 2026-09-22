@@ -32,6 +32,27 @@ ONBOARDING_STEPS = ("name", "language", "residence", "tax_residence", "birth_yea
 STEP_STATUSES = ("done", "skipped", "pending", "unsure")
 IPS_PROFILES = ("conservative", "balanced", "growth")
 IPS_CADENCES = ("annual", "semiannual", "quarterly")  # unsure: answered "not sure"; stays unknown
+TITLINGS = ("individual", "joint", "mancomunada", "fideicomiso", "trust")
+RELATIONSHIPS = ("spouse", "partner", "child", "grandchild", "parent", "sibling", "other_relative", "friend",
+                 "ex_spouse", "trust", "estate", "charity", "other")
+PLAN_TYPES = ("401k", "403b", "457b", "ira", "roth_ira", "sep_ira", "simple_ira", "afore", "ppr", "hsa", "529", "other")
+INSURANCE_KINDS = ("life", "accident", "disability", "other")
+PROPERTY_KINDS = ("home", "land", "rental", "commercial", "other")
+WILL_KINDS = ("publico_abierto", "publico_cerrado", "olografo", "simplificado", "us_will", "other")
+MARITAL_STATUSES = ("single", "married", "free_union", "divorced", "widowed")
+MARITAL_REGIMES = ("sociedad_conyugal", "separacion_de_bienes", "community_property", "separate_property")
+GUARDIAN_DOCUMENTS = ("will", "separate", "none")
+_BENEFICIARY_DOC = ("list of {name, relationship?: " + "|".join(RELATIONSHIPS) + ", share?: 0-1, contingent?: "
+                    "true for a backup, minor?, birth_year?, deceased?, via_trust?: paid to a trust or custodian "
+                    "for them}; [] means they said there are none; leave it out when unknown")
+DESIGNATION_DOC = {
+    "beneficiaries?": _BENEFICIARY_DOC,
+    "designation_date?": "YYYY-MM-DD the beneficiaries were last named or changed",
+    "titling?": "|".join(TITLINGS) + " (mancomunada is a Mexican joint account: not a beneficiary)",
+    "co_owners?": "names of the other holders of a joint or mancomunada account",
+    "owner_share?": "0-1 of the balance that is the person's (default: split equally with co_owners)",
+    "country?": "ISO-2 where the account or asset is (MX, US)",
+}
 
 SCHEMA: dict[str, dict[str, str]] = {
     "client.profile": {
@@ -52,7 +73,8 @@ SCHEMA: dict[str, dict[str, str]] = {
         "name?": "their words", "approximate?": "true when they said 'about'",
     },
     "spending.monthly": {
-        "essential?": "number", "discretionary?": "number", "total?": "number (at least one of the three)",
+        "essential?": "number", "discretionary?": "number",
+        "total?": "number (at least one of the three; amount is read as total)",
         "currency": "ISO 4217", "approximate?": "true|false",
         "partial?": "true when essential (or discretionary) is only the items named (rent alone); a total is "
                     "always the whole",
@@ -87,6 +109,50 @@ SCHEMA: dict[str, dict[str, str]] = {
         "purpose?": "reserve|general|goal:<goal id> (only as the person stated it)",
         "liquidity_days?": "days to get the money out (1 daily, 28 CETES at 28 days); counts toward the reserve "
                            "when 31 or less",
+        "plan_type?": "|".join(PLAN_TYPES) + " for retirement accounts (a 401(k) has spousal-consent rules)",
+    },
+    "insurance.<id>": {
+        "kind": "|".join(INSURANCE_KINDS), "coverage?": "number paid at death (suma asegurada)",
+        "currency?": "ISO 4217 (required with coverage)", "insurer?": "name",
+        "employer_group?": "true for a work policy (it usually ends with the job)", "name?": "their words",
+        "approximate?": "true|false", "country?": "ISO-2",
+    },
+    "property.<id>": {
+        "kind": "|".join(PROPERTY_KINDS), "value?": "number they think it is worth",
+        "currency?": "ISO 4217 (required with value)", "name?": "their words", "approximate?": "true|false",
+        "country?": "ISO-2",
+    },
+    "estate.designation.<slug>": {
+        "note": "who receives one account, policy or property at death, kept apart from its balance so saving a "
+                "beneficiary never refreshes a figure; <slug> is the account key with '.' as '-' "
+                "(investment.gbm -> estate.designation.investment-gbm)",
+        "account": "the key it applies to: cash.<id>, investment.<id>, insurance.<id>, property.<id> or "
+                   "account.<id> (a statement)",
+        **DESIGNATION_DOC,
+        "plan_type?": "|".join(PLAN_TYPES) + " when the account itself does not say",
+        "spousal_consent?": "true when the spouse signed consent to another 401(k) beneficiary (ERISA)",
+        "marital_property?": "false when it was theirs before the marriage, inherited or a gift (not gananciales)",
+    },
+    "estate.will": {
+        "exists": "true|false (leave the fact out when they do not know)", "date?": "YYYY-MM-DD signed",
+        "notaria?": "notaría or attorney (number and city, no address)", "jurisdiction?": "state or country",
+        "kind?": "|".join(WILL_KINDS), "heirs?": "list of {name, relationship?, share?} as they told you",
+        "executor?": "albacea or executor name", "guardian_named?": "true when the will names a tutor for minors",
+    },
+    "estate.guardianship": {
+        "guardian?": "name of the tutor/guardian for minor children", "alternate?": "name",
+        "documented?": "|".join(GUARDIAN_DOCUMENTS) + " (where the choice is written)",
+    },
+    "estate.family": {
+        "marital_status?": "|".join(MARITAL_STATUSES), "marriage_date?": "YYYY-MM-DD",
+        "marital_regime?": "|".join(MARITAL_REGIMES) + " (sociedad conyugal: half of what was acquired in the "
+                           "marriage is already the spouse's)",
+        "spouse?": "name", "divorce_date?": "YYYY-MM-DD",
+        "spouse_assets?": "{amount, currency}: what the spouse owns in their own name (CCF Art. 1624); 0 when none",
+        "ex_spouses?": "list of names", "children?": "list of {name?, birth_date? | birth_year?, minor?}; the name is "
+                                                     "optional ({\"minor\": true} counts a child)",
+        "parents_living?": "0-2", "siblings_living?": "number of living brothers and sisters (0 when none)",
+        "deceased?": "list of names of people who died (to catch stale beneficiaries)",
     },
     "goals": {
         "[]": "list; merge by id",
@@ -126,6 +192,39 @@ SCHEMA: dict[str, dict[str, str]] = {
         "objectives?": "list", "risk?": "{ability, willingness, profile}", "liquidity?": "{reserve, near_goals}",
         "buckets?": "list", "return_requirement?": "{value, goal_id}", "residence?": "object",
         "missing?": "list", "evidence?": "{fact key: fact id}",
+    },
+    "tax.<YYYY>": {
+        "note": "the person's stated tax facts for one year (read by tax_pack); merge by field",
+        "jurisdiction?": "list of MX|US (default: the profile's tax residence, plus US for a US person)",
+        "account_countries?": "{ledger account id: ISO-2} when a statement does not say where an account is",
+        "mx?": "{article_129_loss_carryforwards: [{origin_year, available_updated_mxn, updated_through}] ([] = none), "
+               "total_income_mxn, accumulable_income_mxn, taxable_income_before_mxn|marginal_rate, "
+               "deductions {medical_mxn, insurance_premiums_mxn, funeral_mxn, donations_mxn, tuition_mxn, "
+               "school_transport_mxn, ppr_mxn, art185_mxn, mortgage {...}}, aguinaldo_mxn, ptu_mxn, "
+               "sic_listed {instrument: true|false}, w8ben_on_file, inpc {\"YYYY-MM\": value}, inpc_source}",
+        "us?": "{filing_status, capital_loss_carryover {short_term, long_term} (0 = none), ira_contributions_usd, "
+               "roth_contributions_usd, elective_deferrals_usd (401(k)/403(b)/457(b), W-2 box 12), rmd_taken_usd, "
+               "ira_prior_year_end_balance_usd, mx_annual_isr_usd, mx_annual_isr_passive_usd, "
+               "mx_annual_isr_general_usd, foreign_residence_test bona_fide_residence|physical_presence|neither, "
+               "treasury_rate_per_usd {MXN: rate, source}}",
+    },
+    "constancia.<id>": {
+        "note": "an institution's annual tax document (constancia, 1099, 5498) as printed; the source of truth in "
+                "tax_pack. Upload the PDF with wealth_ingest action=file instead of typing it: confirming saves "
+                "it with source.kind=document",
+        "tax_year": "YYYY", "institution": "GBM, BBVA, Charles Schwab...", "account_id?": "ledger account id",
+        "currency?": "ISO 4217", "issued_on?": "YYYY-MM-DD",
+        "enajenacion?": "{gain, loss, net} Art. 129 share sales (MXN)",
+        "intereses?": "{nominal, real, real_loss, isr_withheld} (MXN)",
+        "dividendos?": "{domestic_gross, foreign_gross, isr_withheld, isr_creditable} (MXN)",
+        "account_last4?": "the account's last four digits as the document prints them",
+        "form_1099_b?": "{proceeds, cost_basis, short_term_gain, long_term_gain, wash_sale_disallowed, lots?: "
+                        "[{description, symbol, quantity, acquired, sold, proceeds, basis, wash_sale_disallowed, "
+                        "gain, term short|long, box A-F}]} (USD)",
+        "form_1099_div?": "{ordinary, qualified, capital_gain_distributions, foreign_tax_paid} (USD)",
+        "form_1099_int?": "{interest, foreign_tax_paid} (USD)",
+        "form_5498?": "{ira_contributions, rollover_contributions, roth_conversion, recharacterized, fair_market_value, "
+                      "sep_contributions, simple_contributions, roth_contributions, rmd_next_year} (USD)",
     },
     "follow.<cik>": {
         "note": "a 13F manager the person follows; <cik> is the 10-digit SEC CIK (find it with manager_search)",
@@ -346,7 +445,8 @@ def _spending(value: dict, key: str) -> None:
 
 def _cash(value: dict, key: str) -> None:
     _object(value, key, {"amount", "currency", "institution", "purpose", "liquid", "name", "approximate", "note",
-                         "balance_unknown", "annual_rate"})
+                         "balance_unknown", "annual_rate", *DESIGNATION_FIELDS})
+    _designation(value, key)
     _rate(value.get("annual_rate"), f"{key}.annual_rate")
     _bool(value.get("balance_unknown"), f"{key}.balance_unknown")
     _number(value.get("amount"), f"{key}.amount", required=value.get("balance_unknown") is not True)
@@ -418,7 +518,11 @@ def _purpose(value: Any, path: str) -> None:
 
 def _investment(value: dict, key: str) -> None:
     _object(value, key, {"amount", "currency", "institution", "kind", "name", "approximate", "note",
-                         "balance_unknown", "purpose", "liquidity_days", "annual_rate"})
+                         "balance_unknown", "purpose", "liquidity_days", "annual_rate", "plan_type", "spousal_consent",
+                         *DESIGNATION_FIELDS})
+    _designation(value, key)
+    _enum(value.get("plan_type"), f"{key}.plan_type", PLAN_TYPES)
+    _bool(value.get("spousal_consent"), f"{key}.spousal_consent")
     _rate(value.get("annual_rate"), f"{key}.annual_rate")
     _purpose(value.get("purpose"), f"{key}.purpose")
     days = value.get("liquidity_days")
@@ -432,6 +536,177 @@ def _investment(value: dict, key: str) -> None:
     _text(value.get("name"), f"{key}.name")
     _bool(value.get("approximate"), f"{key}.approximate")
     _text(value.get("note"), f"{key}.note")
+
+
+# ------------------------------------------------------------------ estate: designations, wills, family
+
+DESIGNATION_FIELDS = ("beneficiaries", "designation_date", "titling", "co_owners", "owner_share", "country")
+_BENEFICIARY_FIELDS = {"name", "person", "relationship", "share", "contingent", "minor", "birth_year", "deceased",
+                       "via_trust", "note"}
+
+
+def _names(value: Any, path: str) -> None:
+    if value is not None and (not isinstance(value, list) or not all(
+            isinstance(v, str) and v.strip() and len(v) <= 80 for v in value)):
+        _fail(path, "must be a list of names")
+
+
+def _year_of_birth(value: Any, path: str) -> None:
+    if value is not None and (isinstance(value, bool) or not isinstance(value, int) or not 1900 <= value <= 2100):
+        _fail(path, "must be a four-digit year")
+
+
+def _designation(value: dict, key: str) -> None:
+    """Beneficiary designation fields shared by accounts, policies and property."""
+    beneficiaries = value.get("beneficiaries")
+    if beneficiaries is not None:
+        if not isinstance(beneficiaries, list):
+            _fail(f"{key}.beneficiaries", "must be a list ([] when they said there are none)")
+        for index, person in enumerate(beneficiaries):
+            path = f"{key}.beneficiaries[{index}]"
+            _object(person, path, _BENEFICIARY_FIELDS)
+            if person.get("name") is None and person.get("person") is None:
+                _fail(f"{path}.name", "is required (the name they used, e.g. 'Ana' or 'mi esposa')")
+            _text(person.get("name"), f"{path}.name", limit=80)
+            _text(person.get("person"), f"{path}.person", limit=64)
+            _enum(person.get("relationship"), f"{path}.relationship", RELATIONSHIPS)
+            if person.get("share") is not None:
+                _share(person["share"], f"{path}.share")
+            for flag in ("contingent", "minor", "deceased", "via_trust"):
+                _bool(person.get(flag), f"{path}.{flag}")
+            _year_of_birth(person.get("birth_year"), f"{path}.birth_year")
+            _text(person.get("note"), f"{path}.note")
+    _iso_date(value.get("designation_date"), f"{key}.designation_date")
+    _enum(value.get("titling"), f"{key}.titling", TITLINGS)
+    _names(value.get("co_owners"), f"{key}.co_owners")
+    if value.get("owner_share") is not None:
+        _share(value["owner_share"], f"{key}.owner_share")
+    country = value.get("country")
+    if country is not None and country_code(country) is None:
+        _fail(f"{key}.country", "must be an ISO-2 country code such as MX or US")
+
+
+_DESIGNATION_TARGET = re.compile(r"^(cash|investment|insurance|property|account)\.[A-Za-z0-9][A-Za-z0-9_.-]{0,119}$")
+
+
+def designation_key(account: str) -> str:
+    """``estate.designation.<slug>`` for an account key (``investment.gbm`` -> ``estate.designation.investment-gbm``)."""
+    return "estate.designation." + account.replace(".", "-")
+
+
+def _estate_designation(value: dict, key: str) -> None:
+    _object(value, key, {"account", *DESIGNATION_FIELDS, "plan_type", "spousal_consent", "marital_property", "note"})
+    account = value.get("account")
+    if not isinstance(account, str) or not _DESIGNATION_TARGET.match(account):
+        _fail(f"{key}.account", "is required: the key it applies to, such as investment.gbm or account.gbm-1")
+    if key != designation_key(account):
+        _fail(key, f"must be {designation_key(account)!r} for account {account!r}")
+    _designation(value, key)
+    _enum(value.get("plan_type"), f"{key}.plan_type", PLAN_TYPES)
+    _bool(value.get("spousal_consent"), f"{key}.spousal_consent")
+    _bool(value.get("marital_property"), f"{key}.marital_property")
+    _text(value.get("note"), f"{key}.note")
+
+
+def _insurance(value: dict, key: str) -> None:
+    _object(value, key, {"kind", "coverage", "currency", "insurer", "employer_group", "name", "approximate", "note",
+                         "beneficiaries", "designation_date", "country"})
+    _enum(value.get("kind"), f"{key}.kind", INSURANCE_KINDS, required=True)
+    _number(value.get("coverage"), f"{key}.coverage", required=False)
+    _currency(value.get("currency"), f"{key}.currency", required=value.get("coverage") is not None)
+    _text(value.get("insurer"), f"{key}.insurer", limit=80)
+    _bool(value.get("employer_group"), f"{key}.employer_group")
+    _text(value.get("name"), f"{key}.name")
+    _bool(value.get("approximate"), f"{key}.approximate")
+    _text(value.get("note"), f"{key}.note")
+    _designation(value, key)
+
+
+def _property(value: dict, key: str) -> None:
+    _object(value, key, {"kind", "value", "currency", "name", "approximate", "note", *DESIGNATION_FIELDS})
+    _enum(value.get("kind"), f"{key}.kind", PROPERTY_KINDS, required=True)
+    _number(value.get("value"), f"{key}.value", required=False)
+    _currency(value.get("currency"), f"{key}.currency", required=value.get("value") is not None)
+    _text(value.get("name"), f"{key}.name")
+    _bool(value.get("approximate"), f"{key}.approximate")
+    _text(value.get("note"), f"{key}.note")
+    _designation(value, key)
+
+
+def _will(value: dict, key: str) -> None:
+    _object(value, key, {"exists", "date", "notaria", "jurisdiction", "kind", "heirs", "executor", "guardian_named",
+                         "note"})
+    if not isinstance(value.get("exists"), bool):
+        _fail(f"{key}.exists", "is required: true or false (leave the fact out when they do not know)")
+    _iso_date(value.get("date"), f"{key}.date")
+    _text(value.get("notaria"), f"{key}.notaria", limit=120)
+    _text(value.get("jurisdiction"), f"{key}.jurisdiction", limit=80)
+    _enum(value.get("kind"), f"{key}.kind", WILL_KINDS)
+    _text(value.get("executor"), f"{key}.executor", limit=80)
+    _bool(value.get("guardian_named"), f"{key}.guardian_named")
+    _text(value.get("note"), f"{key}.note")
+    heirs = value.get("heirs")
+    if heirs is not None:
+        if not isinstance(heirs, list):
+            _fail(f"{key}.heirs", "must be a list of {name, relationship?, share?}")
+        for index, heir in enumerate(heirs):
+            path = f"{key}.heirs[{index}]"
+            _object(heir, path, {"name", "relationship", "share", "note"})
+            _text(heir.get("name"), f"{path}.name", required=True, limit=80)
+            _enum(heir.get("relationship"), f"{path}.relationship", RELATIONSHIPS)
+            if heir.get("share") is not None:
+                _share(heir["share"], f"{path}.share")
+
+
+def _guardianship(value: dict, key: str) -> None:
+    _object(value, key, {"guardian", "alternate", "documented", "note"})
+    _text(value.get("guardian"), f"{key}.guardian", limit=80)
+    _text(value.get("alternate"), f"{key}.alternate", limit=80)
+    _enum(value.get("documented"), f"{key}.documented", GUARDIAN_DOCUMENTS)
+    _text(value.get("note"), f"{key}.note")
+
+
+def _family(value: dict, key: str) -> None:
+    _object(value, key, {"marital_status", "marriage_date", "marital_regime", "spouse", "divorce_date", "ex_spouses",
+                         "children", "parents_living", "siblings_living", "deceased", "note",
+                         "spouse_assets"})
+    assets = value.get("spouse_assets")
+    if assets is not None:
+        _object(assets, f"{key}.spouse_assets", {"amount", "currency", "approximate"})
+        _number(assets.get("amount"), f"{key}.spouse_assets.amount")
+        _currency(assets.get("currency"), f"{key}.spouse_assets.currency")
+        _bool(assets.get("approximate"), f"{key}.spouse_assets.approximate")
+    _enum(value.get("marital_status"), f"{key}.marital_status", MARITAL_STATUSES)
+    _enum(value.get("marital_regime"), f"{key}.marital_regime", MARITAL_REGIMES)
+    _iso_date(value.get("marriage_date"), f"{key}.marriage_date")
+    _iso_date(value.get("divorce_date"), f"{key}.divorce_date")
+    _text(value.get("spouse"), f"{key}.spouse", limit=80)
+    _names(value.get("ex_spouses"), f"{key}.ex_spouses")
+    _names(value.get("deceased"), f"{key}.deceased")
+    _text(value.get("note"), f"{key}.note")
+    parents = value.get("parents_living")
+    if parents is not None and (isinstance(parents, bool) or not isinstance(parents, int) or not 0 <= parents <= 2):
+        _fail(f"{key}.parents_living", "must be 0, 1 or 2")
+    siblings = value.get("siblings_living")
+    if siblings is not None and (isinstance(siblings, bool) or not isinstance(siblings, int)
+                                 or not 0 <= siblings <= 30):
+        _fail(f"{key}.siblings_living", "must be a whole number from 0 to 30")
+    children = value.get("children")
+    if children is not None:
+        if not isinstance(children, list):
+            _fail(f"{key}.children", 'must be a list of {name?, birth_date? | birth_year?, minor?}, e.g. '
+                  '[{"name": "Sofía", "birth_year": 2017}, {"minor": true}]')
+        for index, child in enumerate(children):
+            path = f"{key}.children[{index}]"
+            _object(child, path, {"name", "birth_date", "birth_year", "minor"})
+            _text(child.get("name"), f"{path}.name", limit=80)
+            _iso_date(child.get("birth_date"), f"{path}.birth_date")
+            _year_of_birth(child.get("birth_year"), f"{path}.birth_year")
+            _bool(child.get("minor"), f"{path}.minor")
+
+
+ESTATE_VALIDATORS: dict[str, Callable[[Any, str], None]] = {
+    "estate.will": _will, "estate.guardianship": _guardianship, "estate.family": _family}
 
 
 def _goals(value: Any, key: str) -> None:
@@ -625,6 +900,101 @@ def _constraint(value: Any, key: str) -> None:
                    "(merge=true), not as a constraint")
 
 
+CONSTANCIA_BLOCKS = {
+    "enajenacion": ("gain", "loss", "net", "isr_withheld"),
+    "intereses": ("nominal", "real", "real_loss", "isr_withheld"),
+    "dividendos": ("domestic_gross", "foreign_gross", "isr_withheld", "isr_creditable", "foreign_tax_withheld"),
+    "form_1099_b": ("proceeds", "cost_basis", "short_term_gain", "long_term_gain", "wash_sale_disallowed"),
+    "form_1099_div": ("ordinary", "qualified", "capital_gain_distributions", "foreign_tax_paid"),
+    "form_1099_int": ("interest", "foreign_tax_paid"),
+    "form_5498": ("ira_contributions", "rollover_contributions", "roth_conversion", "recharacterized",
+                  "fair_market_value", "sep_contributions", "simple_contributions", "roth_contributions",
+                  "rmd_next_year"),
+}
+
+
+def _tax_year_value(value: Any, path: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or not 2000 <= value <= 2100:
+        _fail(path, f"must be a four-digit year, not {_shown(value)}")
+
+
+MAX_1099B_LOTS = 5000
+"""A 1099-B fact keeps at most this many lots (a composite lists every sale; the extraction schema's limit)."""
+LOT_FIELDS = ("description", "symbol", "quantity", "acquired", "sold", "proceeds", "basis", "wash_sale_disallowed",
+              "gain", "term", "box")
+
+
+def _lot_day(value: Any, path: str, *, required: bool = False) -> None:
+    if value == "VARIOUS":
+        return
+    _iso_date(value, path, required=required)
+
+
+def _lots(value: Any, path: str) -> None:
+    if not isinstance(value, list):
+        _fail(path, "must be a list of lots {description, symbol, quantity, acquired, sold, proceeds, basis, "
+                    "wash_sale_disallowed, gain, term, box}")
+    if len(value) > MAX_1099B_LOTS:
+        _fail(path, f"has {len(value)} lots; at most {MAX_1099B_LOTS:,} are kept")
+    for index, lot in enumerate(value):
+        where = f"{path}[{index}]"
+        lot = _object(lot, where, set(LOT_FIELDS))
+        _text(lot.get("description"), f"{where}.description", limit=120)
+        _text(lot.get("symbol"), f"{where}.symbol", limit=20)
+        _lot_day(lot.get("acquired"), f"{where}.acquired")
+        _lot_day(lot.get("sold"), f"{where}.sold")
+        for field in ("quantity", "proceeds", "basis", "wash_sale_disallowed", "gain"):
+            _number(lot.get(field), f"{where}.{field}", required=False, minimum=None)
+        _enum(lot.get("term"), f"{where}.term", ("short", "long"))
+        _enum(lot.get("box"), f"{where}.box", ("A", "B", "C", "D", "E", "F"))
+
+
+def _constancia(value: dict, key: str) -> None:
+    fields = {"tax_year", "institution", "account_id", "account_last4", "currency", "issued_on", "note",
+              *CONSTANCIA_BLOCKS}
+    _object(value, key, fields)
+    _tax_year_value(value.get("tax_year"), f"{key}.tax_year")
+    _text(value.get("institution"), f"{key}.institution", required=True)
+    _text(value.get("account_id"), f"{key}.account_id")
+    last4 = value.get("account_last4")
+    if last4 is not None and not (isinstance(last4, str) and re.fullmatch(r"\d{4}", last4)):
+        _fail(f"{key}.account_last4", "must be the account's last four digits (never the full number)")
+    _currency(value.get("currency"), f"{key}.currency", required=False)
+    _iso_date(value.get("issued_on"), f"{key}.issued_on")
+    blocks = [name for name in CONSTANCIA_BLOCKS if value.get(name) is not None]
+    if not blocks:
+        _fail(key, "needs at least one block: " + ", ".join(CONSTANCIA_BLOCKS))
+    for name in blocks:
+        allowed = set(CONSTANCIA_BLOCKS[name]) | ({"lots"} if name == "form_1099_b" else set())
+        block = _object(value[name], f"{key}.{name}", allowed)
+        for field, number in block.items():
+            if field == "lots":
+                _lots(number, f"{key}.{name}.lots")
+                continue
+            _number(number, f"{key}.{name}.{field}", required=False, minimum=None)
+
+
+def _tax_facts(value: dict, key: str) -> None:
+    _tax_year_value(int(key.partition(".")[2]), key)
+    _object(value, key, {"jurisdiction", "account_countries", "mx", "us", "note"})
+    jurisdiction = value.get("jurisdiction")
+    if jurisdiction is not None and (not isinstance(jurisdiction, list)
+                                     or any(j not in ("MX", "US") for j in jurisdiction)):
+        _fail(f"{key}.jurisdiction", "must be a list of MX and/or US")
+    for part in ("mx", "us", "account_countries"):
+        if value.get(part) is not None and not isinstance(value[part], dict):
+            _fail(f"{key}.{part}", "must be an object")
+    carries = (value.get("mx") or {}).get("article_129_loss_carryforwards")
+    if carries is not None:
+        if not isinstance(carries, list):
+            _fail(f"{key}.mx.article_129_loss_carryforwards", "must be a list ([] when there are none)")
+        for index, item in enumerate(carries):
+            path = f"{key}.mx.article_129_loss_carryforwards[{index}]"
+            item = _object(item, path, {"origin_year", "available_updated_mxn", "updated_through"})
+            _tax_year_value(item.get("origin_year"), f"{path}.origin_year")
+            _number(item.get("available_updated_mxn"), f"{path}.available_updated_mxn")
+
+
 def _validator(key: str) -> Callable[[Any, str], None] | None:
     if key == "policy.ips":
         return _policy_ips
@@ -640,13 +1010,20 @@ def _validator(key: str) -> Callable[[Any, str], None] | None:
         return _onboarding
     if key == "preference.risk":
         return _risk
+    if key in ESTATE_VALIDATORS:
+        return ESTATE_VALIDATORS[key]
+    if key.startswith("estate.designation."):
+        return _estate_designation
     head, _, rest = key.partition(".")
     if not rest or "." in rest:
         return None
+    if head == "tax":
+        return _tax_facts if re.fullmatch(r"\d{4}", rest) else None
     if head == "income" and key not in LEGACY_KEYS:
         return _income
     return {"cash": _cash, "liability": _liability, "investment": _investment, "thread": _thread,
-            "follow": _follow, "constraint": _constraint}.get(head)
+            "follow": _follow, "constraint": _constraint, "constancia": _constancia, "insurance": _insurance,
+            "property": _property}.get(head)
 
 
 def out_of_range(value: Any, path: str = "value") -> str | None:
@@ -704,5 +1081,59 @@ def validate(key: str, value: Any) -> list[str]:
     return warnings
 
 
-__all__ = ["SCHEMA", "SchemaError", "validate", "MAX_AMOUNT", "out_of_range", "country_code", "COUNTRIES", "ONBOARDING_STEPS", "LANGUAGES", "FREQUENCIES", "INCOME_KINDS",
-           "LIABILITY_KINDS", "GOAL_ACTIONS", "THREAD_KINDS", "THREAD_STATUSES", "DROP_REACTIONS", "EXPERIENCE"]
+ALIASES: dict[str, dict[str, str]] = {"spending.monthly": {"amount": "total"}}
+"""Field names a model writes naturally, read as the canonical field (only when that field is absent)."""
+
+
+def normalize(key: str, value: Any) -> tuple[Any, list[str]]:
+    """Rename aliased fields to their canonical names; returns the value and notes for the receipt."""
+    if key == "client.profile" and isinstance(value, dict) and value.get("residence") is None \
+            and country_code(value.get("country")) is not None:
+        # {"country": "MX"} is how people say where they live: it is the residence country.
+        out = {k: v for k, v in value.items() if k != "country"}
+        out["residence"] = {"country": country_code(value["country"])}
+        return out, ["client.profile.country was saved as client.profile.residence.country"]
+    if key == "estate.family" and isinstance(value, dict) and isinstance(value.get("children"), list) and any(
+            isinstance(c, dict) and "relationship" in c for c in value["children"]):
+        # Everyone in children is a child: a relationship field there says nothing more.
+        children = [{k: v for k, v in c.items() if k != "relationship"} if isinstance(c, dict) else c
+                    for c in value["children"]]
+        return {**value, "children": children}, []
+    aliases = ALIASES.get(key)
+    if not aliases or not isinstance(value, dict):
+        return value, []
+    out, notes = dict(value), []
+    for alias, canonical in aliases.items():
+        if alias in out and canonical not in out:
+            out[canonical] = out.pop(alias)
+            notes.append(f"{key}.{alias} was saved as {key}.{canonical}")
+    return out, notes
+
+
+EXAMPLES: dict[str, Any] = {
+    "client.profile": {"name": "Ana", "birth_year": 1990, "residence": {"country": "MX", "region": "CDMX"},
+                       "language": "es"},
+    "income.": {"amount": 70000, "currency": "MXN", "frequency": "monthly", "net": True},
+    "spending.monthly": {"total": 45000, "currency": "MXN"},
+    "cash.": {"amount": 150000, "currency": "MXN", "institution": "Nu"},
+    "liability.": {"kind": "card", "balance": 25000, "currency": "MXN", "annual_rate": 0.42},
+    "investment.": {"amount": 200000, "currency": "MXN", "institution": "GBM"},
+    "estate.family": {"marital_status": "married", "spouse": "Luis", "marital_regime": "sociedad_conyugal",
+                      "children": [{"name": "Mateo", "birth_year": 2018}, {"minor": True}]},
+    "estate.will": {"exists": False},
+    "estate.guardianship": {"guardian": "Luis"},
+    "goals": [{"id": "house-2028", "name": "Casa", "target_amount": 800000, "currency": "MXN",
+               "target_date": "2028-12-31"}],
+}
+"""A valid value per key (or key prefix), quoted in validation errors as the corrected shape."""
+
+
+def example(key: str) -> Any | None:
+    if key in EXAMPLES:
+        return EXAMPLES[key]
+    head = key.partition(".")[0] + "."
+    return EXAMPLES.get(head) if head != key else None
+
+
+__all__ = ["SCHEMA", "SchemaError", "validate", "normalize", "example", "ALIASES", "MAX_AMOUNT", "out_of_range", "country_code", "COUNTRIES", "ONBOARDING_STEPS", "LANGUAGES", "FREQUENCIES", "INCOME_KINDS",
+           "LIABILITY_KINDS", "GOAL_ACTIONS", "TITLINGS", "RELATIONSHIPS", "PLAN_TYPES", "DESIGNATION_FIELDS", "designation_key", "THREAD_KINDS", "THREAD_STATUSES", "DROP_REACTIONS", "EXPERIENCE"]

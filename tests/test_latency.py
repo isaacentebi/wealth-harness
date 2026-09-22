@@ -187,8 +187,13 @@ def test_discovery_is_compact_by_default_in_a_conversation_turn(tmp_path):
     assert list(schema["tasks"]) == ["order_ticket"] and "example" in schema["tasks"]["order_ticket"]
     assert "fact_contract" not in schema and "connectors" not in schema and len(json.dumps(schema)) < 4_000
     assert "fact_contract" in call(chat, {"intent": "order_ticket", "detail": "full"})
-    # Without wealth_remember the fact contract is dead weight; a host that saves facts keeps it.
+    # Without wealth_remember the fact contract is dead weight; a host that saves facts reads it on purpose
+    # (intent=remember), and a task read carries a one-line pointer instead of ~16k characters.
     assert "fact_contract" not in call(chat, {"client_id": "ana", "intent": "plan"})
-    assert "fact_contract" in call(host, {"client_id": "ana", "intent": "plan"})
+    assert "fact_contract" not in call(chat, {"client_id": "ana", "intent": "remember"})
+    plan = call(host, {"client_id": "ana", "intent": "plan"})
+    assert "fact_contract" not in plan and "intent=remember" in plan["fact_contract_pointer"]
+    assert "fact_contract" in call(host, {"client_id": "ana", "intent": "remember"})
+    assert "fact_contract" in call(host, {"client_id": "ana", "intent": "plan", "detail": "full"})
     description = {t.name: t for t in asyncio.run(chat.list_tools())}["wealth_run"].description
     assert "order_ticket {orders" in description and "research {symbol" in description

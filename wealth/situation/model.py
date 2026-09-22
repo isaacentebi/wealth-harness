@@ -1088,7 +1088,7 @@ def underlying_of(symbol: Any) -> str | None:
     return UNDERLYING.get(head)
 
 
-def _holdings(accounts: list[dict], fx: _FX, currency: str | None) -> dict:
+def _holdings(accounts: list[dict], fx: _FX, currency: str | None, *, with_rows: bool = False) -> dict:
     rows = []
     for account in accounts:
         if not account["eligible"] or (account["source"] == "ledger" and account.get("valued_by") != "prices"):
@@ -1097,12 +1097,14 @@ def _holdings(accounts: list[dict], fx: _FX, currency: str | None) -> dict:
             value = fx.convert(D(position.get("value")), position.get("currency"), currency)
             symbol = position.get("symbol") or position.get("instrument_id")
             asset_class = position.get("asset_class") or ("cash" if str(position.get("instrument_id", "")).startswith("CASH:") else None)
-            rows.append({"account": account["id"], "institution": account.get("institution"), "symbol": symbol,
+            rows.append({"account": account["id"], "account_type": account.get("type"),
+                         "instrument_id": position.get("instrument_id") or symbol, "currency": position.get("currency"),
+                         "institution": account.get("institution"), "symbol": symbol,
                          "as_of": account.get("as_of"),
                          "value": value, "quantity": num(D(position.get("quantity")), 4),
                          "underlying": underlying_of(position.get("underlying_symbol") or symbol) or symbol,
                          "venue": position.get("venue"), "domicile": position.get("issuer_domicile"),
-                         "asset_class": asset_class})
+                         "listing_currency": position.get("listing_currency"), "asset_class": asset_class})
     known = [r for r in rows if r["value"] is not None]
     total = sum((r["value"] for r in known), Decimal(0))
     groups: dict[str, dict] = {}
@@ -1116,7 +1118,13 @@ def _holdings(accounts: list[dict], fx: _FX, currency: str | None) -> dict:
     top = sorted(groups.values(), key=lambda g: (-g["value"], g["underlying"]))
     split = lambda field: {k: num(v) for k, v in sorted(  # noqa: E731
         _sum_by(known, lambda r: r[field] or ("cash" if r["asset_class"] == "cash" else "other")).items())}
+    detail = {"rows": [{"account": r["account"], "account_type": r["account_type"], "institution": r["institution"],
+                        "instrument_id": r["instrument_id"], "symbol": r["symbol"], "currency": r["currency"],
+                        "quantity": r["quantity"], "value": num(r["value"]), "asset_class": r["asset_class"],
+                        "venue": r["venue"], "listing_currency": r["listing_currency"]}
+                       for r in known]} if with_rows else {}
     return {
+        **detail,
         "currency": currency, "total": num(total) if rows else None,
         "unvalued": len(rows) - len(known),
         "top": [{"underlying": g["underlying"], "value": num(g["value"]), "symbols": g["symbols"],
@@ -1326,8 +1334,11 @@ def _kept(snapshot: Mapping[str, Any], facts: _Facts) -> dict[str, list[dict]]:
 
 def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, today: date | str | None = None,
           *, since_revision: int | None = None, fx_max_age_days: int | None = SITUATION_FX_MAX_AGE_DAYS,
-          market: Mapping[str, Any] | None = None) -> dict:
+          market: Mapping[str, Any] | None = None, holding_rows: bool = False) -> dict:
     """The person's current picture: deterministic, JSON-safe, unknown kept as ``None``.
+
+    ``holding_rows`` adds ``holdings.rows``: every valued position, in the reporting currency
+    (the portfolio tasks derive their weights from it).
 
     ``market`` (from :func:`wealth.prices.ledger_market`) values ledger-only accounts:
     ``{prices: {instrument_id: {price, currency, date, source}}, fx: [{base, quote, rate, date, source}]}``.
@@ -1739,7 +1750,8 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
 
     _goal_funding(goals, (*cash_rows, *investments, *statement_rows), fx, currency)
 
-    holdings = _holdings([a for a in statement_accounts if a["key"] not in superseded], fx, currency)
+    holdings = _holdings([a for a in statement_accounts if a["key"] not in superseded], fx, currency,
+                         with_rows=holding_rows)
     threads = _threads(facts)
 
     # -- unknowns that matter, most consequential first

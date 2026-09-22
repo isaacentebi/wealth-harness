@@ -977,8 +977,15 @@ def _sources(client: Edgar, extra: Iterable[str] = ()) -> list[dict[str, str]]:
     return out
 
 
+UA_FIX = (f"One-line fix, done once by the person (not by you): add {SEC_UA_ENV}=\"Their Name their@email.com\" "
+          "to the wealth MCP server's env (OpenClaw: rerun integrations/openclaw/install.sh; Claude Desktop or Claude "
+          "Code: the \"env\" block of the wealth server in the MCP config), then restart the host. The SEC requires "
+          "a contact on every automated request; nothing else is sent.")
+
+
 def _needs(detail: str, missing: str, client: Edgar | None = None) -> dict[str, Any]:
-    return envelope("needs_input", _meta({}), missing=[missing], warnings=[detail],
+    result = _meta({"fix": UA_FIX} if missing == SEC_UA_ENV else {})
+    return envelope("needs_input", result, missing=[missing], warnings=[detail],
                     sources=_sources(client) if client else [])
 
 

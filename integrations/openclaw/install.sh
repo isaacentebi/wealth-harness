@@ -2,6 +2,7 @@
 # Add Wealth to an OpenClaw assistant: the skill, the MCP server and a private data directory.
 #
 #   integrations/openclaw/install.sh [--dry-run] [--uninstall] [--link] [--workspace DIR] [--no-mcp]
+#                                    [--sec-user-agent "Name email"]
 #
 # Idempotent: rerunning updates the skill and the config entries in place. The only
 # network step is `uv sync`. The OpenClaw config is backed up before any edit and only
@@ -10,7 +11,8 @@
 # Environment: OPENCLAW_STATE_DIR (default ~/.openclaw), OPENCLAW_CONFIG_PATH
 # (default $OPENCLAW_STATE_DIR/openclaw.json), WEALTH_DATA_DIR (default
 # ${XDG_DATA_HOME:-~/.local/share}/wealth-harness), WEALTH_DB (default
-# $WEALTH_DATA_DIR/clients.sqlite3).
+# $WEALTH_DATA_DIR/clients.sqlite3), WEALTH_SEC_USER_AGENT ("Name email" the SEC asks
+# of anyone fetching 13F filings; asked for at a terminal when unset, skipped otherwise).
 
 set -eu
 umask 077
@@ -21,9 +23,10 @@ LINK=0
 MCP=1
 WORKSPACE=""
 CLIENT=me
+SEC_UA=${WEALTH_SEC_USER_AGENT:-}
 
 usage() {
-    sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
@@ -35,6 +38,9 @@ while [ $# -gt 0 ]; do
         --workspace)
             [ $# -ge 2 ] || { echo "--workspace needs a directory" >&2; exit 2; }
             WORKSPACE=$2; shift ;;
+        --sec-user-agent)
+            [ $# -ge 2 ] || { echo "--sec-user-agent needs \"Name email\"" >&2; exit 2; }
+            SEC_UA=$2; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1 (try --help)" >&2; exit 2 ;;
     esac
@@ -183,6 +189,25 @@ else
     [ -f "$DB" ] && chmod 600 "$DB"
 fi
 
+# ------------------------------------------------------------------ SEC contact for the 13F manager tasks
+
+# The SEC asks every automated EDGAR request for a name and e-mail. Asked for only at a terminal;
+# without it Wealth never calls EDGAR and the manager tasks say how to add it.
+if [ -z "$SEC_UA" ] && [ "$DRY_RUN" -eq 0 ] && [ -t 0 ]; then
+    say ""
+    say "13F manager tasks (copy a fund manager's portfolio) read SEC EDGAR, which asks every caller for a"
+    say "name and e-mail. It goes only to sec.gov, in the request header."
+    printf 'Your name and e-mail, e.g. "Jane Doe jane@example.com" (Enter to skip): '
+    read -r SEC_UA || SEC_UA=""
+fi
+case "$SEC_UA" in
+    "") ;;
+    *@*) ;;
+    *) warn "'$SEC_UA' has no e-mail address; the SEC requires one, so it was not saved"; SEC_UA="" ;;
+esac
+SEC_FLAG=""
+[ -n "$SEC_UA" ] && SEC_FLAG=--sec-user-agent
+
 # ------------------------------------------------------------------ skill
 
 if [ -e "$DEST" ] || [ -L "$DEST" ]; then
@@ -208,10 +233,12 @@ NO_MCP_FLAG=""
 [ "$MCP" -eq 1 ] || NO_MCP_FLAG=--no-mcp
 if [ "$DRY_RUN" -eq 1 ]; then
     say "[dry-run] would back up $CONFIG and set these entries (all others kept):"
-    config_tool snippet --home "$WEALTH_HOME" --db "$DB" --uploads "$UPLOAD_DIR" --views "$VIEW_DIR" $NO_MCP_FLAG
+    config_tool snippet --home "$WEALTH_HOME" --db "$DB" --uploads "$UPLOAD_DIR" --views "$VIEW_DIR" $NO_MCP_FLAG \
+        ${SEC_FLAG:+"$SEC_FLAG" "$SEC_UA"}
 elif [ "$OPENCLAW" -eq 1 ]; then
     backup_config
-    JSON=$(config_tool json --home "$WEALTH_HOME" --db "$DB" --uploads "$UPLOAD_DIR" --views "$VIEW_DIR")
+    JSON=$(config_tool json --home "$WEALTH_HOME" --db "$DB" --uploads "$UPLOAD_DIR" --views "$VIEW_DIR" \
+        ${SEC_FLAG:+"$SEC_FLAG" "$SEC_UA"})
     SERVER_JSON=$(printf '%s\n' "$JSON" | sed -n 1p)
     if [ "$MCP" -eq 1 ]; then
         openclaw mcp set wealth "$SERVER_JSON" >/dev/null
@@ -231,7 +258,7 @@ elif [ "$OPENCLAW" -eq 1 ]; then
 else
     # openclaw_config.py backs the file up itself, and only when something changes.
     config_tool merge --config "$CONFIG" --home "$WEALTH_HOME" --db "$DB" --uploads "$UPLOAD_DIR" \
-        --views "$VIEW_DIR" $NO_MCP_FLAG || {
+        --views "$VIEW_DIR" $NO_MCP_FLAG ${SEC_FLAG:+"$SEC_FLAG" "$SEC_UA"} || {
         status=$?
         [ "$status" -eq 3 ] && die "edit $CONFIG by hand with the snippet above, then rerun"
         exit "$status"
@@ -246,3 +273,6 @@ say "  1. Restart the gateway so it loads the skill and server: openclaw gateway
 [ "$MCP" -eq 1 ] && say "  2. Check the server: openclaw mcp doctor wealth --probe"
 say "  3. Message your assistant, for example: hola, quiero ordenar mis finanzas"
 say "If exec runs in allowlist mode, approve 'uv' the first time it asks. See docs/openclaw.md."
+if [ -z "$SEC_UA" ] && [ "$MCP" -eq 1 ]; then
+    say "13F manager tasks stay off until you rerun with --sec-user-agent \"Your Name you@example.com\"."
+fi

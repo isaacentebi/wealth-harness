@@ -52,7 +52,7 @@ returns every schema at once (large).
 | Tool | What it does | Example arguments |
 | --- | --- | --- |
 | `wealth_context` | Task schemas without `client_id`; with it, the facts relevant to a task, or the whole picture with `intent="situation"` | `{"intent": "debt_payoff"}` |
-| `wealth_client` | `create` the profile once; `index` a host-supplied embedding for a fact | `{"action": "create", "client_id": "ana", "inputs": {"display_name": "Ana"}}` |
+| `wealth_client` | `list` the profiles (ids and names); `create` the profile once; `index` a host-supplied embedding for a fact | `{"action": "create", "client_id": "ana", "inputs": {"display_name": "Ana"}}` |
 | `wealth_remember` | Save sourced facts, corrections or `merge` patches atomically; returns a receipt with `needs_user` | `{"client_id": "ana", "facts": [{"key": "spending.monthly", "value": {"total": 30000, "currency": "MXN"}, "source": {"kind": "user", "ref": "conversation", "observed_on": "2026-09-21"}}]}` |
 | `wealth_recall` | Search all remembered facts | `{"client_id": "ana", "query": "spending"}` |
 | `wealth_run` | Run one task; optional `save_as` with `expires_on` | `{"task": "debt_payoff", "inputs": {"monthly_amount": 3000, "liabilities": [{"id": "card", "balance": 18000, "annual_rate": 0.42, "monthly_payment": 1200, "currency": "MXN"}]}}` |
@@ -71,9 +71,9 @@ wealth context` prints every task with its inputs and a runnable example.
 | Money in and out | Where money goes and what is investable, cash calendars, projections, withdrawal and liability matching, debt payoff, the debt engine (amortization, prepay vs invest, refinance offers, payoff strategies), reserves and goals (`spending`, `calendar`, `income`, `project`, `ladder`, `debt_payoff`, `debt`, `plan`) |
 | What you own | Holdings, lots, gains and income from a transaction ledger, returns, exposure and overlap, household import, SIC premium (`ledger`, `performance`, `exposure`, `import`, `sic_premium`) |
 | Investing | Investment policy, tax-aware rebalancing, asset location, recurring investing, portfolio analysis and construction, company and fund research (`policy_draft`, `policy_check`, `rebalance`, `asset_location`, `dca`, `compare`, `construct`, `analyze`, `factors`, `stress`, `research`, `value`) |
-| Tax | US federal lots, wash sales and harvesting; Mexico Art. 129, real interest, deductions and PPR, foreign securities, tax calendar; US estate exposure for non-residents (`tax`, `mx_holdings`, `mx_interest`, `mx_deductions`, `mx_foreign`, `mx_calendar`, `estate`) |
+| Tax | US federal lots, wash sales and harvesting; Mexico Art. 129, real interest, deductions and PPR, foreign securities, tax calendar; US estate exposure for non-residents; the annual tax pack for your contador or CPA (`tax`, `mx_holdings`, `mx_interest`, `mx_deductions`, `mx_foreign`, `mx_calendar`, `estate`, `tax_pack`) |
 | Retirement | IMSS Ley 73/97, AFORE and Modalidad 40; Social Security, contribution limits and withdrawal order; a readiness range (`retirement_mx`, `retirement_us`, `retirement_readiness`) |
-| Protection | Insurance and estate gaps, life events, and guardrails for speculation, panic selling and scams (`protection_review`, `life_event`, `speculation_check`, `panic_check`, `scam_check`) |
+| Protection | Insurance and estate gaps, an estate and beneficiary register (who receives each account at death, by which mechanism, and the gaps ranked by amount at risk), life events, and guardrails for speculation, panic selling and scams (`protection_review`, `estate_register`, `life_event`, `speculation_check`, `panic_check`, `scam_check`) |
 | Reviews and nudges | What needs attention today, a weekly letter, a quarterly review, a fee audit, opt-in monitor rules (`today`, `weekly`, `quarterly_review`, `fee_audit`, `monitor`) |
 | Following managers | Find a fund manager's SEC 13F filings, read and profile them, compare managers, size a mirror within your policy (`manager_search`, `manager_holdings`, `manager_profile`, `manager_compare`, `manager_mirror`) |
 | Connections | Statement uploads, plus read-only syncs from Interactive Brokers, Alpaca and Cuenca, each saved only after you say yes (`wealth_ingest`: `ibkr_flex`, `alpaca`, `cuenca`) |
@@ -91,7 +91,7 @@ after the person has agreed; piped stdin alone is refused.
 | Command | MCP equivalent | What it does |
 | --- | --- | --- |
 | `context` | `wealth_context` | Task schemas or relevant facts |
-| `client` | `wealth_client`, `wealth_inspect` | `create`, `inspect`, `export`, `index`; `forget` in a terminal only |
+| `client` | `wealth_client`, `wealth_inspect` | `list`, `create`, `inspect`, `export`, `index`; `forget` in a terminal only |
 | `remember` | `wealth_remember` | Save facts |
 | `recall` | `wealth_recall` | Search facts |
 | `run` | `wealth_run` | Run a task |
@@ -105,6 +105,7 @@ after the person has agreed; piped stdin alone is refused.
 | `prices` | none | Market-data cache: `status`, or `refresh` now |
 | `forget` | none | Delete a profile; interactive terminal only |
 | `watch` | none | Foreground monitor polling |
+| `tax-pack` | `wealth_run` `task=tax_pack` | Write the annual tax pack: JSON, one CSV per section, printable HTML |
 | `onboarding`, `today`, `view` | none | Text-channel helpers ([openclaw.md](openclaw.md)) |
 
 **context**, with no client, returns the catalog; name one task for its inputs
@@ -296,6 +297,15 @@ events; it runs in the foreground until stopped (`--interval` seconds, default
 uv run wealth watch --client ana --once
 ```
 
+**tax-pack** runs `tax_pack` for a client (or `--input` inputs with facts and
+a ledger) and writes `tax-pack-<year>.json`, one `tax-pack-<year>-<section>.csv`
+per section (plus pendientes, deadlines and reconciliation) and a printable,
+bilingual `tax-pack-<year>.html`; print the page to PDF from the browser:
+
+```sh
+uv run wealth tax-pack --client ana --year 2025 --lang es --out /tmp/wealth-demo/tax-pack
+```
+
 **onboarding, today, view** print person-facing text for text channels. Exit
 code 3 means the reply needs the host model, 4 means there is nothing to send.
 
@@ -340,7 +350,7 @@ uv run wealth forget --client ana
 `WEALTH_UPLOAD_DIR/<client>` when set, otherwise `<db dir>/uploads/<client>`, the
 directory the browser chat saves attachments to. Proposals are held server-side
 by `proposal_id`; `confirm` saves the held proposal (never one sent by the
-caller) as `account.<id>`, `liability.<id>` and `income.<id>` facts and posts
+caller) as `account.<id>`, `liability.<id>` and `income.<id>` facts (a tax document: see below) and posts
 its accounts, holdings, transactions, balance checks and FX to the ledger
 (batch `ingest:<proposal_id>`). An account new to the ledger gets opening
 balances derived from the statement; an account already there gets only new
@@ -364,6 +374,35 @@ shown on the proposal before confirming). An older statement only adds balance
 checks. Forgetting an `account.<id>` fact posts reversal entries for that
 account's ledger lines (append-only; the history stays), so the account leaves
 the brief, the net worth and `task=ledger` together.
+
+**Annual tax documents.** `ingest action=file` recognises, from the title of
+the first page, a Mexican constancia fiscal anual (brokers such as GBM,
+Actinver, Banorte and Kuspit/Cetesdirecto: Art. 129 gain/loss/net, interest
+nominal/real/real loss, ISR withheld, dividends; banks such as BBVA, Banorte,
+Santander and Nu: interest), a US Form 1099 composite (1099-B lots and totals,
+1099-DIV, 1099-INT; Schwab, Fidelity, Vanguard, Alpaca) and Form 5498. Regular
+layouts (label or box lines, the 1099-B lot table) are read deterministically;
+anything else returns an `extraction_request` with the tax-document schema
+(`document_kind: "tax_document"`), validated by `action=extraction` as usual.
+Every figure must appear in the page text and the totals must reconcile (1099-B
+lots against the printed term and overall totals, gain - loss = net, nominal -
+inflation adjustment = real interest); a document that does not is
+`needs_review` and needs `acknowledge_discrepancies`. The proposal shows
+`figures`, `lots`, the checks and `facts_preview`; `confirm` saves exactly
+those as `constancia.<institution>_<year>[_1099|_5498]_<account>` facts with
+`source.kind=document` citing the file, and posts nothing to the ledger.
+`<account>` is the last four digits of the account the document prints, else
+`h` and a short hash of the document (type, institution, year, issue date,
+figures): two accounts' documents from one institution never replace each
+other, and uploading the same document again rewrites the same key. A 1099's
+`form_1099_b` keeps its lots (description, symbol, quantity, acquired, sold,
+proceeds, basis, wash sale, gain, term, box; up to 5,000).
+`task=tax_pack` then declares the document's figures and shows its own
+computation next to them: several documents of one institution are summed per
+block (each one's figure listed under `documents` in the reconciliation), a
+1099-B's lots are the Form 8949 rows for the accounts it covers (the ledger's
+sales there are reconciled against them, never added), and an uploaded
+document is preferred over a typed one for the same institution.
 
 **Upload retention.** Raw statements hold RFC, CURP, CLABE and account numbers,
 so uploads are deleted (overwritten, then unlinked) once they are no longer
@@ -637,6 +676,128 @@ taxes `social_security_annual_benefit_usd` under IRC 86 (25k/34k single,
 32k/44k joint; fixed nominal thresholds deflated at `threshold_inflation`). It
 charges IRMAA from the 2026 CMS table on MAGI from two years earlier. Other
 years use the latest table with a dated warning.
+
+## Tax pack
+
+`tax_pack` is the document a person hands their contador (Mexico) or CPA (US)
+for one year: working papers, not a return. Inputs are `tax_year` (default: the
+last completed year) and `jurisdiction` (`MX`, `US` or `MX,US`; default: the
+profile's tax residence, plus `US` for a US person). It reads the ledger and
+three kinds of saved facts:
+
+- `tax.<year>`: what the person stated for the year. `mx`: Art. 129
+  `article_129_loss_carryforwards` (`[]` = none), `total_income_mxn`,
+  `accumulable_income_mxn`, `deductions` (`medical_mxn`,
+  `insurance_premiums_mxn`, `ppr_mxn`, `art185_mxn`, `mortgage`...),
+  `aguinaldo_mxn`/`ptu_mxn`, `sic_listed`, `inpc` (`{"YYYY-MM": value,
+  "source"}`). `us`: `filing_status`, `capital_loss_carryover`,
+  `ira_contributions_usd`, `roth_contributions_usd`, `rmd_taken_usd`,
+  `ira_prior_year_end_balance_usd`, `treasury_rate_per_usd`,
+  `mx_annual_isr_usd`.
+- `constancia.<id>`: an institution's annual document as printed, with
+  `tax_year`, `institution`, `account_id?`, `account_last4?` and blocks `enajenacion`
+  (`gain`, `loss`, `net`), `intereses` (`nominal`, `real`, `real_loss`,
+  `isr_withheld`), `dividendos`, `form_1099_b`, `form_1099_div`,
+  `form_1099_int`. Save it with `wealth_remember` (`source.kind: document`)
+  after reading the PDF with the person.
+- `client.profile` (residence, tax residence, `us_person`, birth year). Past
+  its review date it is left out like any stale fact (warned, and listed to
+  reconfirm): the jurisdiction then comes from `tax.<year>` or the request,
+  or the pack asks for it (`needs_input`).
+
+Sections, each with `status`, `summary`, a `table` (`columns` in es/en,
+`rows`), `reconciliation`, `missing`, `warnings`, `sources` and `assumptions`:
+
+| Section | What it holds |
+| --- | --- |
+| `mx_enajenacion` | Art. 129 per broker: average cost updated by INPC (CFF Art. 17-A), gains, losses, net, carryforwards, the 10% |
+| `mx_extranjero` | Foreign broker: SIC-listed at 10% (criterio 37/ISR/N), others progressive, foreign dividends and the Art. 5 credit (via `mx_foreign`) |
+| `mx_intereses` | Nominal and real interest per institution, ISR withheld; debt-security sale gains are interest |
+| `mx_dividendos` | Domestic (the additional 10%) and foreign dividends with withholding |
+| `mx_deducciones` | Art. 151/185 caps and room (via `mx_deductions`) and the CFDI checklist (uso D01-D10) |
+| `mx_aguinaldo_ptu` | Exempt parts (30 and 15 daily UMA), only when stated |
+| `us_8949` | Lots sold: boxes A-F, code W and the wash-sale adjustment |
+| `us_schedule_d` | Short/long totals, carryover in and out, the $3,000 limit |
+| `us_1099` | 1099-DIV/INT per account: ordinary vs qualified, interest |
+| `us_foreign_tax` | Foreign tax paid by country (Form 1116 inputs) |
+| `us_retirement` | IRA/Roth contributions vs the limit, RMD required and taken |
+| `us_fbar_8938` | FBAR ($10,000 aggregate maximum, 31 CFR 1010.350) and Form 8938 (from $50,000/$75,000 single in the US to $400,000/$600,000 joint abroad, Instructions for Form 8938) |
+
+Every pack also has `pendientes` (each missing constancia, INPC month, price,
+rate, cost basis or stated figure, in Spanish and English) and `deadlines`
+(April 30 annual return in Mexico, February 15 constancias, April 15 US return,
+IRA contributions and FBAR, June 15 abroad, October 15 FBAR extended).
+
+Unknown is never zero: a figure that cannot be computed is `null` (an empty
+CSV cell, "unknown" on the page). A saved constancia or 1099 is the source of
+truth: each section's `reconciliation` shows our computation, the document and
+the difference, and the declared figure is the document's. The web app serves
+`/api/tax-pack?year=YYYY&format=json|html|csv&section=<id>&lang=es|en`; the You
+page has a link to the printable page. `exports: ["csv", "html"]` returns both
+inside the result for MCP hosts.
+
+## Estate register
+
+`estate_register` answers "what happens to each account if I die". Each row
+is an account, life policy or property with its mechanism: a beneficiary
+designation (bank beneficiaries under LIC Art. 56, casa de bolsa under LMV
+Art. 201, AFORE under LSS Art. 193, life policies, US TOD/POD and plan
+beneficiaries), a trust, survivorship on a US joint account, the will, or
+intestate succession. It also lists who receives the account and an estimated
+amount per heir. A cuenta mancomunada is not a beneficiary: the co-holder keeps
+their own part and yours passes by your designation or your will.
+
+`gaps` are ranked by the amount at risk. They cover no beneficiary, AFORE
+beneficiaries, shares that do not add to 100%, a minor named directly without a
+guardian or trust, a predeceased or ex-spouse beneficiary, a designation older
+than `review_years` (5) or older than a marriage, divorce or child, ERISA
+spousal consent for a 401(k), US-situs assets over US$60,000 for a non-resident
+alien (through `estate`), no will (with Mes del Testamento in September), a
+will older than a marriage or child, and no guardian for minors. What nobody
+said (for example an AFORE with no beneficiaries recorded) goes to `questions`
+and is never read as "none".
+
+`completeness.score` (0-100) weighs designations by value (60), the will (30)
+and a guardian when there are minors (10). The run draws two views: accounts to
+heirs with the score, and the amount per heir. `today` shows the top three gaps
+as `estate_gap` items once the person has told Wealth anything about their
+estate. The You page shows one collapsed Herencia / Estate line. Statutes and
+the not-legal-advice caveat are in `sources` and `assumptions`.
+
+Designations are their own facts, so naming a beneficiary never re-dates a
+balance: `estate.designation.<slug>`, where the slug is the account key with
+`.` as `-` (`investment.gbm` becomes `estate.designation.investment-gbm`). Each
+takes `account` (the `cash.`, `investment.`, `insurance.`, `property.` or
+statement `account.` key), `beneficiaries` (`[{name, relationship?, share?,
+contingent?, minor?, birth_year?, deceased?, via_trust?}]`, where `[]` means
+none), `designation_date`, `titling` (`individual`, `joint`, `mancomunada`,
+`fideicomiso`, `trust`), `co_owners`, `owner_share`, `country`, `plan_type`,
+`spousal_consent` and `marital_property` (false for what was owned before the
+marriage or inherited). Beneficiaries saved inline on an account by older
+writes are still read; the designation fact wins. Other keys: `insurance.<id>`
+(`kind`, `coverage`), `property.<id>` (`kind`, `value`), `estate.will`
+(`exists`, `date`, `notaria`, `jurisdiction`, `heirs`), `estate.guardianship`
+(`guardian`, `alternate`) and `estate.family` (`marital_status`,
+`marriage_date`, `marital_regime`, `spouse_assets`, `spouse`, `children`,
+`ex_spouses`, `deceased`, `parents_living`).
+
+Mexican intestate shares follow the Código Civil Federal. Next to
+descendants, the spouse takes a child's share only if they own nothing, or
+what brings their own property up to a child's share (Arts. 1624-1625). Next
+to parents, the spouse takes half whatever they own (Arts. 1626, 1628). Under
+sociedad conyugal, half of what was acquired in the marriage is already the
+spouse's. It is not in the estate, and it counts as the spouse's own property
+for Art. 1624. When the regime or the spouse's property is unknown, amounts
+come back as `estate_value_range` and `amount_range`, the fields to ask for
+appear in `missing`, and the views draw a range.
+
+```sh
+printf '%s' '{"task":"estate_register","inputs":{"as_of":"2026-09-22","facts":[
+  {"key":"client.profile","value":{"residence":{"country":"MX"}}},
+  {"key":"investment.gbm","value":{"amount":217000,"currency":"MXN","institution":"GBM"}},
+  {"key":"estate.designation.investment-gbm","value":{"account":"investment.gbm","beneficiaries":[]}},
+  {"key":"estate.will","value":{"exists":false}}]}}' | uv run wealth run
+```
 
 ## Facts
 

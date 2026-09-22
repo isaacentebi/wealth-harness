@@ -421,7 +421,7 @@ def test_merge_patch_updates_one_call_without_revision_and_stays_idempotent(stor
         {"id": "home", "name": "Home", "target_amount": 65000, "currency": "USD"},
         {"id": "school", "name": "School", "due": "2030-01-01"}, {"id": "car", "name": "Car"},
     ]
-    assert values["client.profile"] == {"country": "MX", "reporting_currency": "USD"}
+    assert values["client.profile"] == {"residence": {"country": "MX"}, "reporting_currency": "USD"}
     with pytest.raises(ValidationError, match="merge=true .* expected_revision=2"):
         store.remember("c", [fact("preference.style", "long")])
     with pytest.raises(ValidationError, match="requires objects with an id"):

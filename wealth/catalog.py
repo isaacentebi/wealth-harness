@@ -342,6 +342,160 @@ _GUARD_FACTS: list[dict[str, Any]] = [
 ]
 
 
+# ------------------------------------------------------------------ tax pack fixtures (fictional, 2025)
+
+def _tp_entry(i: int, prefix: str, account: str, kind: str, day: str, amount: str | None = None,
+              currency: str = "MXN", **extra: Any) -> dict[str, Any]:
+    row = {"id": f"{prefix}{i:03d}", "account_id": account, "kind": kind, "date": day, "currency": currency,
+           "confidence": "reported", "source": {"kind": "document", "ref": "estado de cuenta (fictional example)"},
+           **extra}
+    if amount is not None:
+        row["amount"] = amount
+    return row
+
+
+_TP_INPC = {"2023-04": "128.363", "2024-06": "134.594", "2025-01": "137.949", "2025-02": "138.343",
+            "2025-03": "138.726", "2025-08": "140.726", "2025-12": "142.645",
+            "source": "INEGI INPC (fictional example values)"}
+
+_TP_MX_LEDGER: dict[str, Any] = {
+    "accounts": [
+        {"id": "gbm", "institution": "GBM", "type": "brokerage", "currency": "MXN", "country": "MX", "owners": _MX_OWNER},
+        {"id": "bbva", "institution": "BBVA", "type": "savings", "currency": "MXN", "country": "MX", "owners": _MX_OWNER},
+    ],
+    "instruments": [
+        {"id": "AMXB", "symbol": "AMXB", "currency": "MXN", "asset_class": "equity", "venue": "bmv", "issuer_domicile": "MX"},
+        {"id": "NAFTRAC", "symbol": "NAFTRAC", "currency": "MXN", "asset_class": "fund", "venue": "bmv",
+         "issuer_domicile": "MX"},
+        {"id": "CETES", "symbol": "CETES", "currency": "MXN", "asset_class": "fixed_income", "venue": "bmv",
+         "issuer_domicile": "MX"},
+    ],
+    "entries": [
+        _tp_entry(1, "mx", "gbm", "opening_balance", "2024-12-31", "200000"),
+        _tp_entry(2, "mx", "gbm", "opening_balance", "2024-12-31", instrument_id="AMXB", quantity="2000",
+                  cost_basis="30000", acquired_on="2023-04-03"),
+        _tp_entry(3, "mx", "gbm", "opening_balance", "2024-12-31", instrument_id="NAFTRAC", quantity="500",
+                  cost_basis="27000", acquired_on="2024-06-03"),
+        _tp_entry(4, "mx", "bbva", "opening_balance", "2024-12-31", "80000"),
+        _tp_entry(5, "mx", "gbm", "buy", "2025-01-06", "-98000", instrument_id="CETES", quantity="10000"),
+        _tp_entry(6, "mx", "gbm", "buy", "2025-02-10", "-16000", instrument_id="AMXB", quantity="1000"),
+        _tp_entry(7, "mx", "gbm", "sell", "2025-04-07", "25000", instrument_id="NAFTRAC", quantity="500"),
+        _tp_entry(8, "mx", "gbm", "sell", "2025-07-07", "102500", instrument_id="CETES", quantity="10000"),
+        _tp_entry(9, "mx", "gbm", "tax_withheld", "2025-07-07", "-400", instrument_id="CETES"),
+        _tp_entry(10, "mx", "gbm", "dividend", "2025-07-21", "1200", instrument_id="AMXB"),
+        _tp_entry(11, "mx", "gbm", "tax_withheld", "2025-07-21", "-120", instrument_id="AMXB"),
+        _tp_entry(12, "mx", "gbm", "sell", "2025-09-15", "30000", instrument_id="AMXB", quantity="1500"),
+        _tp_entry(13, "mx", "bbva", "interest", "2025-12-31", "1800"),
+        _tp_entry(14, "mx", "bbva", "tax_withheld", "2025-12-31", "-300"),
+    ],
+    "fx": [], "assertions": [], "labels": [], "category_rules": [],
+}
+
+_TP_MX_FACTS = [
+    {"key": "client.profile", "value": {"name": "Ana", "language": "es", "residence": {"country": "MX"},
+                                        "tax_residence": ["MX"], "us_person": False, "birth_year": 1988}},
+    {"key": "tax.2025", "value": {"mx": {
+        "article_129_loss_carryforwards": [{"origin_year": 2023, "available_updated_mxn": 1500,
+                                            "updated_through": "2025-12"}],
+        "total_income_mxn": 900000, "accumulable_income_mxn": 860000, "marginal_rate": 0.3,
+        "deductions": {"medical_mxn": 18000, "insurance_premiums_mxn": 12000, "ppr_mxn": 30000, "art185_mxn": 0},
+        "inpc": _TP_INPC}}},
+    {"key": "constancia.gbm_2025", "value": {
+        "tax_year": 2025, "institution": "GBM", "account_id": "gbm", "currency": "MXN", "issued_on": "2026-02-13",
+        "enajenacion": {"gain": 5417.0, "loss": 2830.0, "net": 2587.0},
+        "intereses": {"nominal": 4500.0, "real": 2400.0, "real_loss": 0, "isr_withheld": 400.0},
+        "dividendos": {"domestic_gross": 1200.0, "isr_withheld": 120.0}}},
+]
+
+_TP_MX_EXAMPLE: dict[str, Any] = {
+    "tax_year": 2025, "as_of": "2026-03-01", "facts": _TP_MX_FACTS, "ledger": _TP_MX_LEDGER,
+    "parameters": {"uma_annual_mxn": {"value": "41273.52", "source": "INEGI, UMA 2025 (DOF 10-01-2025)"}},
+}
+
+_TP_US_LEDGER: dict[str, Any] = {
+    "accounts": [
+        {"id": "schwab", "institution": "Charles Schwab", "type": "brokerage", "currency": "USD", "country": "US",
+         "owners": [{"person_id": "sam", "share": "1"}]},
+        {"id": "schwab_roth", "institution": "Charles Schwab", "type": "roth_ira", "currency": "USD", "country": "US",
+         "owners": [{"person_id": "sam", "share": "1"}]},
+    ],
+    "instruments": [
+        {"id": "VTI", "symbol": "VTI", "currency": "USD", "asset_class": "fund", "venue": "us", "issuer_domicile": "US"},
+        {"id": "SCHD", "symbol": "SCHD", "currency": "USD", "asset_class": "fund", "venue": "us", "issuer_domicile": "US"},
+    ],
+    "entries": [
+        _tp_entry(1, "us", "schwab", "opening_balance", "2024-12-31", "40000", currency="USD"),
+        _tp_entry(2, "us", "schwab", "opening_balance", "2024-12-31", instrument_id="SCHD", quantity="50",
+                  cost_basis="3500", acquired_on="2023-05-01", currency="USD"),
+        _tp_entry(3, "us", "schwab", "buy", "2025-01-15", "-6000", currency="USD", instrument_id="VTI", quantity="20"),
+        _tp_entry(4, "us", "schwab", "sell", "2025-03-10", "5600", currency="USD", instrument_id="VTI", quantity="20"),
+        _tp_entry(5, "us", "schwab", "buy", "2025-03-25", "-5700", currency="USD", instrument_id="VTI", quantity="20"),
+        _tp_entry(6, "us", "schwab", "dividend", "2025-06-25", "30", currency="USD", instrument_id="SCHD"),
+        _tp_entry(7, "us", "schwab", "sell", "2025-08-01", "4200", currency="USD", instrument_id="SCHD", quantity="50"),
+        _tp_entry(8, "us", "schwab", "dividend", "2025-09-30", "75", currency="USD", instrument_id="VTI"),
+        _tp_entry(9, "us", "schwab", "sell", "2025-11-03", "6500", currency="USD", instrument_id="VTI", quantity="20"),
+        _tp_entry(10, "us", "schwab", "interest", "2025-12-31", "40", currency="USD"),
+        _tp_entry(11, "us", "schwab_roth", "deposit", "2025-04-01", "6000", currency="USD"),
+        _tp_entry(12, "us", "schwab", "buy", "2026-01-20", "-3000", currency="USD", instrument_id="SCHD", quantity="40"),
+    ],
+    "fx": [], "assertions": [], "labels": [], "category_rules": [],
+}
+
+_TP_US_EXAMPLE: dict[str, Any] = {
+    "tax_year": 2025, "as_of": "2026-02-20", "ledger": _TP_US_LEDGER,
+    "facts": [
+        {"key": "client.profile", "value": {"name": "Sam", "language": "en", "residence": {"country": "US"},
+                                            "tax_residence": ["US"], "us_person": True, "birth_year": 1985}},
+        {"key": "tax.2025", "value": {"us": {"filing_status": "single",
+                                             "capital_loss_carryover": {"short_term": 0, "long_term": 1200}}}},
+        {"key": "constancia.schwab_2025", "value": {
+            "tax_year": 2025, "institution": "Charles Schwab", "account_id": "schwab", "currency": "USD",
+            "form_1099_b": {"short_term_gain": 400.0, "long_term_gain": 700.0, "wash_sale_disallowed": 400.0},
+            "form_1099_div": {"ordinary": 105.0, "qualified": 90.0, "capital_gain_distributions": 0,
+                              "foreign_tax_paid": 4.0},
+            "form_1099_int": {"interest": 40.0}}},
+    ],
+    "parameters": {"us_ira_limit": {"value": 7000, "source": "IRS Notice 2024-80 (2025 IRA limit)"}},
+}
+
+_TP_XB_LEDGER: dict[str, Any] = {
+    "accounts": [
+        {"id": "bbva", "institution": "BBVA", "type": "checking", "currency": "MXN", "country": "MX",
+         "owners": [{"person_id": "lee", "share": "1"}]},
+        {"id": "gbm", "institution": "GBM", "type": "brokerage", "currency": "MXN", "country": "MX",
+         "owners": [{"person_id": "lee", "share": "1"}]},
+    ],
+    "instruments": [
+        {"id": "CSPXN", "symbol": "CSPXN", "currency": "MXN", "asset_class": "fund", "venue": "sic",
+         "issuer_domicile": "IE", "underlying_symbol": "CSPX"},
+    ],
+    "entries": [
+        _tp_entry(1, "xb", "bbva", "opening_balance", "2024-12-31", "300000"),
+        _tp_entry(2, "xb", "gbm", "opening_balance", "2024-12-31", "60000"),
+        _tp_entry(3, "xb", "bbva", "income", "2025-06-01", "60000", subtype="salary", description="NOMINA"),
+        _tp_entry(4, "xb", "bbva", "expense", "2025-07-01", "-20000", description="RENTA"),
+        _tp_entry(5, "xb", "gbm", "buy", "2025-02-03", "-50000", instrument_id="CSPXN", quantity="5"),
+        _tp_entry(6, "xb", "bbva", "interest", "2025-12-31", "1500"),
+        _tp_entry(7, "xb", "bbva", "tax_withheld", "2025-12-31", "-250"),
+    ],
+    "fx": [{"date": d, "base": "USD", "quote": "MXN", "rate": r, "source": "Banxico FIX (fictional example)"}
+           for d, r in (("2025-12-31", "18.00"),)],
+    "assertions": [], "labels": [], "category_rules": [],
+}
+
+_TP_XB_EXAMPLE: dict[str, Any] = {
+    "tax_year": 2025, "as_of": "2026-03-10", "ledger": _TP_XB_LEDGER,
+    "facts": [
+        {"key": "client.profile", "value": {"name": "Lee", "language": "en", "residence": {"country": "MX"},
+                                            "tax_residence": ["MX"], "citizenship": ["US"], "us_person": True,
+                                            "birth_year": 1990}},
+        {"key": "tax.2025", "value": {"us": {"filing_status": "single",
+                                             "capital_loss_carryover": {"short_term": 0, "long_term": 0}},
+                                      "mx": {"article_129_loss_carryforwards": []}}},
+    ],
+}
+
+
 _MANAGER_SNAPSHOT = ('snapshot: "example" (the fictional offline managers CIK 0000000001 and 0000000002) or '
                      "recorded pages {url: body}; omit for live EDGAR")
 
@@ -594,7 +748,7 @@ CATALOG: dict[str, dict[str, Any]] = {
                      "financial_system_lender, credit_udis | credit_amount_mxn + udi_value_at_origination + udi_source, "
                      "within_global_cap} (LISR Art. 151 fr. IV, as mx_deductions), inflation (MX real interest, default 4%), "
                      "expected_return {conservative, base, source}, risk_free {rate, source} (default: a saved "
-                     "cash_reference_rate, else CETES 28 days for MXN; the T-bill rate is asked), investment (a name), "
+                     "cash_reference_rate, else the dated CETES 28-day (MXN) or 13-week T-bill (USD) auction rate), investment (a name), "
                      "reserve {months, target_months} (default: the saved picture)",
                      "refinance: offer {kind refinance|balance_transfer|consolidation, annual_rate (after any promo; with a promo and "
                      "no rate given, the current rate is assumed and said), "
@@ -705,6 +859,36 @@ CATALOG: dict[str, dict[str, Any]] = {
             "US_marginal_override": {**{k: v for k, v in _US_TAX_COMMON.items() if k != "us_return_facts"}, "mode": "harvest",
                                      "rates": {"ordinary": 0.37, "long_term": 0.15}},
         },
+    },
+    "tax_pack": {
+        "purpose": "The annual tax pack for the contador or CPA, built from the ledger and saved facts. Mexico: Art. 129 "
+                   "sales per broker with INPC-updated average cost, the net result, the 10% and carryforwards; interest "
+                   "nominal and real per institution with ISR withheld; domestic and foreign dividends; foreign securities "
+                   "at a foreign broker; Art. 151/185 deductions with the CFDI checklist; aguinaldo/PTU exemptions only "
+                   "when stated. US: Form 8949 lots with wash sales (code W), Schedule D totals and carryovers, "
+                   "1099-DIV/INT (qualified vs ordinary), foreign tax paid (Form 1116 inputs), IRA/Roth contributions vs "
+                   "the limit and RMDs, FBAR/Form 8938 flags with thresholds and sources. Always: pendientes (what is "
+                   "missing) and key deadlines. A saved constancia or 1099 is the source of truth: our figure, the "
+                   "document and the difference.",
+        "required": ["client_id with a posted ledger (or ledger + facts [{key, value}])"],
+        "optional": ["tax_year (default: the last completed year)",
+                     "jurisdiction MX | US | \"MX,US\" (default: tax.<year>.jurisdiction, else the profile's tax "
+                     "residence, plus US for a US person)",
+                     "inpc {\"YYYY-MM\": value, source} (default tax.<year>.mx.inpc)",
+                     "prices {instrument_id: [{date, price}]} (month-end values for FBAR/8938)",
+                     "parameters {key: {value, source}} for unverified dated parameters (UMA, IRA limit)",
+                     "language es|en", "exports [\"csv\", \"html\"] (adds result.csv {file: text} and result.html)",
+                     "as_of"],
+        "notes": "Reads client.profile, tax.<year> (stated tax facts: carryforwards, deductions, income, filing status, "
+                 "IRA contributions) and constancia.<id> (documents: enajenacion, intereses, dividendos, form_1099_b, "
+                 "form_1099_div, form_1099_int, form_5498; an uploaded PDF confirmed through wealth_ingest saves "
+                 "them with source.kind=document). Result: sections {id: {status, title {es, en}, summary, table "
+                 "{columns, rows}, reconciliation [{item, ours, document, difference, source_of_truth}], missing, "
+                 "warnings, sources, assumptions}}, section_order, pendientes, deadlines. An empty figure is unknown, "
+                 "never zero. CLI: `wealth tax-pack --client ID --year YYYY --out DIR` writes JSON, one CSV per section "
+                 "and a printable bilingual HTML; the web serves /api/tax-pack?year=.",
+        "example": _TP_MX_EXAMPLE,
+        "variants": {"us_schwab_wash_sale": _TP_US_EXAMPLE, "us_person_in_mexico": _TP_XB_EXAMPLE},
     },
     "mx_holdings": {
         "purpose": "Classify Mexico-resident holdings by tax regime and liquidity (CETES, UDIBONOS, FIBRAs, SIC, AFORE, PPR, funds).",
@@ -1086,22 +1270,34 @@ CATALOG: dict[str, dict[str, Any]] = {
                     "annual_inflation": 0.04, "simulations": 500, "seed": 7},
     },
     "order_ticket": {
-        "purpose": "Prepare an order ticket when the person asks to act (Alpaca; paper unless the person enabled live "
-                   "trading). Wealth stores the exact orders with pre-trade checks (tradable/fractionable, cash buying "
+        "purpose": "Prepare an order ticket when the person asks to act. The account's institution picks the broker: "
+                   "Alpaca (paper unless the person enabled live trading), Interactive Brokers through the gateway the "
+                   "person runs (paper when logged into a DU... account), or, for any broker without an API (GBM, "
+                   "Vest, Schwab, Fidelity...), a place-it-yourself card with the exact symbol and listing (SIC or "
+                   "BMV), fees and FX that the person marks 'Ya la puse' once placed. Wealth stores the exact orders with pre-trade checks (tradable/fractionable, cash buying "
                    "power, the accepted IPS, live per-order and daily limits, duplicates, market hours, a limit price "
                    "collared around the last trade, estimated tax and cost) and returns a ticket id and a summary. It "
-                   "never places an order: the person reviews and confirms the card in the app. inputs {ticket_id} "
-                   "alone reads a stored ticket's state instead.",
+                   "never places an order: the person confirms its card in the Wealth web app (wealth-chat). inputs {ticket_id} "
+                   "alone reads a stored ticket's state instead. inputs {ticket_id, placed: true} records that the "
+                   "person placed a place-it-yourself ticket at their broker (only when they say so; outside the "
+                   "Wealth app it returns needs_person with a code: show it and, on their yes, call again with "
+                   "confirm: true and confirmation_code inside inputs); it never sends anything. When the person "
+                   "names a broker or account, orders[].account_id is required: with several brokerage accounts "
+                   "and none named the result is needs_input listing them.",
         "required": ["orders [{symbol, side: buy|sell, qty | notional (USD)}] (a rebalance trade's instrument_id, "
                      "quantity and estimated_amount are accepted)",
                      "rationale (one or two sentences the person reads)", "client_id (a ticket belongs to a person)"],
         "optional": ["source: rebalance|manager_mirror|user_request (default user_request)",
                      "orders[].type: limit (default) | market (paper only)", "orders[].limit_price (default: last "
                      "trade +/- half the collar)", "orders[].time_in_force: day (default) | gtc (whole shares)",
-                     "orders[].account_id, estimated_tax, estimated_cost, asset_class, sleeve, domicile, tags",
+                     "orders[].account_id (one account per ticket; it picks the broker; required when the person "
+                     "names a broker), estimated_tax, "
+                     "estimated_cost, asset_class, sleeve, domicile, tags",
+                     "orders[].exchange: SIC | BMV | BIVA for a Mexican broker (default: SIC for foreign shares, BMV "
+                     "for known Mexican issuers)",
                      "orders[].lots (sells only) [{lot_id, quantity?, estimated_tax_saving?, repurchase_not_before?, "
                      "character?, account_id?}] (from tax harvest_report order_tickets)"],
-        "notes": "Result: ticket {id, mode PAPER|LIVE, status, total, lines [{side, symbol, qty, limit_price, "
+        "notes": "Result: ticket {id, broker alpaca|ibkr|manual, broker_label, mode paper|live|manual, status, total, lines [{side, symbol, qty, limit_price, "
                  "estimated_amount, state}], notices [{code, status: warn|violation|block|unknown, message}]} and "
                  "summary. Tell the person to confirm on the card; never say an order was placed or filled until "
                  "its line state says so. Without client_id the result is a preview that cannot be confirmed.",
@@ -1243,6 +1439,91 @@ CATALOG: dict[str, dict[str, Any]] = {
         "optional": ["date (YYYY-MM-DD; default today)", "details", "jurisdiction: MX|US (else residence; unknown "
                      "lists both)", "client_id"],
         "example": {"kind": "birth_or_adoption", "date": "2026-09-21", "jurisdiction": "MX"},
+    },
+    "estate_register": {
+        "purpose": "Estate and beneficiary register: for each account, policy and property, what happens at the "
+                   "person's death (beneficiary designation that skips the juicio sucesorio or probate, trust, "
+                   "survivorship on a US joint account, will, or intestate succession), who receives it and an "
+                   "estimated amount per heir; gaps ranked by amount at risk (no beneficiary, shares not 100%, a "
+                   "minor named directly without guardian or trust, predeceased or ex-spouse beneficiary, old "
+                   "designation or one before a marriage or child, AFORE beneficiaries, ERISA spousal consent, "
+                   "US-situs over US$60,000 for a non-resident alien, no will or a will older than a marriage or "
+                   "child, no guardian), questions for what is unknown, a 0-100 completeness score and two views. "
+                   "Mexico: LIC Art. 56 bank beneficiaries, LMV Art. 201, AFORE designacion (LSS Art. 193), "
+                   "mancomunada vs beneficiary, Mes del Testamento; US: TOD/POD, SECURE Act 10-year rule, ERISA. "
+                   "An estimate, not legal advice.",
+        "required": ["client_id (or facts [{key, value}]: cash.<id>, investment.<id>, insurance.<id>, "
+                     "property.<id>, estate.designation.<slug> {account, beneficiaries, designation_date, titling, "
+                     "...}, estate.will, estate.guardianship, estate.family {marital_regime, spouse_assets, ...})"],
+        "optional": ["review_years (default 5)", "us_situs: estate-task inputs (else US-domiciled holdings)",
+                     "as_of"],
+        "example": {"as_of": "2026-09-22", "facts": [
+            {"key": "client.profile", "value": {"residence": {"country": "MX"}, "birth_year": 1986, "dependents": 2,
+                                                "dependent_ages": [5, 9], "us_person": False, "language": "es"}},
+            {"key": "cash.bbva", "value": {"amount": 85000, "currency": "MXN", "institution": "BBVA",
+                                           "purpose": "reserve"}},
+            {"key": "estate.designation.cash-bbva", "value": {
+                "account": "cash.bbva", "designation_date": "2023-03-10",
+                "beneficiaries": [{"name": "Laura", "relationship": "spouse", "share": 1}]}},
+            {"key": "investment.gbm", "value": {"amount": 217000, "currency": "MXN", "institution": "GBM",
+                                                "kind": "brokerage"}},
+            {"key": "estate.designation.investment-gbm", "value": {"account": "investment.gbm", "beneficiaries": []}},
+            {"key": "investment.afore", "value": {"amount": 410000, "currency": "MXN",
+                                                  "institution": "Afore XXI Banorte", "kind": "afore"}},
+            {"key": "investment.cetes", "value": {"amount": 120000, "currency": "MXN", "institution": "Cetesdirecto"}},
+            {"key": "estate.designation.investment-cetes", "value": {
+                "account": "investment.cetes",
+                "beneficiaries": [{"name": "Laura", "share": 0.6}, {"name": "Sofía", "relationship": "child",
+                                                                    "share": 0.3}]}},
+            {"key": "insurance.vida", "value": {"kind": "life", "coverage": 1500000, "currency": "MXN",
+                                                "insurer": "GNP"}},
+            {"key": "estate.designation.insurance-vida", "value": {
+                "account": "insurance.vida", "designation_date": "2014-05-01",
+                "beneficiaries": [{"name": "Laura", "relationship": "spouse"}]}},
+            {"key": "property.depa", "value": {"kind": "home", "value": 3200000, "currency": "MXN"}},
+            {"key": "estate.will", "value": {"exists": False}},
+            {"key": "estate.family", "value": {"marital_status": "married", "marriage_date": "2015-06-20",
+                                               "spouse": "Laura", "marital_regime": "separacion_de_bienes",
+                                               "children": [{"name": "Sofía", "birth_year": 2017},
+                                                            {"name": "Mateo", "birth_year": 2021}],
+                                               "parents_living": 2}}]},
+        "variants": {
+            "us_401k_consent_and_ira": {"as_of": "2026-09-22", "facts": [
+                {"key": "client.profile", "value": {"residence": {"country": "US"}, "birth_year": 1980,
+                                                    "us_person": True, "dependents": 0}},
+                {"key": "investment.k401", "value": {"amount": 380000, "currency": "USD", "institution": "Fidelity",
+                                                     "kind": "retirement", "plan_type": "401k"}},
+                {"key": "estate.designation.investment-k401", "value": {
+                    "account": "investment.k401", "designation_date": "2012-02-01",
+                    "beneficiaries": [{"name": "Tom", "relationship": "sibling", "share": 1}]}},
+                {"key": "investment.ira", "value": {"amount": 95000, "currency": "USD", "institution": "Vanguard",
+                                                    "kind": "retirement", "plan_type": "roth_ira"}},
+                {"key": "estate.designation.investment-ira", "value": {
+                    "account": "investment.ira", "designation_date": "2024-01-15",
+                    "beneficiaries": [{"name": "Dana", "relationship": "spouse", "share": 0.5},
+                                      {"name": "Tom", "relationship": "sibling", "share": 0.5}]}},
+                {"key": "investment.brokerage", "value": {"amount": 60000, "currency": "USD",
+                                                          "institution": "Schwab", "kind": "brokerage"}},
+                {"key": "estate.designation.investment-brokerage", "value": {
+                    "account": "investment.brokerage", "titling": "joint", "co_owners": ["Dana"]}},
+                {"key": "estate.will", "value": {"exists": True, "date": "2019-05-01",
+                                                 "heirs": [{"name": "Dana", "relationship": "spouse"}]}},
+                {"key": "estate.family", "value": {"marital_status": "married", "marriage_date": "2020-10-10",
+                                                   "spouse": "Dana", "children": [],
+                                                   "marital_regime": "separate_property"}}]},
+            "mx_resident_us_etfs": {"as_of": "2026-09-22", "facts": [
+                {"key": "client.profile", "value": {"residence": {"country": "MX"}, "us_person": False,
+                                                    "reporting_currency": "USD"}},
+                {"key": "investment.ibkr", "value": {"amount": 150000, "currency": "USD", "institution": "IBKR",
+                                                     "kind": "brokerage"}},
+                {"key": "estate.designation.investment-ibkr", "value": {
+                    "account": "investment.ibkr", "country": "US",
+                    "beneficiaries": [{"name": "Andrés", "relationship": "child", "share": 1}]}},
+                {"key": "estate.will", "value": {"exists": True, "date": "2024-09-15"}}],
+                "us_situs": {"year": 2026, "decedent": {"us_citizen": False, "green_card": False,
+                                                        "us_domiciled": False},
+                             "assets": [{"id": "voo", "type": "us_domiciled_fund", "value_usd": 150000}]}},
+        },
     },
     "manager_search": {
         "purpose": "Find a fund manager's SEC filer (CIK) by firm or person name, with its latest 13F filing. "

@@ -494,6 +494,7 @@
         g_money_in: 'Money coming in', g_money_out: 'What you spend', g_own: 'What you own', g_owe: 'What you owe',
         g_goals: 'Goals', g_invest: 'How you invest', g_about: 'About you',
         unknownHead: 'Not known yet', monthsShort: '{n} months of transactions', leftLine: '{x} left unallocated', shortLine: 'Short by {x}', avgLine: 'avg {x} a month',
+        estate: 'Estate', estateScore: '{n}% complete', estateClear: 'No gaps in what you have told me.',
         monthDetail: 'Your month in detail', inAssetsShort: 'in assets', accountsSum: '{n} accounts', accountsSumUnknown: '{n} accounts · {u} without a figure',
         sincePeriod: 'since {d}', paidBy: 'paid off by {d}', fundedUnknown: 'No account is tied to this goal yet, so the progress is not known.', st_next: 'Next',
         connsSum: '{n} connected · {m} not connected', connsNone: 'Nothing connected yet · statements by upload', staleN: '{n} to refresh',
@@ -525,6 +526,7 @@
         step2: 'Store it yourself from Terminal; macOS asks for the value. Never paste it into the chat.',
         step3: 'Or, for one session only, export:', step4: 'Then tap Sync here.', step4_ibkr_flex: 'Then tap Sync here and have your query id ready.',
         readOnlyLine: 'Wealth only reads. It cannot trade or move money.', copy: 'Copy', copied: 'Copied.',
+        taxPack: 'Tax pack {y} for your CPA (printable)', taxPackFailed: 'The tax pack could not be downloaded.',
         export: 'Download everything (JSON)', erase: 'Delete my data', eraseLine: 'Only from the Terminal, so nothing does it by accident.', exportFailed: 'The export could not be downloaded.',
         date: 'Date', item: 'Item', value: 'Value', share: 'Share',
       },
@@ -569,6 +571,7 @@
         g_money_in: 'Dinero que entra', g_money_out: 'Lo que gastas', g_own: 'Lo que tienes', g_owe: 'Lo que debes',
         g_goals: 'Metas', g_invest: 'Cómo inviertes', g_about: 'Sobre ti',
         unknownHead: 'Aún no sé…', monthsShort: '{n} meses de movimientos', leftLine: 'Quedan {x} sin asignar', shortLine: 'Te faltan {x}', avgLine: 'prom. {x} al mes',
+        estate: 'Herencia', estateScore: '{n}% completo', estateClear: 'Sin pendientes en lo que me has contado.',
         monthDetail: 'Tu mes en detalle', inAssetsShort: 'en activos', accountsSum: '{n} cuentas', accountsSumUnknown: '{n} cuentas · {u} sin cifra',
         sincePeriod: 'desde el {d}', paidBy: 'liquidas en {d}', fundedUnknown: 'Aún no hay una cuenta ligada a esta meta; por eso no sé el avance.', st_next: 'Próxima',
         connsSum: '{n} conectadas · {m} sin conectar', connsNone: 'Nada conectado aún · estados de cuenta por archivo', staleN: '{n} por actualizar',
@@ -600,6 +603,7 @@
         step2: 'Guárdala tú desde la Terminal; macOS te pide el valor. Nunca la pegues en el chat.',
         step3: 'O, solo para esta sesión, exporta:', step4: 'Luego toca Sincronizar aquí.', step4_ibkr_flex: 'Luego toca Sincronizar aquí y ten a la mano tu query id.',
         readOnlyLine: 'Wealth solo lee. No puede operar ni mover dinero.', copy: 'Copiar', copied: 'Copiado.',
+        taxPack: 'Paquete fiscal {y} para tu contador (imprimible)', taxPackFailed: 'No se pudo descargar el paquete fiscal.',
         export: 'Descargar todo (JSON)', erase: 'Borrar mis datos', eraseLine: 'Solo desde la Terminal, para que nada lo haga por error.', exportFailed: 'No se pudo descargar la exportación.',
         date: 'Fecha', item: 'Concepto', value: 'Valor', share: 'Proporción',
       }
@@ -1008,7 +1012,7 @@
       const tiles = [renderMonthTile(p), renderGoalsTile(p), renderReserveTile(p)].filter(Boolean);
       const unknowns = renderUnknowns(p);
       const left = [renderMonthDetail(p), renderHave(p)].filter(Boolean);
-      const right = [renderOwe(p), renderReturns(p)].filter(Boolean);
+      const right = [renderOwe(p), renderReturns(p), renderEstate()].filter(Boolean);
       fill(root,
         h('h1', {}, t('you'), h('span', { class: 'dot', text: '.' })),
         h('div', { class: 'board' },
@@ -1492,6 +1496,13 @@
     }
 
     // ---- Lo que sé de ti: one sentence per group; the facts behind each open on tap, and a sentence is edited by tapping it
+    // Herencia / Estate: one collapsed line with the completeness score; the top gap opens under it.
+    function renderEstate() {
+      const e = data.estate;
+      if (!e || !isNum(e.score)) return null;
+      const line = (e.top_gap && e.top_gap[lang]) || (e.question && e.question[lang]) || t('estateClear');
+      return disc('estate', t('estate'), t('estateScore', { n: num(e.score) }), h('p', { class: 'note', text: line }));
+    }
     function renderMemory(mem) {
       const groups = mem.groups.map(g => ({ ...g, facts: g.facts.filter(f => !hidden.has(f.text)) })).filter(g => g.facts.length);
       const facts = groups.reduce((a, g) => a + g.facts.length, 0) + (mem.review || []).length;
@@ -1616,9 +1627,23 @@
         setTimeout(() => URL.revokeObjectURL(url), 4000);
       } catch (_) { say(t('exportFailed')); } finally { button.disabled = false; }
     }
+    // The annual tax pack for the last completed year: a printable page (print to PDF) from /api/tax-pack.
+    async function downloadTaxPack(button, year) {
+      button.disabled = true;
+      try {
+        const response = await fetch(`/api/tax-pack?year=${year}&format=html&lang=${lang}`,
+          { credentials: 'same-origin', cache: 'no-store', headers: { 'X-Wealth-Token': token } });
+        if (!response.ok) throw new Error(t('taxPackFailed'));
+        const url = URL.createObjectURL(await response.blob());
+        const link = h('a', { href: url, download: `tax-pack-${year}.html` });
+        document.body.append(link); link.click(); link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 4000);
+      } catch (_) { say(t('taxPackFailed')); } finally { button.disabled = false; }
+    }
     // Two quiet lines. Deleting happens only in the Terminal: the command stays folded until the line is tapped.
     function renderData() {
       if (!conns?.data) return null;
+      const taxYear = new Date().getFullYear() - 1;
       const command = String(conns.data.forget_command || '');
       const copy = h('button', { class: 'txt small', type: 'button', text: t('copy'), onclick: async () => {
         try { await navigator.clipboard.writeText(command); say(t('copied')); } catch (_) { /* the text stays selectable */ }
@@ -1629,6 +1654,7 @@
       const erase = h('button', { class: 'txt', type: 'button', text: t('erase'), 'aria-expanded': 'false', 'aria-controls': 'erase-how',
         onclick: e => { how.hidden = !how.hidden; e.currentTarget.setAttribute('aria-expanded', String(!how.hidden)); } });
       return h('div', { class: 'data' },
+        h('div', { class: 'data-row' }, h('button', { class: 'txt', type: 'button', text: t('taxPack', { y: taxYear }), onclick: e => downloadTaxPack(e.currentTarget, taxYear) })),
         h('div', { class: 'data-row' }, h('button', { class: 'txt', type: 'button', text: t('export'), onclick: e => downloadExport(e.currentTarget) })),
         h('div', { class: 'data-row' }, erase),
         how);

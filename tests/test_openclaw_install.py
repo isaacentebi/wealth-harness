@@ -197,6 +197,30 @@ def test_merge_and_remove_are_pure():
     assert "mcp" not in no_mcp
 
 
+def test_the_sec_contact_is_set_when_given_skipped_when_not_and_kept_on_rerun(home):
+    home, bin_dir, _ = home
+    config = home / ".openclaw" / "openclaw.json"
+    config.parent.mkdir()
+    config.write_text("{}")
+    skipped = _run(home, bin_dir)  # no terminal: no question, and the way to add it is printed
+    assert skipped.returncode == 0, skipped.stderr
+    assert "WEALTH_SEC_USER_AGENT" not in json.loads(config.read_text())["mcp"]["servers"]["wealth"]["env"]
+    assert "--sec-user-agent" in skipped.stdout and "e-mail" not in skipped.stdout.split("Next:")[0]
+
+    given = _run(home, bin_dir, "--sec-user-agent", "Ana Ruiz ana@example.com")
+    assert given.returncode == 0, given.stderr
+    env = json.loads(config.read_text())["mcp"]["servers"]["wealth"]["env"]
+    assert env["WEALTH_SEC_USER_AGENT"] == "Ana Ruiz ana@example.com"
+    assert "--sec-user-agent" not in given.stdout.split("Next:")[1]
+
+    rerun = _run(home, bin_dir)
+    assert rerun.returncode == 0, rerun.stderr
+    assert json.loads(config.read_text())["mcp"]["servers"]["wealth"]["env"]["WEALTH_SEC_USER_AGENT"] == \
+        "Ana Ruiz ana@example.com"
+    bad = _run(home, bin_dir, "--sec-user-agent", "no email here")
+    assert bad.returncode == 0 and "no e-mail address" in bad.stderr
+
+
 def test_install_script_is_posix_sh():
     text = INSTALL.read_text()
     assert text.startswith("#!/bin/sh\n")

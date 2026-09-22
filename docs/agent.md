@@ -210,7 +210,8 @@ a local personal interface, not a hosted multi-user service.
 
 Most of a turn is model steps, so the launcher keeps them few and small: the
 situation is built once per turn, discovery results are summaries by default (a
-turn that cannot save facts never receives the ~9k-character fact contract),
+turn never receives the ~16k-character fact contract unless it asks with
+intent=remember),
 and the answer is shown as soon as Codex reports the turn complete, while the
 process exits in the background. With app-server the first words show while
 the rest is written; with exec the whole answer appears at once.

@@ -54,7 +54,7 @@ Nine MCP tools. Each instance serves one person: use the host's profile ID as
 
 | Tool | Use |
 | --- | --- |
-| `wealth_context` | Without `client_id`: every task's purpose and required inputs (`intent="overview"`), or one task's full schema and runnable example (`intent="<task>"`). With it: relevant facts, fresh or stale; `intent="situation"` returns the whole picture |
+| `wealth_context` | Without `client_id`: every task with a one-line purpose (`intent="overview"`), or one task's full schema and runnable example (`intent="<task>"`). With it: relevant facts, fresh or stale; `intent="situation"` with `detail="brief"` is the short per-turn read, and `detail="summary"` the whole picture |
 | `wealth_run` | Run one task; `client_id` adds saved facts and the ledger; direct inputs override them for that call |
 | `wealth_remember` | Save sourced facts, corrections and merge patches |
 | `wealth_recall` | Search all remembered facts for an open question; exact keys go to `wealth_inspect` |
@@ -62,7 +62,7 @@ Nine MCP tools. Each instance serves one person: use the host's profile ID as
 | `wealth_resolve_contradiction` | Save the person's answer to a contradiction |
 | `wealth_ingest` | Statements, stated balances and connector syncs into a proposal; `confirm` saves it |
 | `wealth_decision` | Propose, accept or dismiss an evidence-bound decision |
-| `wealth_client` | `create` the profile, or `index` a host-supplied embedding |
+| `wealth_client` | `list` the profiles (ids and names), `create` one, or `index` a host-supplied embedding |
 
 Deleting a profile is not available to you; the person runs `wealth client`
 with action `forget` in their own terminal.
@@ -77,10 +77,10 @@ before answering.
 | Money in and out | `spending`, `calendar`, `income`, `project`, `ladder`, `debt_payoff`, `debt`, `plan` |
 | What they own | `ledger`, `performance`, `exposure`, `import`, `sic_premium` |
 | Investing | `policy_draft`, `policy_check`, `rebalance`, `asset_location`, `dca`, `compare`, `construct`, `analyze`, `factors`, `stress`, `research`, `value` |
-| Tax | `tax`, `mx_holdings`, `mx_interest`, `mx_deductions`, `mx_foreign`, `mx_calendar`, `estate` |
+| Tax | `tax`, `mx_holdings`, `mx_interest`, `mx_deductions`, `mx_foreign`, `mx_calendar`, `estate`, `tax_pack` (the year's pack for the contador or CPA) |
 | Retirement | `retirement_mx`, `retirement_us`, `retirement_readiness` |
 | Reviews and nudges | `today`, `weekly`, `quarterly_review`, `fee_audit`, `monitor` |
-| Protection and guardrails | `protection_review`, `life_event`, `speculation_check`, `panic_check`, `scam_check` |
+| Protection and guardrails | `protection_review`, `estate_register`, `life_event`, `speculation_check`, `panic_check`, `scam_check` |
 | Following a manager (SEC 13F) | `manager_search`, `manager_holdings`, `manager_profile`, `manager_compare`, `manager_mirror` |
 | Acting on a buy or sell | `order_ticket` |
 
@@ -148,7 +148,8 @@ accept the decision on their yes.
 Before discussing speculation (options, leverage, crypto, a single-stock bet)
 run `speculation_check`; when they want to sell everything after a fall,
 `panic_check`; when a message, offer or transfer looks off, `scam_check`; after
-a life event, `life_event`; for insurance and estate gaps, `protection_review`.
+a life event, `life_event`; for insurance and estate gaps, `protection_review`;
+for who inherits each account and beneficiary gaps, `estate_register`.
 Name the risk once, never preach, and respect that the person decides.
 
 Advice boundaries: sizes only as ranges from their own figures; explain how
@@ -176,7 +177,7 @@ passwords, tokens or other credentials; the store rejects them.
   the file or URL as `ref`) for what you read, and goals, profile, preferences,
   constraints and tax profile from them are saved as `inferred`; `inference`
   for your own reading, always `inferred`.
-- Keys and fields are in `fact_contract.schema` (`client.profile`,
+- Keys and fields are in `fact_contract.schema` (`wealth_context(client_id, intent=remember)`; `client.profile`,
   `income.<id>`, `spending.monthly`, `cash.<id>`, `liability.<id>`,
   `investment.<id>`, `goals`, `reserve`, `preference.*`, `constraint.*`,
   `thread.<id>`). One fact per income, account and debt.

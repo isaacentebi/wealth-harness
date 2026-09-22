@@ -34,7 +34,16 @@ _KIND_ALIASES = {"credit_card": "card", "tarjeta": "card", "tdc": "card", "car":
                  "hipoteca": "mortgage", "home": "mortgage", "loan": "other"}
 # Consumer credit in Mexico pays IVA on interest; home credit (and Infonavit/Fovissste) is exempt.
 _IVA_KINDS = ("card", "auto", "personal", "other")
-UNIT_DAYS = Decimal("30.4")               # INEGI: monthly UMA = daily UMA x 30.4
+TYPICAL_CARD_MINIMUM = {
+    # Banxico Circular 13/2011: the greater of 1.5% of the balance plus interest and IVA, or 1.25% of the limit.
+    "MXN": {"percent_of_balance": Decimal("0.015"), "percent_of_limit": Decimal("0.0125"),
+            "label": "Banxico minimum-payment rule (1.5% of the balance plus interest and IVA, at least 1.25% of "
+                     "the credit limit)"},
+    # The common US issuer formula (card agreements vary): 1% of the balance plus interest, at least $25.
+    "USD": {"percent_of_balance": Decimal("0.01"), "floor": Decimal(25),
+            "label": "typical US issuer minimum (1% of the balance plus interest, at least $25)"},
+}
+UNIT_DAYS = Decimal("30.4")             # INEGI: monthly UMA = daily UMA x 30.4
 INDEXATION_ASSUMED = Decimal("0.04")      # annual VSM/UMA update when none is stated (an estimate)
 LIBERATION_MONTHS = 360                   # VSM/UMA credits (post-1997 regime): cancelled after 30 years without omissions
 US_MORTGAGE_DEBT_LIMIT = Decimal(750000)  # IRC 163(h)(3)(F): acquisition debt after 2017-12-15
@@ -206,11 +215,26 @@ def normalize(row: Mapping[str, Any], index: int, today: date) -> tuple[dict | N
     credit_limit = _money_in(row.get("credit_limit"), f"{ident}.credit_limit")
     if rule is not None:
         debt["rule"] = _rule(rule, ident, missing, credit_limit)
+    if (payment is None and debt["rule"] is None and term is None and kind == "card" and not indexed
+            and balance is not None and balance > 0 and rate is not None and currency in TYPICAL_CARD_MINIMUM):
+        # A card with no stated payment runs on the regulator's (MX) or the usual issuer's (US) minimum-payment
+        # rule, flagged; a stated payment, term or rule always wins.
+        typical = TYPICAL_CARD_MINIMUM[currency]
+        floor = (typical["percent_of_limit"] * (credit_limit or balance) if "percent_of_limit" in typical
+                 else typical["floor"])
+        debt["rule"] = {"percent_of_balance": typical["percent_of_balance"], "plus_interest": True, "floor": floor}
+        debt["assumed_rule"] = True
+        assumptions.append(
+            f"ASSUMED: {ident} has no stated payment, so it is paid at the " + typical["label"]
+            + f" (floor {num(floor)} {currency}"
+            + (", 1.25% of the balance standing in for the credit limit" if "percent_of_limit" in typical
+               and credit_limit is None else "")
+            + "). Give monthly_payment for what you actually pay; it replaces this rule.")
     if payment is None and debt["rule"] is None and term is not None and balance is not None and rate is not None:
         # The level payment that repays it in ``term`` months at the monthly cost, IVA included.
         debt["payment"], debt["payment_basis"] = payment_for_term(balance, rate, iva, term), "from remaining term"
     if payment is None and debt["rule"] is not None:
-        debt["payment_basis"] = "minimum rule"
+        debt["payment_basis"] = "assumed minimum rule" if debt.get("assumed_rule") else "minimum rule"
     soft: list[dict] = []  # gaps that leave a partial projection rather than none
     if indexed:
         _indexed(debt, row, today, missing, assumptions, soft)
@@ -1420,6 +1444,12 @@ def run(inputs: Mapping[str, Any], rows: list[Mapping[str, Any]], today: date, *
             ready.append(debt)
     empty = {"status": "needs_input", "result": {"mode": mode}, "warnings": [], "sources": [], "assumptions": assumptions}
     if not ready:
+        if (mode == "prepay_vs_invest" and inputs.get("extra_monthly") is None and inputs.get("lump_sum") is None
+                and not any(str(row.get("kind") or "").lower() in ("card", "tarjeta", "credit_card", "tdc")
+                            for row in rows if isinstance(row, Mapping))):
+            missing = missing + [{"key": "extra_monthly", "reason": "missing",
+                                  "detail": "How much extra: extra_monthly (each month) or lump_sum (once).",
+                                  "detail_es": "¿Cuánto extra?: extra_monthly (cada mes) o lump_sum (una vez)."}]
         return {**empty, "missing": missing or [{"key": "liabilities", "reason": "missing",
                                                  "detail": "No debt with balance, rate and payment is known."}]}
     if mode == "amortize":
@@ -1443,7 +1473,20 @@ def run(inputs: Mapping[str, Any], rows: list[Mapping[str, Any]], today: date, *
             if missing:
                 return {**empty, "missing": missing}
             raise ValueError("prepay_vs_invest compares one debt: pass debt (an id or an object)")
-        report = prepay_vs_invest(ready[0], inputs, today, jurisdiction=jurisdiction, reserve=reserve,
+        chosen = ready[0]
+        if inputs.get("extra_monthly") is None and inputs.get("lump_sum") is None:
+            if chosen["kind"] == "card":
+                # "¿Pago la tarjeta o invierto?": the question is paying it off, so the lump sum is the balance.
+                inputs = {**inputs, "lump_sum": str(chosen["balance"])}
+                assumptions.append(f"ASSUMED: the comparison is paying off the whole {chosen['id']} balance "
+                                   f"({num(chosen['balance'])}) now versus investing that money; give lump_sum or "
+                                   "extra_monthly for another amount.")
+            else:
+                return {**empty, "missing": missing + [{
+                    "key": "extra_monthly", "reason": "missing",
+                    "detail": "How much extra: extra_monthly (each month) or lump_sum (once) against this debt.",
+                    "detail_es": "¿Cuánto extra?: extra_monthly (cada mes) o lump_sum (una vez) a esta deuda."}]}
+        report = prepay_vs_invest(chosen, inputs, today, jurisdiction=jurisdiction, reserve=reserve,
                                   risk_free=risk_free)
     missing = missing + report.get("missing", [])
     status = "partial" if missing else "ready"

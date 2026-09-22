@@ -23,16 +23,19 @@ sales. It runs on your computer, and your data stays in a local SQLite file.
 
 - **Wealth-first.** It starts with income, spending, savings, debts, goals and
   retirement, and treats investing as one part of that picture.
-- **Numbers come from code, not the model.** Fifty deterministic tasks
+- **Numbers come from code, not the model.** Fifty-three deterministic tasks
   (tax lots, Mexican real interest, IMSS pensions, rebalancing, 13F
   look-through) return each figure with its sources and assumptions. The model
   chooses what matters and says it plainly.
 - **Statements are the source of truth.** Upload a PDF or CSV statement, or sync
   Interactive Brokers, Alpaca or Cuenca. Wealth reconciles it with what you told
   it, shows the differences and saves nothing until you say yes.
-- **Read-write brokers, tap to confirm.** Connectors only read. For Alpaca the
-  model can prepare an order ticket with pre-trade checks; only your tap on its
-  card sends it. Paper trading is the default.
+- **Read-write brokers, tap to confirm.** Connectors only read. The model can
+  prepare an order ticket with pre-trade checks; only your tap on its card sends
+  it, to Alpaca or to Interactive Brokers through the gateway you run. Paper
+  trading is the default. For brokers without an API (GBM, Vest, Schwab,
+  Fidelity) the card says exactly what to place, SIC or BMV included, and your
+  next statement confirms it.
 - **Memory you can see.** Every fact records where it came from and when it was
   last checked, and you can edit, confirm or delete it on the You page.
 
@@ -75,6 +78,22 @@ cannot find it:
 }
 ```
 
+Two optional `env` entries for either host:
+
+- `"WEALTH_SEC_USER_AGENT": "Your Name you@example.com"` turns on the 13F manager
+  tasks; the SEC asks every EDGAR caller for a contact, and it goes only to sec.gov.
+- Saving a statement, answering a contradiction or accepting a decision takes two
+  calls: the first returns a summary and a one-time `confirmation_code` for you, the
+  second completes it after your yes (codes are kept in the database for 10 minutes,
+  so hosts that restart the server each turn still finish).
+  `"WEALTH_HOST_HANDLES_CONSENT": "1"` drops the code for hosts whose own
+  tool-approval prompt is your consent (Claude Code or Desktop asking before each
+  `wealth_ingest`/`wealth_decision` call). The trade-off: the code proves the yes came
+  from you after seeing the summary; with the flag, a model that calls the tool on
+  its own (for example after reading instructions planted in a statement) is stopped
+  only by that approval prompt, so leave it off if you auto-approve Wealth's tools.
+  With `claude mcp add`, pass each as `-e NAME=value`.
+
 **OpenClaw**, to talk to Wealth over WhatsApp, Telegram, iMessage or Signal:
 
 ```sh
@@ -116,11 +135,14 @@ charts and order cards drawn by the engine, not the model.
   research.
 - **Tax:** US federal lots, wash sales and harvesting; Mexico Art. 129, real
   interest, deductions and PPR, foreign securities, the tax calendar; US estate
-  exposure for non-residents.
+  exposure for non-residents; an annual tax pack for your contador or CPA
+  (Form 8949 lots with wash sales, Art. 129 per broker against the constancia,
+  FBAR/8938 flags) as JSON, CSV and a printable page.
 - **Retirement:** IMSS Ley 73 and 97, AFORE and Modalidad 40; Social Security,
   contribution limits and withdrawal order.
-- **Protection and guardrails:** insurance and estate gaps, life events,
-  speculation, panic selling and scam checks.
+- **Protection and guardrails:** insurance and estate gaps, an estate and
+  beneficiary register (who receives each account at death and the gaps by
+  amount at risk), life events, speculation, panic selling and scam checks.
 - **Reviews:** what needs attention today, a weekly letter, a quarterly review,
   a fee audit.
 - **Following managers:** SEC 13F holdings, profiles and comparisons, and a
@@ -135,6 +157,8 @@ Every task with its inputs and an example: [docs/cli.md](docs/cli.md#tasks).
   until you say yes. Keys live in the OS keychain or environment variables,
   never in the database, logs or chat.
 - **Only you place an order.** No tool, command or "yes" in chat places one.
+  Orders go to Alpaca or IBKR (paper unless you opt in) or onto a card you
+  place yourself.
   Live trading needs a server-side opt-in, a typed confirmation the first time
   and per-order and daily limits. Wealth never moves money or sends messages.
   Threat model: [docs/trading.md](docs/trading.md).

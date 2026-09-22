@@ -20,7 +20,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
-from .situation.schema import SchemaError, out_of_range, validate as validate_canonical
+from .situation.schema import SchemaError, example as schema_example, normalize as normalize_canonical, \
+    out_of_range, validate as validate_canonical
 
 
 SCHEMA_VERSION = 3
@@ -30,7 +31,7 @@ _SOURCE_KINDS = frozenset({"user", "document", "web", "tool", "inference", "conn
 _CHALLENGER_KINDS = frozenset({"document", "web", "connector", "inference", "pattern"})
 # Records that settle a figure outright (a statement, a payslip, a connected account), and the figures they settle.
 _EVIDENCE_KINDS = frozenset({"document", "connector"})
-_FIGURE_PREFIXES = ("income.", "cash.", "investment.", "liability.", "spending.", "account.")
+_FIGURE_PREFIXES = ("income.", "cash.", "investment.", "liability.", "spending.", "account.", "constancia.")
 _DECISION_STATUSES = frozenset({"accepted", "dismissed"})
 # A fact revision is ``active`` (possibly closed by valid_to), ``corrected`` (it turned out
 # wrong), or a value-less terminal row: ``forgotten`` (the person removed it) or
@@ -254,8 +255,9 @@ BEGIN SELECT RAISE(ABORT, 'conversation messages are append-only'); END""",
 MESSAGE_STATUSES = frozenset({"stopped", "failed"})  # an unfinished turn's mark (NULL: finished)
 CONVERSATION_LIMIT = 100  # messages of the current conversation loaded on startup
 _ORDER_EVENTS = frozenset({"ticket", "checks", "confirm", "blocked", "request", "response", "status",
-                           "cancel", "fill_posted", "live_acknowledged", "discarded", "nonce_rejected", "error"})
-_AUXILIARY = frozenset({"embeddings", "monitor", "ingest", "execution"})
+                           "cancel", "fill_posted", "live_acknowledged", "discarded", "nonce_rejected", "error",
+                           "reply_blocked", "placed_manually", "reconciled", "withdrawn"})
+_AUXILIARY = frozenset({"embeddings", "monitor", "ingest", "execution", "consent"})
 # The base tables of a new database (version 3 without the ledger and contradictions).
 _BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS metadata (
@@ -547,6 +549,8 @@ def merge_patch(current: Any, patch: Any, field: str = "value") -> Any:
     if isinstance(patch, list) and isinstance(current, list):
         if not any(isinstance(i, dict) for i in (*current, *patch)):
             return patch
+        if all(isinstance(i, dict) and "id" not in i for i in (*current, *patch)):
+            return patch  # a list without ids (a family's children) is the whole list, as RFC 7386 has it
         if not all(isinstance(i, dict) and "id" in i for i in (*current, *patch)):
             raise ValidationError(
                 f"merge of list {field} requires objects with an id; send the full list without merge"
@@ -1187,6 +1191,13 @@ class WealthStore:
             if owns_transaction and self._db.in_transaction:
                 self._db.execute("COMMIT")
 
+    def list_clients(self) -> list[dict[str, str]]:
+        """Every profile's id and display name (nothing else), oldest first."""
+        with self._lock:
+            with self._read_transaction():
+                return [{"client_id": row["id"], "display_name": row["display_name"]} for row in self._db.execute(
+                    "SELECT id, display_name FROM clients ORDER BY created_at, id")]
+
     def _client_row(self, client_id: str) -> sqlite3.Row:
         row = self._db.execute(
             "SELECT id, display_name, revision, created_at FROM clients WHERE id = ?",
@@ -1406,8 +1417,10 @@ class WealthStore:
         too_large = out_of_range(value, f"{key}.value")
         if too_large:
             raise ValidationError(too_large)
-        merge = raw.get("merge", False)
-        if not isinstance(merge, bool):
+        value, alias_notes = normalize_canonical(key, value)
+        # None: not said. An object then merges into an existing object value (see remember).
+        merge = raw.get("merge")
+        if merge is not None and not isinstance(merge, bool):
             raise ValidationError(f"{key}.merge must be true or false")
         source = raw.get("source")
         if not isinstance(source, Mapping) or set(source) != {"kind", "ref", "observed_on"}:
@@ -1445,7 +1458,7 @@ class WealthStore:
             valid_from = _iso_date(raw["valid_from"], f"{key}.valid_from")
             if valid_from > _today() + timedelta(days=1):
                 raise ValidationError(f"{key}.valid_from must not be in the future")
-        warnings = []
+        warnings = list(alias_notes)
         if kind in {"document", "web", "connector"} and _is_policy_key(key) and confidence != "inferred":
             confidence = "inferred"
             warnings.append(
@@ -1604,6 +1617,8 @@ class WealthStore:
                 for fact in normalized:
                     key = fact["key"]
                     prior_fact = current.get(key)
+                    if fact["merge"] is None:
+                        fact["merge"] = self._merges_by_default(fact, prior_fact, expected_revision)
                     if fact["merge"] and prior_fact is not None and fact["value"] is not None:
                         fact["value"] = merge_patch(
                             json.loads(prior_fact["value_json"]), fact["value"], key
@@ -1657,10 +1672,13 @@ class WealthStore:
                     if prior_fact is not None and not fact["merge"] and expected_revision is None and not settles:
                         if not (prior_fact["confidence"] == "inferred"
                                 and fact["confidence"] != "inferred"):
+                            patch = {"key": key, "value": fact["value"], "merge": True,
+                                     "source": fact["source"]}
                             raise ValidationError(
                                 f"{key} already has a value (client revision {current_revision}); send it with "
                                 f"merge=true and only the changed fields (no expected_revision needed), or pass "
-                                f"expected_revision={current_revision} to replace it wholesale"
+                                f"expected_revision={current_revision} to replace it wholesale. Corrected: "
+                                f"{_json(patch)[:300]}"
                             )
                     if (fact["merge"] and prior_fact is not None
                             and (prior_fact["confidence"] == "inferred" or is_stale(dict(prior_fact)))):
@@ -1673,7 +1691,9 @@ class WealthStore:
                             warnings.extend(validate_canonical(key, fact["value"]))
                         except SchemaError as exc:
                             hint = "" if prior_fact is not None else self._existing_keys_hint(client_id, key)
-                            raise ValidationError(f"{exc}; see fact_contract.schema{hint}") from exc
+                            shape = schema_example(key)
+                            shown = f"; a valid {key} value: {_json(shape)}" if shape is not None else ""
+                            raise ValidationError(f"{exc}{shown}; see fact_contract.schema{hint}") from exc
                     to_write.append((fact, prior_fact))
                 new_revision = None
                 if to_write:
@@ -1723,6 +1743,28 @@ class WealthStore:
                 self._rollback()
                 raise
         return result
+
+    @staticmethod
+    def _merges_by_default(fact: Mapping[str, Any], prior: sqlite3.Row | None,
+                           expected_revision: int | None) -> bool:
+        """What a write that does not say ``merge`` means: a patch of an existing object value.
+
+        "Mi esposo es Luis" after the family was saved adds to it rather than failing. Everything
+        else keeps the explicit contract: a revision means a wholesale replace, a statement figure
+        or a better source than an inference supersedes, lists and plain values are replaced only
+        with a revision, and an inference or pattern never patches memory implicitly.
+        """
+        if prior is None or expected_revision is not None or not isinstance(fact["value"], dict):
+            return False
+        kind = fact["source"]["kind"]
+        if kind in {"inference", "pattern"} or (kind in _EVIDENCE_KINDS and fact["key"].startswith(_FIGURE_PREFIXES)):
+            return False
+        if prior["confidence"] == "inferred" and fact["confidence"] != "inferred":
+            return False
+        try:
+            return isinstance(json.loads(prior["value_json"]), dict)
+        except (TypeError, ValueError):
+            return False
 
     def _existing_keys_hint(self, client_id: str, key: str) -> str:
         """For a new key that failed the schema: the saved keys of its kind, in case an update was meant."""
@@ -2217,7 +2259,7 @@ class WealthStore:
                         row["namespace"]: _exportable(row["namespace"], json.loads(row["value_json"]))
                         for row in self._db.execute(
                             "SELECT namespace, value_json FROM auxiliary WHERE client_id = ?", (client_id,)
-                        )
+                        ) if row["namespace"] != "consent"  # pending confirmation codes are not history
                     },
                     "ledger": self._ledger_rows(client_id, include_batches=True),
                     "orders": self._order_rows(client_id),

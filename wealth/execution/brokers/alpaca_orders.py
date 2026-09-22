@@ -89,6 +89,7 @@ from typing import Any, Callable, Mapping
 
 from ...connectors import _rest
 from ...connectors import alpaca as _connector
+from .base import BrokerError  # shared by every adapter; re-exported here for existing callers
 
 NAME = "alpaca"
 PAPER_URL = "https://paper-api.alpaca.markets"
@@ -126,17 +127,6 @@ ALLOWED: tuple[tuple[str, str, re.Pattern[str]], ...] = tuple(
 
 # (method, url, headers, body, timeout) -> (status, body bytes)
 Transport = Callable[[str, str, Mapping[str, str], "bytes | None", float], "tuple[int, bytes]"]
-
-
-class BrokerError(Exception):
-    """An Alpaca failure; the message never contains a credential."""
-
-    def __init__(self, message: str, *, status: int | None = None, retryable: bool = False,
-                 body: Any = None):
-        super().__init__(message)
-        self.status = status
-        self.retryable = retryable
-        self.body = body
 
 
 def allowed(method: str, host_kind: str, path: str) -> bool:
@@ -504,5 +494,139 @@ def client(mode: str, *, environ: Mapping[str, str] | None = None, transport: Tr
     return AlpacaOrders(keys, transport=transport, audit=audit, **kwargs) if keys else None
 
 
-__all__ = ["ALLOWED", "AlpacaKeys", "AlpacaOrders", "BrokerError", "DATA_URL", "LIVE_URL", "PAPER_URL", "allowed",
-           "base_url", "client", "load_keys", "redact", "urllib_transport"]
+# -- the OrderBroker adapter -------------------------------------------------------
+
+# Alpaca's order statuses in Wealth's line states.
+LINE_STATE = {
+    "new": "sent", "accepted": "sent", "pending_new": "sent", "accepted_for_bidding": "sent", "calculated": "sent",
+    "held": "sent", "pending_replace": "sent", "pending_cancel": "sent", "done_for_day": "sent", "stopped": "sent",
+    "suspended": "sent", "partially_filled": "partial", "filled": "filled", "canceled": "canceled",
+    "expired": "expired", "rejected": "rejected", "replaced": "canceled",
+}
+_EASTERN = "America/New_York"
+
+
+def _order_view(order: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if not order:
+        return None
+    status = order.get("status")
+    return {"id": str(order.get("id") or "") or None, "status": status,
+            "state": LINE_STATE.get(str(status), "sent"), "filled_qty": order.get("filled_qty"),
+            "filled_avg_price": order.get("filled_avg_price"), "submitted_at": order.get("submitted_at")}
+
+
+class AlpacaBroker:
+    """:class:`~wealth.execution.brokers.base.OrderBroker` over :class:`AlpacaOrders`."""
+
+    name = "alpaca"
+    label = "Alpaca"
+    submits = True
+    posts_fills = True  # with the read connector's FILL ids, so either side can sync first
+
+    def __init__(self, orders: AlpacaOrders):
+        self.client = orders
+        self.mode = orders.mode
+
+    def __repr__(self) -> str:
+        return f"AlpacaBroker(mode={self.mode!r})"
+
+    @property
+    def audit(self):
+        return self.client.audit
+
+    @audit.setter
+    def audit(self, value) -> None:
+        self.client.audit = value
+
+    def account_state(self) -> dict[str, Any]:
+        account = self.client.account()
+        if not isinstance(account, Mapping):
+            raise BrokerError("Alpaca's account answer was not an object.", retryable=True)
+        active = str(account.get("status", "")).upper() == "ACTIVE" and not any(
+            account.get(flag) for flag in ("trading_blocked", "account_blocked", "trade_suspended_by_user"))
+        power = account.get("non_marginable_buying_power")
+        if power in (None, ""):
+            power = account.get("cash")
+        number = str(account.get("account_number") or "")
+        digits = re.sub(r"\D", "", number)
+        return {"active": active, "buying_power": None if power in (None, "") else str(power), "currency": "USD",
+                "number": number or None,
+                "ledger_account_id": f"alpaca-{digits[-4:]}" if len(digits) >= 4 else f"alpaca-{self.mode}"}
+
+    def market_clock(self) -> dict[str, Any]:
+        clock = self.client.clock()
+        return {"is_open": clock.get("is_open") if isinstance(clock, Mapping) else None,
+                "next_open": clock.get("next_open") if isinstance(clock, Mapping) else None}
+
+    def instrument(self, symbol: str) -> dict[str, Any] | None:
+        asset = self.client.asset(symbol)
+        if asset is None:
+            return None
+        return {"symbol": symbol,
+                "tradable": bool(asset.get("tradable")) and str(asset.get("status", "active")) == "active",
+                "fractionable": bool(asset.get("fractionable")), "exchange": asset.get("exchange"), "currency": "USD"}
+
+    def latest_trade(self, symbol: str) -> dict[str, Any] | None:
+        return self.client.latest_trade(symbol)
+
+    def positions(self) -> list[dict[str, Any]]:
+        return [{"symbol": str(p.get("symbol") or "").upper(), "qty": str(p.get("qty_available", p.get("qty")) or 0),
+                 "market_value": p.get("market_value")} for p in self.client.positions() if isinstance(p, Mapping)]
+
+    def open_orders(self) -> list[dict[str, Any]]:
+        return [{"symbol": str(o.get("symbol") or "").upper(), "side": o.get("side"),
+                 "client_order_id": str(o.get("client_order_id") or "")}
+                for o in self.client.open_orders() if isinstance(o, Mapping)]
+
+    def submit(self, order: Mapping[str, Any]) -> dict[str, Any]:
+        body = {k: order[k] for k in ("symbol", "qty", "side", "type", "time_in_force", "client_order_id",
+                                      "limit_price") if order.get(k) is not None}
+        return _order_view(self.client.submit(body)) or {}
+
+    def order(self, order_id: str) -> dict[str, Any]:
+        return _order_view(self.client.order(order_id)) or {}
+
+    def order_by_client_id(self, client_order_id: str) -> dict[str, Any] | None:
+        return _order_view(self.client.order_by_client_id(client_order_id))
+
+    def cancel(self, order_id: str) -> None:
+        self.client.cancel(order_id)
+
+    def fills(self, after: str | None = None) -> list[dict[str, Any]]:
+        """Every FILL since ``after`` with the read connector's external id and its US Eastern trade date."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        out = []
+        for activity in self.client.all_fills(after):
+            external = _connector._external_id(activity)
+            if not external:
+                continue
+            try:
+                when = datetime.fromisoformat(str(activity.get("transaction_time") or "").replace("Z", "+00:00"))
+                day = when.astimezone(ZoneInfo(_EASTERN)).date().isoformat()
+            except ValueError:
+                day = None
+            out.append({"external_id": external, "order_id": str(activity.get("order_id") or ""),
+                        "client_order_id": None, "symbol": activity.get("symbol"), "side": activity.get("side"),
+                        "qty": activity.get("qty"), "price": activity.get("price"), "date": day})
+        return out
+
+    def ledger_account(self) -> dict[str, Any]:
+        try:
+            account_id = self.account_state()["ledger_account_id"]
+        except (BrokerError, ValueError):
+            account_id = f"alpaca-{self.mode}"
+        return {"id": account_id, "institution": "Alpaca", "type": "brokerage", "currency": "USD",
+                "owners": [{"person_id": "self", "share": "1"}],
+                "name": "Alpaca paper account" if self.mode == "paper" else "Alpaca brokerage account"}
+
+
+def broker(mode: str, **kwargs: Any) -> AlpacaBroker | None:
+    """The :class:`AlpacaBroker` for ``mode`` when its keys are configured, else ``None``."""
+    orders = client(mode, **kwargs)
+    return AlpacaBroker(orders) if orders is not None else None
+
+
+__all__ = ["ALLOWED", "AlpacaBroker", "AlpacaKeys", "AlpacaOrders", "BrokerError", "DATA_URL", "LIVE_URL",
+           "PAPER_URL", "allowed", "base_url", "broker", "client", "load_keys", "redact", "urllib_transport"]

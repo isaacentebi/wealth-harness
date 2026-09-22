@@ -20,7 +20,9 @@ Environment of the MCP server (set per turn by the launcher; see ``TurnFile``):
 A host that sets no turn session gets a two-step confirmation (``Confirmations``):
 the first call returns ``needs_person`` with a short summary and a one-time code
 the host must show the person, and only a second call with ``confirm=true`` and
-that code completes it. A host that confirms natively sets
+that code completes it. Pending codes are kept in the database, so a host that
+starts a new server process for each turn can still finish them. A host that
+confirms natively sets
 ``WEALTH_HOST_HANDLES_CONSENT=1`` to skip the second step;
 ``WEALTH_REQUIRE_TURN_CONSENT=1`` makes these operations fail closed instead.
 """
@@ -169,47 +171,75 @@ def digest_of(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, default=str, ensure_ascii=False).encode()).hexdigest()
 
 
-def _code_hash(code: str) -> str:
-    return hashlib.sha256(re.sub(r"[^A-Z0-9]", "", str(code).upper()).encode()).hexdigest()
+def _code_hash(code: str, digest: str = "") -> str:
+    """Salted with what the code covers, so a stored hash is not a lookup table of codes."""
+    return hashlib.sha256((digest + ":" + re.sub(r"[^A-Z0-9]", "", str(code).upper())).encode()).hexdigest()
 
 
 class Confirmations:
     """One-time codes for hosts that set no turn session.
 
-    ``issue(digest)`` returns a fresh code bound to that digest, replacing any
-    earlier one. ``redeem(digest, code)`` succeeds once, within the TTL, and
-    only while what the code covered is unchanged (same digest). A wrong code
-    voids the pending one, so it cannot be guessed. Codes live only in this
-    server process, and only their hashes are kept.
+    ``issue(digest, client)`` returns a fresh code bound to that digest, replacing
+    any earlier one. ``redeem(digest, code, client)`` succeeds once, within the
+    TTL, and only while what the code covered is unchanged (same digest). Any
+    redeem attempt uses the pending code up, and a wrong code voids it, so it
+    cannot be guessed. Only a salted hash of each code is kept.
+
+    ``persist(client, update)`` (optional) applies ``update`` to that client's
+    pending codes atomically and durably (the ``consent`` auxiliary namespace of
+    the database). With it a code issued by one server process can be redeemed by
+    the next, so hosts that start the MCP server for each turn can finish the two
+    steps. Without it the codes live only in this process.
     """
 
-    def __init__(self, ttl: float = CODE_TTL_SECONDS, clock: Callable[[], float] = time.monotonic):
-        self._ttl, self._clock = ttl, clock
-        self._pending: dict[str, tuple[str, float]] = {}
+    def __init__(self, ttl: float = CODE_TTL_SECONDS, clock: Callable[[], float] = time.time,
+                 persist: Callable[[str, Callable[[dict], dict]], Any] | None = None):
+        self._ttl, self._clock, self._persist = ttl, clock, persist
+        self._pending: dict[str, dict] = {}
         self._lock = threading.Lock()
 
-    def issue(self, digest: str) -> str:
-        code = "".join(secrets.choice(_CODE_ALPHABET) for _ in range(6))
+    def _apply(self, client: str | None, update: Callable[[dict], dict]) -> None:
+        if self._persist is not None and client:
+            self._persist(client, update)
+            return
         with self._lock:
-            now = self._clock()
-            self._pending = {d: entry for d, entry in self._pending.items() if entry[1] > now}
-            self._pending[digest] = (_code_hash(code), now + self._ttl)
+            key = str(client or "")
+            self._pending[key] = update(dict(self._pending.get(key) or {}))
+
+    def issue(self, digest: str, client: str | None = None) -> str:
+        code = "".join(secrets.choice(_CODE_ALPHABET) for _ in range(6))
+        now = self._clock()
+
+        def update(pending: dict) -> dict:
+            kept = {d: e for d, e in pending.items() if isinstance(e, dict) and float(e.get("expires") or 0) > now}
+            kept[digest] = {"code_hash": _code_hash(code, digest), "expires": now + self._ttl, "client": client}
+            return kept
+
+        self._apply(client, update)
         return f"{code[:3]}-{code[3:]}"
 
-    def redeem(self, digest: str, code: Any) -> bool:
+    def redeem(self, digest: str, code: Any, client: str | None = None) -> bool:
         if not isinstance(code, str) or not code.strip():
             return False
-        wanted = _code_hash(code)
-        with self._lock:
-            entry = self._pending.pop(digest, None)
-            if entry is None:
+        now = self._clock()
+        outcome = [False]
+
+        def update(pending: dict) -> dict:
+            pending = dict(pending)
+            entry = pending.pop(digest, None)
+            if not isinstance(entry, dict):
                 # The code was issued for something that has changed since (or never existed): void it.
-                for other, (hashed, _) in list(self._pending.items()):
-                    if hmac.compare_digest(hashed, wanted):
-                        del self._pending[other]
-                return False
-            hashed, expires = entry
-            return expires > self._clock() and hmac.compare_digest(hashed, wanted)
+                for other, item in list(pending.items()):
+                    if isinstance(item, dict) and hmac.compare_digest(str(item.get("code_hash")),
+                                                                      _code_hash(code, other)):
+                        del pending[other]
+                return pending
+            outcome[0] = (float(entry.get("expires") or 0) > now and entry.get("client") == client
+                          and hmac.compare_digest(str(entry.get("code_hash")), _code_hash(code, digest)))
+            return pending  # single use: right or wrong, the pending code is gone
+
+        self._apply(client, update)
+        return outcome[0]
 
 
 # --------------------------------------------------------------------------- words
@@ -297,6 +327,39 @@ def matches_choice(message: str, choice: str) -> bool:
     phrases = _CHOICES.get(choice)
     raw = str(message or "")
     return bool(phrases) and "?" not in raw and "¿" not in raw and _has(_fold(raw), phrases)
+
+
+# The person saying they placed a place-it-yourself order at their broker ("Ya la puse").
+_PLACED = (
+    "ya la puse", "ya lo puse", "ya las puse", "ya los puse", "la puse", "lo puse", "ya quedo puesta",
+    "ya quedo puesto", "ya esta puesta", "ya esta puesto", "ya la coloque", "ya lo coloque", "ya las coloque",
+    "ya los coloque", "la coloque", "ya la meti", "ya lo meti", "ya la mande", "ya lo mande", "ya la hice",
+    "ya compre", "ya lo compre", "ya la compre", "ya los compre", "ya las compre", "ya vendi", "ya lo vendi",
+    "ya la vendi", "ya los vendi", "ya las vendi", "ya quedo la orden", "ya puse la orden", "puse la orden",
+    "coloque la orden", "ya coloque la orden", "ya hice la compra", "ya hice la venta",
+    "i placed it", "i placed the order", "i placed them", "i placed the orders", "placed it", "i've placed it",
+    "ive placed it", "i have placed it", "i put it in", "i put the order in", "i submitted it", "order placed",
+    "it's placed", "its placed", "i bought it", "i bought them", "i sold it", "i sold them", "done, placed",
+    "just placed it", "i just placed it",
+)
+
+
+def says_placed(message: str) -> bool:
+    """Whether the person's own message says they placed the order themselves ("ya la puse", "I placed it").
+
+    Never with a question, a negation or a condition ("todavía no la pongo", "ya la puse, pero a otro precio").
+    """
+    raw = str(message or "")
+    text = _fold(raw)
+    if not text or "?" in raw or "¿" in raw or _has(text, _NEGATIONS) or _has(text, _HEDGES) \
+            or _has(text, _NOT_PLACED):
+        return False
+    return _has(text, _PLACED)
+
+
+_NOT_PLACED = ("haven't", "havent", "have not", "hasn't", "hasnt", "didn't", "didnt", "did not", "won't", "wont",
+               "will", "going to", "gonna", "voy a", "la pongo", "lo pongo", "la voy", "lo voy", "manana", "tomorrow",
+               "yet", "aun", "todavia", "falta", "pendiente")
 
 
 # --------------------------------------------------------------------------- numbers
@@ -454,6 +517,8 @@ def ungrounded(value: Any, figures: Iterable[float]) -> list[float]:
     missing = []
     for number in value_numbers(value):
         n = abs(number)
+        if n in restated:  # a figure copied as printed (a 1099-B can list thousands of lots)
+            continue
         if not any(_near(n, f) for f in restated):
             missing.append(number)
     return missing
