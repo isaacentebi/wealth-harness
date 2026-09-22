@@ -9,7 +9,11 @@ app.** Paper trading is the default.
 ## Brokers
 
 The account on the ticket's orders (`orders[].account_id`) picks the broker,
-by that account's institution in the ledger (or its `account.<id>` fact):
+by that account's institution in the ledger (or its `account.<id>` fact). The
+institution must be exactly one of the aliases in the canonical table in
+`base.py` ("Interactive Brokers", "Interactive Brokers LLC", "IBKR", "Alpaca
+Securities", ...) to reach an API broker; a longer name that merely contains
+one ("GBM (not Interactive Brokers)") is manual:
 
 | Institution | Adapter | What the tap does |
 |---|---|---|
@@ -17,10 +21,22 @@ by that account's institution in the ledger (or its `account.<id>` fact):
 | Interactive Brokers | `ibkr` (Client Portal gateway on this computer) | sends the orders to the account the gateway is logged into |
 | Anything else (GBM, Vest, Schwab without OAuth, Fidelity, ...) | `manual` | records "Ya la puse / I placed it"; nothing is sent |
 
-A ticket holds one account's orders. Orders without an account go to Alpaca,
-as before. An account Wealth has no record of, whose name says nothing about
-its broker, also goes to Alpaca, with a quiet line saying so; an unrecorded id
-that names a broker (`ibkr-main`, `gbm-4321`, `vest`) goes to that broker.
+A ticket holds one account's orders. When the orders name no account, the
+broker the person named picks it ("compra 10 VOO en GBM": their GBM account),
+else their only brokerage account; with several candidates the result is
+`needs_input` listing the accounts, so the model asks. Only a client with no
+brokerage account on record at all falls back to Alpaca (paper by default). An
+account Wealth has no record of, whose name says nothing about its broker,
+also goes to Alpaca, with a quiet line saying so (`account_unmatched`; on a
+live account it blocks); an unrecorded id that names a broker (`gbm-4321`,
+`vest`, `ibkr-4567`) goes to that broker.
+
+**Facts never route a live order on their own.** An `account.<id>` fact is
+something the model can write, so for Alpaca and IBKR the account the orders
+name must be the broker's own ledger account (`account_state().ledger_account_id`:
+`alpaca-<last4>`, `ibkr-<last4>`, the ids the connectors use). If the broker
+is logged into any other account, the ticket blocks (`account_mismatch`) and
+nothing is sent. The same holds for a ledger account at that institution.
 
 All three sit behind one small interface, `OrderBroker`
 (`wealth/execution/brokers/base.py`): account state (active, cash buying
@@ -48,8 +64,10 @@ module and one line in `kind_for_institution`.
    (as for every write), the code, that the ticket is unexpired (10 minutes)
    and unused, then runs every check again on fresh data. The tap confirms
    what the card showed, not just the ticket id: if re-pricing moved a line's
-   limit by more than the collar, or its quantity or amount by more than 2%,
-   or pushed a live amount over the per-order limit, nothing is sent. The
+   price or limit by more than the collar (the fresh price is compared with the
+   price the card displayed, so a limit the person gave does not hide a moved
+   market), or its quantity or amount by more than 2%, or pushed a live amount
+   over the per-order limit, nothing is sent. The
    request fails with `price_moved` (409), the card shows the new lines with a
    quiet note, and a fresh tap places them. Only then does it send the
    orders. A "yes" in chat never places anything.
@@ -86,6 +104,9 @@ the card, and the override is recorded. `block` is never overridable.
 | Same symbol and side twice in a ticket | block |
 | Another recent ticket or an open order at the broker for the same symbol and side; market closed; a passive limit far from the market; a market order (paper only) | warn |
 | Prices, account or asset could not be read (no keys, gateway down, network) | unknown |
+| The price is not current: an IBKR `C` (prior close) price while the market is open, delayed, frozen or unlabelled market data, a halt, or a last trade older than 15 minutes (market open) / one trading day (closed) | unknown (`price_stale`) |
+| Alpaca/IBKR: the broker's own account is not the ledger account the orders name | block (`account_mismatch`) |
+| An account Wealth has no record of | warn on paper, block live (`account_unmatched`) |
 | IBKR: the gateway is logged into a live account and `WEALTH_TRADING_LIVE` does not opt IBKR in | block |
 
 A dollar amount becomes a quantity at the limit price (6 decimals if the asset
@@ -97,8 +118,10 @@ and what Wealth cannot see there is a quiet line rather than a stop, because
 the person is looking at their broker's screen: cash from the ledger (warn if
 unknown or short), holdings from the ledger (a sale above them still blocks;
 no holdings on record is a warn), the limit against the last close (warn: a
-close is not a live quote), fractional quantities (warn). A missing price with
-no limit still blocks: the card must say a price. The live limits do not
+close is not a live quote), fractional quantities (warn). A missing price is a
+warn too: the line says **precio al momento de colocar** (limit at the price
+the broker shows when placing), shows no estimated amount (or a ±10% range
+from an older close, with its date), and never blocks. The live limits do not
 apply: Wealth sends nothing.
 
 ## Submission, audit and fills
@@ -132,7 +155,12 @@ statement or web page it read) **can:**
 
 - place, confirm or cancel an order. No MCP tool, CLI operation or
   `WealthService` method submits. The order-sending code is reachable only from
-  the web route, and tests assert this.
+  the web route, and tests assert this. The one MCP write, `order_ticket
+  {ticket_id, placed: true}`, only marks a place-it-yourself ticket as placed
+  by the person; it refuses Alpaca and IBKR tickets and never calls a broker.
+  It needs the person's own words in a Wealth turn ("ya la puse", "ya lo
+  compré", "I placed it") or, in another host, the two-step `needs_person`
+  code.
 - obtain the confirmation code. The code is not in any `order_ticket` result,
   status read or export. The web page gets it with the session token.
 - choose live trading, the broker URL or the limits. These come from the
@@ -179,22 +207,26 @@ rides on the gateway's logged-in session, and the only address it calls is
 5000; the host is always `localhost`).
 
 **Paper or live is the account the gateway is logged into**, read at every
-ticket and again at every tap. Account ids starting with `DU` are paper. Any
+ticket and again at every tap. Account ids starting with `DU` (or `DF`, a
+paper advisor master account) are paper. Any
 other account is live: the ticket blocks unless `WEALTH_TRADING_LIVE` names
 `ibkr` (or is `1`, which opts in IBKR only; Alpaca always needs its name,
 because its live keys may exist just for syncing). Live IBKR orders follow the
 same rules as live Alpaca: limit orders only, the per-order and daily caps,
 the typed **LIVE** the first time. If the gateway is logged into a different
 account at the tap than when the card was drawn, nothing is sent
-(`account_changed`).
+(`account_changed`). The ticket stores an HMAC-SHA256 of the account id keyed
+with a random per-profile key kept in the database (`fingerprint_key` in the
+`execution` namespace), never a plain hash a seven-digit id could be
+brute-forced from.
 
 Requests (the allowlist in `ibkr_gateway.py`; anything else is refused before
 a request is built and again in the transport):
 
 - `GET /iserver/auth/status`, `GET /iserver/accounts` (the selected account)
 - `GET /iserver/secdef/search?symbol=&secType=STK` (the conid of a US listing)
-- `GET /iserver/marketdata/snapshot` (field 31, last price; the first call
-  subscribes, a `C` prefix is the previous close, `H` a halt)
+- `GET /iserver/marketdata/snapshot` (fields 31 last price, 84 bid, 86 ask,
+  6509 market-data availability; the first call subscribes)
 - `GET /portfolio/accounts`, `GET /portfolio/{acct}/ledger` (USD cash; the
   lower of cash and settled cash, never margin), `GET /portfolio/{acct}/positions/0`
 - `POST /iserver/account/{acct}/orders` (one order, `cOID` =
@@ -202,13 +234,35 @@ a request is built and again in the transport):
 - `POST /iserver/reply/{id}`, `GET /iserver/account/orders`,
   `GET /iserver/account/order/status/{id}`, `DELETE /iserver/account/{acct}/order/{id}`
 
+**Price freshness.** The snapshot has no documented last-trade time field
+(`_updated` is when the gateway's cache changed, not when the last trade
+printed; 7295 is the day's open price, not a time). So a price counts as
+current only when field 6509 says real-time (`R`). Delayed (`D`), frozen
+(`Z`), delayed-frozen (`Y`), not subscribed (`N`) or missing availability
+while the market is open is `price_stale`. A `C`-prefixed price is the prior
+session's close: stale while the market is open, dated that session's 16:00
+New York close otherwise; `H` (halted) is never fresh. These field ids come
+from IBKR's Client Portal field list; re-check them before relying on them,
+and anything unrecognised is treated as not fresh.
+
 **Order replies.** IBKR may answer an order with a question that must be
-confirmed. Wealth confirms it inside the person's single tap only when every
-message id is known to be benign: `o163` (limit far from the market; the
-collar is tighter), `o383` (size limit) and `o451` (value limit; both covered
-by Wealth's caps). Any other message is answered `confirmed: false`, the order
-is not placed, the line shows `Not sent` with IBKR's words, and the audit
-table keeps them (`reply_blocked`).
+confirmed. Wealth confirms none of them inside the tap: every question is
+answered `confirmed: false`, the order is not placed, the line shows `Not
+sent` with IBKR's words, and the audit table keeps them (`reply_blocked`).
+That includes `o163` (the limit exceeds the account's price-percentage limit:
+with Wealth's 1% collar, receiving it means Wealth's price disagreed with
+IBKR's), `o354`, `o403`, `o10151`, `o10153`, `o10331`, `o2137`, `o10334` (the
+order would go to another account, such as an omnibus one), `p6` and `p12`.
+`o383` and `o451` are the person's own TWS precautionary limits (order size,
+total value); the line adds that they can place the order in TWS themselves or
+adjust their presets.
+
+**Order listing.** `GET /iserver/account/orders` answers the first call of a
+gateway session with an incomplete list. Wealth reads it at least twice and
+until `snapshot` is true (at most four reads), and a single silent listing
+never marks a line `failed`: it stays `unknown` and is retried on the next
+refresh; only two refreshes at least two minutes apart that both miss it mark
+it not placed. An IBKR "duplicate cOID" rejection means the order exists.
 
 **Fills** are not posted to the ledger from the order path: the Client Portal's
 execution ids are not the trade ids the Flex connector and statements use, so
@@ -226,7 +280,9 @@ statement.
     | openssl x509 -outform DER | shasum -a 256
   ```
 - or allow it unverified for the loopback address only:
-  `export WEALTH_IBKR_GATEWAY_INSECURE_LOCALHOST=1`.
+  `export WEALTH_IBKR_GATEWAY_INSECURE_LOCALHOST=1`. The connection then goes to
+  the loopback literal (`127.0.0.1`, else `::1`) with `Host: localhost`, never to
+  whatever `localhost` resolves to. A pinned certificate does the same.
 
 With neither, the certificate must verify against the system trust store (the
 stock gateway's does not), and the card says which setting to add.
@@ -263,20 +319,33 @@ The card shows, and its **Copy / Copiar** button copies:
   listing;
 - order type, limit (from the last close in Wealth's market-data cache, with
   its date: check the live quote before placing) and time in force;
-- the estimated amount in the account's currency, estimated fees (GBM: 0.25% +
-  16% IVA; other Mexican brokers about the same; US brokers no commission, all
-  shown as estimates) and, for a peso ticket, the USD/MXN rate and the USD
-  equivalent.
+- the estimated amount in the account's currency, estimated fees (GBM: "hasta
+  0.25% + IVA", with GBM+'s minimum commission of MXN 20 per trade, "estimado";
+  other Mexican brokers about 0.25% + IVA; US brokers no commission, all shown
+  as estimates) and, for a peso ticket, the USD/MXN rate with its date and the
+  USD equivalent. A dollar account at GBM ("Trading USA", currency USD) trades
+  the US listing in USD: it is priced from a USD close, and without one the
+  price is unknown with that reason (Wealth never converts a peso price).
 
 The person places the order at their broker and taps **Ya la puse / I placed
-it**. The ticket becomes `placed` and its lines `awaiting` ("Placed by you").
+it**. In another chat host (no card), the person tells the model, which calls
+`wealth_run task=order_ticket inputs {ticket_id, placed: true}`; that returns
+`needs_person` with a summary and code, and only the person's yes completes it
+(`confirm: true, confirmation_code` inside `inputs`). In a Wealth turn the
+person's own message must say they placed it. Either way the ticket records
+`placed_via` (`app` or `mcp`) and `verified: false` until reconciliation. The
+ticket becomes `placed` and its lines `awaiting` ("Placed by you").
 Every refresh (each time the cards load, or `order_status` with `refresh`)
 matches them against the ledger: a buy or sell of the same symbol in that
 account (or, if the ticket's account is not in the ledger, any account at the
 same institution), dated from the day before the tap on, not already claimed
-by another ticket. Entries add up; within 2% of the quantity the line is
-`filled` with the statement's average price and the entry ids it matched. A
-line no statement shows within 30 days is `unconfirmed`. **I did not place it /
+by another ticket. An entry for more than the order's quantity (beyond 2%) is
+a different trade and never fills the line (the line says so). One entry for
+the whole quantity is preferred (the closest wins); otherwise smaller entries
+add up without overshooting. Within 2% of the quantity the line is `filled`
+with the statement's average price and the entry ids it matched, and the
+ticket `verified`; below it, `partial`. A line no statement shows within 30
+days is `unconfirmed`; a partial one is `partial_unconfirmed`, never `filled`. **I did not place it /
 No la puse** withdraws a placed ticket.
 
 ## Alpaca setup
@@ -331,7 +400,7 @@ fills.
 - `wealth/execution/brokers/alpaca_orders.py`: the Alpaca client, its allowlist
   and the cited Alpaca documentation, and its `AlpacaBroker` adapter.
 - `wealth/execution/brokers/ibkr_gateway.py`: the IBKR gateway adapter, its
-  allowlist, TLS policy and benign reply ids.
+  allowlist, TLS policy, reply handling, snapshot fields and freshness.
 - `wealth/execution/brokers/manual.py`: place-it-yourself tickets (listing,
   reference prices, fees, FX).
 - `wealth/store.py`: the `orders` audit table (added on open, no schema version
@@ -345,3 +414,6 @@ fills.
   happy path, the reply handshake, an unknown reply refused, paper/live gating,
   a switched login, the price moved, cancel) and manual tickets with their
   later reconciliation.
+- `tests/test_execution_adversarial.py`: the adversarial review's regressions
+  (replies, freshness, routing, the order listing, reconciliation, MCP
+  placement, fingerprint, loopback transport, GBM fees).

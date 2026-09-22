@@ -21,7 +21,11 @@ from wealth.execution.brokers.base import BrokerError, OrderBroker
 from wealth.store import WealthStore
 
 PAPER_ACCOUNT, LIVE_ACCOUNT = "DU1234567", "U7654321"
-IBKR_FACTS = {"facts": [{"key": "account.ibkr-main", "value": {"institution": "Interactive Brokers"}}]}
+# Wealth names an IBKR account ibkr-<last four> (the Flex connector and the gateway adapter agree), so the paper login
+# is ibkr-4567 and the live one ibkr-4321.
+PAPER_LEDGER_ID, LIVE_LEDGER_ID = "ibkr-4567", "ibkr-4321"
+IBKR_FACTS = {"facts": [{"key": f"account.{i}", "value": {"institution": "Interactive Brokers"}}
+                        for i in (PAPER_LEDGER_ID, LIVE_LEDGER_ID)]}
 
 
 class FakeGateway:
@@ -39,6 +43,7 @@ class FakeGateway:
         self.calls: list[dict] = []
         self.subscribed: set[str] = set()
         self.next_id = 100
+        self.availability = "RpB"  # field 6509: real-time
 
     def __call__(self, method, url, headers, body, timeout):
         parts = urlsplit(url)
@@ -71,9 +76,10 @@ class FakeGateway:
                 self.subscribed.add(conid)
                 return self._json([{"conid": int(conid)}])
             symbol = next(s for s, c in self.conids.items() if c == conid)
-            return self._json([{"conid": int(conid), "31": self.prices[symbol], "_updated": NOW.timestamp() * 1000}])
+            return self._json([{"conid": int(conid), "31": self.prices[symbol], "6509": self.availability,
+                                "_updated": NOW.timestamp() * 1000}])
         if method == "GET" and path == "/iserver/account/orders":
-            return self._json({"orders": [dict(o) for o in self.orders.values()]})
+            return self._json({"orders": [dict(o) for o in self.orders.values()], "snapshot": True})
         if method == "POST" and path == f"/iserver/account/{acct}/orders":
             order = payload["orders"][0]
             if self.replies:
@@ -135,8 +141,8 @@ def gateway(monkeypatch):
     return fake
 
 
-def ibkr_ticket(db, orders, *, snapshot=IBKR_FACTS, environ=None, now=NOW):
-    orders = [{"account_id": "ibkr-main", **o} for o in orders]
+def ibkr_ticket(db, orders, *, snapshot=IBKR_FACTS, environ=None, now=NOW, account=None):
+    orders = [{"account_id": account or PAPER_LEDGER_ID, **o} for o in orders]
     with WealthStore(db) as store:
         return tickets.create_ticket(store, "ana", {"orders": orders, "rationale": "Invest the surplus at IBKR."},
                                      snapshot=snapshot, environ=environ, now=now)["result"]["ticket"]
@@ -182,7 +188,7 @@ def test_the_institution_picks_the_adapter():
 def test_a_ticket_holds_one_account_and_an_unknown_account_stays_with_the_default_broker(db, gateway, monkeypatch):
     with WealthStore(db) as store, pytest.raises(ValueError, match="one account"):
         tickets.create_ticket(store, "ana", {"rationale": "x", "orders": [
-            {"symbol": "VTI", "side": "buy", "qty": 1, "account_id": "ibkr-main"},
+            {"symbol": "VTI", "side": "buy", "qty": 1, "account_id": PAPER_LEDGER_ID},
             {"symbol": "BND", "side": "buy", "qty": 1, "account_id": "gbm-1"}]}, snapshot=IBKR_FACTS, now=NOW)
     monkeypatch.setattr(alpaca_orders, "default_transport", FakeAlpaca())
     for key, value in PAPER_ENV.items():
@@ -222,13 +228,32 @@ def test_ibkr_happy_path_prices_places_and_reads_status(db, gateway):
     assert PAPER_ACCOUNT not in json.dumps([e["payload"] for e in events])  # audit rows mask the account
 
 
-def test_ibkr_benign_reply_is_confirmed_within_the_same_tap(db, gateway):
-    gateway.replies = [["o163"], ["o451"]]
+@pytest.mark.parametrize("message_id", ["o163", "o354", "o403", "o10151", "o10153", "o10331", "o2137", "o10334",
+                                        "p6", "p12"])
+def test_ibkr_never_confirms_a_reply_within_the_tap(db, gateway, message_id):
+    # o163 (price percentage limit) means Wealth's price disagreed with IBKR's; o10334 is the omnibus (wrong)
+    # account; p6 and p12 are precautions too.  Every one is answered confirmed=false and shown.
+    gateway.replies = [[message_id]]
     view = ibkr_ticket(db, [{"symbol": "VTI", "side": "buy", "qty": 1}])
     placed = confirm(db, view["id"])
     replies = [c for c in gateway.calls if c["path"].startswith("/iserver/reply/")]
-    assert [c["body"] for c in replies] == [{"confirmed": True}, {"confirmed": True}]
-    assert placed["lines"][0]["state"] == "sent" and len(gateway.orders) == 1
+    assert [c["body"] for c in replies] == [{"confirmed": False}]
+    line = placed["lines"][0]
+    assert gateway.orders == {} and line["state"] == "failed"
+    assert f"Notice {message_id}" in line["reason"] and "not placed" in line["reason"]
+    assert "TWS" not in line["reason"]
+
+
+@pytest.mark.parametrize("message_id", ["o383", "o451"])
+def test_ibkr_tws_precaution_is_blocked_with_a_note_about_presets(db, gateway, message_id):
+    gateway.replies = [[message_id]]
+    view = ibkr_ticket(db, [{"symbol": "VTI", "side": "buy", "qty": 1}])
+    line = confirm(db, view["id"])["lines"][0]
+    replies = [c for c in gateway.calls if c["path"].startswith("/iserver/reply/")]
+    assert [c["body"] for c in replies] == [{"confirmed": False}] and gateway.orders == {}
+    assert line["state"] == "failed" and f"Notice {message_id}" in line["reason"]
+    assert "place the order in TWS yourself" in line["reason"] and "presets" in line["reason"]
+    assert ibkr_gateway.BENIGN_REPLIES == frozenset()
 
 
 def test_ibkr_unknown_reply_is_refused_and_shown(db, gateway):
@@ -247,7 +272,7 @@ def test_ibkr_unknown_reply_is_refused_and_shown(db, gateway):
 
 def test_ibkr_live_account_needs_the_opt_in_and_keeps_the_limits(db, gateway):
     gateway.account = LIVE_ACCOUNT
-    view = ibkr_ticket(db, [{"symbol": "VTI", "side": "buy", "qty": 2}])
+    view = ibkr_ticket(db, [{"symbol": "VTI", "side": "buy", "qty": 2}], account=LIVE_LEDGER_ID)
     assert view["mode"] == "live" and view["blocked"]
     assert "live_disabled" in {n["code"] for n in view["notices"]}
     with pytest.raises(tickets.ConfirmError) as off:
@@ -255,12 +280,15 @@ def test_ibkr_live_account_needs_the_opt_in_and_keeps_the_limits(db, gateway):
     assert off.value.kind == "live_disabled" and gateway.order_posts() == []
 
     live = {"WEALTH_TRADING_LIVE": "1"}
-    big = ibkr_ticket(db, [{"symbol": "VTI", "side": "buy", "qty": 5}], environ=live)  # about USD 1,256
+    big = ibkr_ticket(db, [{"symbol": "VTI", "side": "buy", "qty": 5}], account=LIVE_LEDGER_ID,
+                      environ=live)  # about USD 1,256
     assert big["mode"] == "live" and "live_order_limit" in {n["code"] for n in big["notices"]}
-    market = ibkr_ticket(db, [{"symbol": "BND", "side": "buy", "qty": 1, "type": "market"}], environ=live)
+    market = ibkr_ticket(db, [{"symbol": "BND", "side": "buy", "qty": 1, "type": "market"}], account=LIVE_LEDGER_ID,
+                         environ=live)
     assert "live_needs_limit" in {n["code"] for n in market["notices"]}
 
-    ok = ibkr_ticket(db, [{"symbol": "VTI", "side": "buy", "qty": 1}], environ={"WEALTH_TRADING_LIVE": "ibkr"})
+    ok = ibkr_ticket(db, [{"symbol": "VTI", "side": "buy", "qty": 1}], account=LIVE_LEDGER_ID,
+                     environ={"WEALTH_TRADING_LIVE": "ibkr"})
     assert not ok["blocked"] and ok["needs_typed"]
     with pytest.raises(tickets.ConfirmError) as typed:
         confirm(db, ok["id"], environ=live)
@@ -447,10 +475,18 @@ def test_a_manual_trade_no_statement_shows_becomes_unconfirmed_and_can_be_withdr
     assert withdrawn["status"] == "done" and withdrawn["lines"][0]["state"] == "canceled"
 
 
-def test_manual_ticket_without_a_reference_price_needs_a_limit(db, quotes):
+def test_manual_ticket_without_a_reference_price_is_placed_at_the_brokers_price(db, quotes):
+    # The person places it and sees GBM's screen: no price is a quiet line ("precio al momento de colocar"),
+    # never a block, and no amount is invented.
     _seed_gbm(db)
     view = gbm_ticket(db, [{"symbol": "IVV", "side": "buy", "qty": 1, "exchange": "SIC"}])
-    assert view["blocked"] and "price_unknown" in {n["code"] for n in view["notices"]}
+    notices = {n["code"]: n for n in view["notices"]}
+    assert not view["blocked"], view["notices"]
+    assert notices["price_unknown"]["status"] == "warn"
+    assert "precio al momento de colocar" in notices["price_unknown"]["message"]
+    line = view["lines"][0]
+    assert line["price_note"] == "precio al momento de colocar" and "estimated_amount" not in line
+    assert "limit_price" not in line and "precio al momento de colocar" in view["manual"]["es"]
     given = gbm_ticket(db, [{"symbol": "IVV", "side": "buy", "qty": 1, "exchange": "SIC", "limit_price": "11000"}])
     assert not given["blocked"] and given["lines"][0]["estimated_amount"] == "11000"
 

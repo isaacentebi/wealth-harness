@@ -8,7 +8,8 @@ session, and the only address it ever calls is ``https://localhost:<port>/v1/api
 
 Paper or live
     Decided by the account the gateway is logged into, read at every ticket and
-    again at every confirmation: an account id starting with ``DU`` is paper.
+    again at every confirmation: an account id starting with ``DU`` (or ``DF``,
+    a paper advisor master account) is paper.
     Anything else is live and needs ``WEALTH_TRADING_LIVE=ibkr`` (or ``1``) in
     the server's environment, plus the same live limits as Alpaca (per-order and
     daily caps, limit orders only, a typed confirmation the first time).  If the
@@ -20,7 +21,10 @@ The gateway's certificate
     ``WEALTH_IBKR_GATEWAY_CERT_SHA256=<sha256 of the DER certificate>`` (the
     connection is refused unless the gateway presents exactly that certificate),
     or allow it without verification for the loopback address only with
-    ``WEALTH_IBKR_GATEWAY_INSECURE_LOCALHOST=1``.  With neither, the certificate
+    ``WEALTH_IBKR_GATEWAY_INSECURE_LOCALHOST=1``.  Without hostname
+    verification the connection goes to the loopback literal (``127.0.0.1``,
+    then ``::1``), never a name resolved at run time, with ``Host: localhost``.
+    With neither, the certificate
     must verify against the system's trust store, which the stock gateway's does
     not, and the error says which setting to add.  ``WEALTH_IBKR_GATEWAY_PORT``
     (default 5000) is the only part of the address that can change; the host is
@@ -29,11 +33,16 @@ The gateway's certificate
 Order replies
     ``POST /iserver/account/{acct}/orders`` may answer with a question
     (``[{id, message: [...], messageIds: [...]}]``) that must be confirmed with
-    ``POST /iserver/reply/{id}``.  Wealth confirms it as part of the person's
-    single tap only when every message id is in :data:`BENIGN_REPLIES` —
-    precautionary notices about price and size that Wealth's own collar and
-    limits already cover.  Any other message is answered ``confirmed: false``,
-    nothing is placed, and the card shows IBKR's words.
+    ``POST /iserver/reply/{id}``.  Wealth confirms none of them within the
+    person's tap (:data:`BENIGN_REPLIES` is empty): every question is answered
+    ``confirmed: false``, nothing is placed, and the card shows IBKR's words.
+    ``o163`` (the limit is beyond the account's price-percentage limit) means
+    Wealth's reference price disagreed with IBKR's; ``o383``/``o451`` are the
+    person's own TWS precautionary size/value limits, so the card adds that
+    they can place it in TWS themselves or adjust their presets.  ``o354``
+    (no market data), ``o403``, ``o10151``/``o10153`` (outside regular hours),
+    ``o10331``, ``o2137``, ``o10334`` (the order would go to another account,
+    e.g. an omnibus one), ``p6`` and ``p12`` are refused like any other.
 
 Allowlist
     GETs on a fixed list, ``POST`` of one order, ``POST`` of a reply and
@@ -52,26 +61,49 @@ IBKR sources (Client Portal Web API v1; re-check before relying on a detail)
     * Overview, the gateway, its self-signed certificate and session:
       https://www.interactivebrokers.com/campus/ibkr-api-page/cpapi-v1/
     * Endpoints used: ``/iserver/auth/status``, ``/iserver/accounts``,
-      ``/iserver/secdef/search``, ``/iserver/marketdata/snapshot`` (field 31,
-      last price; a ``C`` prefix is the previous close, ``H`` a halted symbol),
+      ``/iserver/secdef/search``, ``/iserver/marketdata/snapshot`` (see
+      :data:`SNAPSHOT_FIELDS`),
       ``/iserver/account/{acct}/orders``, ``/iserver/reply/{replyId}``,
       ``/iserver/account/orders``, ``/iserver/account/order/status/{orderId}``,
       ``DELETE /iserver/account/{acct}/order/{orderId}``, ``/portfolio/accounts``
       (must precede other portfolio calls), ``/portfolio/{acct}/ledger`` and
       ``/portfolio/{acct}/positions/0``:
       https://www.interactivebrokers.com/campus/ibkr-api-page/cpapi-v1/#endpoints
+    * Snapshot fields: https://www.interactivebrokers.com/campus/ibkr-api-page/cpapi-v1/#market-data-fields
+
+Price freshness
+    The snapshot has no documented last-trade *time* field (as far as Wealth's
+    sources go; ``_updated`` is when the gateway's cache for the conid last
+    changed, not when the last trade printed, and 7295 is the day's open price,
+    not a time).  So a price is taken as current only when field 6509 (market
+    data availability) says real-time (``R``); delayed (``D``), frozen (``Z``),
+    delayed-frozen (``Y``) or not subscribed (``N``) data, or a missing 6509
+    while the market is open, is not fresh.  A ``C``-prefixed last price is the
+    prior session's close: stale while the market is open, and stamped with that
+    session's 16:00 New York close otherwise.  ``H`` is a halted symbol (never
+    fresh).  Re-check these ids against IBKR's field list before relying on
+    them; an unrecognised answer is treated as not fresh.
+
+Order listing
+    ``GET /iserver/account/orders`` answers the first call of a gateway session
+    with an empty or partial list (``snapshot: false``) while it subscribes.
+    Wealth calls it at least twice and until ``snapshot`` is true (bounded), and
+    never treats one listing's silence as "not placed".  A duplicate-``cOID``
+    rejection means the order already exists.
 """
 
 from __future__ import annotations
 
 import hashlib
+import hmac
 import http.client
 import json
 import os
 import re
 import ssl
+import time
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Mapping
 from zoneinfo import ZoneInfo
@@ -90,13 +122,27 @@ PIN_ENV = "WEALTH_IBKR_GATEWAY_CERT_SHA256"
 INSECURE_ENV = "WEALTH_IBKR_GATEWAY_INSECURE_LOCALHOST"
 LIVE_ENV = "WEALTH_TRADING_LIVE"
 PAPER_PREFIX = "DU"
+PAPER_PREFIXES = ("DU", "DF")  # DF: a paper advisor (master) account
+LOOPBACK = ("127.0.0.1", "::1")
 US_EXCHANGES = frozenset({"NYSE", "NASDAQ", "ARCA", "AMEX", "BATS", "NYSE ARCA", "NYSEARCA", "CBOE", "IEX", "PINK"})
-# Order-reply message ids Wealth confirms within the person's tap.  Each is a precaution Wealth's own checks already
-# cover: o163 "the limit price is more than X% from the market" (the collar is tighter), o383 "the order size
-# exceeds the size limit" and o451 "the order value exceeds the total value limit" (the per-order and daily caps).
-# Anything else (e.g. o354 "no market data", o10151 "outside regular trading hours", a margin or short-sale notice)
-# stops the order and is shown to the person.
-BENIGN_REPLIES = frozenset({"o163", "o383", "o451"})
+# Order-reply message ids Wealth would confirm within the person's tap: none.  Every IBKR question stops the order
+# and is shown to the person.  In particular o163 ("the limit price exceeds the price percentage limit") is not a
+# precaution Wealth's collar covers: with a 1% collar, receiving it at all means Wealth's reference price disagreed
+# with IBKR's.  o383 / o451 are the person's own TWS precautionary limits (order size / total value).
+BENIGN_REPLIES: frozenset[str] = frozenset()
+PRESET_REPLIES = frozenset({"o383", "o451"})
+_PRESET_NOTE = (" This is your own precautionary limit in TWS (order size or total value): place the order in TWS "
+                "yourself, or adjust your presets (Global Configuration > Presets > Precautionary Settings) and ask "
+                "for a new ticket.")
+# Snapshot fields requested (Client Portal v1): 31 last price (C prefix: prior close; H: halted), 84 bid, 86 ask,
+# 6509 market data availability (R real-time, D delayed, Z frozen, Y frozen delayed, N not subscribed; then P/p
+# snapshot/consolidated and B book).  7295 is the day's open price, not a time; IBKR documents no last-trade time.
+SNAPSHOT_FIELDS = ("31", "84", "86", "6509")
+ORDER_LIST_ATTEMPTS = 4   # at least two calls, then a bounded wait for snapshot: true
+ORDER_LIST_PAUSE = 0.5    # seconds between the later attempts
+_DUPLICATE = re.compile(r"dup(licate)?\w*[^.]{0,40}(order|c?oid|id|ref)"
+                        r"|(c?oid|order ref)[^.]{0,40}(already|exist|in use)"
+                        r"|already (been )?(registered|exists|submitted)", re.IGNORECASE)
 _ACCOUNT = r"[A-Z]{1,3}[0-9]{4,12}"
 _ORDER_ID = re.compile(r"^[0-9]{1,20}$")
 _REPLY_ID = re.compile(r"^[A-Za-z0-9-]{1,64}$")
@@ -139,7 +185,7 @@ def live_opted_in(environ: Mapping[str, str] | None = None) -> bool:
 
 
 def is_paper_account(account_id: Any) -> bool:
-    return str(account_id or "").upper().startswith(PAPER_PREFIX)
+    return str(account_id or "").upper().startswith(PAPER_PREFIXES)
 
 
 # -- TLS and transport -------------------------------------------------------------------
@@ -182,6 +228,29 @@ def gateway_port(environ: Mapping[str, str] | None = None) -> int:
     return port if 1 <= port <= 65535 else DEFAULT_PORT
 
 
+def _connect(port: int, timeout: float, tls: TlsPolicy) -> http.client.HTTPSConnection:
+    """A connected HTTPS connection to the gateway on this computer.
+
+    Without hostname verification (a pin, or loopback-only unverified), the socket goes to the loopback literal
+    (127.0.0.1, then ::1), never to whatever ``localhost`` resolves to; the Host header still says localhost.
+    With the system trust store the name is verified, so it connects to ``localhost`` itself.
+    """
+    if not (tls.pin or tls.insecure_localhost):
+        connection = http.client.HTTPSConnection(HOST, port, timeout=timeout, context=tls.context())
+        connection.connect()
+        return connection
+    last: OSError | None = None
+    for address in LOOPBACK:
+        connection = http.client.HTTPSConnection(address, port, timeout=timeout, context=tls.context())
+        try:
+            connection.connect()
+            return connection
+        except ConnectionRefusedError as exc:  # the gateway may listen on one loopback family only
+            connection.close()
+            last = exc
+    raise last or ConnectionRefusedError("gateway not listening on loopback")
+
+
 def https_transport(method: str, url: str, headers: Mapping[str, str], body: bytes | None, timeout: float, *,
                     tls: TlsPolicy) -> tuple[int, bytes]:
     """HTTPS to the local gateway only, with the TLS policy, the allowlist, no redirects and a size cap."""
@@ -191,18 +260,19 @@ def https_transport(method: str, url: str, headers: Mapping[str, str], body: byt
     if not allowed(method, parts.path):
         raise BrokerError(f"Refusing {method} {parts.path}: not a request Wealth makes to IBKR.")
     target = parts.path + (f"?{parts.query}" if parts.query else "")
-    connection = http.client.HTTPSConnection(HOST, parts.port or DEFAULT_PORT, timeout=timeout,
-                                             context=tls.context())
+    port = parts.port or DEFAULT_PORT
+    headers = {**dict(headers), "Host": f"{HOST}:{port}"}
     failure: BrokerError | None = None
     status, data = 0, b""
+    connection = None
     try:
-        connection.connect()
+        connection = _connect(port, timeout, tls)
         if tls.pin:
             der = connection.sock.getpeercert(binary_form=True) if connection.sock else None
             if not der or hashlib.sha256(der).hexdigest() != tls.pin:
                 raise BrokerError("The IBKR gateway's certificate does not match WEALTH_IBKR_GATEWAY_CERT_SHA256; "
                                   "nothing was sent.")
-        connection.request(method, target, body=body, headers=dict(headers))
+        connection.request(method, target, body=body, headers=headers)
         response = connection.getresponse()
         status = response.status
         if 300 <= status < 400:
@@ -220,7 +290,8 @@ def https_transport(method: str, url: str, headers: Mapping[str, str], body: byt
         failure = BrokerError(f"Could not reach the IBKR gateway on localhost ({type(exc).__name__}). Is it running "
                               "and logged in?", retryable=True)
     finally:
-        connection.close()
+        if connection is not None:
+            connection.close()
     if failure is not None:
         raise failure
     if len(data) > MAX_RESPONSE_BYTES:
@@ -256,6 +327,14 @@ def _ibkr_symbol(symbol: str) -> str:
 
 def _wealth_symbol(symbol: Any) -> str:
     return re.sub(r"\s+", ".", str(symbol or "").strip().upper())
+
+
+def _prior_close(now: datetime) -> datetime:
+    """16:00 New York on the last weekday before ``now``'s New York date (a ``C`` price's session)."""
+    day = now.astimezone(_EASTERN).date() - timedelta(days=1)
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    return datetime(day.year, day.month, day.day, 16, 0, tzinfo=_EASTERN).astimezone(timezone.utc)
 
 
 def _us_session_open(now: datetime) -> bool:
@@ -294,6 +373,11 @@ class IbkrBroker:
         self.mode: str | None = None
         self._portfolio_ready = False
         self._conids: dict[str, dict[str, Any]] = {}
+        self._sleep: Callable[[float], None] = time.sleep
+
+    def use_clock(self, clock: Callable[[], datetime]) -> None:
+        """The moment market hours and price freshness are judged at (the ticket checks' own ``now``)."""
+        self._clock = clock
 
     def __repr__(self) -> str:
         return f"IbkrBroker(mode={self.mode!r}, account={mask(self.account_id) if self.account_id else None!r})"
@@ -375,8 +459,20 @@ class IbkrBroker:
         self.mode = "paper" if is_paper_account(account) else "live"
         return account
 
-    def fingerprint(self) -> str:
-        """A stable, non-reversible id of the logged-in account, stored on a ticket to detect a switched login."""
+    def fingerprint(self, key: bytes | None = None) -> str:
+        """An id of the logged-in account, stored on a ticket to detect a switched login.
+
+        With ``key`` (the profile's random fingerprint key, kept in its database) it is an HMAC-SHA256, which
+        cannot be brute-forced from the ticket alone the way a hash of a seven-digit account id can.  Without
+        a key it is the masked number only (``****4567``), which reveals nothing more than the card does.
+        """
+        account = self.resolve()
+        if not key:
+            return mask(account)
+        return hmac.new(key, f"wealth-ibkr:{account}".encode(), hashlib.sha256).hexdigest()[:32]
+
+    def legacy_fingerprint(self) -> str:
+        """The unkeyed fingerprint tickets stored before the keyed one (read only, to recognise them)."""
         return hashlib.sha256(f"wealth-ibkr:{self.resolve()}".encode()).hexdigest()[:16]
 
     def _portfolio(self) -> str:
@@ -427,10 +523,15 @@ class IbkrBroker:
         return match
 
     def latest_trade(self, symbol: str) -> dict[str, Any] | None:
+        """``{price, at, fresh, stale_reason?, availability}``; ``fresh`` is False for a price that is not current.
+
+        See the module notes (Price freshness): a ``C`` prefix is the prior session's close, and delayed,
+        frozen or unlabelled data is never fresh while the market is open.
+        """
         info = self.instrument(symbol)
         if info is None:
             return None
-        query = {"conids": info["conid"], "fields": "31"}
+        query = {"conids": info["conid"], "fields": ",".join(SNAPSHOT_FIELDS)}
         row: Mapping[str, Any] = {}
         for _ in range(2):  # the first snapshot for a conid only subscribes; the second carries the fields
             data = self._ok("GET", "/iserver/marketdata/snapshot", query=query)
@@ -444,11 +545,33 @@ class IbkrBroker:
         price = _dec(raw.lstrip("CH"))
         if price is None or price <= 0:
             return None
-        at = None
+        now = self._clock()
+        market_open = _us_session_open(now)
+        availability = str(row.get("6509") or "").strip()
+        at, fresh, reason = None, True, None
         updated = row.get("_updated")
-        if flag != "H" and isinstance(updated, (int, float)) and updated > 0:
+        if flag == "H":
+            fresh, reason = False, "IBKR marks the symbol halted"
+        elif flag == "C":
+            if market_open:
+                fresh, reason = False, "IBKR shows only the prior session's close (no trade yet this session)"
+            at = _prior_close(now).isoformat()
+        elif isinstance(updated, (int, float)) and updated > 0:
             at = datetime.fromtimestamp(updated / 1000, tz=timezone.utc).isoformat()
-        return {"price": _s(price), "at": at}
+        kind = availability[:1]
+        if fresh and kind in ("D", "Y"):
+            fresh, reason = False, "IBKR's market data for this symbol is delayed"
+        elif fresh and kind == "N":
+            fresh, reason = False, "this account has no market-data subscription for the symbol"
+        elif fresh and kind == "Z" and market_open:
+            fresh, reason = False, "IBKR's market data for this symbol is frozen"
+        elif fresh and market_open and kind != "R":
+            fresh, reason = False, "IBKR did not say the price is real-time"
+        out: dict[str, Any] = {"price": _s(price), "at": at, "fresh": fresh, "availability": availability or None}
+        if not fresh:
+            out["stale_reason"] = reason
+            out["at"] = None
+        return out
 
     # -- positions and orders
     def positions(self) -> list[dict[str, Any]]:
@@ -465,10 +588,23 @@ class IbkrBroker:
         return out
 
     def _orders(self) -> list[Mapping[str, Any]]:
+        """Live orders, read until the gateway says the list is complete (``snapshot: true``).
+
+        The first call of a gateway session only starts the subscription and may answer empty, so this always
+        calls at least twice and at most :data:`ORDER_LIST_ATTEMPTS` times; a list that never says it is
+        complete raises a retryable error rather than being taken for "no such order".
+        """
         self.resolve()
-        data = self._ok("GET", "/iserver/account/orders")
-        rows = (data or {}).get("orders") if isinstance(data, Mapping) else data
-        return [r for r in rows or [] if isinstance(r, Mapping)]
+        for attempt in range(ORDER_LIST_ATTEMPTS):
+            if attempt >= 2:
+                self._sleep(ORDER_LIST_PAUSE)
+            data = self._ok("GET", "/iserver/account/orders")
+            rows = (data or {}).get("orders") if isinstance(data, Mapping) else None
+            complete = isinstance(data, Mapping) and data.get("snapshot") is True
+            if attempt >= 1 and complete:
+                return [r for r in rows or [] if isinstance(r, Mapping)]
+        raise BrokerError("IBKR's order list was not complete after several reads; try again shortly.",
+                          retryable=True)
 
     @staticmethod
     def _view(order: Mapping[str, Any]) -> dict[str, Any]:
@@ -530,7 +666,14 @@ class IbkrBroker:
                 if item is None:
                     raise BrokerError("IBKR's order answer was empty.", retryable=True)
                 if item.get("error"):
-                    raise BrokerError(f"IBKR rejected the order: {self._scrub(str(item['error']))[:300]}", status=400)
+                    text = self._scrub(str(item["error"]))[:300]
+                    if _DUPLICATE.search(text):  # the cOID is already registered: the order exists
+                        found = self.order_by_client_id(cid)
+                        if found:
+                            return found
+                        raise BrokerError(f"IBKR says this order already exists ({text}); Wealth will read its "
+                                          "status on the next refresh.", retryable=True, kind="duplicate")
+                    raise BrokerError(f"IBKR rejected the order: {text}", status=400)
                 if item.get("order_id"):
                     view = self._view(item)
                     view["status"] = view["status"] or "Submitted"
@@ -541,14 +684,18 @@ class IbkrBroker:
                     raise BrokerError("IBKR answered the order with something Wealth does not know.", retryable=True)
                 if not ids or any(i not in BENIGN_REPLIES for i in ids):
                     self._ok("POST", f"/iserver/reply/{reply_id}", body={"confirmed": False}, audit_as="reply")
+                    note = _PRESET_NOTE if any(i in PRESET_REPLIES for i in ids) else ""
                     raise BrokerError("IBKR asked to confirm: " + " ".join(messages)[:400] + " Wealth did not "
-                                      "confirm it, so the order was not placed.", status=409, kind="reply_blocked",
-                                      body={"message_ids": ids, "messages": messages})
+                                      "confirm it, so the order was not placed." + note, status=409,
+                                      kind="reply_blocked", body={"message_ids": ids, "messages": messages})
                 answer = self._ok("POST", f"/iserver/reply/{reply_id}", body={"confirmed": True}, audit_as="reply")
             raise BrokerError("IBKR kept asking questions; the order was not confirmed.", kind="reply_blocked")
         except BrokerError as exc:
-            if exc.kind != "reply_blocked" and (exc.retryable or exc.status is None):
-                found = self.order_by_client_id(cid)  # a lost answer may hide a placed order
+            if exc.kind not in ("reply_blocked", "duplicate") and (exc.retryable or exc.status is None):
+                try:
+                    found = self.order_by_client_id(cid)  # a lost answer may hide a placed order
+                except BrokerError:
+                    found = None  # the listing is not readable now: the line stays unknown, never "not placed"
                 if found:
                     return found
             raise
@@ -574,5 +721,6 @@ def broker(*, environ: Mapping[str, str] | None = None, **kwargs: Any) -> IbkrBr
     return IbkrBroker(environ=environ, **kwargs)
 
 
-__all__ = ["ALLOWED", "BENIGN_REPLIES", "IbkrBroker", "TlsPolicy", "allowed", "broker", "gateway_port",
+__all__ = ["ALLOWED", "BENIGN_REPLIES", "PRESET_REPLIES", "SNAPSHOT_FIELDS", "IbkrBroker", "TlsPolicy", "allowed",
+           "broker", "gateway_port",
            "https_transport", "is_paper_account", "live_opted_in"]

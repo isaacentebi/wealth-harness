@@ -1106,7 +1106,7 @@
           priceMovedFrom: was => `The price moved; the total was ${was}. Review and confirm again.`,
           states: { proposed: '', sent: 'Sent', partial: 'Partly filled', filled: 'Filled', rejected: 'Rejected',
                     failed: 'Not sent', canceled: 'Cancelled', expired: 'Expired', unknown: 'Unconfirmed',
-                    awaiting: 'Placed by you', unconfirmed: 'Not confirmed' },
+                    awaiting: 'Placed by you', unconfirmed: 'Not confirmed', partial_unconfirmed: 'Partly confirmed' },
           manual: 'Place it yourself', placed1: 'I placed it', placedN: 'I placed them', notPlaced: 'I did not place it',
           awaiting: 'Waiting for your next statement or sync to confirm it.', copy: 'Copy', copied: 'Copied',
           fees: 'Estimated fees', fx: (pair, rate, usd) => `${pair} ${rate} · about ${usd} USD`,
@@ -1210,7 +1210,7 @@
           priceMovedFrom: was => `El precio cambió; el total era ${was}. Revisa y confirma de nuevo.`,
           states: { proposed: '', sent: 'Enviada', partial: 'Ejecutada en parte', filled: 'Ejecutada', rejected: 'Rechazada',
                     failed: 'No enviada', canceled: 'Cancelada', expired: 'Vencida', unknown: 'Sin confirmar',
-                    awaiting: 'Puesta por ti', unconfirmed: 'Sin confirmar' },
+                    awaiting: 'Puesta por ti', unconfirmed: 'Sin confirmar', partial_unconfirmed: 'Confirmada en parte' },
           manual: 'Colócala tú', placed1: 'Ya la puse', placedN: 'Ya las puse', notPlaced: 'No la puse',
           awaiting: 'Esperando tu próximo estado de cuenta o sincronización para confirmarla.', copy: 'Copiar', copied: 'Copiado',
           fees: 'Comisiones estimadas', fx: (pair, rate, usd) => `${pair} ${rate} · unos ${usd} USD`,
@@ -2135,9 +2135,10 @@
       dt.append(sub);  // the card's head already names the account
       const extra = [];
       if (line.estimated_fee !== undefined && Number(line.estimated_fee) > 0) extra.push(`${O.fees} ${orderUsd(line.estimated_fee)}`);
-      if (line.fx && line.fx.rate) extra.push(O.fx(line.fx.pair, line.fx.rate, line.fx.usd_amount));
+      if (line.fx && line.fx.rate) extra.push(O.fx(line.fx.pair, line.fx.rate, line.fx.usd_amount) + (line.fx.as_of ? ` (${line.fx.as_of})` : ''));
       if (line.reference_date && line.state === 'proposed') extra.push(O.reference(line.reference_date));
-      if (line.reason && (line.state === 'failed' || line.state === 'unconfirmed' || line.state === 'rejected')) extra.push(line.reason);
+      if (line.price_note && line.limit_price === undefined) extra.push(line.price_note);
+      if (line.reason && ['failed', 'unconfirmed', 'partial_unconfirmed', 'rejected', 'partial', 'awaiting', 'unknown'].includes(line.state)) extra.push(line.reason);
       if (extra.length) dt.append(el('span', 'sub', extra.join(' · ')));
       const dd = el('dd');
       const eq = el('span', 'eq', '='); eq.setAttribute('aria-hidden', 'true');

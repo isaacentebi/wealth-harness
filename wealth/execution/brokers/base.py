@@ -47,8 +47,9 @@ from typing import Any, Callable, Mapping, Protocol, runtime_checkable
 
 KINDS = ("alpaca", "ibkr", "manual")
 # Wealth's line states; "awaiting" is a manual order the person says they placed, until a statement shows it.
+# "partial_unconfirmed" is a manual order only partly shown by statements after the confirmation window.
 LINE_STATES = ("proposed", "sent", "partial", "filled", "canceled", "expired", "rejected", "failed", "unknown",
-               "awaiting", "unconfirmed")
+               "awaiting", "unconfirmed", "partial_unconfirmed")
 
 
 class BrokerError(Exception):
@@ -90,11 +91,21 @@ class OrderBroker(Protocol):
 
 # -- which adapter an account uses ------------------------------------------------------
 
-_IBKR = re.compile(r"\b(ibkr|interactive\s*brokers?|ib\s*gateway)\b")
-_ALPACA = re.compile(r"\balpaca\b")
+# The canonical alias table: an institution routes to an API broker only when its whole (normalised) name is one
+# of these aliases.  Never a substring or a word inside a longer name: "GBM (not Interactive Brokers)" is not IBKR.
+_API_ALIASES: dict[str, str] = {
+    "alpaca": "alpaca", "alpaca securities": "alpaca", "alpaca markets": "alpaca", "alpaca securities llc": "alpaca",
+    "alpaca markets inc": "alpaca", "alpaca paper": "alpaca", "alpaca paper trading": "alpaca",
+    "ibkr": "ibkr", "interactive brokers": "ibkr", "interactive broker": "ibkr", "interactive brokers llc": "ibkr",
+    "interactive brokers ireland": "ibkr", "interactive brokers uk": "ibkr", "interactive brokers u k": "ibkr",
+    "interactive brokers canada": "ibkr", "interactive brokers central europe": "ibkr",
+    "interactive brokers ibkr": "ibkr", "ibkr interactive brokers": "ibkr", "ib gateway": "ibkr",
+    "ibkr lite": "ibkr", "ibkr pro": "ibkr", "interactivebrokers": "ibkr",
+}
 # Institutions whose orders trade on the Mexican exchanges (BMV, BIVA and the SIC for foreign listings), in MXN.
 _MX_BROKERS = {
-    "gbm": "GBM", "gbm+": "GBM", "gbm homebroker": "GBM", "bursanet": "Bursanet", "actinver": "Actinver",
+    "gbm": "GBM", "gbm+": "GBM", "gbm homebroker": "GBM", "gbm plus": "GBM", "gbm trading usa": "GBM",
+    "grupo bursatil mexicano": "GBM", "bursanet": "Bursanet", "actinver": "Actinver",
     "kuspit": "Kuspit", "monex": "Monex", "banorte": "Banorte Casa de Bolsa", "santander": "Santander Casa de Bolsa",
     "bbva": "BBVA Casa de Bolsa", "vector": "Vector", "valmex": "Valmex", "finamex": "Finamex", "cibanco": "CIBanco",
     "intercam": "Intercam", "invex": "Invex", "scotia": "Scotia Casa de Bolsa", "hey banco": "Hey Banco",
@@ -104,20 +115,67 @@ _US_BROKERS = {"vest": "Vest", "schwab": "Charles Schwab", "charles schwab": "Ch
                "vanguard": "Vanguard", "robinhood": "Robinhood", "e*trade": "E*TRADE", "etrade": "E*TRADE",
                "td ameritrade": "TD Ameritrade", "merrill": "Merrill", "firstrade": "Firstrade", "webull": "Webull",
                "hapi": "Hapi", "public": "Public"}
+_API_LABELS = {"alpaca": "Alpaca", "ibkr": "Interactive Brokers"}
 
 
 def _fold(text: Any) -> str:
     return re.sub(r"\s+", " ", str(text or "").strip().lower())
 
 
+def _canonical(text: Any) -> str:
+    """Lowercase, punctuation to spaces (keeping + * &), whitespace collapsed: "Interactive Brokers, LLC." ->
+    "interactive brokers llc"."""
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9+*&]+", " ", _fold(text))).strip()
+
+
 def kind_for_institution(institution: Any) -> str:
-    """``alpaca``, ``ibkr`` or ``manual`` for an account's institution; anything unknown is manual."""
-    text = _fold(institution)
-    if _ALPACA.search(text):
-        return "alpaca"
-    if _IBKR.search(text):
-        return "ibkr"
-    return "manual"
+    """``alpaca``, ``ibkr`` or ``manual`` for an account's institution; anything unknown is manual.
+
+    Only an exact alias from the canonical table picks an API broker; anything else (including a longer name that
+    merely contains one) is manual, which never sends anything.
+    """
+    return _API_ALIASES.get(_canonical(institution), "manual")
+
+
+def kind_for_account_id(account_id: Any) -> str | None:
+    """``alpaca`` / ``ibkr`` for an id in the form Wealth itself gives those accounts (``ibkr-4567``, ``alpaca-1234``).
+
+    Such an id is only a hint: :mod:`wealth.execution.tickets` still requires the broker's own account state to
+    name the same ledger account before anything is sent.
+    """
+    match = re.fullmatch(r"(ibkr|alpaca)-[a-z0-9]{2,12}", str(account_id or "").strip().lower())
+    return match.group(1) if match else None
+
+
+def mentioned_institutions(text: Any) -> dict[str, str]:
+    """``{label: kind}`` for every institution in the alias tables named as whole words in free text.
+
+    Used when an order names no account: "compra 10 VOO en GBM" names GBM.  Aliases are matched as whole
+    tokens only, longest first, so "GBM" in "GBMX" is not a mention.
+    """
+    folded = f" {_canonical(text)} "
+    found: dict[str, str] = {}
+    tables = [(alias, _API_LABELS[kind], kind) for alias, kind in _API_ALIASES.items()]
+    tables += [(alias, label, "manual") for alias, label in {**_MX_BROKERS, **_US_BROKERS}.items()]
+    for alias, label, kind in sorted(tables, key=lambda row: -len(row[0])):
+        if alias in ("public", "vector"):
+            continue  # ordinary words too; they must be named as an account's institution, not in passing
+        if f" {alias} " in folded:
+            found.setdefault(label, kind)
+            folded = folded.replace(f" {alias} ", " ")
+    return found
+
+
+def institution_label(institution: Any) -> tuple[str, str] | None:
+    """``(label, kind)`` when the institution is exactly one of the table's aliases, else ``None``."""
+    text = _canonical(institution)
+    if text in _API_ALIASES:
+        kind = _API_ALIASES[text]
+        return _API_LABELS[kind], kind
+    for table in (_MX_BROKERS, _US_BROKERS):
+        if text in table:
+            return table[text], "manual"
+    return None
 
 
 def institution_profile(institution: Any, country: Any = None) -> dict[str, Any]:
@@ -126,7 +184,7 @@ def institution_profile(institution: Any, country: Any = None) -> dict[str, Any]
     The market decides the listing: an MX broker buys foreign shares through the SIC and Mexican ones on the BMV,
     in pesos; a US broker trades US listings in dollars.
     """
-    text = re.sub(r"[^a-z0-9+*&]+", " ", _fold(institution)).strip()  # "gbm-4321" reads as "gbm 4321"
+    text = _canonical(institution)  # "gbm-4321" reads as "gbm 4321"
     for key, label in _MX_BROKERS.items():
         if text == key or text.startswith(key + " ") or f" {key} " in f" {text} ":
             return {"label": label, "market": "MX", "currency": "MXN", "known": True}
@@ -145,4 +203,5 @@ def mask(number: Any) -> str:
     return f"****{text[-4:]}" if len(text) >= 4 else "****"
 
 
-__all__ = ["BrokerError", "KINDS", "LINE_STATES", "OrderBroker", "institution_profile", "kind_for_institution", "mask"]
+__all__ = ["BrokerError", "KINDS", "LINE_STATES", "OrderBroker", "institution_label", "institution_profile",
+           "kind_for_account_id", "kind_for_institution", "mask", "mentioned_institutions"]
