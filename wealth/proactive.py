@@ -634,7 +634,8 @@ def _advice_target(run: _Run, thread: Mapping[str, Any]) -> tuple[str, str] | No
     related = [k for k in thread.get("related") or [] if isinstance(k, str)]
     for liability in run.sit.get("liabilities") or []:
         if liability.get("key") in related:
-            high = (D(liability.get("annual_rate")) or Decimal(0)) >= HIGH_INTEREST_RATE
+            # High-interest on the effective rate, IVA included, as the high-interest item decides it.
+            high = _interest_factor(liability, liability.get("currency") or run.sit.get("currency")) * 12 >= HIGH_INTEREST_RATE
             if (_below_starter(run) or _reserve_threads(run)) if high else _reserve_first(run):
                 return None
             if liability.get("kind") in _TARGETS:
