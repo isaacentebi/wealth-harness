@@ -453,7 +453,7 @@ def _cash(value: dict, key: str) -> None:
     _bool(value.get("balance_unknown"), f"{key}.balance_unknown")
     _number(value.get("amount"), f"{key}.amount", required=value.get("balance_unknown") is not True,
             unknown_flag="balance_unknown")
-    _currency(value.get("currency"), f"{key}.currency")
+    _currency(value.get("currency"), f"{key}.currency", required=value.get("amount") is not None)
     _text(value.get("institution"), f"{key}.institution", limit=80)
     _purpose(value.get("purpose"), f"{key}.purpose")
     _bool(value.get("liquid"), f"{key}.liquid")
@@ -534,7 +534,7 @@ def _investment(value: dict, key: str) -> None:
     _bool(value.get("balance_unknown"), f"{key}.balance_unknown")
     _number(value.get("amount"), f"{key}.amount", required=value.get("balance_unknown") is not True,
             unknown_flag="balance_unknown")
-    _currency(value.get("currency"), f"{key}.currency")
+    _currency(value.get("currency"), f"{key}.currency", required=value.get("amount") is not None)
     _text(value.get("institution"), f"{key}.institution", limit=80)
     _enum(value.get("kind"), f"{key}.kind", ("brokerage", "retirement", "afore", "fund", "other"))
     _text(value.get("name"), f"{key}.name")

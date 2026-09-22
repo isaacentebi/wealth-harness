@@ -85,7 +85,7 @@ _TICKET_ID = re.compile(r"^t[0-9a-f]{16}$")
 _ORDER_FIELDS = frozenset({
     "symbol", "instrument_id", "side", "qty", "quantity", "notional", "estimated_amount", "type", "limit_price",
     "time_in_force", "account_id", "account", "estimated_tax", "estimated_cost", "asset_class", "sleeve",
-    "domicile", "tags", "reason", "lots", "tax_regime", "exchange",
+    "domicile", "tags", "reason", "lots", "tax_regime", "exchange", "currency",
 })
 _FINAL = frozenset({"filled", "canceled", "expired", "rejected", "failed", "unconfirmed", "partial_unconfirmed"})
 # A place-it-yourself card lives longer (the person switches to their broker's app), and a trade the person marked
@@ -371,6 +371,14 @@ def _normalize_order(raw: Any, index: int, route: Mapping[str, Any] | None = Non
     if unknown:
         errors.append(f"{field} has unknown fields {unknown}; orders carry {sorted(_ORDER_FIELDS)}")
     route = route or {}
+    if raw.get("currency") is not None:
+        # "10 mil pesos en GBM": the currency a model names with the amount.  It must be the one the broker
+        # prices in (MXN on the BMV and SIC, USD at a US broker); amounts are always in that currency.
+        expected = "MXN" if route.get("market") == "MX" else "USD"
+        given = str(raw["currency"]).strip().upper()
+        if given != expected:
+            errors.append(f"{field}.currency: orders at this broker are in {expected}, not {given}; convert the "
+                          "amount or choose the broker that trades in it")
     if route.get("kind") == "manual":
         symbol = _manual_symbol(raw.get("symbol") or raw.get("instrument_id"), route.get("market") or "US")
     else:

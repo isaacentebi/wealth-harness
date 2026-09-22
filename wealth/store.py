@@ -364,6 +364,7 @@ _V1_REVIEW_DAYS: tuple[tuple[str, int], ...] = (
 )
 # Facts that set financial policy; document/web sources cannot establish them.
 _POLICY_KEYS = frozenset({"goals", "client.profile", "tax.profile", "monitor.rules"})
+_HELD_KEY = re.compile(r"^(cash|investment)\.[^.]+$")  # a stated account: its balance may be unknown
 _POLICY_PREFIXES = ("preference.", "constraint.")
 _SENSITIVE_FIELDS = frozenset({
     "password", "passcode", "pin", "ssn", "social_security_number", "curp", "rfc",
@@ -1686,6 +1687,12 @@ class WealthStore:
                             f"{key} was merged into an inferred or past-review value "
                             f"observed on {prior_fact['observed_on']}; reconfirm the unchanged parts"
                         )
+                    if prior_fact is None and isinstance(fact["value"], dict) and _HELD_KEY.match(key) \
+                            and fact["value"].get("amount") is None and "balance_unknown" not in fact["value"]:
+                        # "My Roth IRA at Fidelity" names an account whose balance nobody said: unknown, not 0.
+                        fact["value"] = {**fact["value"], "balance_unknown": True}
+                        warnings.append(f"{key}: no amount was given, so it was saved with balance_unknown: true "
+                                        "(unknown, never 0); save the amount when the person says it")
                     if fact["value"] is not None:
                         try:
                             warnings.extend(validate_canonical(key, fact["value"]))

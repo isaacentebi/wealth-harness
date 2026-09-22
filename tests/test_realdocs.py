@@ -418,16 +418,22 @@ def test_estate_register_with_facts_in_inputs_keeps_ledger_accounts(service):
     assert {"investment.fidelity", "ledger.gbm-7832", "ledger.bbva-7365"} <= keys
 
 
-def test_an_account_without_a_balance_names_balance_unknown(service):
-    """Before: the refusal said to leave the fact out, so a host could not record that the Roth IRA exists."""
-    from wealth.store import ValidationError
-
+def test_an_account_said_without_a_balance_is_saved_as_unknown(service):
+    """Before: "a Roth IRA at Fidelity" with no amount was refused (amount, then currency, required): the host
+    retried three times to record an account whose beneficiaries the person had just named."""
     said = {"kind": "user", "ref": "chat", "observed_on": "2026-09-01"}
-    with pytest.raises(ValidationError, match="balance_unknown: true"):
-        service.remember("mariana", [{"key": "investment.fidelity", "value": {"institution": "Fidelity"},
-                                      "source": said}])
-    service.remember("mariana", [{"key": "investment.fidelity", "value": {"institution": "Fidelity", "currency": "USD",
-                                                                          "balance_unknown": True}, "source": said}])
+    receipt = service.remember("mariana", [
+        {"key": "investment.fidelity", "value": {"institution": "Fidelity", "kind": "retirement",
+                                                 "plan_type": "roth_ira"}, "source": said},
+        {"key": "estate.designation.investment-fidelity", "value": {"account": "investment.fidelity", "beneficiaries": [
+            {"name": "Diego", "relationship": "spouse", "share": 0.5},
+            {"name": "Sofía", "relationship": "child", "share": 0.5}]}, "source": said}])
+    assert any("balance_unknown: true" in w for w in receipt["warnings"])
+    fact = service.inspect("mariana", key="investment.fidelity")["facts"][0]["value"]
+    assert fact["balance_unknown"] is True and "amount" not in fact
+    assert service.situation("mariana")["net_worth"] is not None
+    rows = {r["key"]: r for r in service.run("estate_register", client_id="mariana")["result"]["rows"]}
+    assert [h["name"] for h in rows["investment.fidelity"]["heirs"]] == ["Diego", "Sofía"]
 
 
 def test_a_us_citizen_is_a_us_person_without_saying_so(service):
