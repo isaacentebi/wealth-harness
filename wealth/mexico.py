@@ -683,6 +683,89 @@ def real_interest(inputs: dict[str, Any]) -> dict[str, Any]:
 # 3. Personal deductions and retirement contributions (Arts. 151, 185)
 # ---------------------------------------------------------------------------
 
+MORTGAGE_UDI_LIMIT = Decimal(750000)
+
+
+def _mortgage_real_interest(raw: Any) -> tuple[dict[str, Any] | None, list[str], list[str]]:
+    """LISR Art. 151 fr. IV: real interest actually paid in the year on a mortgage for the casa habitacion.
+
+    Inputs (``mortgage``): ``real_interest_paid_mxn`` (the real interest on the lender's annual constancia) or
+    ``nominal_interest_paid_mxn`` + ``inflation_adjustment_mxn`` (real = nominal - adjustment, the LISR Art. 134
+    method the constancia applies); the credit amount as ``credit_udis`` or ``credit_amount_mxn`` +
+    ``udi_value_at_origination`` + ``udi_source``; confirmations ``casa_habitacion`` and
+    ``financial_system_lender`` (true); optional ``constancia_deductible_real_interest_mxn`` (the lender's own
+    deductible figure, which wins).  A credit above 750,000 UDIs keeps only the share of interest on the first
+    750,000 UDIs (the proportional reading lenders apply on the constancia; confirm with it).
+    """
+    if raw is None:
+        return None, [], []
+    if not isinstance(raw, dict):
+        raise ValueError("mortgage must be an object")
+    missing: list[str] = []
+    warnings: list[str] = []
+    out: dict[str, Any] = {"rule": "LISR Art. 151 fr. IV", "_deductible": None, "deductible_before_cap_mxn": None,
+                           "reason": None}
+    for flag in ("casa_habitacion", "financial_system_lender"):
+        if raw.get(flag) is not True:
+            missing.append(f"mortgage.{flag}=true")
+    if "real_interest_paid_mxn" in raw:
+        real = _decimal(raw["real_interest_paid_mxn"], "mortgage.real_interest_paid_mxn", nonnegative=False)
+        out["real_interest_basis"] = "constancia real interest"
+    elif "nominal_interest_paid_mxn" in raw and "inflation_adjustment_mxn" in raw:
+        real = (_decimal(raw["nominal_interest_paid_mxn"], "mortgage.nominal_interest_paid_mxn")
+                - _decimal(raw["inflation_adjustment_mxn"], "mortgage.inflation_adjustment_mxn"))
+        out["real_interest_basis"] = "nominal interest less the inflation adjustment supplied"
+    else:
+        real = None
+        missing.append("mortgage.real_interest_paid_mxn (from the lender's constancia) or nominal_interest_paid_mxn "
+                       "+ inflation_adjustment_mxn")
+    credit_udis = None
+    if "credit_udis" in raw:
+        credit_udis = _decimal(raw["credit_udis"], "mortgage.credit_udis")
+    elif "credit_amount_mxn" in raw:
+        need = [f"mortgage.{k}" for k in ("udi_value_at_origination", "udi_source") if k not in raw]
+        if need:
+            missing.extend(need)
+        else:
+            udi = _decimal(raw["udi_value_at_origination"], "mortgage.udi_value_at_origination")
+            if udi <= 0:
+                raise ValueError("mortgage.udi_value_at_origination must be positive")
+            credit_udis = _decimal(raw["credit_amount_mxn"], "mortgage.credit_amount_mxn") / udi
+            out["udi_source"] = _text(raw["udi_source"], "mortgage.udi_source")
+    else:
+        missing.append("mortgage.credit_udis or credit_amount_mxn + udi_value_at_origination + udi_source "
+                       "(Banxico UDI value on the contract date)")
+    out["real_interest_mxn"] = None if real is None else _money(real)
+    out["credit_udis"] = None if credit_udis is None else format(credit_udis.quantize(Decimal("0.01")), "f")
+    out["udi_limit"] = format(MORTGAGE_UDI_LIMIT, "f")
+    if "constancia_deductible_real_interest_mxn" in raw:
+        deductible = _decimal(raw["constancia_deductible_real_interest_mxn"],
+                              "mortgage.constancia_deductible_real_interest_mxn")
+        out["basis"] = "lender constancia deductible amount"
+        missing = [m for m in missing if not m.startswith(("mortgage.real_interest", "mortgage.credit", "mortgage.udi"))]
+    elif real is None or credit_udis is None:
+        deductible = None
+    else:
+        share = min(Decimal(1), MORTGAGE_UDI_LIMIT / credit_udis) if credit_udis > 0 else Decimal(1)
+        deductible = max(real, Decimal(0)) * share
+        out["basis"] = "real interest" + ("" if share == 1 else f" x {format(share.quantize(Decimal('0.0001')), 'f')} "
+                                          "(750,000 UDIs / credit in UDIs)")
+        if share < 1:
+            warnings.append("The mortgage credit exceeds 750,000 UDIs; only the interest share on the first 750,000 "
+                            "UDIs is counted. Use the constancia's deductible figure when it states one.")
+        if real < 0:
+            warnings.append("Real mortgage interest is negative (inflation exceeded interest): nothing is deductible; "
+                            "confirm the treatment with the constancia.")
+    if any(m.startswith(("mortgage.casa", "mortgage.financial")) for m in missing):
+        out["reason"] = "Deductible only for the taxpayer's own home, on credit from the financial system (confirm both)."
+        deductible = None
+    elif deductible is None:
+        out["reason"] = "Unknown until the missing mortgage inputs are supplied; not treated as zero."
+    out["_deductible"] = deductible
+    out["deductible_before_cap_mxn"] = None if deductible is None else _money(deductible)
+    return out, missing, warnings
+
+
 def personal_deductions(inputs: dict[str, Any]) -> dict[str, Any]:
     """Apply the Art. 151 global cap and PPR cap, and estimate the saving of an extra contribution.
 
@@ -693,6 +776,8 @@ def personal_deductions(inputs: dict[str, Any]) -> dict[str, Any]:
     (optional: already-capped amounts the caller has confirmed are outside the cap)},
     ``proposed_ppr_contribution_mxn`` and/or ``proposed_art185_mxn``, and
     ``taxable_income_before_mxn`` (after existing deductions) or ``marginal_rate``.
+    Optional ``mortgage`` (Art. 151 fr. IV real interest; see :func:`_mortgage_real_interest`); it counts inside
+    the global cap together with ``general_mxn``, so do not also include it there.
     """
     sources = [_lisr("articulo 151", "personal deductions; fr. V retirement contributions capped at 10% of accumulable income and five annual UMAs; global cap lesser of five annual UMAs or 15% of total income, not applicable to fr. V"),
                _lisr("articulo 185", "special savings accounts deduction up to $152,000; accumulable on withdrawal"),
@@ -726,7 +811,25 @@ def personal_deductions(inputs: dict[str, Any]) -> dict[str, Any]:
                          assumptions=params.assumptions)
     five_uma = uma_annual * 5
     global_cap = min(five_uma, total_income * Decimal("0.15"))
-    general_allowed = min(general, global_cap)
+    mortgage, mortgage_missing, mortgage_warnings = _mortgage_real_interest(inputs.get("mortgage"))
+    if mortgage is not None:
+        sources.append(_lisr("articulo 151, fraccion IV", "real interest actually paid in the year on mortgage credit "
+                             "for the taxpayer's casa habitacion, contracted with the financial system, credit up to "
+                             "750,000 UDIs; subject to the global cap"))
+    mortgage_deductible = mortgage["_deductible"] if mortgage and mortgage.get("_deductible") is not None else Decimal(0)
+    # Fr. IV mortgage real interest sits inside the global cap with the general deductions (applied together).
+    capped_general = general + mortgage_deductible
+    general_allowed_total = min(capped_general, global_cap)
+    general_only_allowed = min(general, global_cap)
+    mortgage_allowed = general_allowed_total - general_only_allowed
+    if mortgage is not None and mortgage.get("_deductible") is not None:
+        mortgage["within_global_cap_mxn"] = _money(mortgage_allowed)
+        mortgage["cut_by_global_cap_mxn"] = _money(mortgage_deductible - mortgage_allowed)
+        if mortgage_allowed < mortgage_deductible:
+            mortgage_warnings.append("The global cap cuts the mortgage real-interest deduction: general deductions are "
+                                     "applied first, then fr. IV interest, within the lesser of five annual UMAs or 15% "
+                                     "of total income.")
+    general_allowed = general_allowed_total
     # Art. 151 último párrafo: the global cap covers every personal deduction except fr. III and V,
     # and Art. 185 deposits count against it. General deductions are applied first.
     global_room_after_general = global_cap - general_allowed
@@ -771,6 +874,8 @@ def personal_deductions(inputs: dict[str, Any]) -> dict[str, Any]:
                          if label == "art151_v" else
                          "Deferral, not exemption: deposits and returns are accumulable when withdrawn, at a rate no higher than the deposit-year rate; Art. 185 fund shares are locked for five years."),
         }
+    missing.extend(m for m in mortgage_missing if m not in missing)
+    warnings.extend(mortgage_warnings)
     missing.extend(m for m in params.missing if m not in missing)
     if not scenarios:
         warnings.append("No proposed contribution was supplied; only caps and remaining room are reported.")
@@ -779,13 +884,17 @@ def personal_deductions(inputs: dict[str, Any]) -> dict[str, Any]:
         "caps": {"five_annual_umas_mxn": _money(five_uma), "fifteen_percent_total_income_mxn": _money(total_income * Decimal("0.15")),
                  "global_cap_mxn": _money(global_cap), "art151_v_cap_mxn": _money(ppr_cap),
                  "art185_limit_mxn": None if limit_185 is None else _money(limit_185)},
-        "allowed": {"general_mxn": _money(general_allowed), "art151_v_mxn": _money(allowed_151v), "outside_global_cap_mxn": _money(outside),
+        "allowed": {"general_mxn": _money(general_only_allowed),
+                    "mortgage_real_interest_mxn": _money(mortgage_allowed) if mortgage is not None
+                    and mortgage.get("_deductible") is not None else None,
+                    "art151_v_mxn": _money(allowed_151v), "outside_global_cap_mxn": _money(outside),
                     "art185_mxn": None if allowed_185 is None else _money(allowed_185),
                     "total_personal_deductions_mxn": _money(general_allowed + allowed_151v + outside)},
         "remaining_room": {"art151_v_mxn": _money(ppr_room), "art185_mxn": None if room_185 is None else _money(room_185),
                            "global_cap_mxn": None if global_room is None else _money(global_room),
                            "note": "Art. 185 room is shared with the Art. 151 global cap; a general deduction added later reduces it."},
         "contribution_scenarios": scenarios,
+        "mortgage_interest": None if mortgage is None else {k: v for k, v in mortgage.items() if not k.startswith("_")},
         **params.report(),
         "scope": "Caps and marginal estimates only; donation (7%) and tuition-decree limits must be applied by the caller before passing outside_global_cap_mxn.",
     }

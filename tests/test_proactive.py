@@ -142,7 +142,8 @@ def test_reserve_quiet_on_target_and_unknown_without_a_target_or_spending():
 
 
 def test_cash_drag_fires_past_twelve_months_only():
-    item = kinds(evaluate(_reserve(400000)))["cash_drag"]
+    # Cash already earning more than CETES has no yield gap to price, so the plain cash_drag nudge stays.
+    item = kinds(evaluate(_reserve(400000) + [("cash_yield", 0.07)]))["cash_drag"]
     assert item["data"]["excess"] == 280000
     assert "cash_drag" not in kinds(evaluate(_reserve(200000)))
 
@@ -724,3 +725,64 @@ def test_a_goal_liability_must_name_a_debt():
     from wealth.situation.schema import SchemaError, validate
     with pytest.raises(SchemaError, match="liability"):
         validate("goals", [{"id": "x", "name": "X", "liability": "cash.bbva"}])
+
+
+# ------------------------------------------------------------------ idle cash yield gap
+
+
+def test_idle_cash_above_reserve_is_priced_at_cetes_28_with_a_ladder_offer():
+    item = kinds(evaluate(_reserve(400000)))["idle_yield"]
+    data = item["data"]
+    # 400,000 held; the 6-month reserve keeps 120,000; 280,000 idle at 6.25% (Banxico 2026-09-15) = 17,500 a year.
+    assert (data["idle"], data["lost_per_year"], data["reference_rate"]) == (280000, 17500, 0.0625)
+    assert data["bound"] == "at_most" and data["cash_yield"] is None and "unknown" in data["cash_yield_reason"]
+    assert data["reference_as_of"] == "2026-09-15" and data["reference_stale"] is False
+    assert "banxico" in data["reference_source"].lower()
+    assert item["title"]["es"].startswith("Hasta $17,500")
+    assert "cash_drag" not in kinds(evaluate(_reserve(400000)))  # the priced nudge replaces the vague one
+    offer = data["offer"]
+    assert offer["task"] == "ladder" and len(offer["rungs"]) == 4 and offer["ready"] is False
+    assert offer["rungs"][0]["cashflows"][0]["amount"] == pytest.approx(70000 * (1 + 0.0625 * 28 / 360), abs=0.01)
+
+
+def test_idle_yield_uses_the_stated_yield_and_a_stored_reference_rate():
+    facts = _reserve(400000) + [("cash_yield", {"value": 5, "unit": "percent"}),
+                                ("cash_reference_rate", {"low": "7.0", "high": "7.5", "unit": "percent",
+                                                         "source": "CETES 28 dias, Banxico"})]
+    data = kinds(evaluate(facts))["idle_yield"]["data"]
+    assert data["reference_rate"] == 0.07 and data["reference_origin"] == "stored cash_reference_rate"
+    assert (data["lost_per_year"], data["bound"], data["cash_yield"]) == (5600, "estimate", 0.05)  # 280,000 x 2%
+
+
+def test_idle_yield_rate_is_marked_stale_after_thirty_days():
+    item = kinds(evaluate(_reserve(400000), as_of="2026-11-01"))["idle_yield"]
+    assert item["data"]["reference_stale"] is True and "47 days old" in item["why"]["en"]
+
+
+def test_idle_yield_keeps_goal_money_and_offers_a_ladder_against_dated_goals():
+    facts = _reserve(400000) + [("cash.car", {"amount": 50000, "currency": "MXN", "purpose": "goal:car"}),
+                                ("goals", [{"id": "car", "name": "Coche", "target_amount": 60000, "currency": "MXN",
+                                            "target_date": "2027-03-01"},
+                                           {"id": "house", "name": "Enganche", "target_amount": 100000,
+                                            "currency": "MXN", "protect_now": True}])]
+    data = kinds(evaluate(facts))["idle_yield"]["data"]
+    assert data["idle"] == 180000 and data["kept"]["protected_goals"] == 100000
+    assert data["kept"]["goal_earmarked_cash"] == 50000
+    offer = data["offer"]
+    assert offer["ready"] and offer["inputs"]["liabilities"][0]["id"] == "car"
+    from wealth import planning
+    assert planning.run("ladder", offer["inputs"], {})["status"] == "ready"
+
+
+def test_idle_yield_is_silent_when_the_rate_or_a_balance_is_unknown():
+    found = evaluate(_reserve(400000) + [("cash.box", {"currency": "MXN", "balance_unknown": True})])
+    assert "idle_yield" not in kinds(found) and "the balance of cash.box" in unknown(found, "idle_yield")
+    found = evaluate(_reserve(400000, target=None))
+    assert "idle_yield" not in kinds(found) and unknown(found, "idle_yield")
+    us = [("client.profile", US), ("spending.monthly", {"essential": 3000, "currency": "USD"}),
+          ("cash.chase", {"amount": 90000, "currency": "USD", "purpose": "reserve"}), ("reserve", {"target_months": 6})]
+    found = evaluate(us)
+    assert "idle_yield" not in kinds(found) and "reference rate for USD" in unknown(found, "idle_yield")[0]
+    priced = evaluate(us + [("cash_reference_rate", {"low": 4.1, "unit": "percent", "currency": "USD",
+                                                     "source": "3-month T-bill, US Treasury"})])
+    assert kinds(priced)["idle_yield"]["data"]["lost_per_year"] == pytest.approx(72000 * 0.041)

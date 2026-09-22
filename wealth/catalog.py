@@ -384,8 +384,14 @@ CATALOG: dict[str, dict[str, Any]] = {
             "household records: ownership {form, owners:[{person_id, share}]} or owner_id",
             "positions: listed, liquid, restricted, lockup_until, redemption {frequency, notice_days, gate}",
             "fx [{from, to, rate, as_of, source, direction_verified}] where 1 from = rate to",
+            "fund_holdings[] {instrument_id, as_of, source, holdings, asset_class?} (asset_class labels holdings and the unreported residual)",
+            "income_exposures[].employer_instrument_id (employer stock: concentration with look-through and salary)",
+            "auto_lookthrough (default true: funds without holdings use saved research.<SYMBOL> fund packets)",
+            "live_lookthrough (default true: a Yahoo top-holdings pull only when market data is online)",
         ],
-        "notes": "A stored portfolio.snapshot converts foreign positions only through its own fx list [{from, to, rate, as_of, source}].",
+        "notes": "A stored portfolio.snapshot converts foreign positions only through its own fx list [{from, to, rate, as_of, source}]. "
+                 "Result adds top_underlying (direct + via funds), overlap_matrix (fund positions), employer_concentration "
+                 "and lookthrough_sources (where each fund's holdings came from, or why none were found).",
         "example": {"household": _HOUSEHOLD, "targets": {"asset_class": {"equity": 0.6}}, "evaluation_date": "2026-09-20"},
     },
     "analyze": {
@@ -571,7 +577,11 @@ CATALOG: dict[str, dict[str, Any]] = {
             "lots[].holding_period_start (tacked holding period)",
             "MX: article_129_sales [{lot_id, quantity, sale_date, proceeds_mxn, article_129_adjusted_basis_mxn, basis_source, proceeds_source, article_129_eligibility}], article_129_realized_gain_or_loss_mxn, article_129_loss_carryforwards",
         ],
-        "notes": "Result rows report wash_sale {disallowed_loss, replacements}. Not state tax or a filing position.",
+        "notes": "Result rows report wash_sale {disallowed_loss, replacements}. Not state tax or a filing position. "
+                 "harvest_report also returns order_tickets [{account_id, estimated_tax_saving, repurchase_not_before, "
+                 "inputs}]: pass inputs to order_ticket (sell lines carry lots [{lot_id, quantity, estimated_tax_saving, "
+                 "repurchase_not_before}]); the person confirms on the card. order_ticket_exclusions says why a loss lot "
+                 "was left out (wash_sale, carryforward_only, not_tradable_here).",
         "example": {
             "jurisdiction": "MX_ARTICLE_129", "as_of": "2026-09-20", "sale_date": "2026-09-18",
             "household": _MX_TAX_HOUSEHOLD,
@@ -608,10 +618,18 @@ CATALOG: dict[str, dict[str, Any]] = {
     "mx_deductions": {
         "purpose": "Art. 151 personal deductions: global cap, PPR/Art. 185 room, and the ISR saving of an extra contribution.",
         "required": ["tax_year", "total_income_mxn", "accumulable_income_mxn", "deductions {general_mxn, retirement_151v_mxn, art185_mxn}", "proposed_ppr_contribution_mxn and/or proposed_art185_mxn", "taxable_income_before_mxn or marginal_rate"],
-        "optional": ["deductions.outside_global_cap_mxn", "parameters {key: {value, source}}"],
+        "optional": ["deductions.outside_global_cap_mxn", "parameters {key: {value, source}}",
+                     "mortgage (LISR Art. 151 fr. IV, inside the global cap; keep it out of general_mxn) {casa_habitacion: true, "
+                     "financial_system_lender: true, real_interest_paid_mxn (constancia) | nominal_interest_paid_mxn + "
+                     "inflation_adjustment_mxn, credit_udis | credit_amount_mxn + udi_value_at_origination + udi_source, "
+                     "constancia_deductible_real_interest_mxn?}"],
         "example": {"tax_year": 2026, "total_income_mxn": 1000000, "accumulable_income_mxn": 900000,
                     "deductions": {"general_mxn": 200000, "retirement_151v_mxn": 50000, "art185_mxn": 0},
                     "proposed_ppr_contribution_mxn": 100000, "taxable_income_before_mxn": 700000},
+        "variants": {"mortgage": {"tax_year": 2026, "total_income_mxn": 1000000, "accumulable_income_mxn": 900000,
+                                  "deductions": {"general_mxn": 60000, "retirement_151v_mxn": 0, "art185_mxn": 0},
+                                  "mortgage": {"casa_habitacion": True, "financial_system_lender": True,
+                                               "real_interest_paid_mxn": 90000, "credit_udis": 400000}}},
     },
     "mx_foreign": {
         "purpose": "Foreign securities at a foreign broker (e.g. IBKR, GBM Trading USA): SIC-listed securities keep the 10% Art. 129 rate (criterio 37/ISR/N); others are progressive income. MXN gains including FX, foreign dividends and credit.",
@@ -815,6 +833,11 @@ CATALOG: dict[str, dict[str, Any]] = {
                      "dismiss: [item id] (hidden until its trigger changes)",
                      "snooze: [{id, until: YYYY-MM-DD} | {id, days}]", "restore: [item id]"],
         "example": {"as_of": "2026-12-18", "facts": _PROACTIVE_FACTS, "ledger": _PROACTIVE_LEDGER},
+        "notes": "The idle_yield item prices cash above the reserve target and goals at a reference rate: a saved "
+                 "cash_reference_rate {low, high, unit, source, as_of?, currency?} fact, else for Mexico residents the "
+                 "dated CETES 28-day constant (marked stale after 30 days). A saved cash_yield (what the cash earns) "
+                 "makes it exact; without it the figure is an upper bound. data.offer holds ladder task inputs for a "
+                 "four-rung CETES ladder.",
         "variants": {"us_person_in_mexico": {"as_of": "2026-09-08", "jurisdiction": "MX,US", "facts": _PROACTIVE_FACTS}},
     },
     "weekly": {
@@ -924,7 +947,10 @@ CATALOG: dict[str, dict[str, Any]] = {
         "optional": ["birth_year (top level, shared by sections; or stored client.profile)",
                      "social_security {real_discount_rate, longevity_ages, spouse {birth_year, own_pia_monthly_usd}}",
                      "withdrawals {tax_year (bracket table, default 2026), other_ordinary_income_usd, deduction_usd, "
-                     "conversion_target_rate (default 0.12), terminal_rates {tax_deferred, taxable_gain}}",
+                     "conversion_target_rate (default 0.12), conversion_sweep_rates (default [0.10, 0.12, 0.22, 0.24]), "
+                     "terminal_rates {tax_deferred, taxable_gain}, social_security_annual_benefit_usd + "
+                     "social_security_start_age (taxed under IRC 86), threshold_inflation (default 0.025), "
+                     "medicare_enrollees, medicare_start_age (65), magi_prior_two_years_usd [t-2, t-1], irmaa: false}",
                      "parameters {key: {value, source}}"],
         "example": {"birth_year": 1964,
                     "social_security": {"pia_monthly_usd": 2400, "spouse": {"birth_year": 1966, "own_pia_monthly_usd": 600}},
@@ -963,7 +989,9 @@ CATALOG: dict[str, dict[str, Any]] = {
         "optional": ["source: rebalance|manager_mirror|user_request (default user_request)",
                      "orders[].type: limit (default) | market (paper only)", "orders[].limit_price (default: last "
                      "trade +/- half the collar)", "orders[].time_in_force: day (default) | gtc (whole shares)",
-                     "orders[].account_id, estimated_tax, estimated_cost, asset_class, sleeve, domicile, tags"],
+                     "orders[].account_id, estimated_tax, estimated_cost, asset_class, sleeve, domicile, tags",
+                     "orders[].lots (sells only) [{lot_id, quantity?, estimated_tax_saving?, repurchase_not_before?, "
+                     "character?, account_id?}] (from tax harvest_report order_tickets)"],
         "notes": "Result: ticket {id, mode PAPER|LIVE, status, total, lines [{side, symbol, qty, limit_price, "
                  "estimated_amount, state}], notices [{code, status: warn|violation|block|unknown, message}]} and "
                  "summary. Tell the person to confirm on the card; never say an order was placed or filled until "

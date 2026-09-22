@@ -451,6 +451,55 @@ Quantity, Price, Amount, Fees) using `"preset": "vest"`. The preset is a
 generic US-broker layout (USD, month-first dates) and says so in the proposal's
 assumptions.
 
+## Harvest tickets, idle cash, look-through and Roth conversions
+
+**Harvest to ticket.** `tax` with `mode: harvest_report` returns
+`order_tickets`, one per account: `inputs` go to `order_ticket` unchanged.
+Each sell line lists `lots` (`lot_id`, `quantity`, `estimated_tax_saving`,
+`repurchase_not_before`). A lot's saving is its marginal current-year federal
+reduction in plan order. It is `null` when return facts are missing. Lots a wash
+sale would disallow, or that only add to carryforwards, are listed in
+`order_ticket_exclusions`. The ticket is a proposal. The person confirms it on
+the card and asks the broker for specific-lot relief.
+
+```sh
+printf '%s' '{"task":"order_ticket","client_id":"ana","inputs":{"source":"user_request",
+  "rationale":"Tax-loss harvest ...","orders":[{"symbol":"VTI","side":"sell","qty":100,
+  "lots":[{"lot_id":"vti-1","quantity":100,"estimated_tax_saving":"660.00","repurchase_not_before":"2026-04-20"}]}]}}' \
+  | uv run wealth run
+```
+
+**Idle cash.** `today` adds an `idle_yield` item: cash above the reserve
+target, earmarked goal cash and `protect_now` goals, priced at a reference
+rate. The rate is a saved `cash_reference_rate` fact
+(`{low, high, unit, source, as_of?, currency?}`). Mexico residents without one
+get the dated CETES 28-day constant (Banxico auction of 2026-09-15, 6.25%). The
+item says when the rate is more than 30 days old. A saved `cash_yield` (what the
+cash earns) makes the loss exact. Without it the figure is `bound: at_most`.
+`data.offer` holds `ladder` inputs for four weekly CETES rungs. Nothing fires
+when the rate, the reserve target or a balance is unknown.
+
+**Look-through.** `exposure` fills fund holdings the household lacks from
+saved `research.<SYMBOL>` fund packets. Yahoo is used only when market data is
+online (`WEALTH_OFFLINE` unset; `live_lookthrough: false` turns it off). The
+result adds `top_underlying`, `overlap_matrix`, `lookthrough_sources` and
+`employer_concentration` (from `income_exposures[].employer_instrument_id`,
+with the salary). A fund with a known asset class labels its unreported
+residual with that class.
+
+**Mexico mortgage.** `mx_deductions` takes `mortgage` (LISR Art. 151 fr. IV).
+It needs real interest from the lender's constancia, the credit in UDIs, and
+confirmation that the loan is for the home and from the financial system. It
+counts inside the global cap after `general_mxn`. A credit above 750,000 UDIs
+keeps the proportional share.
+
+**Roth conversions.** `retirement_us` `withdrawals` sweeps conversion
+ceilings (`conversion_sweep`, 10/12/22/24%) and names a `best_strategy`. It
+taxes `social_security_annual_benefit_usd` under IRC 86 (25k/34k single,
+32k/44k joint; fixed nominal thresholds deflated at `threshold_inflation`). It
+charges IRMAA from the 2026 CMS table on MAGI from two years earlier. Other
+years use the latest table with a dated warning.
+
 ## Facts
 
 A fact has `key`, `value`, `source` (`kind`, `ref`, `observed_on`), optional
