@@ -369,3 +369,19 @@ def test_a_1099_without_statements_gives_the_8949_rows_from_its_lots(tmp_path, m
     assert (s8949["summary"]["short"]["gain"], s8949["summary"]["long"]["gain"]) == ("400.00", "700.00")
     assert report["result"]["sections"]["us_schedule_d"]["summary"]["short_term_before_carryover_usd"] == "400.00"
     assert any("ledger has no sales" in w for w in s8949["warnings"])
+
+
+def test_prose_that_mentions_a_box_is_not_that_boxs_value():
+    """A note citing "(Box 10)" before an amount is not Box 10: it must not contest the real box."""
+    from tests.fixtures.ingest.taxdocs import _line, render
+    pdf = render([
+        ("text", "Charles Schwab & Co., Inc."), ("text", "2025 Form 5498  IRA Contribution Information"),
+        ("text", "Tax Year 2025"), ("text", "Account Number: XXXX-9012     Account type: Roth IRA"), ("blank",),
+        _line("5 Fair market value of account", "6,420.00"),
+        _line("10 Roth IRA contributions", "6,000.00"),
+        _line("Note: contributions reported in (Box 10) include prior-year amounts of", "3,500.00"),
+        _line("Total Roth IRA contributions (Box 10)", "6,000.00"),
+    ])
+    result = ingest_bytes(pdf, "5498.pdf")
+    assert result["result"]["figures"]["form_5498"]["roth_contributions"] == "6000.00"
+    assert result["status"] == "ready_to_confirm", result["result"].get("review_reasons")

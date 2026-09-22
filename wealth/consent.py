@@ -528,7 +528,7 @@ def ungrounded(value: Any, figures: Iterable[float]) -> list[float]:
 # monthly 100,000, "tengo 34" as a birth year, "80k en GBM y 20k en Nu" as a 100,000 total. Those are
 # still the person's figures. A number they never said, or cannot be read from what they said, stays
 # an inference.
-_PERIODS = (2, 4, 12, 24, 26, 52, 365)
+_PERIODS = (2, 4, 6, 12, 24, 26, 52, 365)  # times a year: semestral ... quincenal (24), catorcenal (26), semanal
 _MAX_SUMMED = 12
 
 
@@ -540,7 +540,7 @@ def _restatements(said: set[float]) -> set[float]:
     for s in base:
         out.update({s * 100, s / 100})  # a share written either way: 30 (%) and 0.3
         for k in _PERIODS:
-            out.update({s * k, s / k})
+            out.update({s * k, s / k, s * k / 12, s * 12 / k})  # per year, and per month ("1,000 a la semana")
         if 0 < s < 120 and float(s).is_integer():  # an age gives a birth year
             out.update({year - s, year - s - 1})
     figures = sorted((s for s in base if s >= 100), reverse=True)[:_MAX_SUMMED]

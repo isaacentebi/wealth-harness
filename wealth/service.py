@@ -5,7 +5,7 @@ import hashlib
 import os
 import re
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import importlib
 from inspect import signature
 import uuid
@@ -546,6 +546,39 @@ def _call(function, label: str, data: dict, **fixed):
     return function(**fixed, **data)
 
 
+_CONFIRM_OPTIONS = ("proposal_id", "acknowledge_discrepancies", "expires_on", "settle_differences")
+
+
+def confirm_options(inputs: object) -> dict:
+    """The exact options an ingest confirm executes with, validated strictly.
+
+    Booleans must be real booleans ("false" is refused, never read as true), ``expires_on`` a real date, and no
+    other key is accepted.  The MCP boundary hashes this object for the person's confirmation code and passes
+    the same object on, so what the code covers is exactly what runs."""
+    if not isinstance(inputs, dict):
+        raise ValueError("ingest confirm inputs must be an object")
+    unknown = sorted(set(inputs) - set(_CONFIRM_OPTIONS))
+    if unknown:
+        raise ValueError(f"ingest confirm inputs: unknown {unknown}; expected {{proposal_id, acknowledge_discrepancies?, "
+                         "expires_on?, settle_differences?}")
+    if not isinstance(inputs.get("proposal_id"), str) or not inputs["proposal_id"].strip():
+        raise ValueError("ingest confirm inputs: proposal_id must be the proposal's id")
+    for name in ("acknowledge_discrepancies", "settle_differences"):
+        if inputs.get(name) is not None and not isinstance(inputs[name], bool):
+            raise ValueError(f"{name} must be true or false")
+    expires = inputs.get("expires_on")
+    if expires is not None:
+        try:
+            expires = date.fromisoformat(expires).isoformat() if isinstance(expires, str) else None
+        except ValueError:
+            expires = None
+        if expires is None:
+            raise ValueError("expires_on must be a date as YYYY-MM-DD")
+    return {"proposal_id": inputs["proposal_id"],
+            "acknowledge_discrepancies": inputs.get("acknowledge_discrepancies") is True,
+            "expires_on": expires, "settle_differences": inputs.get("settle_differences") is True}
+
+
 def freshness(facts: list[dict]) -> dict:
     today = datetime.now(timezone.utc).date()
     stale = [f["key"] for f in facts if is_stale(f, today)]
@@ -735,6 +768,10 @@ class WealthService:
                     # The fact contract is for writing facts: wealth_remember's description carries the
                     # compact form, wealth_context(client_id, intent=<task>) the full one.
                     "views": views_module.summaries(views_module.views_for("situation", sit))}
+        if client_id is None and intent in ("remember", "fact_contract"):
+            # How to write facts does not depend on who they are about.
+            return {"fact_contract": fact_contract(),
+                    "next_step": "Save facts with wealth_remember(client_id, facts); every key's fields are above."}
         if client_id is None:
             catalog = capabilities()
             if intent != "overview":
@@ -1628,6 +1665,8 @@ class WealthService:
         keyed by ``proposal_id``.  ``confirm`` loads that stored proposal, never
         one supplied by the caller, and must follow the person's explicit yes.
         """
+        if action == "confirm":
+            inputs = confirm_options(inputs or {})
         handlers = {"file": self._ingest_file, "extraction": self._ingest_extraction, "chat": self._ingest_chat,
                     "confirm": self._ingest_confirm, "confirm_duplicates": self._ingest_confirm_duplicates,
                     "diff": self._ingest_diff, "connector": self._ingest_connector,
@@ -1771,12 +1810,18 @@ class WealthService:
         from .connectors import batch_mapper
         from .ingest import proposal_to_facts
         from .ingest_posting import describe_changes, is_newest, missing_positions, proposal_to_batch, reconciliation_lines
-        if not isinstance(acknowledge_discrepancies, bool):
-            raise ValueError("acknowledge_discrepancies must be true or false")
+        for name, flag in (("acknowledge_discrepancies", acknowledge_discrepancies),
+                           ("settle_differences", settle_differences)):
+            if not isinstance(flag, bool):
+                raise ValueError(f"{name} must be true or false")
         state = self._ingest_state(client_id)
         record = (state.get("pending") or {}).get(proposal_id) or (state.get("confirmed") or {}).get(proposal_id)
         if (((record or {}).get("proposal") or {}).get("result") or {}).get("kind") == "tax_document":
             return self._ingest_confirm_tax(client_id, proposal_id, acknowledge_discrepancies, expires_on)
+        if (((record or {}).get("proposal") or {}).get("result") or {}).get("source_kind") == "user":
+            from .ingest.chat import stated_plan
+            if stated_plan(record["proposal"]):
+                return self._ingest_confirm_stated(client_id, proposal_id, acknowledge_discrepancies, expires_on)
         today = datetime.now(timezone.utc).date()
         with WealthStore(self.db_path) as store:
             with store.atomic():
@@ -1872,6 +1917,75 @@ class WealthService:
                 report["result"]["upload_removed"] = bool(purge_uploads(client_id, self.db_path, sha256=sha))
             except OSError:
                 report["result"]["upload_removed"] = False
+        return report
+
+    def _ingest_confirm_stated(self, client_id: str, proposal_id: str, acknowledge_discrepancies: bool,
+                               expires_on: str | None = None) -> dict:
+        """Save balances the person stated in conversation as the stated facts a statement later refines.
+
+        ``cash.<name>``, ``investment.<name>``, ``liability.<name>`` and ``income.<name>`` (source ``user``), never
+        statement records and never ledger lines: a statement for the same institution covers them (its figure
+        wins and the difference is shown) instead of being counted beside them.
+        """
+        from .ingest import proposal_to_facts
+        from .ingest.chat import stated_plan
+        with WealthStore(self.db_path) as store:
+            with store.atomic():
+                state = store.auxiliary(client_id, "ingest")
+                done = (state.get("confirmed") or {}).get(proposal_id)
+                if done is not None:
+                    return {**done["report"], "replayed": True}
+                stored = (state.get("pending") or {}).get(proposal_id)
+                if stored is None:
+                    raise ValueError("proposal_id is unknown or expired; ingest the chat again and show the summary")
+                proposal = stored["proposal"]
+                packet = proposal_to_facts(proposal, confirmed=True, proposal_id=proposal_id,
+                                           acknowledge_discrepancies=acknowledge_discrepancies, expires_on=expires_on)
+                if packet["status"] != "ready":
+                    return packet
+                facts, covers = stated_plan(proposal) or ([], {})
+                household = (proposal.get("result") or {}).get("household") or {}
+                proposed = [item["id"] for entity in ("accounts", "liabilities", "income_exposures")
+                            for item in household.get(entity) or []]
+                lost = [item for item in proposed if not covers.get(item)]
+                if lost:
+                    # Confirming marks the whole proposal saved: an item without a fact would vanish silently.
+                    raise ValueError(f"confirm would drop {', '.join(lost)} (no fact holds it); nothing was saved")
+                snapshot = store.snapshot(client_id)
+                _resolve_stated_keys(facts, snapshot)
+                if expires_on:  # the review date the person chose, as a statement confirmation honours it
+                    for fact in facts:
+                        fact["expires_on"] = expires_on
+                before = build_situation(snapshot, store.ledger(client_id), datetime.now(timezone.utc).date())
+                saved = store.remember(client_id, facts, None, packet["result"]["request_id"])
+                after = build_situation(store.snapshot(client_id), store.ledger(client_id),
+                                        datetime.now(timezone.utc).date())
+                written = [w["key"] for w in saved["written"]]
+                report = {
+                    "status": "saved",
+                    "result": {
+                        "summary": (f"Saved what the person said as {', '.join(f['key'] for f in facts)}. A statement "
+                                    "for the same institution will replace these figures and show the difference."),
+                        "saved": {"keys": written, "client_revision": saved["client"]["revision"]},
+                        "needs_user": saved["needs_user"],
+                        "picture_after": situation_module.picture_delta(before, after,
+                                                                        after["profile"].get("language")),
+                    },
+                    "missing": [], "warnings": packet["warnings"] + saved.get("warnings", []),
+                    "sources": packet["sources"], "assumptions": packet["assumptions"],
+                }
+                now = datetime.now(timezone.utc).isoformat()
+
+                def update(old):
+                    state = {k: dict(old.get(k) or {}) for k in ("pending", "extractions", "confirmed")}
+                    state["pending"].pop(proposal_id, None)
+                    state["confirmed"][proposal_id] = {"proposal": proposal, "created_at": now, "batch": None,
+                                                       "held": [], "report": report}
+                    state["confirmed"] = dict(sorted(state["confirmed"].items(),
+                                                     key=lambda item: item[1].get("created_at", ""))[-_KEEP_PROPOSALS:])
+                    return state
+
+                store.update_auxiliary(client_id, "ingest", update)
         return report
 
     def _ingest_confirm_tax(self, client_id: str, proposal_id: str, acknowledge_discrepancies: bool,
@@ -2128,6 +2242,83 @@ def _retire_forgotten_accounts(store: WealthStore, client_id: str, receipt: dict
             "transactions": lines})
         result["reversed"] += len(posted["posted"])
     return result
+
+
+def _stated_identity(key: str, value: dict) -> tuple[str, str, str | None, str | None]:
+    """(kind family, normalised label, institution, currency) of a stated account, debt or income."""
+    from .ingest.common import fold
+    from .situation.model import _INSTITUTION_ALIASES, institution_key
+
+    family = key.split(".", 1)[0]
+    institution = value.get("institution") or value.get("lender") or None
+    name = value.get("name") or key.split(".", 1)[-1].replace("-", " ")
+    words = fold(name).split()
+    if institution:
+        # The label without the firm's own words: "BBVA Checking" at BBVA is "checking", "GBM" at GBM is "".
+        alias, tokens = institution_key(institution)
+        firm = set(tokens) | {w for n in _INSTITUTION_ALIASES.get(alias or "", ()) for w in fold(n).split()}
+        words = [w for w in words if w not in firm]
+    return family, " ".join(words), institution, value.get("currency") or None
+
+
+def _same_stated(a: tuple, b: tuple) -> bool:
+    """One account: same family and label, the same firm (absent matches only absent), a compatible currency (an
+    unknown currency, from an account said without a balance, is not a different one)."""
+    from .situation.model import same_institution
+
+    if a[0] != b[0] or a[1] != b[1]:
+        return False
+    if (a[2] is None) != (b[2] is None) or (a[2] is not None and not same_institution(a[2], b[2])):
+        return False
+    return a[3] is None or b[3] is None or a[3] == b[3]
+
+
+def _resolve_stated_keys(facts: list[dict], snapshot: dict) -> None:
+    """The one place a stated fact's key is chosen.
+
+    An incoming account, debt or income that matches an existing stated fact of the same kind (same label, same
+    firm, compatible currency) updates that fact's key: an update never creates a key.  Otherwise it gets a new
+    key no existing fact uses, tried in a fixed order: its label (with the firm's name when one is known), then
+    that with the currency as a suffix, then numbered.  So one fact holds each (label, firm, currency) identity
+    and two identities never share a key."""
+    from .ingest.common import slug
+
+    existing: list[tuple[str, tuple, dict]] = []
+    for fact in snapshot.get("facts") or []:
+        key, value = fact.get("key"), fact.get("value")
+        if isinstance(key, str) and key.count(".") == 1 and key.split(".")[0] in _STATED_FAMILIES \
+                and isinstance(value, dict) and "proposal_id" not in value:
+            existing.append((key, _stated_identity(key, value), value))
+    used = {f.get("key") for f in snapshot.get("facts") or [] if isinstance(f.get("key"), str)}
+    claimed: set[str] = set()
+    for fact in facts:
+        value = fact.get("value") if isinstance(fact.get("value"), dict) else {}
+        identity = _stated_identity(fact["key"], value)
+        matches = [(key, held) for key, other, held in existing if key not in claimed and _same_stated(identity, other)]
+        if len(matches) == 1:
+            key, held = matches[0]
+            if held.get("balance_unknown") and value.get("amount") is not None:
+                value["balance_unknown"] = None  # the amount is known now (merge removes the flag)
+            fact["key"] = key
+            claimed.add(key)
+            continue
+        family, _, institution, currency = identity
+        from .ingest.common import with_institution
+        base = f"{family}.{slug(with_institution(str(value.get('name') or fact['key'].split('.', 1)[-1]), institution), 48)}"
+        candidates = [base] + ([f"{base}-{str(currency).lower()}"] if currency else [])
+        chosen = next((c for c in candidates if c not in used), None)
+        if chosen is None:
+            counter = 2
+            while f"{candidates[-1]}-{counter}" in used:
+                counter += 1
+            chosen = f"{candidates[-1]}-{counter}"
+        fact["key"] = chosen
+        used.add(chosen)
+        claimed.add(chosen)
+        existing.append((chosen, identity, value))
+
+
+_STATED_FAMILIES = frozenset({"cash", "investment", "liability", "income"})
 
 
 def _ledger_summary(receipt: dict | None, mapping: dict) -> dict:

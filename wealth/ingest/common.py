@@ -51,6 +51,20 @@ def fold(text: Any) -> str:
     return " ".join(re.sub(r"[^a-z0-9%]+", " ", value).split())
 
 
+def with_institution(name: str | None, institution: str | None) -> str:
+    """``name`` prefixed with the institution unless it already names it ("BBVA" is BBVA México; "Checking" is not)."""
+    name = (name or "").strip()
+    if not institution or not str(institution).strip():
+        return name
+    from ..situation.model import institution_key  # lazy: the situation model imports ingest helpers
+
+    alias, tokens = institution_key(institution)
+    named_alias, named_tokens = institution_key(name)
+    if (alias and alias == named_alias) or fold(institution) in fold(name) or (tokens and tokens <= named_tokens):
+        return name
+    return f"{institution} {name}".strip()
+
+
 def slug(text: Any, limit: int = 32) -> str:
     return "-".join(fold(text).replace("%", "").split())[:limit].strip("-") or "x"
 

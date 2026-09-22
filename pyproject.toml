@@ -37,7 +37,7 @@ Security = "https://github.com/isaacentebi/wealth-harness/blob/main/SECURITY.md"
 
 [project.optional-dependencies]
 images = ["pillow>=10"]
-dev = ["pytest>=8,<10", "scikit-learn>=1.5", "fpdf2>=2.8"]
+dev = ["pytest>=8,<10", "scikit-learn>=1.5", "fpdf2>=2.8", "reportlab>=4.2"]
 
 [project.scripts]
 wealth = "wealth.cli:main"

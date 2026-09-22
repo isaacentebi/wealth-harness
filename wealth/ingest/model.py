@@ -40,7 +40,8 @@ import re
 from typing import Any, Iterable, TypedDict
 
 from .classify import CASH_LABEL, classify_instrument, listing
-from .common import decimals, digest, envelope, fold as fold_text, out, parse_amount, parse_percent, slug
+from .common import (decimals, digest, envelope, fold as fold_text, out, parse_amount, parse_percent, slug,
+                     with_institution)
 from .redact import mask_account, redact, redact_text
 from .safety import INSTRUCTION_REASON, flag_instructions, mark_untrusted, text_leaves
 from .transactions import normalize as normalize_transactions
@@ -138,7 +139,7 @@ def build_proposal(
         raise ValueError(f"kind must be one of {SOURCE_KINDS}")
     comma = statement.get("decimal_comma")
     warnings, missing, assumptions = list(warnings), list(missing), list(assumptions)
-    reasons = list(review_reasons)
+    reasons = list(review_reasons) + [str(r) for r in statement.get("review_reasons") or []]
     # Text in the file that addresses an assistant is a risk flag the person must see: never ready_to_confirm.
     if flag_instructions(provenance, [*text_leaves(statement), *text_leaves(transactions or [])]):
         reasons.append(INSTRUCTION_REASON)
@@ -184,7 +185,10 @@ def build_proposal(
         tail = raw.get("number_last4")
         tail = tail if isinstance(tail, str) and re.fullmatch(r"\d{4}", tail) else None
         label = redact_text(str(raw.get("label") or "")).strip() or None
-        base = f"{institution_key}-{tail}" if tail else f"{institution_key}-{slug(label, 20)}" if label else f"{institution_key}-{index + 1}"
+        # An institution the person named with the account ("Checking" at BBVA) is part of its identity.
+        named_at = redact_text(str(raw.get("institution") or "")).strip() or None
+        ident = with_institution(label, named_at) or None
+        base = f"{institution_key}-{tail}" if tail else f"{institution_key}-{slug(ident, 32)}" if ident else f"{institution_key}-{index + 1}"
         account_id = _unique(base, used_ids)
         account_currency = _ccy(raw.get("currency")) or currency
         if account_currency is None:
@@ -196,8 +200,8 @@ def build_proposal(
         account = {"id": account_id, "owner_id": owner_id, "type": account_type, "currency": account_currency}
         if label:
             account["name"] = label
-        if statement.get("institution"):
-            account["institution"] = statement["institution"]
+        if named_at or statement.get("institution"):
+            account["institution"] = named_at or statement["institution"]
         if tail:
             account["number_masked"] = mask_account(tail)
         if raw.get("interest_rate") not in (None, ""):
@@ -214,9 +218,11 @@ def build_proposal(
         cash_total: dict[str, Decimal] = {}
         merged: dict[str, dict[str, Any]] = {}
         lots_by_instrument: dict[str, list[dict[str, Any]]] = {}
+        row_values: list[Decimal | None] = []  # each printed row in the account currency, for section subtotals
 
         for row in raw.get("positions") or []:
             rows_seen += 1
+            row_values.append(None)
             row_ccy = _ccy(row.get("currency")) or account_currency
             qty = parse_amount(row.get("quantity"), decimal_comma=comma)
             price = parse_amount(row.get("price"), decimal_comma=comma)
@@ -274,6 +280,8 @@ def build_proposal(
                                     "expected": out(gain), "computed": out(value - cost),
                                     "difference": out(value - cost - gain), "page": row.get("page"),
                                     "detail": "market value minus cost does not match printed gain/loss"})
+            if value is not None:
+                row_values[-1] = rates.convert(value, row_ccy, account_currency)
             if value is None:
                 unresolved.append({"account_id": account_id, "item": label_text, "reason": "no market value or price",
                                    "page": row.get("page")})
@@ -351,9 +359,11 @@ def build_proposal(
             cash_total[cash_ccy] = cash_total.get(cash_ccy, Decimal(0)) + amount
             key = f"CASH:{cash_ccy}|{cash_ccy}"
             if amount < 0:
-                fragment["liabilities"].append({"id": f"{account_id}:debit-{cash_ccy.lower()}", "account_id": account_id,
-                                                "name": "Negative cash balance", "type": "margin_or_overdraft",
-                                                "value": out(-amount), "currency": cash_ccy})
+                # Kept as what the account owes (a negative cash balance, margin interest accrued): never dropped.
+                fragment["liabilities"].append({
+                    "id": _unique(f"{account_id}:debit-{cash_ccy.lower()}", used_ids), "account_id": account_id,
+                    "name": str(cash.get("liability_name") or "Negative cash balance"),
+                    "type": "margin_or_overdraft", "value": out(-amount), "currency": cash_ccy})
                 continue
             position = merged.setdefault(key, {"id": "", "account_id": account_id, "instrument_id": f"CASH:{cash_ccy}",
                                                "symbol": cash_ccy, "quantity": Decimal(0), "value": Decimal(0),
@@ -411,6 +421,18 @@ def build_proposal(
             rate = parse_percent(liability.get("interest_rate")) if liability.get("interest_rate") not in (None, "") else None
             if rate is not None:
                 entry["interest_rate"] = out(rate)
+            for field in ("no_interest_payment", "credit_limit"):  # what a card statement prints beside the balance
+                figure = parse_amount(liability.get(field), decimal_comma=comma)
+                if figure is not None:
+                    entry[field] = out(abs(figure))
+            if liability.get("cat") not in (None, ""):
+                cat = parse_percent(liability["cat"])
+                if cat is not None:
+                    entry["cat"] = out(cat)
+            if isinstance(liability.get("due_date"), str):
+                entry["due_date"] = liability["due_date"]
+            if liability.get("kind") in ("installments",):
+                entry["kind"] = liability["kind"]
             if balance is None:
                 missing.append({"key": f"liabilities.{entry['id']}.value", "reason": "missing", "detail": "Balance owed was not readable."})
             fragment["liabilities"].append(entry)
@@ -418,23 +440,28 @@ def build_proposal(
         tx_reconciled = None
         if raw.get("transactions") or raw.get("flows") or raw.get("debt_flows"):
             kind_for_tx = account_type if account_type != "unspecified" else ("brokerage" if raw.get("positions") else "checking")
-            rows, tx_warnings = normalize_transactions(raw.get("transactions") or [], account_id=account_id,
-                                                       currency=account_currency, account_kind=kind_for_tx,
-                                                       comma=comma, redact_text=redact_text)
+            rows, tx_warnings, unread = normalize_transactions(raw.get("transactions") or [], account_id=account_id,
+                                                               currency=account_currency, account_kind=kind_for_tx,
+                                                               comma=comma, redact_text=redact_text)
             warnings.extend(tx_warnings)
+            reasons.extend(unread)  # a movement the parser could not read makes the whole proposal a review
             all_transactions.extend(rows)
             tx_reconciled = _check_transactions(account_id, account_currency, raw, rows, comma, differences, assertions,
                                                 statement.get("period_start"), as_of)
         recon_accounts.append(_reconcile_account(
             account_id, account_currency, raw, items, positions_value, cash_total, rows_seen, rates, comma,
-            tolerance, differences, tx_reconciled,
+            tolerance, differences, tx_reconciled, row_values,
         ))
 
     for item in statement.get("liabilities") or []:
         balance = parse_amount(item.get("balance"), decimal_comma=comma)
-        entry = {"id": _unique(f"liability-{slug(item.get('label') or 'debt', 24)}", used_ids),
+        lender = redact_text(str(item.get("institution") or "")).strip() or None
+        ident = with_institution(str(item.get("label") or "debt"), lender)
+        entry = {"id": _unique(f"liability-{slug(ident, 32)}", used_ids),
                  "name": redact_text(str(item.get("label") or "Debt")), "value": out(abs(balance)) if balance is not None else None,
                  "currency": _ccy(item.get("currency")) or currency or "XXX"}
+        if lender:
+            entry["lender"] = lender
         payment = parse_amount(item.get("minimum_payment"), decimal_comma=comma)
         if payment is not None:
             entry["monthly_payment"] = out(abs(payment))
@@ -450,9 +477,12 @@ def build_proposal(
                  "description": redact_text(str(item.get("label") or "Income")), "currency": income_ccy}
         if amount is not None:
             entry["annual_amount"] = out(amount)
-        for field in ("sector", "country"):
+        for field in ("sector", "country", "frequency"):
             if item.get(field):
                 entry[field] = item[field]
+        per_period = parse_amount(item.get("per_period"), decimal_comma=comma)
+        if per_period is not None and item.get("frequency"):
+            entry["per_period"] = out(per_period)  # as the person said it ("85 mil al mes"), beside the year's figure
         fragment["income_exposures"].append(entry)
 
     fragment["unknown_sections"] = sorted(
@@ -510,7 +540,7 @@ def build_proposal(
 
 
 def _reconcile_account(account_id, currency, raw, items, positions_value, cash_total, rows_seen, rates, comma,
-                       tolerance, differences, tx_reconciled=None) -> dict[str, Any]:
+                       tolerance, differences, tx_reconciled=None, row_values=None) -> dict[str, Any]:
     reported_raw = raw.get("reported_total") if isinstance(raw.get("reported_total"), dict) else None
     reported = _amount(reported_raw, comma) if reported_raw else None
     label = reported_raw.get("label") if reported_raw else None
@@ -569,16 +599,38 @@ def _reconcile_account(account_id, currency, raw, items, positions_value, cash_t
     else:
         entry["status"] = "unverifiable"
         entry["detail"] = "No reported account total."
-    subtotal_raw = raw.get("positions_subtotal") if isinstance(raw.get("positions_subtotal"), dict) else None
-    subtotal = _amount(subtotal_raw, comma) if subtotal_raw else None
-    if subtotal is not None:
-        check = abs(positions_value - subtotal) <= tol
-        entry["positions_subtotal"] = {"reported": out(subtotal), "computed": out(positions_value), "matches": check}
+    subtotals = [s for s in raw.get("positions_subtotals") or [] if isinstance(s, dict)]
+    if isinstance(raw.get("positions_subtotal"), dict):
+        subtotals.append(raw["positions_subtotal"])
+    checks = []
+    for subtotal_raw in subtotals:
+        subtotal = _amount(subtotal_raw, comma)
+        if subtotal is None:
+            continue
+        # A section subtotal covers the rows since its header or the previous subtotal; a "Total positions"
+        # line covers the whole account (with or without its cash rows).
+        candidates = []
+        rows = subtotal_raw.get("rows")
+        if isinstance(rows, list) and len(rows) == 2 and row_values is not None:
+            section = row_values[rows[0]:rows[1]]
+            if section and all(v is not None for v in section):
+                candidates.append(sum(section, Decimal(0)))
+        candidates.append(positions_value)
+        if row_values and all(v is not None for v in row_values):
+            candidates.append(sum(row_values, Decimal(0)))
+        check = any(abs(value - subtotal) <= tol for value in candidates)
+        shown = next((value for value in candidates if abs(value - subtotal) <= tol), candidates[0])
+        checks.append({"label": subtotal_raw.get("label"), "reported": out(subtotal), "computed": out(shown),
+                       "matches": check})
         if not check:
             differences.append({"account_id": account_id, "check": "positions_subtotal", "expected": out(subtotal),
-                                "computed": out(positions_value), "difference": out(positions_value - subtotal),
+                                "computed": out(shown), "difference": out(shown - subtotal),
                                 "page": subtotal_raw.get("page"),
                                 "detail": "security rows do not sum to the printed positions subtotal"})
+    if len(checks) == 1:
+        entry["positions_subtotal"] = {k: v for k, v in checks[0].items() if k != "label"}
+    elif checks:
+        entry["positions_subtotals"] = checks
     return entry
 
 

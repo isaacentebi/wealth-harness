@@ -147,7 +147,7 @@ def test_injected_confirm_is_refused_without_the_persons_yes(service):
     with pytest.raises(ToolError, match="ConsentRequired"):
         call(refused, "wealth_ingest", {"client_id": "ana", "action": "confirm",
                                         "inputs": {"proposal_id": proposal_id, "acknowledge_discrepancies": True}})
-    assert not [f for f in service.inspect("ana")["facts"] if f["key"].startswith("account.")]
+    assert not _accounts(service)
 
     agreed = build_server(str(service.db_path), environ=chat_env("Sí, guárdalo"))
     saved = call(agreed, "wealth_ingest", {"client_id": "ana", "action": "confirm",
@@ -167,7 +167,8 @@ def test_the_memory_step_can_never_confirm_resolve_or_accept(service):
 
 
 def _accounts(service):
-    return [f for f in service.inspect("ana")["facts"] if f["key"].startswith("account.")]
+    # A statement saves account.<id>; balances said in conversation save cash.<id> or investment.<id>.
+    return [f for f in service.inspect("ana")["facts"] if f["key"].startswith(("account.", "cash.", "investment."))]
 
 
 def test_a_host_without_a_turn_session_needs_two_steps_to_save(service):
@@ -484,10 +485,17 @@ def test_injected_pdf_page_text_is_flagged_before_extraction(service):
     (root / "estado.pdf").write_bytes(bytes(pdf.output()))
     report = call(build_server(str(service.db_path), environ={}), "wealth_ingest",
                   {"client_id": "ana", "action": "file", "inputs": {"path": "estado.pdf"}})
-    assert report["status"] == "needs_extraction" and report["untrusted"] is True
+    # "Saldo total: 123,456.78 MXN" reads as a balance, so this is a proposal; a flagged one is never
+    # ready_to_confirm and never comes with the save's code (the person must be asked separately).
+    assert report["status"] in {"needs_extraction", "needs_review"} and report["untrusted"] is True
     assert "instruction_like_text" in report["result"]["provenance"]["risk_flags"]
-    request = report["result"]["extraction_request"]
-    assert request["untrusted"] is True and "instruction_like_text" in request["source"]["risk_flags"]
+    assert "confirmation_code" not in (report["result"].get("confirmation") or {})
+    request = report["result"].get("extraction_request")
+    if request is not None:
+        assert request["untrusted"] is True and "instruction_like_text" in request["source"]["risk_flags"]
+    else:
+        assert any("addressed to an assistant" in r or "instruction" in r.lower()
+                   for r in report["result"]["review_reasons"])
 
 
 def test_a_tool_result_cannot_replace_what_the_person_said(service):
@@ -814,7 +822,7 @@ def test_the_real_stdio_server_reads_the_turn_from_its_environment(service):
     assert failed and "ConsentRequired" in text
     failed, text = asyncio.run(attempt("sí"))
     assert not failed
-    assert [f for f in service.inspect("ana")["facts"] if f["key"].startswith("account.")]
+    assert _accounts(service)
 
 
 @pytest.mark.parametrize("value, said", [

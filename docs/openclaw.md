@@ -198,10 +198,10 @@ The claw never says it bought, sold or moved anything, and asks "¿Lo guardo?"
   no amounts or identity); `WEALTH_OFFLINE=1` turns that off. The local web
   page loads fonts from Google Fonts, which sees the IP and the font request
   but no financial data.
-- OpenClaw is a host without the Wealth launcher, so it gets `needs_person`
-  plus a `confirmation_code`; the claw must show the summary and code, and
-  send the second call (`confirm: true` plus the code) only on the person's
-  yes. Pending codes live in the database for 10 minutes (single use; a wrong
+- OpenClaw is a host without the Wealth launcher, so a statement proposal
+  carries its summary and a `confirmation_code` (and `confirm` without one
+  returns `needs_person` plus a code); the claw must show the summary and
+  code, and send `confirm: true` plus the code only on the person's yes. Pending codes live in the database for 10 minutes (single use; a wrong
   code cancels it), so a gateway that starts `wealth-mcp` for every message
   can still finish the second call.
 - `WEALTH_HOST_HANDLES_CONSENT=1` (in `mcp.servers.wealth.env`) drops the

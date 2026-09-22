@@ -79,6 +79,7 @@ _B = {
            "r_cash": "efectivo", "inside": " (no sé si el pago de {x} ya está dentro del gasto: el excedente es {lo} si no lo está, {hi} si sí; pregúntalo)",
            "b_essential": "esencial", "b_total": "total",
            "debt": "Deuda {n}: {b} al {r}; pago {p}/mes; {when}", "paid": "liquida {d}", "missing": "falta {x}",
+           "no_int": "; para no generar intereses paga {x} antes del {d}",
            "never": "no se liquida con ese pago", "interest": ", intereses {x}", "interest_iva": ", intereses + IVA {x}",
            "goal": "Meta {n}: {detail} ({st})", "per_month": "{x}/mes", "target": "{x} para {d}",
            "inv": "Inversiones: {x}", "cash": "Efectivo: {x}", "invalid": "Datos guardados que no se pudieron leer (pide el valor correcto): {x}", "pos": "Posiciones: {x}", "units": "títulos", "top": "mayor exposición {u} {w} ({s})",
@@ -101,6 +102,7 @@ _B = {
            "r_cash": "cash", "inside": " (unknown whether the {x} payment is already inside spending: surplus {lo} if not, {hi} if so; ask)",
            "b_essential": "essential", "b_total": "total",
            "debt": "Debt {n}: {b} at {r}; payment {p}/month; {when}", "paid": "paid off {d}", "missing": "missing {x}",
+           "no_int": "; pay {x} by {d} to avoid interest",
            "never": "never at this payment", "interest": ", interest {x}", "interest_iva": ", interest + IVA {x}",
            "goal": "Goal {n}: {detail} ({st})", "per_month": "{x}/month", "target": "{x} by {d}",
            "inv": "Investments: {x}", "cash": "Cash: {x}", "invalid": "Saved data that could not be read (ask for the correct value): {x}", "pos": "Positions: {x}", "units": "units", "top": "largest exposure {u} {w} ({s})",
@@ -119,8 +121,10 @@ _KIND = {"es": {"auto": "auto", "mortgage": "hipoteca", "card": "tarjeta", "pers
                 "student": "student", "other": "loan"}}
 
 
-_FREQUENCY = {"es": {"monthly": " al mes", "biweekly": " cada dos semanas", "annual": " al año", "weekly": " a la semana"},
-              "en": {"monthly": " a month", "biweekly": " every two weeks", "annual": " a year", "weekly": " a week"}}
+_FREQUENCY = {"es": {"monthly": " al mes", "semimonthly": " a la quincena", "biweekly": " cada dos semanas",
+                     "annual": " al año", "weekly": " a la semana"},
+              "en": {"monthly": " a month", "semimonthly": " twice a month", "biweekly": " every two weeks",
+                     "annual": " a year", "weekly": " a week"}}
 _KEY_NAMES = {"es": {"income": "ingreso", "spending": "gasto mensual", "client.profile": "perfil", "goals": "metas",
                      "reserve": "reserva", "cash": "efectivo", "investment": "inversión", "liability": "deuda",
                      "policy.ips": "política de inversión", "planning.dca": "plan de inversión periódica",
@@ -158,6 +162,8 @@ def liability_name(row: Mapping[str, Any], lang: str) -> str:
     name = _KIND[lang].get(row.get("kind") or "other", _KIND[lang]["other"])
     if row.get("kind") in (None, "other") and row.get("name"):
         name = row["name"]
+    if row.get("installments"):  # purchases at meses sin intereses on the card, owed apart from its balance
+        name += " MSI" if lang == "es" else " installments"
     return f"{name} ({row['lender']})" if row.get("lender") else name
 
 
@@ -242,6 +248,8 @@ def brief(sit: Mapping[str, Any], language: str | None = None) -> str:
             when = t["never"]
         else:
             when = t["paid"].format(d=plan.get("date") or "?") + t["interest_iva" if plan.get("iva") else "interest"].format(x=fmt(plan.get("interest")))
+        if row.get("no_interest_payment") is not None:
+            when += t["no_int"].format(x=fmt(row["no_interest_payment"]), d=row.get("due_date") or "?")
         lines.append((5, t["debt"].format(n=liability_name(row, lang), b=f"{fmt(row['balance'])} {row['currency']}",
                                           r=pct(row["annual_rate"]) if row["annual_rate"] is not None else "?",
                                           p=fmt(row["monthly_payment"]), when=when)))
@@ -263,6 +271,8 @@ def brief(sit: Mapping[str, Any], language: str | None = None) -> str:
     for account in sit["accounts"]:
         if account["source"] == "ledger" or account.get("superseded_by"):
             continue
+        if kind_family(account.get("type")) == "debt" and not account.get("value"):
+            continue  # a card or loan statement: its balance is on the debt lines, not an investment worth 0
         value = fmt(account["value"]) if account["value"] is not None else _native(account["native"])
         text = f"{account['label']} {value}" + (f" ({account['as_of']})" if account.get("as_of") else "")
         # A checking or savings account is cash, never an investment.
@@ -478,8 +488,10 @@ def sentences(sit: Mapping[str, Any], language: str | None = None) -> list[dict]
     for item in income["items"]:
         amount = _amount(item["amount"], item["currency"], True)
         approx = about(item["approximate"])
-        if item["frequency"] == "biweekly":
-            period_es, period_en = "cada dos semanas", "every two weeks"
+        if item["frequency"] in ("biweekly", "semimonthly", "weekly"):
+            period_es, period_en = {"biweekly": ("cada dos semanas", "every two weeks"),
+                                    "semimonthly": ("a la quincena", "twice a month"),
+                                    "weekly": ("a la semana", "a week")}[item["frequency"]]
         else:
             period_es, period_en = "al mes", "a month"
         if item["net"] is False:

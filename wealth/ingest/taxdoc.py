@@ -93,7 +93,9 @@ _YEAR_PATTERNS = tuple(re.compile(p) for p in (
 ))
 _ISSUED = re.compile(r"(?:fecha\s+de\s+(?:emision|expedicion)|date\s+(?:prepared|issued)|issued\s+on|prepared\s+on)"
                      r"\s*:?\s*(.+)$", re.MULTILINE)
-_ACCOUNT = re.compile(r"(?:contrato|cuenta|account(?:\s+(?:number|no\.?))?)\s*(?:no\.?\s*)?[:#]\s*([\dxX*\- ]{4,24})")
+_ACCOUNT = re.compile(r"(?:contrato|cuenta|account(?:\s+(?:number|no\.?))?)\s*(?:no\.?\s*)?[:#]\s*"
+                      r"([\dxX*\-]{2,}(?: [\dxX*\-]+)*)")  # single spaces only: never into the next column
+_COLUMN_GAP = re.compile(r"\s{8,}")
 
 
 def detect_tax_document(pages: list[tuple[int, str]]) -> dict[str, Any] | None:
@@ -152,11 +154,13 @@ _FIELDS_MX = {
                   ("isr_withheld", r"\bisr\b|retenci|impuesto"),
                   ("nominal", r"\bnominal(?:es)?\b|^intereses?(?:\s+(?:totales|pagados|devengados|cobrados|ganados|"
                               r"generados|del\s+ejercicio))*$")),
+    # "Dividendos ... (CUFIN)" are the domestic dividends themselves (paid from the company's CUFIN); only an
+    # ISR the company paid and the person may credit is isr_creditable.
     "dividendos": (("total", r"^total\b"), ("foreign_tax_withheld", r"(?:impuesto|isr)\b.*\bextranjer"),
                    ("foreign_gross", r"extranjer|del\s+exterior"),
-                   ("isr_creditable", r"acreditable|cufin|pagado\s+por\s+la\s+(?:persona\s+)?moral"),
+                   ("isr_creditable", r"acreditable|pagado\s+por\s+la\s+(?:persona\s+)?moral"),
                    ("isr_withheld", r"\bisr\b|retenci|impuesto"),
-                   ("domestic_gross", r"nacional|mexic|personas\s+morales|^dividendos?$")),
+                   ("domestic_gross", r"nacional|mexic|personas\s+morales|cufin|^dividendos?$")),
 }
 _BOXES = {
     "form_1099_div": {"1a": "ordinary", "1b": "qualified", "2a": "capital_gain_distributions", "4": "federal_tax_withheld",
@@ -180,13 +184,18 @@ _WORDS_US = {
                   ("ira_contributions", r"ira\s+contributions")),
 }
 _BOX = re.compile(r"^(?:box\s+)?(\d{1,2}[a-h]?)\b\s*")
+# A title ending in its box, "Total ordinary dividends (Box 1a)"; prose that only mentions a box mid-sentence
+# ("contributions reported in (Box 10) include") is not that box's value.
+_BOX_REF = re.compile(r"\(\s*box\s+(\d{1,2}[a-h]?)\s*\)\s*[:.\-]?\s*$")
 
 
 def _segments(line: str) -> list[tuple[str, str]]:
     """(label, printed amount) pairs: each amount with the text since the previous one."""
     out, start = [], 0
     for match in _MONEY.finditer(line):
-        label = line[start:match.start()]
+        # Forms are laid out in columns: the payer's address or the account number sits on the same text line
+        # as "10 Roth IRA contributions". The label is the column the amount closes, not the whole line.
+        label = _COLUMN_GAP.split(line[start:match.start()].strip())[-1]
         out.append((label, match.group(0).strip()))
         start = match.end()
     return out
@@ -203,15 +212,28 @@ def _match_field(label: str, rules: Iterable[tuple[str, str]]) -> str | None:
     return None
 
 
-def _put(doc: dict, block: str, field: str, raw: str, page: int) -> None:
+def _put(doc: dict, block: str, field: str, raw: str, page: int, rank: int = 1) -> None:
+    """Record a printed figure; ``rank`` 2 is a numbered form box, 1 a figure found by its words.
+
+    A box ("10 Roth IRA contributions $7,000.00") is the form itself; a sentence elsewhere that names the same
+    thing ("... include $3,500.00 made from 01/01/2026 through 04/15/2026") is a note about it, not a rival.
+    """
     fields = doc["blocks"].setdefault(block, {})
+    ranks = doc.setdefault("ranks", {})
+    path = f"{block}.{field}"
     if field in fields:
-        if parse_amount(fields[field]) != parse_amount(raw):
+        if parse_amount(fields[field]) == parse_amount(raw):
+            ranks[path] = max(ranks.get(path, 1), rank)
+            return
+        if rank < ranks.get(path, 1):
+            return
+        if rank == ranks.get(path, 1):
             doc["conflicts"].append(f"{block}.{field} is printed twice with different values "
                                     f"({fields[field]} and {raw})")
-        return
+            return
     fields[field] = raw
-    doc["pages"][f"{block}.{field}"] = page
+    ranks[path] = rank
+    doc["pages"][path] = page
 
 
 def _parse_mx(pages: list[tuple[int, str]], doc: dict) -> None:
@@ -239,10 +261,12 @@ def _parse_mx(pages: list[tuple[int, str]], doc: dict) -> None:
 
 
 def _parse_us_boxes(block: str, label: str, raw: str, number: int, doc: dict) -> None:
-    box = _BOX.match(label)
+    box = _BOX.match(label) or _BOX_REF.search(label)  # "1a Total ordinary ..." or "... (Box 1a)"
     field = _BOXES[block].get(box.group(1)) if box else None
-    if field is None:
-        field = _match_field(_BOX.sub("", label), _WORDS_US[block])
+    if field is not None:
+        _put(doc, block, field, raw, number, rank=2)
+        return
+    field = _match_field(_BOX.sub("", label), _WORDS_US[block])
     if field:
         _put(doc, block, field, raw, number)
 
@@ -265,27 +289,48 @@ def _lot(line: str, term: str | None, number: int, box: str | None = None) -> di
     dates = list(_DATE_TOKEN.finditer(line))
     if len(dates) < 2:
         return None
-    amounts = [m.group(0).strip() for m in _MONEY.finditer(line, dates[-1].end())]
-    if len(amounts) not in (3, 4):
+    columns = _b_columns([m.group(0).strip() for m in _MONEY.finditer(line, dates[-1].end())])
+    if columns is None:
         return None
     before = line[:dates[-2].start()].split()
     quantity = before.pop() if before and re.fullmatch(r"[\d,]*\.?\d+", before[-1]) else None
     symbol = before.pop() if before and re.fullmatch(r"[A-Z][A-Z.]{0,5}|[0-9A-Z]{9}", before[-1]) else None
     lot = {"description": redact_text(" ".join(before))[:120] or None, "symbol": symbol, "quantity": quantity,
-           "date_acquired": dates[-2].group(0), "date_sold": dates[-1].group(0),
-           "proceeds": amounts[0], "cost_basis": amounts[1],
-           "wash_sale_disallowed": amounts[2] if len(amounts) == 4 else None, "gain": amounts[-1],
+           "date_acquired": dates[-2].group(0), "date_sold": dates[-1].group(0), **columns,
            "term": term, "box": box, "page": number}
     return lot
 
 
-def _total(label: str, line: str, term: str | None, number: int) -> dict | None:
-    amounts = [m.group(0).strip() for m in _MONEY.finditer(line)]
-    if len(amounts) not in (3, 4):
+def _b_columns(amounts: list[str]) -> dict | None:
+    """Proceeds, cost, [accrued market discount], [wash sale disallowed], gain: 3 to 5 printed amounts.
+
+    Composites print "--" or 0.00 for an empty column.  With four amounts the third is the wash sale when
+    proceeds - cost + it = gain, else the market discount (which does not enter the realized gain).
+    """
+    if len(amounts) not in (3, 4, 5):
         return None
-    return {"term": _term_of(label) or ("all" if term is None or re.search(r"1099|grand|overall", label) else term),
-            "proceeds": amounts[0], "cost_basis": amounts[1],
-            "wash_sale_disallowed": amounts[2] if len(amounts) == 4 else None, "gain": amounts[-1], "page": number}
+    out = {"proceeds": amounts[0], "cost_basis": amounts[1], "wash_sale_disallowed": None, "gain": amounts[-1]}
+    if len(amounts) == 5:
+        out["wash_sale_disallowed"] = amounts[3]
+        if (_d(amounts[2]) or 0) != 0:
+            out["market_discount"] = amounts[2]
+    elif len(amounts) == 4:
+        p, c, third, g = (_d(a) for a in amounts)
+        if None not in (p, c, third, g) and abs(p - c + third - g) > TOLERANCE and abs(p - c - g) <= TOLERANCE:
+            if third:
+                out["market_discount"] = amounts[2]
+        else:
+            out["wash_sale_disallowed"] = amounts[2]
+    return out
+
+
+def _total(label: str, line: str, term: str | None, number: int, box: str | None = None) -> dict | None:
+    columns = _b_columns([m.group(0).strip() for m in _MONEY.finditer(line)])
+    if columns is None:
+        return None
+    overall = term is None or re.search(r"1099|grand|overall", label)
+    return {"term": _term_of(label) or ("all" if overall else term), "box": None if overall else box,
+            **columns, "page": number}
 
 
 def _parse_us(pages: list[tuple[int, str]], doc: dict) -> None:
@@ -308,7 +353,7 @@ def _parse_us(pages: list[tuple[int, str]], doc: dict) -> None:
                 continue
             if section == "form_1099_b":
                 if folded.startswith("total"):
-                    total = _total(folded, line, term, number)
+                    total = _total(folded, line, term, number, box)
                     if total:
                         doc["totals"].append(total)
                     continue
@@ -466,6 +511,12 @@ def _checks(doc: dict) -> tuple[list[dict], list[str], dict[str, dict[str, str]]
     return checks, reasons, figures, derived
 
 
+def _total_name(key: tuple[str, str | None]) -> str:
+    term, box = key
+    name = "overall total" if term == "all" else f"{term}-term total"
+    return name + (f" (Box {box})" if box else "")
+
+
 def _check_1099b(doc: dict, figures: dict, check, reasons: list[str], derived: list[str]) -> None:
     lots, totals = doc["lots"], doc["totals"]
     fields = ("proceeds", "cost_basis", "wash_sale_disallowed", "gain")
@@ -478,29 +529,48 @@ def _check_1099b(doc: dict, figures: dict, check, reasons: list[str], derived: l
               f"{lot.get('date_sold')}): proceeds - cost + wash sale = gain", p - c + (w or Decimal(0)), g)
         if lot.get("term") is None:
             reasons.append(f"1099-B lot {index + 1}: short or long term is not stated")
-    by_term: dict[str, dict] = {}
+    # A composite prints one total per Form 8949 box ("Total Long-Term" under Box D and again under Box E):
+    # totals are keyed by term and box, and a term's figures are the sum of its boxes.
+    by_key: dict[tuple[str, str | None], dict] = {}
     for total in totals:
-        if total["term"] in by_term:
-            reasons.append(f"1099-B: two printed {total['term']} totals")
-        by_term[total["term"]] = total
+        key = (total["term"], total.get("box"))
+        if key in by_key:
+            reasons.append(f"1099-B: two printed {total['term']} totals"
+                           + (f" for Box {key[1]}" if key[1] else ""))
+        by_key[key] = total
         p, c, w, g = (_d(total.get(f)) for f in fields)
         if None not in (p, c, g):
-            check(f"1099-B {total['term']} total: proceeds - cost + wash sale = gain", p - c + (w or Decimal(0)), g)
+            check(f"1099-B {_total_name(key)}: proceeds - cost + wash sale = gain", p - c + (w or Decimal(0)), g)
     for term in ("short", "long"):
-        chosen = [lot for lot in lots if lot.get("term") == term]
-        total = by_term.get(term)
-        if chosen and total is None:
-            reasons.append(f"1099-B: {len(chosen)} {term}-term lot(s) but no printed {term}-term total to check them "
-                           "against")
+        keys = [key for key in by_key if key[0] == term]
+        term_lots = [lot for lot in lots if lot.get("term") == term]
+        if term_lots and not keys:
+            reasons.append(f"1099-B: {len(term_lots)} {term}-term lot(s) but no printed {term}-term total to check "
+                           "them against")
             continue
-        if chosen and total:
+        for key in keys:
+            boxed = key[1] is not None and len(keys) > 1
+            chosen = [lot for lot in term_lots if not boxed or (lot.get("box") or "").upper() == key[1]]
+            if not chosen:
+                continue
+            total = by_key[key]
             for field in fields:
                 printed = _d(total.get(field))
                 parts = [_d(lot.get(field)) for lot in chosen]
                 if printed is None and not any(parts):
                     continue
-                check(f"1099-B {term}-term lots sum to the printed {field.replace('_', ' ')}",
+                check(f"1099-B {term}-term lots" + (f" (Box {key[1]})" if boxed else "")
+                      + f" sum to the printed {field.replace('_', ' ')}",
                       sum((x or Decimal(0) for x in parts), Decimal(0)), printed or Decimal(0))
+    by_term: dict[str, dict] = {}
+    for term in ("short", "long", "all"):
+        parts = [total for key, total in by_key.items() if key[0] == term]
+        if len(parts) == 1:
+            by_term[term] = parts[0]
+        elif parts:
+            by_term[term] = {"term": term, **{f: _s(sum((_d(t.get(f)) or Decimal(0) for t in parts), Decimal(0)))
+                                             for f in fields}}
+            derived.append(f"form_1099_b {term}-term figures = sum of the printed Box totals")
     terms = [by_term[t] for t in ("short", "long") if t in by_term]
     grand = by_term.get("all")
     if grand and terms:

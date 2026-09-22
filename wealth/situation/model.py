@@ -39,7 +39,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Iterable, Mapping
 
 from .. import finmath
-from .schema import country_code
+from .schema import PAYMENT_FREQUENCIES, country_code
 
 # ------------------------------------------------------------------ constants
 
@@ -343,7 +343,9 @@ def _profile(facts: _Facts) -> dict:
         "tax_residence": tax_list or None,
         "tax_residence_assumed": None if tax_list else country,
         "citizenship": raw.get("citizenship") if isinstance(raw.get("citizenship"), list) else None,
-        "us_person": raw.get("us_person") if isinstance(raw.get("us_person"), bool) else None,
+        # A US citizen is a US person (taxed on worldwide income) whether or not anyone said "us_person".
+        "us_person": True if _us_citizen(raw.get("citizenship"))
+        else raw.get("us_person") if isinstance(raw.get("us_person"), bool) else None,
         "dependents": raw.get("dependents") if isinstance(raw.get("dependents"), int) else None,
         "dependent_ages": raw.get("dependent_ages") if isinstance(raw.get("dependent_ages"), list) else None,
         "currencies": raw.get("currencies") if isinstance(raw.get("currencies"), list) else None,
@@ -423,11 +425,14 @@ def _income(facts: _Facts) -> tuple[list[dict], str | None]:
     return [], None
 
 
+_RECURRING = ("monthly", "semimonthly", "biweekly", "weekly")  # paid through the year: part of the monthly flow
+
+
 def _income_view(items: list[dict], fx: _FX, currency: str | None) -> dict:
     rows, extras, monthly, unconverted = [], [], Decimal(0), []
     for item in items:
         amount, freq = D(item.get("amount")), item.get("frequency")
-        per_month = finmath.per_month(amount, freq) if freq in ("monthly", "biweekly") else None
+        per_month = finmath.per_month(amount, freq) if freq in _RECURRING else None
         row = {"id": item["id"], "key": item["key"], "name": item.get("name"), "kind": item.get("kind"),
                "amount": num(amount), "currency": item.get("currency"), "frequency": freq,
                "net": item.get("net") if isinstance(item.get("net"), bool) else None,
@@ -559,6 +564,11 @@ _DEBT_ACCOUNT_KINDS = {"credit card", "card", "loan", "mortgage", "line of credi
                        "credito", "prestamo", "hipoteca"}
 
 
+def _us_citizen(citizenship: Any) -> bool:
+    values = citizenship if isinstance(citizenship, list) else [citizenship] if isinstance(citizenship, str) else []
+    return any(str(v).strip().upper() in {"US", "USA", "UNITED STATES"} for v in values)
+
+
 def kind_family(kind: Any) -> str | None:
     """'cash', 'retirement', 'investment', 'debt' or None (unknown) for a stated kind or an account type."""
     if not isinstance(kind, str) or not kind.strip():
@@ -659,7 +669,11 @@ def _liabilities(facts: _Facts, statement_accounts: list[dict]) -> tuple[list[di
                           "payment": raw.get("monthly_payment"),
                           "payment_frequency": "monthly" if raw.get("monthly_payment") is not None else None,
                           "annual_rate": raw.get("interest_rate"), "lender": account.get("institution"),
-                          "source": "statement", "as_of": account.get("as_of")})
+                          "source": "statement", "as_of": account.get("as_of"),
+                          # What a card statement prints beside the balance (the pago-mínimo trap is between them).
+                          **{f: raw[f] for f in ("no_interest_payment", "due_date", "cat", "credit_limit")
+                             if raw.get(f) is not None},
+                          **({"installments": True} if raw.get("kind") == "installments" else {})})
     household = facts.value("household", use=False)
     if isinstance(household, dict):
         for raw in household.get("liabilities") or []:
@@ -728,9 +742,9 @@ def _legacy_payments(facts: _Facts, items: list[dict]) -> None:
             continue
         frequency = value.get("payment_frequency") or value.get("frequency")
         match["payment"] = value.get("payment", value.get("amount"))
-        match["payment_frequency"] = frequency if frequency in ("monthly", "biweekly", "annual") else "monthly"
+        match["payment_frequency"] = frequency if frequency in PAYMENT_FREQUENCIES else "monthly"
         match["payment_from"] = key
-        match["payment_frequency_assumed"] = frequency not in ("monthly", "biweekly", "annual")
+        match["payment_frequency_assumed"] = frequency not in PAYMENT_FREQUENCIES
         facts.used[key] = facts.all[key].get("id")
 
 
@@ -808,7 +822,7 @@ def annuity_payment(balance: Decimal, annual_rate: Decimal, months: int) -> Deci
 def _liability_view(item: dict, fx: _FX, currency: str | None, today: date) -> dict:
     balance, rate = D(item.get("balance")), D(item.get("annual_rate"))
     payment, freq = D(item.get("payment")), item.get("payment_frequency")
-    monthly = finmath.per_month(payment, freq) if freq in ("monthly", "biweekly", "annual") else None
+    monthly = finmath.per_month(payment, freq) if freq in PAYMENT_FREQUENCIES else None
     term = item.get("remaining_term_months")
     maturity = _as_date(item.get("maturity"))
     if term is None and maturity and maturity > today:
@@ -837,6 +851,8 @@ def _liability_view(item: dict, fx: _FX, currency: str | None, today: date) -> d
         "approximate": bool(item.get("approximate")), "legacy": bool(item.get("legacy")),
         "payment_from": item.get("payment_from"),
         "payment_frequency_assumed": bool(item.get("payment_frequency_assumed")),
+        **{f: item[f] for f in ("no_interest_payment", "due_date", "cat", "credit_limit", "installments")
+           if item.get(f) is not None},
     }
 
 

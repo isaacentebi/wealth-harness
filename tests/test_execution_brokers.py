@@ -406,6 +406,15 @@ def gbm_ticket(db, orders, now=NOW):
                                      snapshot={"facts": []}, now=now)["result"]["ticket"]
 
 
+def test_an_order_may_name_the_currency_the_broker_prices_in(db, quotes, gateway):
+    """An outside host wrote "currency": "MXN" with "10 mil pesos en GBM" and was refused twice (unknown field)."""
+    _seed_gbm(db)
+    view = gbm_ticket(db, [{"symbol": "VOO", "side": "buy", "notional": 20000, "currency": "MXN"}])
+    assert view["lines"][0]["currency"] == "MXN" and view["lines"][0]["qty"] == "2"
+    with pytest.raises(ValueError, match="orders at this broker are in MXN, not USD"):
+        gbm_ticket(db, [{"symbol": "VOO", "side": "buy", "notional": 1000, "currency": "USD"}])
+
+
 def test_manual_ticket_is_a_clean_place_it_yourself_card(db, quotes, gateway):
     _seed_gbm(db)
     view = gbm_ticket(db, [{"symbol": "VOO", "side": "buy", "notional": 20000}])

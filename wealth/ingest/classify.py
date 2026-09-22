@@ -36,8 +36,20 @@ INSTITUTIONS: tuple[tuple[str, str, re.Pattern[str]], ...] = tuple(
         ("chase", "Chase", r"\bjpmorgan\s+chase\b|\bchase\s+bank\b"),
         ("wellsfargo", "Wells Fargo", r"\bwells\s+fargo\b"),
         ("bofa", "Bank of America", r"\bbank\s+of\s+america\b"),
+        ("alpaca", "Alpaca", r"\balpaca\b"),
+        ("cuenca", "Cuenca", r"\bcuenca\b"),
     )
 )
+# What each institution is: a broker's cash belongs to its brokerage account (a statement or sync of that
+# account covers it); a bank's is a bank balance.  Every INSTITUTIONS key is here, connectors included.
+INSTITUTION_KINDS: dict[str, str] = {
+    "gbm": "broker", "actinver": "broker", "kuspit": "broker", "cetesdirecto": "broker", "schwab": "broker",
+    "fidelity": "broker", "vanguard": "broker", "ibkr": "broker", "merrill": "broker", "etrade": "broker",
+    "morganstanley": "broker", "robinhood": "broker", "alpaca": "broker",
+    "banorte": "bank", "bbva": "bank", "santander": "bank", "nu": "bank", "hey": "bank", "chase": "bank",
+    "wellsfargo": "bank", "bofa": "bank", "cuenca": "bank",
+}
+BROKERS = frozenset(key for key, kind in INSTITUTION_KINDS.items() if kind == "broker")
 
 CASH_LABEL = re.compile(
     r"(?i)^\s*(?:total\s+)?(cash(?:\s*(?:&|and)\s*cash\s*(?:investments|equivalents))?|cash\s+balance|"
@@ -51,6 +63,7 @@ CASH_TICKERS = frozenset({
 })
 _ETF = re.compile(r"(?i)\b(etf|ishares|ishrs|spdr|vanguard\s+\w+.*\b(index|etf)|index\s+fund|naftrac|trac)\b")
 _FUND = re.compile(r"(?i)\b(fund|fondo|sociedad\s+de\s+inversi[oó]n|siid|sirv|mutual)\b")
+_FUND_SECTION = re.compile(r"(?i)\b(sociedades?\s+de\s+inversi[oó]n|fondos?\s+de\s+inversi[oó]n|mutual\s+funds?)\b")
 _FIBRA_TICKERS = frozenset({
     "FUNO", "FIBRAMQ", "FIBRAPL", "FMTY", "FIHO", "FINN", "TERRA", "TERRAFINA", "DANHOS", "FSHOP",
     "FIBRAHD", "FNOVA", "FPLUS", "EDUCA", "STORAGE", "FIBRAUP", "FIBRAHOTEL", "NEXT", "FIBRAMTY",
@@ -84,7 +97,7 @@ def account_type(text: str) -> tuple[str | None, str]:
         (r"\broth\b", "roth_ira"), (r"\b(ira|individual retirement)\b", "ira"), (r"\b401 ?k\b|\b403 ?b\b", "401k"),
         (r"\bhsa\b|health savings", "hsa"), (r"\b529\b", "529"),
         (r"\bppr\b|plan personal de retiro", "ppr"), (r"\bafore\b", "afore"),
-        (r"\bcheques\b|\bchecking\b|cuenta de cheques", "checking"),
+        (r"\bcheques\b|\bchecking\b|cuenta de cheques|\blibreton\b|\bcuenta digital\b|\bcuenta express\b", "checking"),
         (r"\bhysa\b|high yield savings|\bsavings\b|\bahorro\b|\bcajitas?\b", "savings"),
         (r"credit card|tarjeta de cr[eé]dito|\bcredito\b", "credit_card"),
         (r"\bmortgage\b|hipoteca|hipotecario", "mortgage"),
@@ -148,7 +161,10 @@ def listing(symbol: str | None, description: str | None, section: str = "", *, m
     in_sic_section = bool(_SIC.search(section or "")) or bool(re.search(r"(?i)\bSIC\b", description or ""))
     domestic = home in _BMV_DOMESTIC or home in _FIBRA_TICKERS or home.startswith("FIBRA")
     if domestic and not (isin and isin.group(1) != "MX"):
-        return {"venue": "bmv", "listing_currency": "MXN", "issuer_domicile": "MX", **({"series": series} if series else {})}
+        kind = ({} if home in _FIBRA_TICKERS or home.startswith("FIBRA") else
+                {"asset_class": "fund"} if home.endswith("TRAC") else {"asset_class": "equity"})
+        return {"venue": "bmv", "listing_currency": "MXN", "issuer_domicile": "MX", **kind,
+                **({"series": series} if series else {})}
     foreign_known = home in _UCITS_IE or home in _US_ETFS or home in _US_STOCKS
     if not (in_sic_section or (market == "mx" and foreign_known and series in {"*", "N", ""})):
         return {}
@@ -198,10 +214,10 @@ def classify_instrument(symbol: str | None, description: str | None, section: st
         return {"asset_class": "fixed_income", "instrument_type": "reporto"}
     if head in _FIBRA_TICKERS or head.startswith("FIBRA") or re.search(r"(?i)\bfibra\b", desc):
         return {"asset_class": "real_estate", "instrument_type": "fibra", "country": "MX"}
-    if _ETF.search(text):
+    if _ETF.search(text) or head.rstrip("*") in _US_ETFS or head.rstrip("*") in _UCITS_IE:
         result["asset_class"] = "fund"
-    elif _FUND.search(desc):
-        result["asset_class"] = "fund"
+    elif _FUND.search(desc) or _FUND_SECTION.search(section or ""):
+        result["asset_class"] = "fund"  # a row under "Sociedades de inversión" is a fund whatever its ticker
     elif _BOND.search(desc):
         result["asset_class"] = "fixed_income"
     return result

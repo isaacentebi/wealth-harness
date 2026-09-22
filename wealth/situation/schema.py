@@ -16,10 +16,12 @@ from typing import Any, Callable
 # ------------------------------------------------------------------ the contract
 
 LANGUAGES = ("es", "en")
-FREQUENCIES = ("monthly", "biweekly", "annual", "one_off")
+# weekly 52, biweekly (catorcenal, every 14 days) 26, semimonthly (quincenal, twice a month) 24 a year:
+# finmath.per_month is the one place those counts live.
+FREQUENCIES = ("monthly", "semimonthly", "biweekly", "weekly", "annual", "one_off")
 INCOME_KINDS = ("salary", "aguinaldo", "ptu", "bonus", "rent", "business", "pension", "other")
 LIABILITY_KINDS = ("auto", "mortgage", "card", "personal", "student", "other")
-PAYMENT_FREQUENCIES = ("monthly", "biweekly", "annual")
+PAYMENT_FREQUENCIES = ("monthly", "semimonthly", "biweekly", "weekly", "annual")
 GOAL_PRIORITIES = ("high", "medium", "low")
 GOAL_STATUSES = ("active", "paused", "done", "dropped")
 GOAL_ACTIONS = ("invest", "save", "buy", "pay_off", "retire", "education", "other")
@@ -285,10 +287,12 @@ def _shown(value: Any) -> str:
 
 
 def _number(value: Any, path: str, *, required: bool = True, minimum: float | None = 0,
-            maximum: float = MAX_AMOUNT) -> None:
+            maximum: float = MAX_AMOUNT, unknown_flag: str | None = None) -> None:
     if value is None:
         if required:
-            _fail(path, "is required (a number; leave the whole fact out if unknown, never 0)")
+            _fail(path, "is required (a number; " + (f"send {unknown_flag}: true when they have it but the amount "
+                                                     "is not known, never 0)" if unknown_flag else
+                                                     "leave the whole fact out if unknown, never 0)"))
         return
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         _fail(path, f"must be a number, not {_shown(value)}")
@@ -449,8 +453,9 @@ def _cash(value: dict, key: str) -> None:
     _designation(value, key)
     _rate(value.get("annual_rate"), f"{key}.annual_rate")
     _bool(value.get("balance_unknown"), f"{key}.balance_unknown")
-    _number(value.get("amount"), f"{key}.amount", required=value.get("balance_unknown") is not True)
-    _currency(value.get("currency"), f"{key}.currency")
+    _number(value.get("amount"), f"{key}.amount", required=value.get("balance_unknown") is not True,
+            unknown_flag="balance_unknown")
+    _currency(value.get("currency"), f"{key}.currency", required=value.get("amount") is not None)
     _text(value.get("institution"), f"{key}.institution", limit=80)
     _purpose(value.get("purpose"), f"{key}.purpose")
     _bool(value.get("liquid"), f"{key}.liquid")
@@ -529,8 +534,9 @@ def _investment(value: dict, key: str) -> None:
     if days is not None and (isinstance(days, bool) or not isinstance(days, int) or not 0 <= days <= 36600):
         _fail(f"{key}.liquidity_days", "must be a whole number of days")
     _bool(value.get("balance_unknown"), f"{key}.balance_unknown")
-    _number(value.get("amount"), f"{key}.amount", required=value.get("balance_unknown") is not True)
-    _currency(value.get("currency"), f"{key}.currency")
+    _number(value.get("amount"), f"{key}.amount", required=value.get("balance_unknown") is not True,
+            unknown_flag="balance_unknown")
+    _currency(value.get("currency"), f"{key}.currency", required=value.get("amount") is not None)
     _text(value.get("institution"), f"{key}.institution", limit=80)
     _enum(value.get("kind"), f"{key}.kind", ("brokerage", "retirement", "afore", "fund", "other"))
     _text(value.get("name"), f"{key}.name")
@@ -1083,6 +1089,8 @@ def validate(key: str, value: Any) -> list[str]:
 
 ALIASES: dict[str, dict[str, str]] = {"spending.monthly": {"amount": "total"}}
 """Field names a model writes naturally, read as the canonical field (only when that field is absent)."""
+PREFIX_ALIASES: dict[str, dict[str, str]] = {"thread.": {"summary": "text", "note": "text", "description": "text"}}
+"""The same for every key under a prefix (a thread's words are its text, whatever the model called them)."""
 
 
 def normalize(key: str, value: Any) -> tuple[Any, list[str]]:
@@ -1099,7 +1107,7 @@ def normalize(key: str, value: Any) -> tuple[Any, list[str]]:
         children = [{k: v for k, v in c.items() if k != "relationship"} if isinstance(c, dict) else c
                     for c in value["children"]]
         return {**value, "children": children}, []
-    aliases = ALIASES.get(key)
+    aliases = ALIASES.get(key) or next((a for prefix, a in PREFIX_ALIASES.items() if key.startswith(prefix)), None)
     if not aliases or not isinstance(value, dict):
         return value, []
     out, notes = dict(value), []
