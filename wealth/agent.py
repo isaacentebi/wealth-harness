@@ -179,6 +179,7 @@ def _config_overrides(db_path: str | Path, *, web_search: bool, reasoning: str,
                       instructions: Path | None = None, tools: Iterable[str] | None = None,
                       turn_env: Mapping[str, str] | None = None) -> list[str]:
     database = Path(db_path).expanduser().resolve()
+    turn_env = getattr(turn_env, "env", turn_env)  # a consent.TurnFile or its env mapping
     values = [
         f"model_reasoning_effort={_toml(reasoning)}",
         'model_verbosity="low"',
@@ -195,10 +196,13 @@ def _config_overrides(db_path: str | Path, *, web_search: bool, reasoning: str,
         'mcp_servers.wealth.env.WEALTH_BEHAVIOR_IN_HOST="1"',
         'mcp_servers.wealth.default_tools_approval_mode="approve"',
         *([f"mcp_servers.wealth.env.WEALTH_MCP_TOOLS={_toml(','.join(sorted(tools)))}"] if tools is not None else []),
-        # The person's own words for this turn: the MCP server checks consent and "the person said it"
-        # against them. The model has no shell, so it cannot change this environment.
+        # The turn's session label and the path of the private file holding the person's own words (never the
+        # words themselves: argv is visible to every local process). The MCP server checks consent and "the
+        # person said it" against them; the model has no shell, so it cannot change either.
         *(f"mcp_servers.wealth.env.{name}={_toml(value)}" for name, value in sorted((turn_env or {}).items())
           if re.fullmatch(r"WEALTH_[A-Z0-9_]+", name)),
+        # With search live the server refuses to read raw file text into this turn.
+        *(['mcp_servers.wealth.env.WEALTH_TURN_WEB_SEARCH="1"'] if web_search else []),
     ]
     return [part for value in values for part in ("-c", value)]
 
@@ -614,6 +618,9 @@ def _result_views(item: Mapping[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+_READS_FILE_TEXT = frozenset({"file", "extraction", "connector"})
+
+
 class _TurnParser:
     """Incremental parser for the Codex JSONL event stream."""
 
@@ -625,6 +632,7 @@ class _TurnParser:
         self.completed = False
         self.thread_id: str | None = None
         self.activity = False
+        self.read_files = False  # a wealth_ingest call put file or account text in the model's context
         self._last_step = ""
 
     def _step(self, text: str) -> list[TurnEvent]:
@@ -672,6 +680,8 @@ class _TurnParser:
                 label = ".".join(p for p in (server, tool) if isinstance(p, str) and p)
                 if label and label not in self.tools:
                     self.tools.append(label)
+                if tool == "wealth_ingest" and _arguments(item).get("action") in _READS_FILE_TEXT:
+                    self.read_files = True
                 if event_type == "item.started":
                     out += self._step(_tool_step(item))
                 elif event_type == "item.completed" and tool in {"wealth_remember", "wealth_ingest"}:
@@ -789,6 +799,38 @@ def _terminate(process: subprocess.Popen[str]) -> None:
         process.wait()
 
 
+# Environment the Codex child keeps whatever its name looks like (it needs these to find itself, sign in and
+# reach the network); everything else is dropped if its name looks like a credential.
+_ENV_KEEP = frozenset({"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TERM", "LANG", "TZ",
+                       "__CF_USER_TEXT_ENCODING", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+                       "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy",
+                       "no_proxy", "all_proxy"})
+_ENV_KEEP_PREFIXES = ("CODEX_", "LC_", "XDG_")
+_ENV_DROP_PREFIXES = ("APCA_", "AWS_", "AZURE_", "GOOGLE_", "GCP_", "GITHUB_", "GH_", "OPENAI_", "ANTHROPIC_",
+                      "STRIPE", "PLAID", "WEALTH_TURN_", "WEALTH_HOST_", "WEALTH_REQUIRE_")
+_ENV_SECRET = re.compile(r"ALPACA|CUENCA|IBKR|SECRET|TOKEN|PASSW|PASSPHRASE|CREDENTIAL|PRIVATE|COOKIE|SESSION|AUTH|"
+                         r"(?:^|_)KEY(?:$|_)|APIKEY|API_KEY|_PAT$|DSN$", re.IGNORECASE)
+
+
+def child_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The environment for the Codex process: broker keys, tokens and other secrets removed.
+
+    Codex needs PATH, HOME, its own CODEX_* settings (including CODEX_API_KEY for
+    API-key sign-in), locale and proxy settings; Wealth's broker and bank
+    credentials (ALPACA*, CUENCA*, IBKR*, WEALTH_*SECRET*) and anything named like
+    a key or token have no business in a model's process.
+    """
+
+    source = os.environ if environ is None else environ
+    kept: dict[str, str] = {}
+    for name, value in source.items():
+        if name in _ENV_KEEP or name.startswith(_ENV_KEEP_PREFIXES):
+            kept[name] = value
+        elif not name.upper().startswith(_ENV_DROP_PREFIXES) and not _ENV_SECRET.search(name):
+            kept[name] = value
+    return kept
+
+
 def _stream_process(
     command: Sequence[str],
     prompt: str,
@@ -812,6 +854,7 @@ def _stream_process(
             encoding="utf-8",
             errors="replace",
             cwd=str(cwd) if cwd else None,
+            env=child_env(),
             start_new_session=True,
         )
     except FileNotFoundError as exc:
@@ -1030,20 +1073,20 @@ def remember_exchange(
 
     if MEMORY_TOOLS & _consent.CONSENT_TOOLS:
         raise RuntimeError("the memory step must not be able to confirm, resolve or accept")
-    command = build_command(model, db_path, web_search=False, reasoning="low", ephemeral=True,
-                            instructions=memory_instructions(), tools=MEMORY_TOOLS,
-                            turn_env=_consent.turn_env("memory", user_prompt, recent_person))
-    prompt = build_memory_prompt(user_prompt, answer, client_id, brief=brief)
     parser = _TurnParser()
     keys: list[str] = []
     return_code, stderr = -1, ""
-    for kind, *rest in _stream_process(command, prompt, timeout, control, PROJECT_ROOT):
-        if kind == "line":
-            for event in parser.feed(rest[0]):
-                if event.type == "memory":
-                    keys.extend(str(k) for k in event.data.get("keys", ()) if str(k) not in keys)
-        else:
-            return_code, stderr = rest
+    with _consent.turn_env("memory", user_prompt, recent_person) as evidence:  # deleted when the step ends
+        command = build_command(model, db_path, web_search=False, reasoning="low", ephemeral=True,
+                                instructions=memory_instructions(), tools=MEMORY_TOOLS, turn_env=evidence.env)
+        prompt = build_memory_prompt(user_prompt, answer, client_id, brief=brief)
+        for kind, *rest in _stream_process(command, prompt, timeout, control, PROJECT_ROOT):
+            if kind == "line":
+                for event in parser.feed(rest[0]):
+                    if event.type == "memory":
+                        keys.extend(str(k) for k in event.data.get("keys", ()) if str(k) not in keys)
+            else:
+                return_code, stderr = rest
     if return_code != 0 and not keys:
         _conclude(parser.result(), return_code, stderr)  # raises a classified AgentError
     return keys
@@ -1086,52 +1129,110 @@ def stream_turn(
 
     ``person_message`` is what the person typed this turn (default ``user_prompt``;
     ``""`` when the request comes from Wealth itself). It and their recent messages
-    reach the MCP server as consent evidence. Web search is off while the turn
-    has attachments, so nothing read from their files can leave in a query.
+    reach the MCP server as consent evidence, through a private file deleted when
+    the turn ends.
+
+    Web search is off for the whole thread once it has read a file: in a turn
+    with attachments, and in every later turn that resumes a thread which read
+    one (an attachment, or a wealth_ingest file/extraction/connector call), so
+    text from the file still in the model's context cannot leave in a query.
+    Keeping search off is simpler and more robust than starting a fresh thread
+    with a summary, which would itself carry what the file said. Those threads
+    are recorded next to the database (``_FILE_THREADS``); a fresh thread
+    started because resuming failed inherits the mark. In a turn with search on,
+    the MCP server refuses to read file text at all.
     """
 
     history = list(history)
-    if attachments:
+    tainted = bool(attachments) or bool(thread_id and not ephemeral and _thread_read_files(db_path, thread_id))
+    if tainted:
         web_search = False
     said = user_prompt if person_message is None else person_message
-    env = _consent.turn_env("chat", said, [text for role, text in history if role == "user"])
     views = [dict(v) for v in views]
     if views:
         yield TurnEvent("view", data={"views": views})
     attempts: list[str | None] = [thread_id] if thread_id and not ephemeral else []
     attempts.append(None)
-    for resume in attempts:
-        command = build_command(
-            model, db_path, web_search=web_search, reasoning=reasoning,
-            resume_thread=resume, ephemeral=ephemeral,
-            instructions=conversation_instructions() if defer_memory else None,
-            tools=WEALTH_TOOLS - {"wealth_remember"} if defer_memory else None,
-            turn_env=env,
-        )
-        prompt = build_prompt(
-            user_prompt, client_id, history, profile_empty=profile_empty, profile=profile, brief=brief,
-            web_search=web_search, timezone_name=timezone_name, attachments=attachments,
-            resumed=resume is not None, views=views,
-        )
-        parser = _TurnParser()
-        return_code, stderr = -1, ""
-        for kind, *rest in _stream_process(command, prompt, timeout, control, PROJECT_ROOT):
-            if kind == "line":
-                yield from parser.feed(rest[0])
-            else:
-                return_code, stderr = rest
-        result = parser.result()
-        try:
-            answer = _conclude(result, return_code, stderr)
-        except AgentError as exc:
-            recoverable = exc.kind in {"other", "model_error"} and not result.activity
-            if resume is not None and recoverable:
-                yield TurnEvent("notice", "Starting a fresh session; the previous one could not be resumed.")
-                continue
-            raise
-        yield TurnEvent("answer", answer, {"thread_id": result.thread_id or resume, "resumed": resume is not None})
-        return
+    with _consent.turn_env("chat", said, [text for role, text in history if role == "user"]) as evidence:
+        for resume in attempts:
+            command = build_command(
+                model, db_path, web_search=web_search, reasoning=reasoning,
+                resume_thread=resume, ephemeral=ephemeral,
+                instructions=conversation_instructions() if defer_memory else None,
+                tools=WEALTH_TOOLS - {"wealth_remember"} if defer_memory else None,
+                turn_env=evidence.env,
+            )
+            prompt = build_prompt(
+                user_prompt, client_id, history, profile_empty=profile_empty, profile=profile, brief=brief,
+                web_search=web_search, timezone_name=timezone_name, attachments=attachments,
+                resumed=resume is not None, views=views,
+            )
+            parser = _TurnParser()
+            return_code, stderr = -1, ""
+            marked: set[str] = set()
+            for kind, *rest in _stream_process(command, prompt, timeout, control, PROJECT_ROOT):
+                if kind == "line":
+                    events = parser.feed(rest[0])
+                    thread = parser.thread_id or resume
+                    if (tainted or parser.read_files) and thread and not ephemeral and thread not in marked:
+                        _mark_thread_read_files(db_path, thread)  # before the answer: a cancelled turn counts too
+                        marked.add(thread)
+                    yield from events
+                else:
+                    return_code, stderr = rest
+            result = parser.result()
+            try:
+                answer = _conclude(result, return_code, stderr)
+            except AgentError as exc:
+                recoverable = exc.kind in {"other", "model_error"} and not result.activity
+                if resume is not None and recoverable:
+                    yield TurnEvent("notice", "Starting a fresh session; the previous one could not be resumed.")
+                    continue
+                raise
+            yield TurnEvent("answer", answer, {"thread_id": result.thread_id or resume, "resumed": resume is not None})
+            return
     raise AgentError(None, "other")  # pragma: no cover - loop always returns or raises
+
+
+_FILE_THREADS_SUFFIX = ".file-threads"
+_MAX_FILE_THREADS = 500
+_file_threads_lock = threading.Lock()
+
+
+def _file_threads_path(db_path: str | Path) -> Path:
+    database = Path(db_path).expanduser()
+    return database.with_name(database.name + _FILE_THREADS_SUFFIX)
+
+
+def _thread_read_files(db_path: str | Path, thread_id: str) -> bool:
+    """Whether this Codex thread has read a file (so web search stays off in it)."""
+    try:
+        return thread_id in _file_threads_path(db_path).read_text(encoding="utf-8").split()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True  # cannot tell: keep search off
+
+
+def _mark_thread_read_files(db_path: str | Path, thread_id: str) -> None:
+    if not _THREAD_ID.match(thread_id):
+        return
+    path = _file_threads_path(db_path)
+    with _file_threads_lock:
+        try:
+            known = path.read_text(encoding="utf-8").split()
+        except OSError:
+            known = []
+        if thread_id in known:
+            return
+        known = [*known, thread_id][-_MAX_FILE_THREADS:]
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write("\n".join(known) + "\n")
+        except OSError:
+            pass
 
 
 def run_turn(
@@ -1142,11 +1243,15 @@ def run_turn(
 ) -> str:
     """Blocking wrapper around ``stream_turn`` returning the final answer."""
 
-    for event in stream_turn(user_prompt, **kwargs):
-        if on_event is not None:
-            on_event(event)
-        if event.type == "answer":
-            return event.text
+    events = stream_turn(user_prompt, **kwargs)
+    try:
+        for event in events:
+            if on_event is not None:
+                on_event(event)
+            if event.type == "answer":
+                return event.text
+    finally:
+        events.close()  # ends the turn now: its evidence file is deleted
     raise AgentError("Codex completed without an assistant response.")
 
 
