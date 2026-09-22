@@ -1914,6 +1914,7 @@ class WealthService:
                     # Confirming marks the whole proposal saved: an item without a fact would vanish silently.
                     raise ValueError(f"confirm would drop {', '.join(lost)} (no fact holds it); nothing was saved")
                 snapshot = store.snapshot(client_id)
+                _separate_institutions(facts, snapshot)
                 before = build_situation(snapshot, store.ledger(client_id), datetime.now(timezone.utc).date())
                 saved = store.remember(client_id, facts, None, packet["result"]["request_id"])
                 after = build_situation(store.snapshot(client_id), store.ledger(client_id),
@@ -2200,6 +2201,26 @@ def _retire_forgotten_accounts(store: WealthStore, client_id: str, receipt: dict
             "transactions": lines})
         result["reversed"] += len(posted["posted"])
     return result
+
+
+def _separate_institutions(facts: list[dict], snapshot: dict) -> None:
+    """Rename a stated fact whose key already holds another institution's account (never merge two firms)."""
+    from .situation.model import same_institution
+
+    taken = {f["key"]: f.get("value") for f in snapshot.get("facts") or [] if isinstance(f.get("key"), str)}
+    used = set(taken) | {f["key"] for f in facts}
+    for fact in facts:
+        value = fact.get("value") if isinstance(fact.get("value"), dict) else {}
+        held = taken.get(fact["key"])
+        mine = value.get("institution") or value.get("lender")
+        theirs = (held.get("institution") or held.get("lender")) if isinstance(held, dict) else None
+        if not (mine and theirs) or same_institution(mine, theirs):
+            continue
+        base, counter = fact["key"], 2
+        while f"{base}-{counter}" in used:
+            counter += 1
+        fact["key"] = f"{base}-{counter}"
+        used.add(fact["key"])
 
 
 def _ledger_summary(receipt: dict | None, mapping: dict) -> dict:

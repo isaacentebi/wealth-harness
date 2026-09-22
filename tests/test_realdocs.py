@@ -72,7 +72,7 @@ def test_the_fixture_script_reproduces_the_committed_documents(tmp_path):
 
     truth = make_docs.build(tmp_path)
     assert truth == TRUTH
-    for name in ALL:
+    for name in make_docs.BUILDERS:
         assert (tmp_path / name).read_bytes() == (DOCS / name).read_bytes(), name
 
 
@@ -97,6 +97,40 @@ def test_gbm_section_subtotals_opening_value_and_fx_with_a_date():
     assert money(held["CASH:MXN"]["value"]) == money(truth["cash"])
     # Before: WALMEX and the GBMF2 fund had no asset class.
     assert held["BMV:WALMEX"]["asset_class"] == "equity" and held["GBMF2 BO"]["asset_class"] == "fund"
+
+
+def test_a_holdings_section_split_across_pages_keeps_its_subtotal():
+    """Before: the SIC table continued on the next page under a repeated column header, the section restarted
+    there, and its Subtotal 249,564.60 was checked against VOO alone (a false 126,375.00 discrepancy)."""
+    report = read("gbm_estado_de_cuenta_2026-08_split.pdf")
+    assert report["status"] == "ready_to_confirm", report["result"]["review_reasons"]
+    recon = report["result"]["reconciliation"]["accounts"][0]
+    assert [(s["reported"], s["matches"]) for s in recon["positions_subtotals"]] == [("249564.6", True),
+                                                                                       ("70338", True)]
+    split, whole = positions(report), positions(read(GBM))
+    assert {k: (v["quantity"], v["value"]) for k, v in split.items()} == \
+        {k: (v["quantity"], v["value"]) for k, v in whole.items()}
+
+
+def test_a_movement_whose_direction_cannot_be_told_needs_review():
+    """Self-review: an unsigned "Importe" with no running balance and no telling concept was kept as money in."""
+    from wealth.ingest.model import build_proposal
+    from wealth.ingest.statement import parse_statement_text
+
+    text = """GBM Grupo Bursatil Mexicano
+ESTADO DE CUENTA   Periodo: del 01/08/2026 al 31/08/2026
+Contrato: 10457832
+Moneda: Pesos mexicanos
+
+MOVIMIENTOS DEL PERIODO
+Fecha         Concepto                          Importe
+05/08/2026    TRASPASO ENTRE CONTRATOS         1,000.00
+07/08/2026    DEPOSITO DE EFECTIVO SPEI        2,000.00
+"""
+    parsed = parse_statement_text([(1, text)])
+    proposal = build_proposal(parsed["statement"], kind="document", provenance={"kind": "document", "ref": "x"})
+    assert proposal["status"] == "needs_review"
+    assert any("without a sign" in r for r in proposal["result"]["review_reasons"])
 
 
 def test_gbm_account_is_not_named_after_the_holder():
@@ -520,6 +554,56 @@ def test_confirm_refuses_to_drop_a_proposed_item(service, monkeypatch):
         service.ingest("mariana", "confirm", {"proposal_id": chat["result"]["proposal_id"],
                                               "acknowledge_discrepancies": True})
     assert not [f for f in service.inspect("mariana")["facts"] if f["key"].startswith(("cash.", "income."))]
+
+
+def test_a_named_institution_keys_the_stated_account_and_pairs_it_with_its_statement(service):
+    """Before: {label: "Checking", institution: "BBVA"} lost the institution: cash.checking could not be paired with
+    the BBVA statement (net worth counted both), and "Checking" at BBVA and at Banorte shared one key."""
+    chat = service.ingest("mariana", "chat", {"currency": "MXN", "items": [
+        {"kind": "cash", "label": "Checking", "institution": "BBVA", "amount": 60000,
+         "quote": "60 mil en mi cuenta de cheques de BBVA"},
+        {"kind": "cash", "label": "Checking", "institution": "Banorte", "amount": 5000,
+         "quote": "y 5 mil en la de Banorte"},
+        {"kind": "liability", "label": "Tarjeta", "institution": "Banorte", "amount": 20000,
+         "quote": "debo 20 mil de la tarjeta de Banorte"}]})
+    saved = service.ingest("mariana", "confirm", {"proposal_id": chat["result"]["proposal_id"],
+                                                  "acknowledge_discrepancies": True})
+    assert sorted(saved["result"]["saved"]["keys"]) == ["cash.banorte-checking", "cash.bbva-checking",
+                                                        "liability.banorte-tarjeta"]
+    facts = {f["key"]: f["value"] for f in service.inspect("mariana")["facts"]}
+    assert facts["cash.bbva-checking"]["institution"] == "BBVA"
+    assert facts["cash.banorte-checking"]["institution"] == "Banorte"
+    assert facts["liability.banorte-tarjeta"]["lender"] == "Banorte"
+    proposal = service.ingest("mariana", "file", {"path": BBVA})
+    service.ingest("mariana", "confirm", {"proposal_id": proposal["result"]["proposal_id"]})
+    worth = service.situation("mariana")["net_worth"]
+    # The BBVA statement replaces the stated 60,000; the Banorte checking stays stated.
+    assert money(worth["liquid"]) == money(TRUTH[BBVA]["closing"]) + money(5000)
+
+
+def test_cash_said_to_be_at_a_broker_is_replaced_by_its_statement(service):
+    """Self-review: "18 mil en efectivo en GBM" was a savings balance, never paired with the GBM brokerage
+    statement (which already includes that cash): both were counted."""
+    chat = service.ingest("mariana", "chat", {"currency": "MXN", "items": [
+        {"kind": "cash", "label": "GBM", "amount": 18000, "quote": "tengo 18 mil en efectivo en GBM"}]})
+    saved = service.ingest("mariana", "confirm", {"proposal_id": chat["result"]["proposal_id"]})
+    assert saved["result"]["saved"]["keys"] == ["investment.gbm"]
+    proposal = service.ingest("mariana", "file", {"path": GBM})
+    service.ingest("mariana", "confirm", {"proposal_id": proposal["result"]["proposal_id"]})
+    assert money(service.situation("mariana")["net_worth"]["liquid"]) == money(TRUTH[GBM]["total"])
+
+
+def test_a_stated_key_never_merges_two_institutions():
+    from wealth.service import _separate_institutions
+
+    snapshot = {"facts": [{"key": "cash.wallet", "value": {"amount": 1, "currency": "MXN", "institution": "Nu"}}]}
+    facts = [{"key": "cash.wallet", "value": {"amount": 2, "currency": "MXN", "institution": "BBVA"}},
+             {"key": "cash.nu", "value": {"amount": 3, "currency": "MXN", "institution": "Nu"}}]
+    _separate_institutions(facts, snapshot)
+    assert [f["key"] for f in facts] == ["cash.wallet-2", "cash.nu"]
+    same = [{"key": "cash.wallet", "value": {"amount": 4, "currency": "MXN", "institution": "Nu México"}}]
+    _separate_institutions(same, snapshot)
+    assert same[0]["key"] == "cash.wallet"  # the same firm: an update, not a new account
 
 
 def test_a_chat_wallet_in_two_currencies_is_two_balances_never_a_sum(service):

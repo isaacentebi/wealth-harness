@@ -152,7 +152,8 @@ def _gbm_rows():
     return rows, cetes_value
 
 
-def gbm_statement(path: Path) -> dict:
+def gbm_statement(path: Path, *, split_sic: bool = False) -> dict:
+    """``split_sic`` breaks the SIC table across a page: the next page repeats only the column header."""
     rows, cetes_value = _gbm_rows()
     sic = sum(r[5] for r in rows["sic"])
     bmv = sum(r[5] for r in rows["bmv"])
@@ -163,7 +164,7 @@ def gbm_statement(path: Path) -> dict:
     flows_in = D("15000.00")
     valuation = total - GBM_OPENING_VALUE - flows_in - dividends + withheld
     opening_cash = GBM_CASH - sum(m[9] for m in GBM_MOVES if m[9] is not None)
-    pages = 3
+    pages = 4 if split_sic else 3
     doc = Doc(path, title="Estado de Cuenta GBM Agosto 2026", author="GBM Grupo Bursatil Mexicano")
 
     def header(number: int) -> None:
@@ -267,7 +268,12 @@ def gbm_statement(path: Path) -> dict:
         y -= 22
         doc.text(40, y, title, 8, True)
         y = holdings_header(y - 12)
-        for symbol, serie, qty, cost, price, value, gain in rows[group]:
+        for index, (symbol, serie, qty, cost, price, value, gain) in enumerate(rows[group]):
+            if split_sic and group == "sic" and index == 1:
+                footer(2)
+                doc.page()
+                header(3)
+                y = holdings_header(706)
             doc.row(y, [(x, a, t) for (x, a), t in zip(cols, [
                 symbol, serie, f"{qty:,}", money(cost), money(price), money(value), money(gain, parens=True),
                 f"{value / total * 100:.2f}%"])])
@@ -315,11 +321,11 @@ def gbm_statement(path: Path) -> dict:
         "El costo promedio incluye comisiones e IVA de las compras. La plusvalía o minusvalía no realizada no constituye ganancia",
         "o pérdida fiscal; ésta se determina al enajenar los títulos conforme al artículo 129 de la Ley del ISR.",
     ], 6, 8)
-    footer(2)
+    footer(pages - 1)
     doc.page()
 
-    # ---- page 3: movimientos
-    header(3)
+    # ---- last page: movimientos
+    header(pages)
     y = 706
     doc.shade(36, y - 3, W - 72, 14)
     doc.text(40, y + 1, "MOVIMIENTOS DEL PERIODO", 9, True)
@@ -355,7 +361,7 @@ def gbm_statement(path: Path) -> dict:
         "Este documento es un estado de cuenta; no es un comprobante fiscal. Para consultas acuda a la Unidad Especializada de",
         "Atención a Usuarios (UNE) o a la CONDUSEF: 55 5340 0999, www.condusef.gob.mx.",
     ], 6, 8)
-    footer(3)
+    footer(pages)
     doc.save()
     return {
         "institution": "GBM", "contract_last4": "7832", "period": ["2026-08-01", "2026-08-31"], "currency": "MXN",
@@ -1191,6 +1197,7 @@ def ibkr_csv(path: Path) -> dict:
 
 BUILDERS = {
     "gbm_estado_de_cuenta_2026-08.pdf": gbm_statement,
+    "gbm_estado_de_cuenta_2026-08_split.pdf": lambda path: gbm_statement(path, split_sic=True),
     "bbva_estado_de_cuenta_2026-08.pdf": bbva_statement,
     "banorte_tdc_2026-08.pdf": banorte_card,
     "gbm_constancia_2025.pdf": gbm_constancia,

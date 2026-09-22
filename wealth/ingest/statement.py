@@ -93,6 +93,7 @@ _RATE = re.compile(r"(?i)\b(apr|annual percentage rate|tasa de inter[eé]s(?: an
 _RATE_OTHER = re.compile(r"(?i)\b(mensual|monthly|moratori[ao]|penalty|promedio|cat|bruta)\b")
 _CAT = re.compile(r"(?i)\bCAT\b(?:\s+promedio)?\s*:?\s*(?P<r>\d{1,3}(?:[.,]\d+)?)\s*%")
 _PAIR_AMOUNT = re.compile(r"(?<![\w.,/$])(?:\(\s*)?[-−–]?\$?\s?\d{1,3}(?:,\d{3})*\.\d{2}(?:\s*\))?(?![\w/%]|[.,]\d)")
+_CONTINUED = re.compile(r"\b(continuacion|continua|cont|continued|continuation)\b")
 _TICKER_IN_DESC = re.compile(r"\(([A-Z][A-Z0-9.]{0,6})\)\s*$")
 _ES_WORDS = ("saldo", "cuenta", "periodo", "emisora", "titulos", "fecha", "corte", "efectivo", "cartera", "moneda",
              "inversion", "rendimiento", "contrato", "estado de cuenta", "valor de mercado", "plusvalia")
@@ -396,7 +397,22 @@ def parse_statement_text(pages: list[tuple[int, str]], *, aliases: dict[str, lis
         columns = tx_columns = section_currency = last_row = last_tx = None
         return _Account(page=page)
 
+    # A column header repeated after a page break continues its section; only a heading the statement has not
+    # printed on an earlier page (page chrome repeats) and that is not a "(continuación)" marker starts a new one.
+    earlier_headings: set[str] = set()
+    page_headings: set[str] = set()
+    new_section = False
+
+    def heading(text: str) -> None:
+        nonlocal new_section
+        folded = fold(text)
+        page_headings.add(folded)
+        if folded not in earlier_headings and not _CONTINUED.search(folded):
+            new_section = True
+
     for page, text in pages:
+        earlier_headings |= page_headings
+        page_headings = set()
         lines = text.splitlines()
         skip_next = False
         for number, line in enumerate(lines):
@@ -463,6 +479,7 @@ def parse_statement_text(pages: list[tuple[int, str]], *, aliases: dict[str, lis
                     section_currency = code
                 if len(cells) <= 2:
                     section = stripped
+                    heading(stripped)
                 continue
 
             tx_header = _tx_header(line)
@@ -477,7 +494,9 @@ def parse_statement_text(pages: list[tuple[int, str]], *, aliases: dict[str, lis
                 continue
             if header:
                 columns, tx_columns, last_row, last_tx = header, None, None, None
-                current.section_start = len(current.positions)
+                if new_section or not current.positions:
+                    current.section_start = len(current.positions)
+                new_section = False
                 continue
 
             first = fold(cells[0][0]) if cells else ""
@@ -627,6 +646,7 @@ def parse_statement_text(pages: list[tuple[int, str]], *, aliases: dict[str, lis
                 continue
             if not has_amount and len(stripped) <= 70 and len(cells) <= 3:
                 section = stripped
+                heading(stripped)
                 if re.search(r"(?i)\b(d[oó]lares|usd|dls)\b", stripped):
                     section_currency = "USD"
                 elif re.search(r"(?i)\b(pesos|moneda nacional|mxn)\b", stripped):
@@ -636,6 +656,7 @@ def parse_statement_text(pages: list[tuple[int, str]], *, aliases: dict[str, lis
         accounts.append(current)
 
     statement_accounts = []
+    review: list[str] = []
     confidence: dict[str, str] = {"as_of": as_of_confidence, "currency": currency_confidence}
     for position, account in enumerate(accounts, 1):
         if not account.has_content():
@@ -649,7 +670,12 @@ def parse_statement_text(pages: list[tuple[int, str]], *, aliases: dict[str, lis
             if len(values) > 1:
                 notes.append(f"Account ending {account.number_last4 or '?'} prints different totals {sorted(values)}; the last one was used.")
         if account.type not in {"credit_card", "mortgage"}:
-            _orient_transactions(account, comma, notes)
+            unsigned = _orient_transactions(account, comma, notes)
+            if unsigned:
+                # Money in or out cannot be told for these lines: never guess the sign silently.
+                review.append(f"{unsigned} movement(s) in account ending {account.number_last4 or '?'} print an "
+                              "amount without a sign, balance or concept that says whether money came in or went out; "
+                              "confirm their direction.")
         entry: dict[str, Any] = {
             "label": account.label, "number_last4": account.number_last4, "type": account.type,
             "currency": account.currency, "page": account.page, "positions": account.positions,
@@ -681,6 +707,7 @@ def parse_statement_text(pages: list[tuple[int, str]], *, aliases: dict[str, lis
             "as_of": as_of, "period_start": period_start, "currency": currency, "decimal_comma": comma,
             "market": "mx" if (language == "es" or institution_key in _MX_INSTITUTIONS) else "us" if institution_key in _US_INSTITUTIONS else None,
             "accounts": statement_accounts, "fx": _dedupe_fx(fx), "as_of_page": as_of_page,
+            "review_reasons": review,
         },
         "confidence": confidence, "notes": notes, "parsed": parsed,
     }
@@ -704,7 +731,7 @@ def _signed_options(tx: dict[str, Any], comma: bool | None) -> list[Decimal]:
     return options
 
 
-def _orient_transactions(account: _Account, comma: bool | None, notes: list[str]) -> None:
+def _orient_transactions(account: _Account, comma: bool | None, notes: list[str]) -> int:
     """Sign an unsigned amount column ("Importe" printed without +/-) from the printed running balance.
 
     A brokerage "Importe" is printed unsigned: a purchase, a retention and a deposit all look positive.
@@ -718,7 +745,7 @@ def _orient_transactions(account: _Account, comma: bool | None, notes: list[str]
     values = [parse_amount(t["amount"], decimal_comma=comma) for t in unsigned]
     if not unsigned or any(v is None or v < 0 or str(t["amount"]).strip().startswith(("(", "-"))
                            for v, t in zip(values, unsigned)):
-        return
+        return 0
     targets = {id(t) for t in unsigned}
     previous = parse_amount(account.flows.get("opening"), decimal_comma=comma)
     pending: list[dict[str, Any]] = []
@@ -759,6 +786,7 @@ def _orient_transactions(account: _Account, comma: bool | None, notes: list[str]
         notes.append(f"{solved} unsigned amount(s) were signed from the printed running balance.")
     if guessed:
         notes.append(f"{guessed} unsigned amount(s) were signed from their concept (no running balance settled them).")
+    return sum(1 for tx in unsigned if not tx.get("signed_by"))
 
 
 def _combos(options: list[list[Decimal]]):

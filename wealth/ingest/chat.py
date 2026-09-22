@@ -21,7 +21,7 @@ import re
 from typing import Any
 
 from .classify import account_type as infer_type
-from .common import envelope, number_tokens, parse_amount, parse_percent, slug
+from .common import envelope, number_tokens, parse_amount, parse_percent, slug, with_institution
 from .model import build_proposal
 
 
@@ -96,6 +96,8 @@ _LIABILITY_WORDS = ((re.compile(r"(?i)\b(hipoteca|mortgage|infonavit|fovissste)\
                     (re.compile(r"(?i)\b(tarjeta|card|tdc)\b"), "card"),
                     (re.compile(r"(?i)\b(student|educativo|estudiantil)\b"), "student"),
                     (re.compile(r"(?i)\b(personal|n[oó]mina)\b"), "personal"))
+_BROKERS = frozenset({"gbm", "actinver", "kuspit", "cetesdirecto", "schwab", "fidelity", "vanguard", "ibkr",
+                      "merrill", "etrade", "morganstanley", "robinhood"})  # classify.INSTITUTIONS keys
 _INVESTMENT_KINDS = {"brokerage": "brokerage", "afore": "afore", "ira": "retirement", "roth_ira": "retirement",
                      "401k": "retirement", "ppr": "retirement", "hsa": "retirement"}
 
@@ -129,7 +131,7 @@ def stated_plan(proposal: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[st
     covers: dict[str, list[str]] = {}
 
     def add(prefix: str, name: str, value: dict[str, Any], item: str) -> None:
-        base, counter = slug(name or prefix, 24), 2
+        base, counter = slug(name or prefix, 48), 2
         key = f"{prefix}.{base}"
         while key in keys:
             key, counter = f"{prefix}.{base}-{counter}", counter + 1
@@ -148,7 +150,9 @@ def stated_plan(proposal: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[st
         if any(p.get("asset_class") != "cash" for p in rows):
             return None
         name = account.get("name") or account["id"]
-        institution = detect_institution(name)[1]
+        # The institution the person named, else one the account's name implies ("BBVA").
+        institution = account.get("institution") or detect_institution(name)[1]
+        keyed = with_institution(name, institution)
         # Amounts are never summed across currencies: "USD 100 and MXN 1,000 in Wallet" is two balances, saved as
         # cash.wallet-usd and cash.wallet-mxn (a cash.<id> fact holds one amount in one currency).
         by_currency: dict[str, Decimal] = {}
@@ -157,22 +161,32 @@ def stated_plan(proposal: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[st
             by_currency[ccy] = by_currency.get(ccy, Decimal(0)) + Decimal(position["value"])
         stated = totals.get(account["id"], [])
         currencies = set(by_currency) | {row.get("currency") or account["currency"] for row in stated}
+        # Cash said to be at a broker ("5 mil en efectivo en GBM") is part of that brokerage account: saved as an
+        # investment, so the broker's statement (which includes its cash) replaces it instead of adding to it.
+        at_broker = account.get("type") in (None, "savings", "brokerage") and \
+            detect_institution(institution or name)[0] in _BROKERS
         for ccy, amount in sorted(by_currency.items()):
             value: dict[str, Any] = {"amount": float(amount), "currency": ccy, "name": name}
             if institution:
                 value["institution"] = institution
+            if at_broker:
+                add("investment", f"{keyed} {ccy}" if len(currencies) > 1 else keyed,
+                    {**value, "institution": institution or name, "kind": "brokerage"}, account["id"])
+                continue
             if account.get("interest_rate") is not None:
                 value["annual_rate"] = float(account["interest_rate"])
-            add("cash", f"{name} {ccy}" if len(currencies) > 1 else name, value, account["id"])
+            add("cash", f"{keyed} {ccy}" if len(currencies) > 1 else keyed, value, account["id"])
         for row in stated:
             ccy = row.get("currency") or account["currency"]
             value = {"amount": float(Decimal(row["value"])), "currency": ccy,
                      "institution": institution or name, "name": name,
                      "kind": _INVESTMENT_KINDS.get(account.get("type") or "", "other")}
-            add("investment", f"{name} {ccy}" if len(currencies) > 1 else name, value, account["id"])
+            if account.get("type") in ("ira", "roth_ira", "401k"):
+                value["plan_type"] = account["type"]
+            add("investment", f"{keyed} {ccy}" if len(currencies) > 1 else keyed, value, account["id"])
         if not currencies:
             # Named without a balance: it exists, the amount is unknown (never 0, never dropped).
-            cash = account.get("type") in ("savings", "checking")
+            cash = account.get("type") in ("savings", "checking") and not at_broker
             value = {"balance_unknown": True, "name": name}
             if account.get("currency") and account["currency"] != "XXX":
                 value["currency"] = account["currency"]
@@ -182,7 +196,7 @@ def stated_plan(proposal: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[st
                 value["kind"] = _INVESTMENT_KINDS.get(account.get("type") or "", "other")
                 if account.get("type") in ("ira", "roth_ira", "401k"):
                     value["plan_type"] = account["type"]
-            add("cash" if cash else "investment", name, value, account["id"])
+            add("cash" if cash else "investment", keyed, value, account["id"])
     for liability in household.get("liabilities") or []:
         if liability.get("account_id"):
             return None
@@ -192,14 +206,14 @@ def stated_plan(proposal: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[st
         kind = next((k for pattern, k in _LIABILITY_WORDS if pattern.search(name)), "other")
         value = {"kind": kind, "balance": float(Decimal(liability["value"])), "currency": liability["currency"],
                  "name": name}
-        lender = detect_institution(name)[1]
+        lender = liability.get("lender") or detect_institution(name)[1]
         if lender:
             value["lender"] = lender
         if liability.get("interest_rate") is not None:
             value["annual_rate"] = float(liability["interest_rate"])
         if liability.get("monthly_payment") is not None:
             value.update(payment=float(liability["monthly_payment"]), payment_frequency="monthly")
-        add("liability", name, value, liability["id"])
+        add("liability", with_institution(name, lender), value, liability["id"])
     for income in household.get("income_exposures") or []:
         if income.get("annual_amount") is None:
             return None  # an income without its amount cannot be a stated income
@@ -266,19 +280,23 @@ def proposal_from_chat(items: list[dict[str, Any]], *, as_of: str | None = None,
             continue
         if kind == "liability":
             entry = {"label": item.get("label") or "Debt", "balance": item.get("amount"), "currency": ccy,
-                     "minimum_payment": item.get("monthly_payment"), "interest_rate": item.get("rate")}
+                     "minimum_payment": item.get("monthly_payment"), "interest_rate": item.get("rate"),
+                     **({"institution": item["institution"]} if isinstance(item.get("institution"), str)
+                        and item["institution"].strip() else {})}
             if item.get("amount") in (None, ""):
                 missing.append({"key": f"items[{index}].amount", "reason": "missing", "detail": "Balance owed was not stated."})
             loose_liabilities.append(entry)
             continue
         label = item.get("account_label") if kind == "position" else item.get("label")
-        label = label or item.get("institution") or "Account"
-        key = slug(label, 24)
-        stated_type = item.get("account_type") or infer_type(f"{label} {item.get('institution') or ''}")[0]
+        institution = item.get("institution").strip() if isinstance(item.get("institution"), str) else ""
+        label = label or institution or "Account"
+        # "Checking" at BBVA and "Checking" at Banorte are two accounts: the institution is part of the key.
+        key = slug(with_institution(label, institution), 48)
+        stated_type = item.get("account_type") or infer_type(f"{label} {institution}")[0]
         account = accounts.setdefault(key, {
             "label": label, "number_last4": None, "type": stated_type or ("savings" if kind == "cash" else None),
             "currency": ccy, "positions": [], "cash": [], "reported_total": None, "single_value": True,
-            "liabilities": [],
+            "liabilities": [], **({"institution": institution} if institution else {}),
         })
         if kind in ("cash", "account"):
             if item.get("amount") in (None, ""):

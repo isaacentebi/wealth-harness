@@ -52,6 +52,59 @@
     "commission": "50.53",
     "commission_iva": "8.08"
   },
+  "gbm_estado_de_cuenta_2026-08_split.pdf": {
+    "institution": "GBM",
+    "contract_last4": "7832",
+    "period": [
+      "2026-08-01",
+      "2026-08-31"
+    ],
+    "currency": "MXN",
+    "total": "398365.82",
+    "cash": "18432.15",
+    "opening_cash": "23002.38",
+    "positions": {
+      "SIC:AAPL": {
+        "quantity": 30,
+        "price": "4212.50",
+        "value": "126375.00",
+        "cost_basis": "109500.00"
+      },
+      "SIC:VOO": {
+        "quantity": 12,
+        "price": "10265.80",
+        "value": "123189.60",
+        "cost_basis": "113760.00"
+      },
+      "BMV:FUNO 11": {
+        "quantity": 1500,
+        "price": "23.40",
+        "value": "35100.00",
+        "cost_basis": "32775.00"
+      },
+      "BMV:WALMEX": {
+        "quantity": 600,
+        "price": "58.73",
+        "value": "35238.00",
+        "cost_basis": "38520.00"
+      },
+      "CETES 261015": {
+        "quantity": 5000,
+        "price": "9.932140",
+        "value": "49660.70"
+      },
+      "GBMF2 BO": {
+        "quantity": 3000,
+        "price": "3.456789",
+        "value": "10370.37"
+      }
+    },
+    "dividends": "957.04",
+    "isr_withheld": "258.06",
+    "fx_usd_mxn": "18.6235",
+    "commission": "50.53",
+    "commission_iva": "8.08"
+  },
   "bbva_estado_de_cuenta_2026-08.pdf": {
     "institution": "BBVA México",
     "account_last4": "7365",

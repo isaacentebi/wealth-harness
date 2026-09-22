@@ -40,7 +40,8 @@ import re
 from typing import Any, Iterable, TypedDict
 
 from .classify import CASH_LABEL, classify_instrument, listing
-from .common import decimals, digest, envelope, fold as fold_text, out, parse_amount, parse_percent, slug
+from .common import (decimals, digest, envelope, fold as fold_text, out, parse_amount, parse_percent, slug,
+                     with_institution)
 from .redact import mask_account, redact, redact_text
 from .safety import INSTRUCTION_REASON, flag_instructions, mark_untrusted, text_leaves
 from .transactions import normalize as normalize_transactions
@@ -138,7 +139,7 @@ def build_proposal(
         raise ValueError(f"kind must be one of {SOURCE_KINDS}")
     comma = statement.get("decimal_comma")
     warnings, missing, assumptions = list(warnings), list(missing), list(assumptions)
-    reasons = list(review_reasons)
+    reasons = list(review_reasons) + [str(r) for r in statement.get("review_reasons") or []]
     # Text in the file that addresses an assistant is a risk flag the person must see: never ready_to_confirm.
     if flag_instructions(provenance, [*text_leaves(statement), *text_leaves(transactions or [])]):
         reasons.append(INSTRUCTION_REASON)
@@ -184,7 +185,10 @@ def build_proposal(
         tail = raw.get("number_last4")
         tail = tail if isinstance(tail, str) and re.fullmatch(r"\d{4}", tail) else None
         label = redact_text(str(raw.get("label") or "")).strip() or None
-        base = f"{institution_key}-{tail}" if tail else f"{institution_key}-{slug(label, 20)}" if label else f"{institution_key}-{index + 1}"
+        # An institution the person named with the account ("Checking" at BBVA) is part of its identity.
+        named_at = redact_text(str(raw.get("institution") or "")).strip() or None
+        ident = with_institution(label, named_at) or None
+        base = f"{institution_key}-{tail}" if tail else f"{institution_key}-{slug(ident, 32)}" if ident else f"{institution_key}-{index + 1}"
         account_id = _unique(base, used_ids)
         account_currency = _ccy(raw.get("currency")) or currency
         if account_currency is None:
@@ -196,8 +200,8 @@ def build_proposal(
         account = {"id": account_id, "owner_id": owner_id, "type": account_type, "currency": account_currency}
         if label:
             account["name"] = label
-        if statement.get("institution"):
-            account["institution"] = statement["institution"]
+        if named_at or statement.get("institution"):
+            account["institution"] = named_at or statement["institution"]
         if tail:
             account["number_masked"] = mask_account(tail)
         if raw.get("interest_rate") not in (None, ""):
@@ -448,9 +452,13 @@ def build_proposal(
 
     for item in statement.get("liabilities") or []:
         balance = parse_amount(item.get("balance"), decimal_comma=comma)
-        entry = {"id": _unique(f"liability-{slug(item.get('label') or 'debt', 24)}", used_ids),
+        lender = redact_text(str(item.get("institution") or "")).strip() or None
+        ident = with_institution(str(item.get("label") or "debt"), lender)
+        entry = {"id": _unique(f"liability-{slug(ident, 32)}", used_ids),
                  "name": redact_text(str(item.get("label") or "Debt")), "value": out(abs(balance)) if balance is not None else None,
                  "currency": _ccy(item.get("currency")) or currency or "XXX"}
+        if lender:
+            entry["lender"] = lender
         payment = parse_amount(item.get("minimum_payment"), decimal_comma=comma)
         if payment is not None:
             entry["monthly_payment"] = out(abs(payment))
