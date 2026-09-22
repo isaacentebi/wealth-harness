@@ -121,19 +121,37 @@ SQLite remains the durable financial memory.
 `codex app-server` has no `--ignore-user-config`, and its `-c` overrides merge
 into your `~/.codex/config.toml` instead of replacing it: your other MCP servers,
 plugins, notify hook, model provider or base URL would reach the Wealth turn.
-So app-server turns run with a Wealth-owned Codex home,
+And even `codex exec --ignore-user-config` still loads `AGENTS.md` and
+`skills/` from its Codex home and `.codex/skills` from its working directory.
+So both runtimes run with a Wealth-owned Codex home,
 `$XDG_DATA_HOME/wealth-harness/codex-home` (default `~/.local/share/...`,
-`WEALTH_CODEX_HOME` overrides it). It is private (0700), its `config.toml` is
-rewritten empty every turn, and `auth.json` there is a symlink to your own
-Codex login, which Codex rewrites in place, so a token refresh reaches your real
-file. Before any thread starts, Wealth reads the effective config back
-(`config/read`) and uses exec for the rest of the server's life if anything but
-the Wealth MCP server is enabled, the sandbox is not read-only, approvals are
-not `never`, a disabled feature is on or a notify hook is set. Without a shared
-`auth.json` (signed out, or credentials in the keychain) app-server is not
-used either. Sessions of the two runtimes live in different homes: switching
-runtimes starts one fresh thread. Pass `--ephemeral` to either launcher to keep
-no session files at all, at the cost of that continuity.
+`WEALTH_CODEX_HOME` overrides it), in a fresh empty 0700 working directory per
+turn (removed afterwards; `project_root_markers=[]` keeps Codex from searching
+its parents). The home is private (0700), its `config.toml` is rewritten empty
+every turn, any `AGENTS.md`, `AGENTS.override.md`, `skills/`, `hooks/`,
+`hooks.json` and `rules/` in it are removed every turn, and `auth.json` there is
+a symlink to your own Codex login, which Codex rewrites in place, so a token
+refresh reaches your real file. The path is resolved once and checked before
+anything is written: it must not be, contain or be inside your own Codex home
+(compared resolved, case-folded and by inode, so `~/.codex/../.codex` and
+`~/.CODEX` count), an existing directory must be one Wealth made, and outside
+`$HOME` every parent must belong to you or root and not be writable by others
+(a root-owned sticky `/tmp` is fine).
+
+Before any app-server thread starts, Wealth reads the effective config back
+(`config/read` with `includeLayers`) and refuses the turn if any layer but its
+own `-c` flags is non-empty (system, managed, MDM or project config), if
+`openai_base_url`, another `chatgpt_base_url` or a model provider is set (where
+your login token would be sent), if hooks, skills, trusted projects or
+`experimental_*` endpoints are set, if anything but the Wealth MCP server is
+enabled, the sandbox is not read-only, approvals are not `never`, a disabled
+feature is on or a notify hook is set. In `auto` it then uses exec for five
+minutes before trying app-server again. Without a shared `auth.json` (signed
+out, or credentials in the keychain) neither runtime starts a turn (exec signed
+in with `CODEX_API_KEY` needs none): Wealth fails closed rather than run in your
+own Codex home. Both runtimes keep their sessions in the Wealth home. Pass
+`--ephemeral` to either launcher to keep no session files at all, at the cost of
+continuity.
 
 A new app-server process starts for every turn, rather than one kept warm per
 chat. The Wealth MCP server reads the turn's consent evidence (the private
@@ -156,7 +174,10 @@ subagents, browser and computer use, image viewing and generation, Codex
 memories, tool suggestions and skill search. Wealth tools can write to their
 configured database. No transfers, messages or background monitors start, and
 the model cannot place an order: only the tap on an order card does. Stopping
-a response ends the whole Codex process group, including the Wealth MCP server.
+a response ends the whole Codex process group and every descendant, including
+the Wealth MCP server, which Codex starts in a process group of its own; the MCP
+server also exits by itself as soon as its stdin closes or its parent is gone
+(SQLite rolls back any write that had not committed).
 Both runtimes get the same overrides, the same scrubbed environment (broker keys,
 tokens and other secrets removed) and the same per-turn consent file and
 web-search rules; app-server approval requests are declined.

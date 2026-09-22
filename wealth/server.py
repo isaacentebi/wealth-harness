@@ -26,8 +26,13 @@ Consent and provenance come from the person, not the model (see ``consent.py``):
 from __future__ import annotations
 
 import os
+
+_PARENT_AT_START = os.getppid()  # before the slow imports, so a host that dies meanwhile is still noticed
+
 import re
 import sqlite3
+import threading
+import time
 from functools import wraps
 from typing import Any, Literal, Mapping
 
@@ -664,7 +669,59 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = False,
     )
 
 
+WATCHDOG_SECONDS = 0.5
+
+
+def _exit_now() -> None:
+    """Exit at once, from any thread. An open SQLite transaction is never committed half-way: it rolls back."""
+    os._exit(0)
+
+
+def start_orphan_watchdog(poll: float = WATCHDOG_SECONDS) -> None:
+    """Exit when the host is gone: stdin reaches EOF or this process is reparented.
+
+    Codex starts MCP servers in their own process group, so stopping a turn that
+    kills Codex's group does not reach this process; without this it would live on
+    with the turn's consent evidence. stdin is relayed through a pipe so its EOF is
+    seen here the moment it happens (the MCP transport reads the pipe as before),
+    and a thread notices a parent change (reparented to launchd/init or a subreaper).
+    Nothing is waited for: work in flight is abandoned, and SQLite rolls back any
+    transaction that had not committed, so no write is left half-done.
+    """
+    parent = _PARENT_AT_START
+    try:
+        source = os.dup(0)
+    except OSError:  # no stdin at all: the stdio transport ends by itself
+        _exit_now()
+    read_end, write_end = os.pipe()
+    os.dup2(read_end, 0)
+    os.close(read_end)
+
+    def relay() -> None:
+        try:
+            while True:
+                data = os.read(source, 65536)
+                if not data:
+                    break
+                view = memoryview(data)
+                while view:
+                    view = view[os.write(write_end, view):]
+        except OSError:
+            pass
+        _exit_now()
+
+    def watch_parent() -> None:
+        while os.getppid() == parent:
+            time.sleep(poll)
+        _exit_now()
+
+    threading.Thread(target=relay, name="wealth-stdin-relay", daemon=True).start()
+    threading.Thread(target=watch_parent, name="wealth-orphan-watchdog", daemon=True).start()
+
+
 def main() -> None:
+    if os.name == "posix":
+        start_orphan_watchdog()
     allowed = os.environ.get("WEALTH_MCP_TOOLS")
     # The full policy (~21k characters) is opt-in: WEALTH_BEHAVIOR_IN_SERVER=1. WEALTH_BEHAVIOR_IN_HOST=1,
     # which the Wealth launcher sets, always leaves it out.

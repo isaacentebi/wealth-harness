@@ -70,6 +70,7 @@ def test_instructions_carry_the_compact_contract_unless_the_full_policy_is_asked
         return Stub()
 
     monkeypatch.setattr(server_module, "build_server", fake_build)
+    monkeypatch.setattr(server_module, "start_orphan_watchdog", lambda: None)  # it would take pytest's stdin
     monkeypatch.delenv("WEALTH_BEHAVIOR_IN_HOST", raising=False)
     monkeypatch.delenv("WEALTH_BEHAVIOR_IN_SERVER", raising=False)
     server_module.main()

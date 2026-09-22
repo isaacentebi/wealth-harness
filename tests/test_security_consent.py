@@ -572,7 +572,7 @@ def test_the_codex_process_gets_no_broker_keys_or_tokens():
                    "CODEX_HOME": "/c", "CODEX_API_KEY": "sk-codex", "TMPDIR": "/t",
                    "HTTPS_PROXY": "http://proxy:8080", "WEALTH_DB": "/db", "WEALTH_OFFLINE": "1"}
     import inspect as _inspect
-    assert "env=child_env()" in _inspect.getsource(agent._stream_process)
+    assert "env = child_env()" in _inspect.getsource(agent._stream_process)
 
 
 def test_web_turns_with_attachments_run_without_web_search(tmp_path, monkeypatch):
