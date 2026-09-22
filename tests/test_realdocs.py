@@ -244,6 +244,21 @@ def test_ibkr_cash_by_currency_accruals_fund_types_and_dividend_symbols():
     assert held["VT"]["asset_class"] == held["SGOV"]["asset_class"] == "fund" and held["AMZN"]["asset_class"] == "equity"
     dividend = next(t for t in report["result"]["transactions"] if t["type"] == "dividend")
     assert dividend["symbol"] == "SGOV"
+    # The 5.02 of interest earned but not paid is money the account is owed: kept as its own cash-like line
+    # (not in the cash balance), so the account is worth the printed Net Asset Value.
+    accrual = held["ACCRUED-INTEREST"]
+    assert (accrual["value"], accrual["asset_class"], accrual["currency"]) == ("5.02", "cash", "USD")
+    recon = report["result"]["reconciliation"]["accounts"][0]
+    assert recon["status"] == "reconciled" and money(recon["reported_total"]) == money(TRUTH[IBKR]["nav"])
+
+
+def test_saved_ibkr_account_keeps_its_accruals(service):
+    """Before: accruals were subtracted from NAV to reconcile, so the saved account lost the 5.02 receivable."""
+    proposal = service.ingest("mariana", "file", {"path": IBKR})
+    service.ingest("mariana", "confirm", {"proposal_id": proposal["result"]["proposal_id"]})
+    account = next(a for a in service.situation("mariana")["accounts"] if a["id"] == "ibkr-2345")
+    assert money(account["native"]["USD"]) == money(TRUTH[IBKR]["nav"]) - money(25000 * Decimal("0.053694"))
+    assert money(account["native"]["MXN"]) == money("25000")
 
 
 # ------------------------------------------------------------------ the whole person, through the service
@@ -469,6 +484,42 @@ def test_matching_designations_on_both_keys_are_not_a_conflict(service):
     report = service.run("estate_register", client_id="mariana")
     assert [r["key"] for r in report["result"]["rows"] if "gbm" in r["key"]] == ["investment.gbm"]
     assert not any(g["code"] == "designation_conflict" for g in report["result"]["gaps"])
+
+
+def test_an_account_named_without_a_balance_is_kept_beside_valued_ones(service):
+    """Before: "$100 in Wallet and a Roth IRA at Fidelity" saved the Wallet and marked the whole proposal
+    confirmed, silently discarding the IRA."""
+    chat = service.ingest("mariana", "chat", {"items": [
+        {"kind": "cash", "label": "Wallet", "amount": 100, "currency": "USD", "quote": "tengo 100 dólares en Wallet"},
+        {"kind": "account", "label": "Fidelity Roth IRA", "currency": "USD", "account_type": "roth_ira",
+         "quote": "y una Roth IRA en Fidelity"}]})
+    saved = service.ingest("mariana", "confirm", {"proposal_id": chat["result"]["proposal_id"],
+                                                  "acknowledge_discrepancies": True})
+    assert sorted(saved["result"]["saved"]["keys"]) == ["cash.wallet", "investment.fidelity-roth-ira"]
+    ira = service.inspect("mariana", key="investment.fidelity-roth-ira")["facts"][0]["value"]
+    assert ira["balance_unknown"] is True and ira["institution"] == "Fidelity" and "amount" not in ira
+
+
+def test_confirm_refuses_to_drop_a_proposed_item(service, monkeypatch):
+    """The invariant behind the fix: every proposed account, debt and income maps to a saved fact, or nothing
+    is saved and the confirm fails loudly."""
+    from wealth.ingest import chat as chat_module
+
+    chat = service.ingest("mariana", "chat", {"items": [
+        {"kind": "cash", "label": "Wallet", "amount": 100, "currency": "USD", "quote": "tengo 100 dólares en Wallet"},
+        {"kind": "income", "label": "Sueldo", "amount": 85000, "currency": "MXN", "quote": "gano 85 mil al mes"}]})
+    real = chat_module.stated_plan
+
+    def lossy(proposal):
+        facts, covers = real(proposal)
+        return [f for f in facts if not f["key"].startswith("income.")], \
+            {k: v for k, v in covers.items() if not k.startswith("income")}
+
+    monkeypatch.setattr(chat_module, "stated_plan", lossy)
+    with pytest.raises(ValueError, match="confirm would drop income-sueldo"):
+        service.ingest("mariana", "confirm", {"proposal_id": chat["result"]["proposal_id"],
+                                              "acknowledge_discrepancies": True})
+    assert not [f for f in service.inspect("mariana")["facts"] if f["key"].startswith(("cash.", "income."))]
 
 
 def test_a_chat_wallet_in_two_currencies_is_two_balances_never_a_sum(service):

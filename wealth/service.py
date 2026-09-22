@@ -1782,8 +1782,8 @@ class WealthService:
         if (((record or {}).get("proposal") or {}).get("result") or {}).get("kind") == "tax_document":
             return self._ingest_confirm_tax(client_id, proposal_id, acknowledge_discrepancies, expires_on)
         if (((record or {}).get("proposal") or {}).get("result") or {}).get("source_kind") == "user":
-            from .ingest.chat import stated_facts
-            if stated_facts(record["proposal"]):
+            from .ingest.chat import stated_plan
+            if stated_plan(record["proposal"]):
                 return self._ingest_confirm_stated(client_id, proposal_id, acknowledge_discrepancies)
         today = datetime.now(timezone.utc).date()
         with WealthStore(self.db_path) as store:
@@ -1890,7 +1890,7 @@ class WealthService:
         wins and the difference is shown) instead of being counted beside them.
         """
         from .ingest import proposal_to_facts
-        from .ingest.chat import stated_facts
+        from .ingest.chat import stated_plan
         with WealthStore(self.db_path) as store:
             with store.atomic():
                 state = store.auxiliary(client_id, "ingest")
@@ -1905,7 +1905,14 @@ class WealthService:
                                            acknowledge_discrepancies=acknowledge_discrepancies)
                 if packet["status"] != "ready":
                     return packet
-                facts = stated_facts(proposal) or []
+                facts, covers = stated_plan(proposal) or ([], {})
+                household = (proposal.get("result") or {}).get("household") or {}
+                proposed = [item["id"] for entity in ("accounts", "liabilities", "income_exposures")
+                            for item in household.get(entity) or []]
+                lost = [item for item in proposed if not covers.get(item)]
+                if lost:
+                    # Confirming marks the whole proposal saved: an item without a fact would vanish silently.
+                    raise ValueError(f"confirm would drop {', '.join(lost)} (no fact holds it); nothing was saved")
                 snapshot = store.snapshot(client_id)
                 before = build_situation(snapshot, store.ledger(client_id), datetime.now(timezone.utc).date())
                 saved = store.remember(client_id, facts, None, packet["result"]["request_id"])

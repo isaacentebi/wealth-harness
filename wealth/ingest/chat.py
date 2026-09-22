@@ -101,13 +101,22 @@ _INVESTMENT_KINDS = {"brokerage": "brokerage", "afore": "afore", "ira": "retirem
 
 
 def stated_facts(proposal: dict[str, Any]) -> list[dict[str, Any]] | None:
-    """What the person said, as the facts the rest of Wealth reads for stated balances.
+    """What the person said, as the facts the rest of Wealth reads for stated balances (see :func:`stated_plan`)."""
+    plan = stated_plan(proposal)
+    return plan[0] if plan else None
+
+
+def stated_plan(proposal: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, list[str]]] | None:
+    """The stated facts and, for every proposed account, debt and income id, the fact keys that hold it.
+
+    Every proposed item must map to at least one fact: an account named without a balance ("a Roth IRA at
+    Fidelity") is saved with ``balance_unknown: true``, never dropped.
 
     ``cash.<name>``, ``investment.<name>``, ``liability.<name>`` and ``income.<name>`` (source ``user``) are what a
     statement later covers: its figure replaces the stated one and the difference is shown ("you said 400,000;
     the statement shows 398,365.82").  Saving them as statement records instead left "BBVA 60,000 (stated)" beside
     "BBVA 76,581.87 (statement)" and counted both.  Returns None when the person named holdings (symbols and
-    quantities), which only an account record can hold.
+    quantities) or a debt or income without its amount, which only an account record can hold.
     """
     from .classify import detect_institution
 
@@ -117,19 +126,23 @@ def stated_facts(proposal: dict[str, Any]) -> list[dict[str, Any]] | None:
     source = {"kind": "user", "ref": str(provenance.get("ref") or "conversation"), "observed_on": result.get("as_of")}
     facts: list[dict[str, Any]] = []
     keys: set[str] = set()
+    covers: dict[str, list[str]] = {}
 
-    def add(prefix: str, name: str, value: dict[str, Any]) -> None:
+    def add(prefix: str, name: str, value: dict[str, Any], item: str) -> None:
         base, counter = slug(name or prefix, 24), 2
         key = f"{prefix}.{base}"
         while key in keys:
             key, counter = f"{prefix}.{base}-{counter}", counter + 1
         keys.add(key)
         facts.append({"key": key, "value": value, "source": source, "confidence": "reported"})
+        covers.setdefault(item, []).append(key)
 
     totals: dict[str, list[dict[str, Any]]] = {}
     for row in result.get("unresolved") or []:
         if row.get("reason") == "quantity not printed" and row.get("value") is not None:
             totals.setdefault(row["account_id"], []).append(row)  # "Tengo 400k en GBM": a stated total
+        else:
+            return None  # a holding without a value: only an account record keeps it
     for account in household.get("accounts") or []:
         rows = [p for p in household.get("positions") or [] if p.get("account_id") == account["id"]]
         if any(p.get("asset_class") != "cash" for p in rows):
@@ -150,18 +163,31 @@ def stated_facts(proposal: dict[str, Any]) -> list[dict[str, Any]] | None:
                 value["institution"] = institution
             if account.get("interest_rate") is not None:
                 value["annual_rate"] = float(account["interest_rate"])
-            add("cash", f"{name} {ccy}" if len(currencies) > 1 else name, value)
+            add("cash", f"{name} {ccy}" if len(currencies) > 1 else name, value, account["id"])
         for row in stated:
             ccy = row.get("currency") or account["currency"]
             value = {"amount": float(Decimal(row["value"])), "currency": ccy,
                      "institution": institution or name, "name": name,
                      "kind": _INVESTMENT_KINDS.get(account.get("type") or "", "other")}
-            add("investment", f"{name} {ccy}" if len(currencies) > 1 else name, value)
+            add("investment", f"{name} {ccy}" if len(currencies) > 1 else name, value, account["id"])
+        if not currencies:
+            # Named without a balance: it exists, the amount is unknown (never 0, never dropped).
+            cash = account.get("type") in ("savings", "checking")
+            value = {"balance_unknown": True, "name": name}
+            if account.get("currency") and account["currency"] != "XXX":
+                value["currency"] = account["currency"]
+            if institution:
+                value["institution"] = institution
+            if not cash:
+                value["kind"] = _INVESTMENT_KINDS.get(account.get("type") or "", "other")
+                if account.get("type") in ("ira", "roth_ira", "401k"):
+                    value["plan_type"] = account["type"]
+            add("cash" if cash else "investment", name, value, account["id"])
     for liability in household.get("liabilities") or []:
         if liability.get("account_id"):
             return None
         if liability.get("value") is None:
-            continue
+            return None  # a debt without its balance cannot be a stated liability
         name = liability.get("name") or "Debt"
         kind = next((k for pattern, k in _LIABILITY_WORDS if pattern.search(name)), "other")
         value = {"kind": kind, "balance": float(Decimal(liability["value"])), "currency": liability["currency"],
@@ -173,17 +199,17 @@ def stated_facts(proposal: dict[str, Any]) -> list[dict[str, Any]] | None:
             value["annual_rate"] = float(liability["interest_rate"])
         if liability.get("monthly_payment") is not None:
             value.update(payment=float(liability["monthly_payment"]), payment_frequency="monthly")
-        add("liability", name, value)
+        add("liability", name, value, liability["id"])
     for income in household.get("income_exposures") or []:
         if income.get("annual_amount") is None:
-            continue
+            return None  # an income without its amount cannot be a stated income
         name = income.get("description") or "Income"
         per_period, frequency = income.get("per_period"), income.get("frequency")
         value = {"amount": float(Decimal(per_period if per_period and frequency else income["annual_amount"])),
                  "currency": income["currency"], "frequency": frequency if per_period and frequency else "annual",
                  "name": name}
-        add("income", name, value)
-    return facts or None
+        add("income", name, value, income["id"])
+    return (facts, covers) if facts else None
 
 
 def _verify(item: dict[str, Any], index: int) -> list[dict[str, Any]]:

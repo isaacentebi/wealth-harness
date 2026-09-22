@@ -336,13 +336,16 @@ def _parse_ibkr(rows: list[list[str]], *, currency: str | None, as_of: str | Non
             accruals.append((label, parse_amount(record["Current Total"])))
         elif label == "total" and record.get("Current Total"):
             account["reported_total"] = {"amount": record["Current Total"], "currency": base, "label": "Net Asset Value", "page": None}
-    if accruals and account["reported_total"] and parse_amount(account["reported_total"]["amount"]) is not None:
-        # Net Asset Value counts interest and dividends earned but not yet paid; they are not a holding yet.
-        owed = sum((amount for _, amount in accruals), Decimal(0))
-        account["reported_total"]["amount"] = str(parse_amount(account["reported_total"]["amount"]) - owed)
-        account["reported_total"]["label"] = "Net Asset Value less accruals"
-        notes.append("Reconciled to Net Asset Value less " + " and ".join(
-            f"{label} {amount}" for label, amount in accruals) + " (earned, not yet paid).")
+    for label, amount in accruals:
+        # Net Asset Value counts interest and dividends earned but not yet paid: money the account is owed. It is
+        # kept as its own cash-like line (not added to the cash balance), so the saved value is the NAV.
+        account["positions"].append({
+            "symbol": "ACCRUED-" + ("DIVIDENDS" if label.startswith("dividend") else "INTEREST"),
+            "description": f"{label.capitalize()} (earned, not yet paid)", "quantity": str(amount), "price": "1",
+            "market_value": str(amount), "currency": base, "asset_type": "cash", "page": None})
+    if accruals:
+        notes.append(" and ".join(f"{label} {amount}" for label, amount in accruals)
+                     + " (earned, not yet paid) are kept in the account as a receivable, as Net Asset Value counts them.")
     described = {r.get("Symbol"): r for kind, r in sections.get("Financial Instrument Information", [])
                  if kind == "Data"}
     for kind, record in sections.get("Open Positions", []):
