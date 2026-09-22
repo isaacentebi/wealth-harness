@@ -14,10 +14,12 @@ from .files import ingest_bytes, ingest_file
 from .llm import EXTRACTION_SCHEMA, extraction_request, validate_llm_extraction
 from .model import IngestProposal, build_proposal, diff_proposals, merge_household, proposal_digest, proposal_to_facts
 from .redact import mask_account, redact, redact_text
+from .taxdoc import TAX_EXTRACTION_SCHEMA, detect_tax_document, tax_proposal_to_facts
 from .transactions import TYPES as TRANSACTION_TYPES
 
 __all__ = [
     "Connector", "EXTRACTION_SCHEMA", "IngestProposal", "TRANSACTION_TYPES", "build_proposal", "diff_proposals",
     "extraction_request", "ingest_bytes", "ingest_file", "mask_account", "merge_household", "proposal_digest",
     "proposal_from_chat", "proposal_to_facts", "redact", "redact_text", "validate_llm_extraction",
+    "TAX_EXTRACTION_SCHEMA", "detect_tax_document", "tax_proposal_to_facts",
 ]

@@ -30,7 +30,7 @@ _SOURCE_KINDS = frozenset({"user", "document", "web", "tool", "inference", "conn
 _CHALLENGER_KINDS = frozenset({"document", "web", "connector", "inference", "pattern"})
 # Records that settle a figure outright (a statement, a payslip, a connected account), and the figures they settle.
 _EVIDENCE_KINDS = frozenset({"document", "connector"})
-_FIGURE_PREFIXES = ("income.", "cash.", "investment.", "liability.", "spending.", "account.")
+_FIGURE_PREFIXES = ("income.", "cash.", "investment.", "liability.", "spending.", "account.", "constancia.")
 _DECISION_STATUSES = frozenset({"accepted", "dismissed"})
 # A fact revision is ``active`` (possibly closed by valid_to), ``corrected`` (it turned out
 # wrong), or a value-less terminal row: ``forgotten`` (the person removed it) or

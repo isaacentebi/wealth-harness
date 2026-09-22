@@ -300,9 +300,16 @@ class _Book:
         self.constancias = []
         for key, fact in sorted(self.facts.items()):
             value = fact["value"]
-            if key.startswith("constancia.") and isinstance(value, dict) and value.get("tax_year") == year:
-                self.constancias.append({"id": key.partition(".")[2], "fact_id": fact["id"], **value})
+            if not key.startswith("constancia.") or not isinstance(value, dict):
+                continue
+            source = fact.get("source") or {}
+            doc = {"id": key.partition(".")[2], "fact_id": fact["id"], **value,
+                   "_source": source.get("kind"), "_ref": source.get("ref")}
+            if value.get("tax_year") == year:
+                self.constancias.append(doc)
                 self.evidence.add(fact["id"])
+        # An uploaded document (source kind document) wins over one typed in for the same institution.
+        self.constancias.sort(key=lambda d: d["_source"] != "document")
         self.parameters = inputs.get("parameters") or {}
         if not isinstance(self.parameters, dict):
             raise ValueError("parameters must be an object {key: {value, source}}")
@@ -1608,9 +1615,35 @@ def _us_retirement(book: _Book) -> dict | None:
     sid = "us_retirement"
     ira = [a for a in book.accounts if book.kind(a) in {"ira", "roth"}]
     stated_trad, stated_roth = _d(book.us.get("ira_contributions_usd")), _d(book.us.get("roth_contributions_usd"))
-    if not ira and stated_trad is None and stated_roth is None:
+    forms = [d for d in book.constancias if isinstance(d.get("form_5498"), dict)]
+    if not ira and stated_trad is None and stated_roth is None and not forms:
         return None
-    missing, warnings, rows = [], [], []
+    missing, warnings, rows, recon = [], [], [], []
+    if forms:
+        # Form 5498 is the source of truth: it includes contributions made by April 15 for this year and
+        # excludes rollovers and conversions, which deposits in the ledger cannot tell apart.
+        def form_sum(field: str) -> Decimal | None:
+            values = [_d(d["form_5498"].get(field)) for d in forms]
+            return None if all(v is None for v in values) else sum((v or ZERO for v in values), ZERO)
+
+        doc_trad, doc_roth = form_sum("ira_contributions"), form_sum("roth_contributions")
+        ours = {"ira": ZERO, "roth": ZERO}
+        for e in book.entries:
+            if (e["account_id"] in ira and book.start <= e["date"] <= book.end and not e.get("instrument_id")
+                    and e["kind"] in {"deposit", "transfer"}):
+                amount = book.convert(_d(e.get("amount")), e.get("currency"), "USD", e["date"])
+                if amount is not None and amount > 0:
+                    ours[book.kind(e["account_id"])] += amount
+        for label, kind, stated, theirs in (("traditional IRA contributions (5498 box 1)", "ira", stated_trad, doc_trad),
+                                            ("Roth IRA contributions (5498 box 10)", "roth", stated_roth, doc_roth)):
+            if theirs is None:
+                continue
+            mine = stated if stated is not None else (ours[kind] if ira else None)
+            recon.append({"item": label, "ours": _m(mine), "document": _m(theirs),
+                          "difference": _m(None if mine is None else mine - theirs), "source_of_truth": "5498",
+                          "document_id": ", ".join(d["id"] for d in forms)})
+        stated_trad = doc_trad if doc_trad is not None else stated_trad
+        stated_roth = doc_roth if doc_roth is not None else stated_roth
     ledger_contrib = {"ira": ZERO, "roth": ZERO}
     withdrawals = {"ira": ZERO, "roth": ZERO}
     for e in book.entries:
@@ -1626,7 +1659,7 @@ def _us_retirement(book: _Book) -> dict | None:
             withdrawals[kind] += -amount
     trad = stated_trad if stated_trad is not None else (ledger_contrib["ira"] if ira else None)
     roth = stated_roth if stated_roth is not None else (ledger_contrib["roth"] if ira else None)
-    if stated_trad is None or stated_roth is None:
+    if (stated_trad is None or stated_roth is None) and not forms:
         warnings.append("Contributions are read from deposits into IRA accounts; rollovers, conversions and "
                         "prior-year contributions made by April 15 must be excluded (Form 5498 is the source).")
     params = retirement._Params({"parameters": book.parameters})
@@ -1675,7 +1708,8 @@ def _us_retirement(book: _Book) -> dict | None:
                                   ("roth_usd", "Roth", "Roth"), ("combined_usd", "Total", "Combined"),
                                   ("limit_usd", "Límite", "Limit"), ("excess_usd", "Exceso", "Excess"),
                                   ("required_usd", "RMD requerido", "RMD required"), ("taken_usd", "Retirado", "Taken")),
-                    rows=rows, missing=missing, warnings=warnings, sources=[SRC_590A, SRC_590B, *params.sources],
+                    rows=rows, reconciliation=recon, missing=missing, warnings=warnings,
+                    sources=[SRC_590A, SRC_590B, *params.sources],
                     assumptions=["The IRA limit is shared by traditional and Roth IRAs; income phase-outs for Roth and "
                                  "deductibility are not applied.",
                                  "Contributions need taxable compensation; excluded foreign earned income (Form 2555) "
@@ -2021,7 +2055,9 @@ def run_task(inputs: Mapping[str, Any], snapshot: Mapping[str, Any], ledger: Map
               "sections": {s["id"]: s for s in sections}, "section_order": [s["id"] for s in sections],
               "pendientes": pendientes, "deadlines": deadlines,
               "documents": [{"id": d["id"], "institution": d.get("institution"),
-                             "blocks": sorted(k for k in d if k in DOCUMENT_BLOCKS)} for d in book.constancias],
+                             "blocks": sorted(k for k in d if k in DOCUMENT_BLOCKS),
+                             "source": "uploaded document" if d["_source"] == "document" else "stated",
+                             "ref": d["_ref"] if d["_source"] == "document" else None} for d in book.constancias],
               "ledger": {"first_entry": book.first_day, "last_entry": book.last_day,
                          "covers_year": book.covers_year(), "sources": book.ledger_sources}}
     report = {"status": status, "result": result, "missing": pendientes, "warnings": list(dict.fromkeys(warnings)),
@@ -2036,7 +2072,8 @@ def run_task(inputs: Mapping[str, Any], snapshot: Mapping[str, Any], ledger: Map
     return report
 
 
-DOCUMENT_BLOCKS = ("enajenacion", "intereses", "dividendos", "form_1099_b", "form_1099_div", "form_1099_int")
+DOCUMENT_BLOCKS = ("enajenacion", "intereses", "dividendos", "form_1099_b", "form_1099_div", "form_1099_int",
+                   "form_5498")
 
 
 # ----------------------------------------------------------------- CSV and HTML

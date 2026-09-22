@@ -189,7 +189,8 @@ and coverage before answering):
   research and value (a company or fund).
 - Tax: tax (US lots, harvesting), mx_holdings, mx_interest, mx_deductions,
   mx_foreign, mx_calendar, estate, tax_pack (the year's pack for the contador
-  or CPA; save a constancia as constancia.<id> and stated tax facts as
+  or CPA; read an uploaded constancia, 1099 or 5498 with wealth_ingest
+  action=file and confirm it into constancia.<id>; save stated tax facts as
   tax.<year>).
 - Retirement: retirement_mx (IMSS Ley 73/97, AFORE, Modalidad 40),
   retirement_us (Social Security, limits, withdrawals), retirement_readiness.

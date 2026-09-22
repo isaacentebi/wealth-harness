@@ -204,7 +204,9 @@ SCHEMA: dict[str, dict[str, str]] = {
                "treasury_rate_per_usd {MXN: rate, source}}",
     },
     "constancia.<id>": {
-        "note": "an institution's annual tax document (constancia, 1099) as printed; the source of truth in tax_pack",
+        "note": "an institution's annual tax document (constancia, 1099, 5498) as printed; the source of truth in "
+                "tax_pack. Upload the PDF with wealth_ingest action=file instead of typing it: confirming saves "
+                "it with source.kind=document",
         "tax_year": "YYYY", "institution": "GBM, BBVA, Charles Schwab...", "account_id?": "ledger account id",
         "currency?": "ISO 4217", "issued_on?": "YYYY-MM-DD",
         "enajenacion?": "{gain, loss, net} Art. 129 share sales (MXN)",
@@ -213,6 +215,8 @@ SCHEMA: dict[str, dict[str, str]] = {
         "form_1099_b?": "{short_term_gain, long_term_gain, wash_sale_disallowed} (USD)",
         "form_1099_div?": "{ordinary, qualified, capital_gain_distributions, foreign_tax_paid} (USD)",
         "form_1099_int?": "{interest, foreign_tax_paid} (USD)",
+        "form_5498?": "{ira_contributions, rollover_contributions, roth_conversion, recharacterized, fair_market_value, "
+                      "sep_contributions, simple_contributions, roth_contributions, rmd_next_year} (USD)",
     },
     "follow.<cik>": {
         "note": "a 13F manager the person follows; <cik> is the 10-digit SEC CIK (find it with manager_search)",
@@ -888,6 +892,9 @@ CONSTANCIA_BLOCKS = {
     "form_1099_b": ("proceeds", "cost_basis", "short_term_gain", "long_term_gain", "wash_sale_disallowed"),
     "form_1099_div": ("ordinary", "qualified", "capital_gain_distributions", "foreign_tax_paid"),
     "form_1099_int": ("interest", "foreign_tax_paid"),
+    "form_5498": ("ira_contributions", "rollover_contributions", "roth_conversion", "recharacterized",
+                  "fair_market_value", "sep_contributions", "simple_contributions", "roth_contributions",
+                  "rmd_next_year"),
 }
 
 

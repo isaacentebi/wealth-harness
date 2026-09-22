@@ -270,6 +270,9 @@ def validate_llm_extraction(payload: Any, source_text: Any, *, provenance: dict[
     """
     from .model import build_proposal
 
+    if isinstance(source_text, dict) and source_text.get("document_kind") == "tax_document":
+        from .taxdoc import validate_tax_extraction  # an annual tax document has its own schema
+        return validate_tax_extraction(payload, source_text, provenance=provenance)
     text, request_source = _source_texts(source_text)
     errors = check_schema(EXTRACTION_SCHEMA, payload)
     base = dict(provenance or request_source or {})

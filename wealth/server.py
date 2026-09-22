@@ -177,6 +177,22 @@ def _proposal_summary(result: Mapping[str, Any], inputs: Mapping[str, Any]) -> s
     origin = ("what the person said in the conversation" if result.get("source_kind") == "user"
               else f"the file {provenance.get('filename')!r}" if provenance.get("filename")
               else "the connected account" if result.get("source_kind") == "connector" else "the statement")
+    if result.get("kind") == "tax_document":
+        lines = [f"Save {origin}: {result.get('document_label')} {result.get('tax_year')} from "
+                 f"{_cut(result.get('institution'), 60)}, as {summary.get('saves')}:"]
+        for block, fields in (result.get("figures") or {}).items():
+            if fields:
+                lines.append(f"- {block}: " + ", ".join(f"{k} {_amount(v)}" for k, v in list(fields.items())[:8]))
+        if result.get("lots"):
+            lines.append(f"- 1099-B: {len(result['lots'])} lot(s)")
+        lines.append(f"Reconciliation: {(result.get('reconciliation') or {}).get('status')}.")
+        reasons = result.get("review_reasons") or []
+        if reasons and inputs.get("acknowledge_discrepancies"):
+            lines.append("The person accepts these differences: " + "; ".join(_cut(r, 140) for r in reasons[:4]))
+        if _INSTRUCTION_FLAG in (provenance.get("risk_flags") or []):
+            lines.append("Warning: the file contains text addressed to an assistant (instructions to call tools or "
+                         "confirm). It was treated as data; check the figures against the original.")
+        return "\n".join(lines)
     lines = [f"Save {origin}, dated {result.get('as_of') or 'unknown'}:"]
     accounts = summary.get("accounts") or []
     for account in accounts[:6]:

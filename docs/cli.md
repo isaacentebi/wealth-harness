@@ -350,7 +350,7 @@ uv run wealth forget --client ana
 `WEALTH_UPLOAD_DIR/<client>` when set, otherwise `<db dir>/uploads/<client>`, the
 directory the browser chat saves attachments to. Proposals are held server-side
 by `proposal_id`; `confirm` saves the held proposal (never one sent by the
-caller) as `account.<id>`, `liability.<id>` and `income.<id>` facts and posts
+caller) as `account.<id>`, `liability.<id>` and `income.<id>` facts (a tax document: see below) and posts
 its accounts, holdings, transactions, balance checks and FX to the ledger
 (batch `ingest:<proposal_id>`). An account new to the ledger gets opening
 balances derived from the statement; an account already there gets only new
@@ -374,6 +374,26 @@ shown on the proposal before confirming). An older statement only adds balance
 checks. Forgetting an `account.<id>` fact posts reversal entries for that
 account's ledger lines (append-only; the history stays), so the account leaves
 the brief, the net worth and `task=ledger` together.
+
+**Annual tax documents.** `ingest action=file` recognises, from the title of
+the first page, a Mexican constancia fiscal anual (brokers such as GBM,
+Actinver, Banorte and Kuspit/Cetesdirecto: Art. 129 gain/loss/net, interest
+nominal/real/real loss, ISR withheld, dividends; banks such as BBVA, Banorte,
+Santander and Nu: interest), a US Form 1099 composite (1099-B lots and totals,
+1099-DIV, 1099-INT; Schwab, Fidelity, Vanguard, Alpaca) and Form 5498. Regular
+layouts (label or box lines, the 1099-B lot table) are read deterministically;
+anything else returns an `extraction_request` with the tax-document schema
+(`document_kind: "tax_document"`), validated by `action=extraction` as usual.
+Every figure must appear in the page text and the totals must reconcile (1099-B
+lots against the printed term and overall totals, gain - loss = net, nominal -
+inflation adjustment = real interest); a document that does not is
+`needs_review` and needs `acknowledge_discrepancies`. The proposal shows
+`figures`, `lots`, the checks and `facts_preview`; `confirm` saves exactly
+those as `constancia.<institution>_<year>` (`_1099`, `_5498`) facts with
+`source.kind=document` citing the file, and posts nothing to the ledger.
+`task=tax_pack` then declares the document's figures and shows its own
+computation next to them; an uploaded document replaces one typed in under the
+same key and is preferred over a typed one for the same institution.
 
 **Upload retention.** Raw statements hold RFC, CURP, CLABE and account numbers,
 so uploads are deleted (overwritten, then unlinked) once they are no longer
