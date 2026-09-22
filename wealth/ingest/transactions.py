@@ -165,7 +165,8 @@ def classify(description: str, amount: Decimal | None, *, account_kind: str, pri
                 return "fee"
             if kind == "transfer" and account_kind == "credit_card" and amount is not None and amount > 0:
                 return "loan_payment"  # "PAGO SPEI RECIBIDO": money into a card is a payment on it
-            if kind == "transfer" and spending_account and amount is not None and amount < 0 and _PAID_TO_OTHERS.search(folded):
+            if kind == "transfer" and spending_account and amount is not None and amount < 0 \
+                    and _PAID_TO_OTHERS.search(folded):
                 return "expense"  # rent or school fees sent by SPEI are spending, not a move between own accounts
             if kind == "withdrawal" and spending_account and amount is not None and amount < 0:
                 return "expense"  # cash taken at an ATM is spent (spending files it under cash_withdrawal)

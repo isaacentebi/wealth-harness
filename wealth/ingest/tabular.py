@@ -343,7 +343,8 @@ def _parse_ibkr(rows: list[list[str]], *, currency: str | None, as_of: str | Non
         account["reported_total"]["label"] = "Net Asset Value less accruals"
         notes.append("Reconciled to Net Asset Value less " + " and ".join(
             f"{label} {amount}" for label, amount in accruals) + " (earned, not yet paid).")
-    described = {r.get("Symbol"): r for kind, r in sections.get("Financial Instrument Information", []) if kind == "Data"}
+    described = {r.get("Symbol"): r for kind, r in sections.get("Financial Instrument Information", [])
+                 if kind == "Data"}
     for kind, record in sections.get("Open Positions", []):
         if kind != "Data" or record.get("DataDiscriminator", "Summary") != "Summary":
             continue
@@ -361,7 +362,8 @@ def _parse_ibkr(rows: list[list[str]], *, currency: str | None, as_of: str | Non
             if kind != "Data" or not record.get("Date") or fold(record.get("Currency")).startswith("total"):
                 continue
             # "SGOV(US46436E7186) Cash Dividend ...": the security it came from, so the ledger can post it.
-            paid_by = re.match(r"\s*([A-Z][A-Z0-9.]{0,9})\s*\((?:[A-Z]{2}[A-Z0-9]{9}\d)\)", record.get("Description") or "")
+            paid_by = re.match(r"\s*([A-Z][A-Z0-9.]{0,9})\s*\((?:[A-Z]{2}[A-Z0-9]{9}\d)\)",
+                               record.get("Description") or "")
             account["transactions"].append({"date": resolve_date(record["Date"], None, day_first=False),
                                             "description": record.get("Description", name), "amount": record.get("Amount"),
                                             "symbol": paid_by.group(1) if paid_by else None,

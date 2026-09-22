@@ -82,10 +82,12 @@ Two optional `env` entries for either host:
 
 - `"WEALTH_SEC_USER_AGENT": "Your Name you@example.com"` turns on the 13F manager
   tasks; the SEC asks every EDGAR caller for a contact, and it goes only to sec.gov.
-- Saving a statement, answering a contradiction or accepting a decision takes two
-  calls: the first returns a summary and a one-time `confirmation_code` for you, the
-  second completes it after your yes (codes are kept in the database for 10 minutes,
-  so hosts that restart the server each turn still finish).
+- Saving a statement takes your one yes: its proposal carries a summary and a
+  one-time `confirmation_code` for you, and the save sends the code back after
+  your yes. Answering a contradiction or accepting a decision takes two calls:
+  the first returns a summary and a code, the second completes it after your yes
+  (codes are kept in the database for 10 minutes, so hosts that restart the
+  server each turn still finish).
   `"WEALTH_HOST_HANDLES_CONSENT": "1"` drops the code for hosts whose own
   tool-approval prompt is your consent (Claude Code or Desktop asking before each
   `wealth_ingest`/`wealth_decision` call). The trade-off: the code proves the yes came

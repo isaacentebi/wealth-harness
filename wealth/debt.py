@@ -1480,8 +1480,8 @@ def run(inputs: Mapping[str, Any], rows: list[Mapping[str, Any]], today: date, *
         if len(ready) != 1:
             if missing:
                 return {**empty, "missing": missing}
-            listed = "; ".join(f"{d['id']} ({num(d['balance'])} at {num(d['rate'], 4) if d['rate'] is not None else '?'})"
-                               for d in ready[:8])
+            listed = "; ".join(f"{d['id']} ({num(d['balance'])} at "
+                               f"{num(d['rate'], 4) if d['rate'] is not None else '?'})" for d in ready[:8])
             raise ValueError(f"prepay_vs_invest compares one debt: pass debt (an id or an object), one of: {listed}")
         chosen = ready[0]
         if inputs.get("extra_monthly") is None and inputs.get("lump_sum") is None:

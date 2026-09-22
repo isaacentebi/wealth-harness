@@ -1869,9 +1869,9 @@ def _us_1099(book: _Book, scope: set[str]) -> tuple[dict, dict, Decimal | None]:
               "qualified_dividends_usd": _m(_sum(_d(r["qualified_dividends_usd"]) for r in rows)) if rows else _m(ZERO),
               "interest_usd": _m(_sum(_d(r["interest_usd"]) for r in rows)) if rows else _m(ZERO),
               # What goes on the return: each account's 1099 figure where there is one, else the ledger's.
-              "ordinary_dividends_to_report_usd": _m(_sum(_d(r["form_ordinary_dividends_usd"])
-                                                          if r["form_ordinary_dividends_usd"] is not None
-                                                          else _d(r["dividends_usd"]) for r in rows)) if rows else _m(ZERO),
+              "ordinary_dividends_to_report_usd": _m(_sum(
+                  _d(r["form_ordinary_dividends_usd"]) if r["form_ordinary_dividends_usd"] is not None
+                  else _d(r["dividends_usd"]) for r in rows)) if rows else _m(ZERO),
               "interest_to_report_usd": _m(_sum(_d(r["form_interest_usd"]) if r["form_interest_usd"] is not None
                                                 else _d(r["interest_usd"]) for r in rows)) if rows else _m(ZERO)}
     section = _section(

@@ -253,8 +253,8 @@ def _statement_currency(text: str, language: str | None) -> tuple[str | None, st
 
 
 _HOLDING_NUMERIC = frozenset({"quantity", "price", "value", "cost_basis", "avg_cost", "gain", "rate"})
-_TX_NUMERIC = frozenset({"debit", "credit", "amount", "balance", "quantity", "price", "fees", "fees_tax", "original_amount",
-                         "remaining_balance", "installment_payment"})
+_TX_NUMERIC = frozenset({"debit", "credit", "amount", "balance", "quantity", "price", "fees", "fees_tax",
+                         "original_amount", "remaining_balance", "installment_payment"})
 _IN_SECTION = re.compile(r"^(deposits|depositos|abonos|credits|payments (and|&) (other )?credits|pagos y abonos|additions|entradas)")
 _OUT_SECTION = re.compile(r"^(withdrawals|retiros|cargos|debits|checks|purchases|compras|electronic withdrawals|atm|card purchases|"
                           r"other withdrawals|consumos|salidas)")
@@ -688,8 +688,8 @@ def parse_statement_text(pages: list[tuple[int, str]], *, aliases: dict[str, lis
 
 _OUT_WORDS = re.compile(r"(?i)\b(compra|cpa|retenci[oó]n|isr|comisi[oó]n|iva|retiro|cargo|buy|bought|purchase|"
                         r"withdrawal|fee|tax)\b")
-_IN_WORDS = re.compile(r"(?i)\b(venta|vta|dividendo|distribuci[oó]n|inter[eé]s(es)?|dep[oó]sito|abono|sell|sold|sale|"
-                       r"dividend|interest|deposit|rendimiento)\b")
+_IN_WORDS = re.compile(r"(?i)\b(venta|vta|dividendo|distribuci[oó]n|inter[eé]s(es)?|dep[oó]sito|abono|sell|sold|"
+                       r"sale|dividend|interest|deposit|rendimiento)\b")
 _MAX_UNSIGNED_RUN = 4  # rows between two printed balances whose signs are solved together
 
 

@@ -255,5 +255,5 @@ def proposal_from_chat(items: list[dict[str, Any]], *, as_of: str | None = None,
     return build_proposal(statement, kind="user", provenance=provenance, owner_id=owner_id,
                           verification={"source_text": True, "checked": checked, "unverified": unverified},
                           missing=missing, confidence={"as_of": "high"},
-                          assumptions=["Values are as the person stated them in conversation; they are reported, not statement-verified.",
-                                       *notes])
+                          assumptions=["Values are as the person stated them in conversation; they are reported, "
+                                       "not statement-verified.", *notes])

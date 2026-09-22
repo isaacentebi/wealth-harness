@@ -172,8 +172,9 @@ exercise it.
 - **The model** (Codex locally, or any MCP host) reads context, runs tasks,
   saves sourced facts, proposes decisions and prepares ingest proposals and
   order tickets. It may call `ingest action=confirm`: in a Wealth turn, the
-  server checks the person's own message; in other hosts, it needs two calls
-  with a one-time code shown to the person, unless
+  server checks the person's own message; in other hosts, it needs the
+  one-time code shown to the person with the proposal (or returned by a first
+  confirm call), unless
   `WEALTH_HOST_HANDLES_CONSENT=1`. Document-sourced facts must match the
   statement's figures or they are saved as inferences. It cannot delete a
   profile, read credentials or order confirmation codes, place, confirm or
