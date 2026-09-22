@@ -342,6 +342,160 @@ _GUARD_FACTS: list[dict[str, Any]] = [
 ]
 
 
+# ------------------------------------------------------------------ tax pack fixtures (fictional, 2025)
+
+def _tp_entry(i: int, prefix: str, account: str, kind: str, day: str, amount: str | None = None,
+              currency: str = "MXN", **extra: Any) -> dict[str, Any]:
+    row = {"id": f"{prefix}{i:03d}", "account_id": account, "kind": kind, "date": day, "currency": currency,
+           "confidence": "reported", "source": {"kind": "document", "ref": "estado de cuenta (fictional example)"},
+           **extra}
+    if amount is not None:
+        row["amount"] = amount
+    return row
+
+
+_TP_INPC = {"2023-04": "128.363", "2024-06": "134.594", "2025-01": "137.949", "2025-02": "138.343",
+            "2025-03": "138.726", "2025-08": "140.726", "2025-12": "142.645",
+            "source": "INEGI INPC (fictional example values)"}
+
+_TP_MX_LEDGER: dict[str, Any] = {
+    "accounts": [
+        {"id": "gbm", "institution": "GBM", "type": "brokerage", "currency": "MXN", "country": "MX", "owners": _MX_OWNER},
+        {"id": "bbva", "institution": "BBVA", "type": "savings", "currency": "MXN", "country": "MX", "owners": _MX_OWNER},
+    ],
+    "instruments": [
+        {"id": "AMXB", "symbol": "AMXB", "currency": "MXN", "asset_class": "equity", "venue": "bmv", "issuer_domicile": "MX"},
+        {"id": "NAFTRAC", "symbol": "NAFTRAC", "currency": "MXN", "asset_class": "fund", "venue": "bmv",
+         "issuer_domicile": "MX"},
+        {"id": "CETES", "symbol": "CETES", "currency": "MXN", "asset_class": "fixed_income", "venue": "bmv",
+         "issuer_domicile": "MX"},
+    ],
+    "entries": [
+        _tp_entry(1, "mx", "gbm", "opening_balance", "2024-12-31", "200000"),
+        _tp_entry(2, "mx", "gbm", "opening_balance", "2024-12-31", instrument_id="AMXB", quantity="2000",
+                  cost_basis="30000", acquired_on="2023-04-03"),
+        _tp_entry(3, "mx", "gbm", "opening_balance", "2024-12-31", instrument_id="NAFTRAC", quantity="500",
+                  cost_basis="27000", acquired_on="2024-06-03"),
+        _tp_entry(4, "mx", "bbva", "opening_balance", "2024-12-31", "80000"),
+        _tp_entry(5, "mx", "gbm", "buy", "2025-01-06", "-98000", instrument_id="CETES", quantity="10000"),
+        _tp_entry(6, "mx", "gbm", "buy", "2025-02-10", "-16000", instrument_id="AMXB", quantity="1000"),
+        _tp_entry(7, "mx", "gbm", "sell", "2025-04-07", "25000", instrument_id="NAFTRAC", quantity="500"),
+        _tp_entry(8, "mx", "gbm", "sell", "2025-07-07", "102500", instrument_id="CETES", quantity="10000"),
+        _tp_entry(9, "mx", "gbm", "tax_withheld", "2025-07-07", "-400", instrument_id="CETES"),
+        _tp_entry(10, "mx", "gbm", "dividend", "2025-07-21", "1200", instrument_id="AMXB"),
+        _tp_entry(11, "mx", "gbm", "tax_withheld", "2025-07-21", "-120", instrument_id="AMXB"),
+        _tp_entry(12, "mx", "gbm", "sell", "2025-09-15", "30000", instrument_id="AMXB", quantity="1500"),
+        _tp_entry(13, "mx", "bbva", "interest", "2025-12-31", "1800"),
+        _tp_entry(14, "mx", "bbva", "tax_withheld", "2025-12-31", "-300"),
+    ],
+    "fx": [], "assertions": [], "labels": [], "category_rules": [],
+}
+
+_TP_MX_FACTS = [
+    {"key": "client.profile", "value": {"name": "Ana", "language": "es", "residence": {"country": "MX"},
+                                        "tax_residence": ["MX"], "us_person": False, "birth_year": 1988}},
+    {"key": "tax.2025", "value": {"mx": {
+        "article_129_loss_carryforwards": [{"origin_year": 2023, "available_updated_mxn": 1500,
+                                            "updated_through": "2025-12"}],
+        "total_income_mxn": 900000, "accumulable_income_mxn": 860000, "marginal_rate": 0.3,
+        "deductions": {"medical_mxn": 18000, "insurance_premiums_mxn": 12000, "ppr_mxn": 30000, "art185_mxn": 0},
+        "inpc": _TP_INPC}}},
+    {"key": "constancia.gbm_2025", "value": {
+        "tax_year": 2025, "institution": "GBM", "account_id": "gbm", "currency": "MXN", "issued_on": "2026-02-13",
+        "enajenacion": {"gain": 5417.0, "loss": 2830.0, "net": 2587.0},
+        "intereses": {"nominal": 4500.0, "real": 2400.0, "real_loss": 0, "isr_withheld": 400.0},
+        "dividendos": {"domestic_gross": 1200.0, "isr_withheld": 120.0}}},
+]
+
+_TP_MX_EXAMPLE: dict[str, Any] = {
+    "tax_year": 2025, "as_of": "2026-03-01", "facts": _TP_MX_FACTS, "ledger": _TP_MX_LEDGER,
+    "parameters": {"uma_annual_mxn": {"value": "41273.52", "source": "INEGI, UMA 2025 (DOF 10-01-2025)"}},
+}
+
+_TP_US_LEDGER: dict[str, Any] = {
+    "accounts": [
+        {"id": "schwab", "institution": "Charles Schwab", "type": "brokerage", "currency": "USD", "country": "US",
+         "owners": [{"person_id": "sam", "share": "1"}]},
+        {"id": "schwab_roth", "institution": "Charles Schwab", "type": "roth_ira", "currency": "USD", "country": "US",
+         "owners": [{"person_id": "sam", "share": "1"}]},
+    ],
+    "instruments": [
+        {"id": "VTI", "symbol": "VTI", "currency": "USD", "asset_class": "fund", "venue": "us", "issuer_domicile": "US"},
+        {"id": "SCHD", "symbol": "SCHD", "currency": "USD", "asset_class": "fund", "venue": "us", "issuer_domicile": "US"},
+    ],
+    "entries": [
+        _tp_entry(1, "us", "schwab", "opening_balance", "2024-12-31", "40000", currency="USD"),
+        _tp_entry(2, "us", "schwab", "opening_balance", "2024-12-31", instrument_id="SCHD", quantity="50",
+                  cost_basis="3500", acquired_on="2023-05-01", currency="USD"),
+        _tp_entry(3, "us", "schwab", "buy", "2025-01-15", "-6000", currency="USD", instrument_id="VTI", quantity="20"),
+        _tp_entry(4, "us", "schwab", "sell", "2025-03-10", "5600", currency="USD", instrument_id="VTI", quantity="20"),
+        _tp_entry(5, "us", "schwab", "buy", "2025-03-25", "-5700", currency="USD", instrument_id="VTI", quantity="20"),
+        _tp_entry(6, "us", "schwab", "dividend", "2025-06-25", "30", currency="USD", instrument_id="SCHD"),
+        _tp_entry(7, "us", "schwab", "sell", "2025-08-01", "4200", currency="USD", instrument_id="SCHD", quantity="50"),
+        _tp_entry(8, "us", "schwab", "dividend", "2025-09-30", "75", currency="USD", instrument_id="VTI"),
+        _tp_entry(9, "us", "schwab", "sell", "2025-11-03", "6500", currency="USD", instrument_id="VTI", quantity="20"),
+        _tp_entry(10, "us", "schwab", "interest", "2025-12-31", "40", currency="USD"),
+        _tp_entry(11, "us", "schwab_roth", "deposit", "2025-04-01", "6000", currency="USD"),
+        _tp_entry(12, "us", "schwab", "buy", "2026-01-20", "-3000", currency="USD", instrument_id="SCHD", quantity="40"),
+    ],
+    "fx": [], "assertions": [], "labels": [], "category_rules": [],
+}
+
+_TP_US_EXAMPLE: dict[str, Any] = {
+    "tax_year": 2025, "as_of": "2026-02-20", "ledger": _TP_US_LEDGER,
+    "facts": [
+        {"key": "client.profile", "value": {"name": "Sam", "language": "en", "residence": {"country": "US"},
+                                            "tax_residence": ["US"], "us_person": True, "birth_year": 1985}},
+        {"key": "tax.2025", "value": {"us": {"filing_status": "single",
+                                             "capital_loss_carryover": {"short_term": 0, "long_term": 1200}}}},
+        {"key": "constancia.schwab_2025", "value": {
+            "tax_year": 2025, "institution": "Charles Schwab", "account_id": "schwab", "currency": "USD",
+            "form_1099_b": {"short_term_gain": 400.0, "long_term_gain": 700.0, "wash_sale_disallowed": 400.0},
+            "form_1099_div": {"ordinary": 105.0, "qualified": 90.0, "capital_gain_distributions": 0,
+                              "foreign_tax_paid": 4.0},
+            "form_1099_int": {"interest": 40.0}}},
+    ],
+    "parameters": {"us_ira_limit": {"value": 7000, "source": "IRS Notice 2024-80 (2025 IRA limit)"}},
+}
+
+_TP_XB_LEDGER: dict[str, Any] = {
+    "accounts": [
+        {"id": "bbva", "institution": "BBVA", "type": "checking", "currency": "MXN", "country": "MX",
+         "owners": [{"person_id": "lee", "share": "1"}]},
+        {"id": "gbm", "institution": "GBM", "type": "brokerage", "currency": "MXN", "country": "MX",
+         "owners": [{"person_id": "lee", "share": "1"}]},
+    ],
+    "instruments": [
+        {"id": "CSPXN", "symbol": "CSPXN", "currency": "MXN", "asset_class": "fund", "venue": "sic",
+         "issuer_domicile": "IE", "underlying_symbol": "CSPX"},
+    ],
+    "entries": [
+        _tp_entry(1, "xb", "bbva", "opening_balance", "2024-12-31", "300000"),
+        _tp_entry(2, "xb", "gbm", "opening_balance", "2024-12-31", "60000"),
+        _tp_entry(3, "xb", "bbva", "income", "2025-06-01", "60000", subtype="salary", description="NOMINA"),
+        _tp_entry(4, "xb", "bbva", "expense", "2025-07-01", "-20000", description="RENTA"),
+        _tp_entry(5, "xb", "gbm", "buy", "2025-02-03", "-50000", instrument_id="CSPXN", quantity="5"),
+        _tp_entry(6, "xb", "bbva", "interest", "2025-12-31", "1500"),
+        _tp_entry(7, "xb", "bbva", "tax_withheld", "2025-12-31", "-250"),
+    ],
+    "fx": [{"date": d, "base": "USD", "quote": "MXN", "rate": r, "source": "Banxico FIX (fictional example)"}
+           for d, r in (("2025-12-31", "18.00"),)],
+    "assertions": [], "labels": [], "category_rules": [],
+}
+
+_TP_XB_EXAMPLE: dict[str, Any] = {
+    "tax_year": 2025, "as_of": "2026-03-10", "ledger": _TP_XB_LEDGER,
+    "facts": [
+        {"key": "client.profile", "value": {"name": "Lee", "language": "en", "residence": {"country": "MX"},
+                                            "tax_residence": ["MX"], "citizenship": ["US"], "us_person": True,
+                                            "birth_year": 1990}},
+        {"key": "tax.2025", "value": {"us": {"filing_status": "single",
+                                             "capital_loss_carryover": {"short_term": 0, "long_term": 0}},
+                                      "mx": {"article_129_loss_carryforwards": []}}},
+    ],
+}
+
+
 _MANAGER_SNAPSHOT = ('snapshot: "example" (the fictional offline managers CIK 0000000001 and 0000000002) or '
                      "recorded pages {url: body}; omit for live EDGAR")
 
@@ -705,6 +859,35 @@ CATALOG: dict[str, dict[str, Any]] = {
             "US_marginal_override": {**{k: v for k, v in _US_TAX_COMMON.items() if k != "us_return_facts"}, "mode": "harvest",
                                      "rates": {"ordinary": 0.37, "long_term": 0.15}},
         },
+    },
+    "tax_pack": {
+        "purpose": "The annual tax pack for the contador or CPA, built from the ledger and saved facts. Mexico: Art. 129 "
+                   "sales per broker with INPC-updated average cost, the net result, the 10% and carryforwards; interest "
+                   "nominal and real per institution with ISR withheld; domestic and foreign dividends; foreign securities "
+                   "at a foreign broker; Art. 151/185 deductions with the CFDI checklist; aguinaldo/PTU exemptions only "
+                   "when stated. US: Form 8949 lots with wash sales (code W), Schedule D totals and carryovers, "
+                   "1099-DIV/INT (qualified vs ordinary), foreign tax paid (Form 1116 inputs), IRA/Roth contributions vs "
+                   "the limit and RMDs, FBAR/Form 8938 flags with thresholds and sources. Always: pendientes (what is "
+                   "missing) and key deadlines. A saved constancia or 1099 is the source of truth: our figure, the "
+                   "document and the difference.",
+        "required": ["client_id with a posted ledger (or ledger + facts [{key, value}])"],
+        "optional": ["tax_year (default: the last completed year)",
+                     "jurisdiction MX | US | \"MX,US\" (default: tax.<year>.jurisdiction, else the profile's tax "
+                     "residence, plus US for a US person)",
+                     "inpc {\"YYYY-MM\": value, source} (default tax.<year>.mx.inpc)",
+                     "prices {instrument_id: [{date, price}]} (month-end values for FBAR/8938)",
+                     "parameters {key: {value, source}} for unverified dated parameters (UMA, IRA limit)",
+                     "language es|en", "exports [\"csv\", \"html\"] (adds result.csv {file: text} and result.html)",
+                     "as_of"],
+        "notes": "Reads client.profile, tax.<year> (stated tax facts: carryforwards, deductions, income, filing status, "
+                 "IRA contributions) and constancia.<id> (documents: enajenacion, intereses, dividendos, form_1099_b, "
+                 "form_1099_div, form_1099_int). Result: sections {id: {status, title {es, en}, summary, table "
+                 "{columns, rows}, reconciliation [{item, ours, document, difference, source_of_truth}], missing, "
+                 "warnings, sources, assumptions}}, section_order, pendientes, deadlines. An empty figure is unknown, "
+                 "never zero. CLI: `wealth tax-pack --client ID --year YYYY --out DIR` writes JSON, one CSV per section "
+                 "and a printable bilingual HTML; the web serves /api/tax-pack?year=.",
+        "example": _TP_MX_EXAMPLE,
+        "variants": {"us_schwab_wash_sale": _TP_US_EXAMPLE, "us_person_in_mexico": _TP_XB_EXAMPLE},
     },
     "mx_holdings": {
         "purpose": "Classify Mexico-resident holdings by tax regime and liquidity (CETES, UDIBONOS, FIBRAs, SIC, AFORE, PPR, funds).",

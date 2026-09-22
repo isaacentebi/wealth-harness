@@ -44,7 +44,7 @@ TASK_MODULES = {
 # Tasks answered by the service itself rather than one module.
 SERVICE_TASKS = ("plan", "calendar", "monitor", "debt_payoff", "debt", "policy_draft", "policy_check", "today", "weekly",
                  "quarterly_review", "fee_audit", "speculation_check", "panic_check", "scam_check",
-                 "protection_review", "life_event", "order_ticket")
+                 "protection_review", "life_event", "order_ticket", "tax_pack")
 # Investment policy tasks (wealth/policy.py) read the canonical picture, so the service runs them.
 POLICY_TASKS = frozenset({"policy_draft", "policy_check"})
 # Proactive tasks (wealth/proactive.py) read the whole picture and keep dismissals in the monitor namespace.
@@ -57,6 +57,10 @@ GUARDRAIL_TASKS = frozenset({"speculation_check", "panic_check", "scam_check", "
 # order_ticket (wealth/execution) only PROPOSES orders: it stores a ticket the person confirms on its card in
 # the app.  Nothing in this service submits orders; the only submit path is the local web confirmation route.
 EXECUTION_TASKS = frozenset({"order_ticket"})
+# The annual tax pack (wealth/taxpack.py) reads the ledger, the profile, tax.<year> and constancia.<id> facts.
+TAX_PACK_TASKS = frozenset({"tax_pack"})
+# Facts that go stale (warned about); tax.<year> and constancia.<id> are dated documents and do not.
+TAX_PACK_FACT_KEYS = ("client.profile", "income.", "cash.", "investment.")
 TASKS = (*TASK_MODULES, *SERVICE_TASKS)
 # Tasks whose module reads the client's transaction ledger from context["ledger"].
 LEDGER_TASKS = frozenset({"ledger", "performance", "spending", "dca", "rebalance"})
@@ -627,7 +631,8 @@ class WealthService:
             with WealthStore(self.db_path) as store:
                 snapshot = store.snapshot(client_id)
                 if (task in LEDGER_TASKS or task in {"plan", "calendar", "debt_payoff", "debt"} or task in POLICY_TASKS
-                        or task in PROACTIVE_TASKS or task in REVIEW_TASKS or task in GUARDRAIL_TASKS) and "ledger" not in inputs:
+                        or task in PROACTIVE_TASKS or task in REVIEW_TASKS or task in GUARDRAIL_TASKS
+                        or task in TAX_PACK_TASKS) and "ledger" not in inputs:
                     ledger = current_ledger(store.ledger(client_id))
             snapshot, invalid = usable_snapshot(snapshot)
         eligible = [f for f in snapshot["facts"] if f["confidence"] != "inferred"
@@ -663,6 +668,10 @@ class WealthService:
             derived_evidence = report.pop("_evidence", [])
         elif task in EXECUTION_TASKS:
             report = self._order_ticket(inputs, client_id, snapshot)
+        elif task in TAX_PACK_TASKS:
+            from . import taxpack
+            report = taxpack.run_task(inputs, snapshot, ledger, today)
+            derived_evidence = report.pop("_evidence", [])
         elif task in {"plan", "calendar"}:
             # Direct inputs may supply the same canonical facts without requiring a profile.
             keys = ("plan.resources", "goals") if task == "plan" else ("income.schedule",)
@@ -722,7 +731,8 @@ class WealthService:
                 report["market_data"] = market
                 if isinstance(report.get("sources"), list):
                     report["sources"] = report["sources"] + _price_sources(market.get("prices") or [])
-        if task in {"plan", "calendar", "debt_payoff", "debt"} or task in POLICY_TASKS or task in PROACTIVE_TASKS or task in REVIEW_TASKS or task in GUARDRAIL_TASKS:
+        if task in {"plan", "calendar", "debt_payoff", "debt"} or task in POLICY_TASKS or task in PROACTIVE_TASKS \
+                or task in REVIEW_TASKS or task in GUARDRAIL_TASKS or task in TAX_PACK_TASKS:
             used_ids = set(packet["evidence_ids"] if task in {"plan", "calendar"} else []) | set(derived_evidence)
             consumed = [f for f in eligible if f["id"] in used_ids and f["key"] not in inputs]
         elif task == "monitor":
@@ -747,6 +757,8 @@ class WealthService:
         elif task in GUARDRAIL_TASKS:
             from .guardrails import GUARDRAIL_FACT_KEYS
             relevant = {f["key"] for f in snapshot["facts"] if f["key"].startswith(GUARDRAIL_FACT_KEYS)}
+        elif task in TAX_PACK_TASKS:
+            relevant = {f["key"] for f in snapshot["facts"] if f["key"].startswith(TAX_PACK_FACT_KEYS)}
         elif task in {"plan", "calendar"}:
             relevant = set(keys)
         elif task in PROACTIVE_TASKS:

@@ -525,6 +525,7 @@
         step2: 'Store it yourself from Terminal; macOS asks for the value. Never paste it into the chat.',
         step3: 'Or, for one session only, export:', step4: 'Then tap Sync here.', step4_ibkr_flex: 'Then tap Sync here and have your query id ready.',
         readOnlyLine: 'Wealth only reads. It cannot trade or move money.', copy: 'Copy', copied: 'Copied.',
+        taxPack: 'Tax pack {y} for your CPA (printable)', taxPackFailed: 'The tax pack could not be downloaded.',
         export: 'Download everything (JSON)', erase: 'Delete my data', eraseLine: 'Only from the Terminal, so nothing does it by accident.', exportFailed: 'The export could not be downloaded.',
         date: 'Date', item: 'Item', value: 'Value', share: 'Share',
       },
@@ -600,6 +601,7 @@
         step2: 'Guárdala tú desde la Terminal; macOS te pide el valor. Nunca la pegues en el chat.',
         step3: 'O, solo para esta sesión, exporta:', step4: 'Luego toca Sincronizar aquí.', step4_ibkr_flex: 'Luego toca Sincronizar aquí y ten a la mano tu query id.',
         readOnlyLine: 'Wealth solo lee. No puede operar ni mover dinero.', copy: 'Copiar', copied: 'Copiado.',
+        taxPack: 'Paquete fiscal {y} para tu contador (imprimible)', taxPackFailed: 'No se pudo descargar el paquete fiscal.',
         export: 'Descargar todo (JSON)', erase: 'Borrar mis datos', eraseLine: 'Solo desde la Terminal, para que nada lo haga por error.', exportFailed: 'No se pudo descargar la exportación.',
         date: 'Fecha', item: 'Concepto', value: 'Valor', share: 'Proporción',
       }
@@ -1616,9 +1618,23 @@
         setTimeout(() => URL.revokeObjectURL(url), 4000);
       } catch (_) { say(t('exportFailed')); } finally { button.disabled = false; }
     }
+    // The annual tax pack for the last completed year: a printable page (print to PDF) from /api/tax-pack.
+    async function downloadTaxPack(button, year) {
+      button.disabled = true;
+      try {
+        const response = await fetch(`/api/tax-pack?year=${year}&format=html&lang=${lang}`,
+          { credentials: 'same-origin', cache: 'no-store', headers: { 'X-Wealth-Token': token } });
+        if (!response.ok) throw new Error(t('taxPackFailed'));
+        const url = URL.createObjectURL(await response.blob());
+        const link = h('a', { href: url, download: `tax-pack-${year}.html` });
+        document.body.append(link); link.click(); link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 4000);
+      } catch (_) { say(t('taxPackFailed')); } finally { button.disabled = false; }
+    }
     // Two quiet lines. Deleting happens only in the Terminal: the command stays folded until the line is tapped.
     function renderData() {
       if (!conns?.data) return null;
+      const taxYear = new Date().getFullYear() - 1;
       const command = String(conns.data.forget_command || '');
       const copy = h('button', { class: 'txt small', type: 'button', text: t('copy'), onclick: async () => {
         try { await navigator.clipboard.writeText(command); say(t('copied')); } catch (_) { /* the text stays selectable */ }
@@ -1629,6 +1645,7 @@
       const erase = h('button', { class: 'txt', type: 'button', text: t('erase'), 'aria-expanded': 'false', 'aria-controls': 'erase-how',
         onclick: e => { how.hidden = !how.hidden; e.currentTarget.setAttribute('aria-expanded', String(!how.hidden)); } });
       return h('div', { class: 'data' },
+        h('div', { class: 'data-row' }, h('button', { class: 'txt', type: 'button', text: t('taxPack', { y: taxYear }), onclick: e => downloadTaxPack(e.currentTarget, taxYear) })),
         h('div', { class: 'data-row' }, h('button', { class: 'txt', type: 'button', text: t('export'), onclick: e => downloadExport(e.currentTarget) })),
         h('div', { class: 'data-row' }, erase),
         how);

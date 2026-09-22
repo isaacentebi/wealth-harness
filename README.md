@@ -23,7 +23,7 @@ sales. It runs on your computer, and your data stays in a local SQLite file.
 
 - **Wealth-first.** It starts with income, spending, savings, debts, goals and
   retirement, and treats investing as one part of that picture.
-- **Numbers come from code, not the model.** Fifty deterministic tasks
+- **Numbers come from code, not the model.** Fifty-two deterministic tasks
   (tax lots, Mexican real interest, IMSS pensions, rebalancing, 13F
   look-through) return each figure with its sources and assumptions. The model
   chooses what matters and says it plainly.
@@ -119,7 +119,9 @@ charts and order cards drawn by the engine, not the model.
   research.
 - **Tax:** US federal lots, wash sales and harvesting; Mexico Art. 129, real
   interest, deductions and PPR, foreign securities, the tax calendar; US estate
-  exposure for non-residents.
+  exposure for non-residents; an annual tax pack for your contador or CPA
+  (Form 8949 lots with wash sales, Art. 129 per broker against the constancia,
+  FBAR/8938 flags) as JSON, CSV and a printable page.
 - **Retirement:** IMSS Ley 73 and 97, AFORE and Modalidad 40; Social Security,
   contribution limits and withdrawal order.
 - **Protection and guardrails:** insurance and estate gaps, life events,

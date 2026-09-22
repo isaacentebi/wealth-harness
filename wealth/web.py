@@ -148,7 +148,7 @@ _HISTORY_PATH = re.compile(r"^/api/profile/fact/([^/]{1,200})/history$")
 _CONTRADICTION_PATH = re.compile(r"^/api/profile/contradictions/([A-Za-z0-9_-]{1,80})$")
 _FACT_PATH = re.compile(r"^/api/facts/([^/]{1,200})$")
 _TURN_PATH = re.compile(r"^/api/turns/([0-9a-f]{16})(/events|/cancel)?$")
-SURFACE_GETS = frozenset({"/review", "/api/today", "/api/review", "/api/connections", "/api/export"})
+SURFACE_GETS = frozenset({"/review", "/api/today", "/api/review", "/api/connections", "/api/export", "/api/tax-pack"})
 _VIEW_PATH = re.compile(r"^/api/views/([a-z][a-z0-9_]{0,31}-[0-9a-f]{10})\.(svg|png)$")
 # Order tickets: confirm takes a ticket id; cancel takes a ticket id (discard) or an Alpaca order id.
 _ORDER_PATH = re.compile(r"^/api/orders/([A-Za-z0-9-]{1,64})/(confirm|cancel)$")
@@ -1082,6 +1082,8 @@ def create_server(chat, port=8765, host="127.0.0.1"):
                                                      inputs=getattr(chat, "review_inputs", None)))
             if url.path == "/api/connections":
                 return self.respond(200, connections_view(service, chat.client_id))
+            if url.path == "/api/tax-pack":
+                return self.tax_pack(service, parse_qs(url.query))
             data = json.dumps(export_payload(service, chat.client_id), default=str, indent=1).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -1089,6 +1091,46 @@ def create_server(chat, port=8765, host="127.0.0.1"):
             self.send_header("Content-Length", str(len(data)))
             for name, header in SECURITY_HEADERS:
                 self.send_header(name, header)
+            self.end_headers()
+            self.wfile.write(data)
+
+        def tax_pack(self, service, query):
+            """The annual tax pack: ?year=YYYY&format=json|html|csv&section=<id>&lang=es|en (read only)."""
+            from . import taxpack
+            year = (query.get("year") or [None])[0]
+            fmt = (query.get("format") or ["json"])[0]
+            lang = (query.get("lang") or [None])[0]
+            inputs = {}
+            if year is not None:
+                if not re.fullmatch(r"20\d\d", year):
+                    raise ValueError("Send year as YYYY.")
+                inputs["tax_year"] = int(year)
+            if lang is not None:
+                if lang not in ("es", "en"):
+                    raise ValueError("Send lang as es or en.")
+                inputs["language"] = lang
+            if fmt not in ("json", "html", "csv"):
+                raise ValueError("Send format as json, html or csv.")
+            report = service.run("tax_pack", inputs=inputs, client_id=chat.client_id)
+            report.pop("views", None)
+            if fmt == "json":
+                return self.respond(200, report)
+            label = (report.get("result") or {}).get("tax_year")
+            if fmt == "html":
+                data, name, kind = taxpack.render_html(report, lang).encode(), f"tax-pack-{label}.html", "text/html"
+            else:
+                files = taxpack.csv_files(report, lang)
+                section = (query.get("section") or ["pendientes"])[0]
+                name = f"tax-pack-{label}-{section}.csv"
+                if name not in files:
+                    raise ValueError("No such section; use one of the section ids.")
+                data, kind = files[name].encode(), "text/csv"
+            self.send_response(200)
+            self.send_header("Content-Type", kind + "; charset=utf-8")
+            self.send_header("Content-Disposition", f'attachment; filename="{name}"')
+            self.send_header("Content-Length", str(len(data)))
+            for header, value in SECURITY_HEADERS:
+                self.send_header(header, value)
             self.end_headers()
             self.wfile.write(data)
 
