@@ -4,10 +4,10 @@ from __future__ import annotations
 import math
 import re
 from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 
+from tests._pages import page_text
 from tests.fixtures.ingest import statements as fx
 from wealth import onboarding, profile
 from wealth.prices import Fetched, PriceProvider
@@ -15,7 +15,7 @@ from wealth.service import WealthService, upload_dir
 from wealth.store import WealthStore
 
 TODAY = date(2026, 9, 21)
-PAGE = Path(profile.__file__).with_name("profile.html")
+PAGE = page_text("profile")
 
 
 def _weekdays(first: str, last: str, start: float, drift: float, wave: float = 0.0) -> dict[str, float]:
@@ -247,7 +247,7 @@ def test_onboarding_keeps_the_city():
 
 
 def _script() -> str:
-    page = PAGE.read_text()
+    page = PAGE
     script = "\n".join(re.findall(r"<script>(.*?)</script>", page, re.S))
     return re.sub(r"(?m)(^|\s)//.*$", r"\1", script)
 
@@ -272,7 +272,7 @@ def test_every_chart_has_a_text_alternative():
         body = script[script.index(f"function {fn}("):]
         body = body[:body.index("\n    }\n")]
         assert "chart(" in body, fn
-    assert "font-variant-numeric: tabular-nums" in PAGE.read_text()
+    assert "font-variant-numeric: tabular-nums" in PAGE
 
 
 def test_memory_reads_as_sentences_with_one_focused_pass():

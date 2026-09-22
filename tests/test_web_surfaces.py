@@ -11,6 +11,7 @@ from urllib.request import Request, urlopen
 
 import pytest
 
+from tests._pages import page_text
 from wealth import connectors, ledger as ledger_module, profile, views, web
 from wealth.catalog import _MX_REVIEW_EXAMPLE, _MX_REVIEW_FACTS, _MX_REVIEW_LEDGER
 from wealth.service import WealthService
@@ -254,7 +255,7 @@ def test_review_page_draws_names_from_the_payload_language():
 
 
 def test_chat_today_lines_fold_their_actions_behind_one_control_on_touch():
-    page = (ROOT / "chat.html").read_text()
+    page = page_text("chat")
     block = page[page.index("// ------------------------------------------------------------------ today (Hoy)"):
                  page.index("// ------------------------------------------------------------------ start")]
     touch = "(hover: none), (pointer: coarse), (max-width: 560px)"
@@ -323,7 +324,7 @@ def test_closed_quarters_stay_the_letter_and_the_current_one_is_offered(tmp_path
     assert closed["current"]["period"] == "2026-Q3"  # offered alongside, not instead
     to_date = profile.review_view(service, "ana", "2026-Q3", today=TODAY)
     assert to_date["partial"] is True and to_date["end"] == "2026-09-01" and to_date["sections"] is not None
-    page = (ROOT / "review.html").read_text()
+    page = page_text("review")
     assert "data.current.period" in page and "L(data.current.label)" in page
 
 
@@ -367,7 +368,7 @@ def test_connections_payload_never_carries_a_secret(tmp_path, monkeypatch):
 
 
 def _script(name):
-    page = (ROOT / name).read_text()
+    page = page_text(name)
     script = "\n".join(re.findall(r"<script>(.*?)</script>", page, re.S))
     return page, re.sub(r"(?m)(^|\s)//.*$", r"\1", script)  # comments may name what the code avoids
 
@@ -380,7 +381,7 @@ def test_pages_never_write_markup(name):
 
 
 def test_chat_today_block_writes_text_only_and_stays_in_one_place():
-    page = (ROOT / "chat.html").read_text()
+    page = page_text("chat")
     block = page[page.index("// ------------------------------------------------------------------ today (Hoy)"):
                  page.index("// ------------------------------------------------------------------ start")]
     for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "location.search"):
@@ -419,7 +420,7 @@ def test_delete_my_data_is_one_folded_line_and_the_hoy_value_is_bold_whole():
     assert data.count("class: 'data-row'") == 3 and ".erase-how[hidden] { display: none; }" in page
     assert "eraseLine: 'Only from the Terminal, so nothing does it by accident.'" in script
     # The emphasis span is snapped to the value it lands on, on both pages, with the same rule.
-    chat = Path(web.__file__).with_name("chat.html").read_text(encoding="utf-8")
+    chat = page_text("chat")
     for source in (script, chat):
         fn = source[source.index("function hoyEmphasis("):]
         fn = fn[:fn.index("\n    }\n")]

@@ -5,16 +5,16 @@ import json
 import sqlite3
 import threading
 import time
-from pathlib import Path
 from urllib.request import urlopen
 
+from tests._pages import page_text
 from wealth import agent, web
 from wealth.agent import AgentError, TurnEvent
 from wealth.store import WealthStore
 
 from test_web_streaming import _events, _post, serving
 
-PAGE = (Path(web.__file__).with_name("chat.html")).read_text(encoding="utf-8")
+PAGE = page_text("chat")
 
 
 def _streaming(monkeypatch, fn):

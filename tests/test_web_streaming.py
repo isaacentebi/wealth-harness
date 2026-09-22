@@ -12,6 +12,7 @@ from urllib.request import Request, urlopen
 
 import pytest
 
+from tests._pages import page_text
 from wealth import agent, web
 from wealth.agent import AgentError, TurnEvent
 from wealth.store import StoreError
@@ -233,8 +234,7 @@ def test_security_headers_and_socket_timeout(tmp_path):
 
 
 def test_page_never_injects_html_from_model_text():
-    from pathlib import Path
-    page = Path(web.__file__).with_name("chat.html").read_text(encoding="utf-8")
+    page = page_text("chat")
     for sink in ("innerHTML =", "innerHTML=", "outerHTML", "insertAdjacentHTML", "document.write"):
         assert sink not in page
     assert "event.isComposing" in page and "(pointer: coarse)" in page
@@ -250,8 +250,7 @@ def test_friendly_names():
 
 
 def _page() -> str:
-    from pathlib import Path
-    return Path(web.__file__).with_name("chat.html").read_text(encoding="utf-8")
+    return page_text("chat")
 
 
 def test_page_citations_presence_and_send_markup():
