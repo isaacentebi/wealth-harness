@@ -467,27 +467,31 @@ def _high_interest(run: _Run) -> None:
       reserve); the reserve item then says the card comes next.  Above that, the card comes first and
       the reserve keeps growing in parallel.
     Says the monthly amount that clears it in a year, the interest that saves against the current payment
-    and the interest saved for each month sooner; when the payment is unknown it asks for it.
+    and the interest saved for each month sooner; when the payment is unknown it asks for it.  Every figure
+    comes from the debt engine (wealth/debt.py), IVA on Mexican consumer credit included, so this item and
+    the ``debt`` task agree; "20% or more" is the effective annual cost with IVA.
     """
-    from .situation.model import annuity_payment, payoff
+    from .debt import payoff_in
     short_of_target = _reserve_first(run)
     for row in run.sit.get("liabilities") or []:
         balance, rate = D(row.get("balance")), D(row.get("annual_rate"))
-        if balance is None or balance <= 0 or rate is None or rate < HIGH_INTEREST_RATE:
+        if balance is None or balance <= 0 or rate is None:
             continue
         currency = row.get("currency") or run.currency
-        needed = annuity_payment(balance, rate, HIGH_INTEREST_PAYOFF_MONTHS)
-        fast = payoff(balance, rate, needed, run.as_of)
+        engine = payoff_in(row, run.as_of, HIGH_INTEREST_PAYOFF_MONTHS, currency=currency)
+        if engine is None or engine["effective_annual"] < HIGH_INTEREST_RATE:
+            continue
+        needed, fast = engine["payment_to_clear"], engine["fast"]
         payment = D(row.get("monthly_payment"))
-        stop_growth = balance * _interest_factor(row, currency)
+        stop_growth = balance * engine["monthly_factor"]
         growing = payment is not None and payment <= stop_growth
         if not growing and _below_starter(run):
             run.deferred_debts.append(row)
             continue
-        current = payoff(balance, rate, payment, run.as_of) if payment is not None else {"status": "unknown"}
+        current = engine["current"] or {"status": "unknown"}
         saved = sooner = per_month = None
         if current.get("status") == "ready" and fast.get("status") == "ready":
-            saved = max(D(current["interest"]) - D(fast["interest"]), Decimal(0))
+            saved = max(current["interest"] - fast["interest"], Decimal(0))
             sooner = current["months"] - fast["months"]
             per_month = saved / sooner if sooner > 0 else None
         rate_text = f"{num(rate * 100, 0)}%"
@@ -538,8 +542,10 @@ def _high_interest(run: _Run) -> None:
             why=why, next_step=step,
             data={"liability": row["id"], "annual_rate": num(rate, 4), "balance": num(balance), "currency": currency,
                   "monthly_to_clear": num(needed), "months": HIGH_INTEREST_PAYOFF_MONTHS,
-                  "interest_if_cleared": fast.get("interest"), "monthly_payment": num(payment),
-                  "interest_at_current_payment": current.get("interest") if current.get("status") == "ready" else None,
+                  "interest_if_cleared": num(fast.get("interest")), "monthly_payment": num(payment),
+                  "interest_at_current_payment": num(current.get("interest")) if current.get("status") == "ready" else None,
+                  "months_at_current_payment": current.get("months") if current.get("status") == "ready" else None,
+                  "effective_annual_rate": num(engine["effective_annual"], 4), "iva_on_interest": num(engine["iva"], 4),
                   "interest_saved": num(saved), "months_sooner": sooner,
                   "interest_saved_per_month_sooner": num(per_month), "payment_unknown": payment is None,
                   "balance_growing": growing, "payment_to_stop_growth": num(stop_growth),

@@ -414,3 +414,146 @@ def test_advice_to_prepay_low_rate_debt_keeps_the_full_reserve_rule():
     assert proactive._advice_target(run_, {"text": "Pon el extra al coche", "related": ["liability.car"]}) is None
     assert proactive._advice_target(run_, {"text": "Pon el extra a la tarjeta", "related": ["liability.card"]}) == \
         ("to the card", "a la tarjeta")
+
+
+# ------------------------------------------------------------------ audit fixes
+
+
+def test_proactive_high_interest_uses_the_engine_with_iva():
+    from datetime import date
+    from wealth import debt
+    found = proactive.evaluate(build(_picture(_cash(120000), _said("reserve", {"target_months": 3})), None, AS_OF),
+                               None, {"facts": []}, AS_OF)
+    data = next(i for i in found["candidates"] if i["kind"] == "high_interest_debt")["data"]
+    # 18,000 at 42% + IVA: 1,925 a month clears it in 12 months; 1,200 takes 24 months and 10,321 of interest and IVA.
+    assert round(data["monthly_to_clear"]) == 1925
+    assert data["months_at_current_payment"] == 24 and data["interest_at_current_payment"] == pytest.approx(10320.54, abs=0.01)
+    assert round(data["interest_saved"]) == 5225 and data["months_sooner"] == 12
+    engine = debt.run({"mode": "amortize", "monthly_rows": 0},
+                      [{"id": "card", "kind": "card", "balance": 18000, "annual_rate": 0.42,
+                        "monthly_payment": data["monthly_to_clear"], "currency": "MXN"}],
+                      date.fromisoformat(AS_OF))["result"]["debts"][0]
+    assert engine["months"] == 12 and engine["interest_cost"] == pytest.approx(data["interest_if_cleared"], abs=0.01)
+
+
+def test_high_interest_is_decided_on_the_effective_rate_with_iva():
+    card18 = {"kind": "card", "balance": 18000, "annual_rate": 0.18, "currency": "MXN", "payment": 1200,
+              "payment_frequency": "monthly"}  # 18% x 1.16 compounded monthly is about 23% a year
+    item = _kinds(_found(_cash(120000), card=card18))["high_interest_debt"]
+    assert item["data"]["effective_annual_rate"] > 0.2
+
+
+def test_infonavit_without_months_paid_is_partial_not_zero(service):
+    credit = {"id": "infonavit", "kind": "infonavit", "denomination": "UMA", "balance_units": 250, "annual_rate": 0.10,
+              "monthly_payment_units": 2.0}
+    report = service.run("debt", {"mode": "amortize", "as_of": AS_OF, "liabilities": [credit]})
+    assert report["status"] == "partial"
+    assert "liability.infonavit.months_paid" in [m["key"] for m in report["missing"]]
+    [debt] = report["result"]["debts"]
+    assert debt["projection"] == "partial" and debt["forgiven_at_30_years"] is None and debt["months_paid"] is None
+    dated = run(service, {"mode": "amortize", "as_of": AS_OF, "liabilities": [{**credit, "origination_date": "2011-09-01"}]})
+    [debt] = dated["result"]["debts"]
+    assert dated["status"] == "ready" and debt["months_paid"] == 180 and debt["months"] == 180
+    assert debt["forgiven_at_30_years"] > 0
+    excluded = run(service, {"mode": "amortize", "as_of": AS_OF,
+                             "liabilities": [{**credit, "months_paid": 240, "liberation_eligible": False}]})
+    assert excluded["result"]["debts"][0]["forgiven_at_30_years"] is None
+
+
+def test_a_payment_from_a_term_includes_iva(service):
+    loan = {"id": "p", "kind": "personal", "balance": 100000, "annual_rate": 0.30, "remaining_term_months": 24,
+            "currency": "MXN"}
+    [debt] = run(service, {"mode": "amortize", "as_of": AS_OF, "liabilities": [loan]})["result"]["debts"]
+    assert debt["monthly_payment"] == pytest.approx(5841.32, abs=0.01) and debt["months"] == 24
+
+
+def test_refinance_compares_the_same_payment_and_a_longer_term(service):
+    car = EXAMPLES["car_loan_refinance"]["liabilities"]
+    report = run(service, {"mode": "refinance", "as_of": AS_OF, "liabilities": car,
+                           "offer": {"kind": "refinance", "annual_rate": 0.085, "fee": 0, "term_months": 72}})
+    longer = report["result"]
+    assert longer["interest_saved"] < 0 and longer["breakeven_month"] is None
+    assert longer["same_payment"]["monthly_payment"] == 520 and longer["same_payment"]["interest_saved"] > 0
+    assert longer["verdict"] == "take_offer_keep_payment"
+    assert "longer term lowers the payment but costs more" in longer["verdict_text"]["en"]
+    for spec in views.views_for("debt", report):
+        views.validate(spec)
+    worse = run(service, {"mode": "refinance", "as_of": AS_OF, "liabilities": car,
+                          "offer": {"kind": "refinance", "annual_rate": 0.12, "fee": 500, "term_months": 72}})["result"]
+    assert worse["verdict"] == "keep" and worse["worth_it"] is False and worse["breakeven_month"] is None
+    mx = [{"id": "a", "kind": "card", "balance": 50000, "annual_rate": 0.45, "monthly_payment": 4000, "currency": "MXN"}]
+    consolidated = run(service, {"mode": "refinance", "as_of": AS_OF, "liabilities": mx,
+                                 "offer": {"kind": "consolidation", "annual_rate": 0.25, "term_months": 24}})
+    assert consolidated["result"]["offer"]["months"] == 24  # the term's payment carries IVA
+    assert any("sin comisión indicada" in a for a in consolidated["assumptions"])
+
+
+def test_mx_gains_tax_is_on_the_real_gain_and_depends_on_the_channel(service):
+    base = {**EXAMPLES["mx_card_prepay_vs_cetes"], "horizon_months": 120}
+    report = run(service, base)
+    investing = report["result"]["investing"]
+    assert investing["gains_tax"] == 0.1 and investing["gains_tax_basis"].startswith("real gain")
+    assert any(a.startswith("LISR Art. 129") for a in report["assumptions"])
+    grown, cost = 1.10 ** 10, 1.04 ** 10
+    assert investing["after_tax"]["base"] == pytest.approx((grown - (grown - cost) * 0.1) ** 0.1 - 1, abs=0.0001)
+    foreign = run(service, {**base, "investment_channel": "foreign_broker"})["result"]["investing"]
+    assert foreign["gains_tax"] == 0.3 and "marginal" in foreign["gains_tax_rule"]
+
+
+def test_mx_unknown_marginal_is_labelled_as_a_range(service):
+    inputs = {k: v for k, v in EXAMPLES["mx_card_prepay_vs_cetes"].items() if k != "marginal_rate"}
+    report = run(service, inputs)
+    investing = report["result"]["investing"]
+    assert investing["marginal_rate_known"] is False
+    assert "rango según tu tasa marginal" in investing["marginal_label"]["es"]
+    for spec in views.views_for("debt", report):
+        views.validate(spec)
+
+
+def test_single_debt_amortize_draws_its_balance_with_the_interest_paid(service):
+    report = run(service, {"mode": "amortize", "as_of": AS_OF, "debt": card()})
+    specs = views.views_for("debt", report)
+    series = next(s for s in specs if s["kind"] == "series")
+    views.validate(series)
+    [debt] = report["result"]["debts"]
+    assert len(series["data"]["points"]) == len(debt["balance_series"]) and series["data"]["points"][-1]["y"] == 0
+    assert series["caption"]["en"] == "Interest and IVA paid: $13,350 over 18 months"
+    assert series["caption"]["es"].startswith("Intereses e IVA pagados: $13,350")
+    grows = run(service, {"mode": "amortize", "as_of": AS_OF, "debt": card(monthly_payment=500)})
+    assert next(s for s in views.views_for("debt", grows) if s["kind"] == "series")["caption"]["en"] == \
+        "Not repaid at this payment"
+
+
+def test_payment_frequency_maturity_and_top_level_credit_limit(service):
+    semimonthly = {"id": "sm", "kind": "auto", "balance": 10000, "annual_rate": 0.1, "monthly_payment": 250,
+                   "payment_frequency": "semimonthly", "currency": "USD"}
+    soon = {"id": "mat", "kind": "auto", "balance": 1000, "annual_rate": 0.1, "maturity": "2026-09-30", "currency": "USD"}
+    limit = {"id": "t2", "kind": "card", "balance": 30000, "annual_rate": 0.45, "credit_limit": 60000, "currency": "MXN",
+             "minimum_payment": {"percent_of_balance": 0.015, "percent_of_limit": 0.0125}}
+    debts = {d["id"]: d for d in run(service, {"mode": "amortize", "as_of": AS_OF,
+                                               "liabilities": [semimonthly, soon, limit]})["result"]["debts"]}
+    assert debts["sm"]["monthly_payment"] == 500
+    assert debts["mat"]["months"] == 1
+    assert debts["t2"]["minimum_rule"]["floor"] == 750
+
+
+def test_strategies_minimum_is_capped_at_balance_plus_interest(service):
+    debts = [{"id": "c1", "kind": "card", "balance": 500, "annual_rate": 0.30, "monthly_payment": 800, "currency": "USD"},
+             {"id": "c2", "kind": "card", "balance": 9000, "annual_rate": 0.25, "monthly_payment": 200, "currency": "USD"}]
+    result = run(service, {"mode": "strategies", "as_of": AS_OF, "monthly_amount": 900, "liabilities": debts})["result"]
+    assert result["minimum_payments"] == pytest.approx(712.5, abs=0.01)
+
+
+def test_us_student_loan_and_standard_deduction_hurdle(service):
+    loan = {"id": "sl", "kind": "student", "balance": 40000, "annual_rate": 0.065, "monthly_payment": 450, "currency": "USD"}
+    common = {"mode": "prepay_vs_invest", "as_of": AS_OF, "extra_monthly": 200, "marginal_rate": 0.24,
+              "reserve": {"months": 6, "target_months": 6}}
+    with_deduction = run(service, {**common, "debt": loan})
+    without = run(service, {**common, "debt": loan, "student_loan_deduction": False})
+    assert with_deduction["result"]["guaranteed"]["after_tax_rate"] < without["result"]["guaranteed"]["after_tax_rate"]
+    assert any("phases out" in a for a in with_deduction["assumptions"])
+    mortgage = EXAMPLES["us_mortgage_prepay_vs_vti"]
+    itemized = run(service, {**mortgage, "itemizes": True})
+    hurdle = run(service, {**mortgage, "itemizes": True, "standard_deduction": 30000, "other_itemized_deductions": 10000})
+    assert any("standard deduction" in a for a in itemized["assumptions"])
+    assert hurdle["result"]["guaranteed"]["after_tax_rate"] > itemized["result"]["guaranteed"]["after_tax_rate"]

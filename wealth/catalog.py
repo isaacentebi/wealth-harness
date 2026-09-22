@@ -571,16 +571,26 @@ CATALOG: dict[str, dict[str, Any]] = {
                      "| minimum_payment, currency}], or debt (one id or object); default: the client's stored liability.<id> facts",
                      "prepay_vs_invest: extra_monthly and/or lump_sum", "refinance: offer", "strategies: monthly_amount"],
         "optional": ["debts: stored liability ids to include", "as_of", "currency",
-                     "card: cat (Banxico CAT, compared with the tasa; alone it is used as an estimate), iva_on_interest "
+                     "payment_frequency weekly|biweekly|semimonthly|monthly|quarterly|semiannual|annual (the payment is "
+                     "converted to its monthly equivalent)", "maturity (a date; later this month counts as 1 month)",
+                     "card: credit_limit, cat (Banxico CAT, compared with the tasa; alone it is used as an estimate), iva_on_interest "
                      "(default 16% for MXN cards and consumer credit, 0 for home credit), minimum_payment {percent_of_balance, "
                      "plus_interest (true), floor | percent_of_limit + credit_limit}",
                      "Infonavit/Fovissste: kind infonavit|fovissste, denomination VSM|UMA|MXN, balance_units (or balance in "
                      "pesos), unit_value_mxn (monthly; UMA defaults to INEGI 2026 x 30.4), monthly_payment_units or "
-                     "monthly_payment, unit_growth_annual (default 4%, an estimate), update_month, months_paid",
+                     "monthly_payment, unit_growth_annual (default 4%, an estimate), update_month, months_paid | "
+                     "origination_date (unknown: listed in missing and the projection is partial, without the 30-year "
+                     "liberation), liberation_eligible (the 30-year liberation applies to VSM/UMA credits under the "
+                     "post-1997 regime with no payment omissions; denomination MXN amortizes by contract)",
                      "amortize: monthly_rows (default 12, or \"all\")",
                      "prepay_vs_invest: horizon_months (default: payoff at the current payment), jurisdiction MX|US, "
                      "marginal_rate, federal_marginal_rate (T-bills are state-exempt), itemizes (US mortgage interest), "
-                     "capital_gains_rate (US, default 15%), account taxable|tax_free, mx_mortgage {casa_habitacion, "
+                     "capital_gains_rate (US, default 15%), standard_deduction + other_itemized_deductions (US "
+                     "itemizers: only interest above the standard deduction saves tax), student_loan_deduction (US, "
+                     "IRC 221 $2,500 cap; false above the income phase-out), investment_channel "
+                     "mx_intermediary|foreign_broker and sic_listed (MX: 10% Art. 129 on the real gain for BMV/SIC "
+                     "securities; other securities through a foreign broker at the marginal rate), account "
+                     "taxable|tax_free, mx_mortgage {casa_habitacion, "
                      "financial_system_lender, credit_udis | credit_amount_mxn + udi_value_at_origination + udi_source, "
                      "within_global_cap} (LISR Art. 151 fr. IV, as mx_deductions), inflation (MX real interest, default 4%), "
                      "expected_return {conservative, base, source}, risk_free {rate, source} (default: a saved "
@@ -588,12 +598,14 @@ CATALOG: dict[str, dict[str, Any]] = {
                      "reserve {months, target_months} (default: the saved picture)",
                      "refinance: offer {kind refinance|balance_transfer|consolidation, annual_rate (after any promo), "
                      "promo_rate + promo_months, fee, fee_percent, fees_financed, term_months | monthly_payment, "
-                     "deferred_interest}",
+                     "deferred_interest} (no fee given: 0, stated as an assumption); the result adds same_payment "
+                     "(your current payment on the new rate) and a verdict over both",
                      "strategies: order (a custom order to compare), quick_win_months (hybrid, default 3)"],
         "scope": "Fixed rates and on-time payments; interest accrues at annual_rate / 12 plus IVA where it applies. "
-                 "Anything unknown is listed in missing and shown as a range, never taken as zero. prepay_vs_invest never "
-                 "recommends prepaying while the reserve is below its target. Views: balance series, payoff tickets and "
-                 "comparisons.",
+                 "A payment derived from a term includes IVA where it applies. Anything unknown is listed in missing and "
+                 "shown as a range, never taken as zero. prepay_vs_invest waits for the full reserve target, except a "
+                 "debt costing 20%+ a year with IVA, which waits only for one month of essentials. Views: balance "
+                 "series, payoff tickets and comparisons.",
         "example": {"mode": "amortize", "as_of": "2026-09-21", "liabilities": [
             {"id": "tarjeta", "name": "Tarjeta BBVA", "kind": "card", "balance": 30000, "annual_rate": 0.45, "cat": 0.60,
              "monthly_payment": 2500, "currency": "MXN",

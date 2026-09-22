@@ -881,7 +881,9 @@ class WealthService:
     DEBT_INPUTS = frozenset({"mode", "liabilities", "debts", "debt", "as_of", "currency", "monthly_rows", "monthly_amount",
                              "order", "quick_win_months", "offer", "extra_monthly", "lump_sum", "horizon_months",
                              "jurisdiction", "marginal_rate", "federal_marginal_rate", "itemizes", "capital_gains_rate",
-                             "account", "mx_mortgage", "inflation", "expected_return", "risk_free", "investment", "reserve"})
+                             "account", "mx_mortgage", "inflation", "expected_return", "risk_free", "investment", "reserve",
+                             "investment_channel", "sic_listed", "standard_deduction", "other_itemized_deductions",
+                             "student_loan_deduction"})
 
     def _debt(self, inputs: dict, snapshot: dict, ledger, today: str) -> dict:
         """The debt engine (wealth/debt.py) over inline liabilities or the client's stored ones."""

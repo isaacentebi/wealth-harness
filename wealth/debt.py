@@ -36,7 +36,7 @@ _KIND_ALIASES = {"credit_card": "card", "tarjeta": "card", "tdc": "card", "car":
 _IVA_KINDS = ("card", "auto", "personal", "other")
 UNIT_DAYS = Decimal("30.4")               # INEGI: monthly UMA = daily UMA x 30.4
 INDEXATION_ASSUMED = Decimal("0.04")      # annual VSM/UMA update when none is stated (an estimate)
-LIBERATION_MONTHS = 360                   # Infonavit/Fovissste cancel what is left after 30 years of payments
+LIBERATION_MONTHS = 360                   # VSM/UMA credits (post-1997 regime): cancelled after 30 years without omissions
 US_MORTGAGE_DEBT_LIMIT = Decimal(750000)  # IRC 163(h)(3)(F): acquisition debt after 2017-12-15
 MONTHLY_ROWS_DEFAULT = 12
 HIGH_INTEREST_RATE = Decimal("0.20")      # as proactive: a debt this costly beats any safe return
@@ -55,6 +55,7 @@ EXPECTED_RETURNS = {
                       "10% base, nominal (includes Mexican inflation), before tax; not a forecast"},
 }
 US_LTCG_ASSUMED = Decimal("0.15")
+US_STUDENT_INTEREST_CAP = Decimal(2500)   # IRC 221: student-loan interest deduction, per return per year
 MX_INFLATION_ASSUMED = Decimal("0.04")
 MARGINAL_BOUNDS = {"US": (Decimal("0.10"), Decimal("0.37")), "MX": (Decimal("0.0192"), Decimal("0.35"))}
 
@@ -74,19 +75,25 @@ SOURCES = {
             "rules": ["the UMA is updated every year by the December INPC and takes effect on February 1; "
                       "monthly value = daily value x 30.4"]},
     "infonavit": {"title": "Ley del Infonavit, articulo 51", "url": "https://www.diputados.gob.mx/LeyesBiblio/",
-                  "rules": ["credits in VSM/UMA are updated with the unit each year; a balance left after 30 years "
-                            "of regular payments is cancelled (Fovissste has an equivalent rule)"]},
+                  "rules": ["credits in VSM/UMA are updated with the unit each year; for VSM/UMA credits under the "
+                            "post-1997 regime, a balance left after 30 years of payments without omissions is "
+                            "cancelled (Fovissste has an equivalent rule); fixed-peso credits amortize by contract"]},
     "irs936": {"title": "IRS Publication 936, Home Mortgage Interest Deduction; IRC 163(h)(3)",
                "url": "https://www.irs.gov/publications/p936",
                "rules": ["mortgage interest is deductible only for those who itemize; acquisition debt after "
                          "2017-12-15 counts up to $750,000"]},
+    "irs970": {"title": "IRS Publication 970, Student Loan Interest Deduction; IRC 221",
+               "url": "https://www.irs.gov/publications/p970",
+               "rules": ["up to $2,500 a year of student-loan interest is deductible above the line; the deduction "
+                         "phases out with modified AGI"]},
     "art151": {"title": "Ley del Impuesto sobre la Renta, articulo 151 fraccion IV",
                "url": "https://www.diputados.gob.mx/LeyesBiblio/pdf/LISR.pdf",
                "rules": ["real interest on a mortgage for the casa habitacion, from the financial system, credit up "
                          "to 750,000 UDIs, is a personal deduction within the global cap"]},
     "art129": {"title": "Ley del Impuesto sobre la Renta, articulo 129",
                "url": "https://www.diputados.gob.mx/LeyesBiblio/pdf/LISR.pdf",
-               "rules": ["10% definitive tax on gains from qualifying listed shares and ETFs (BMV/SIC)"]},
+               "rules": ["10% definitive tax on the gain (proceeds less the inflation-updated average cost) from "
+                         "shares and ETFs listed on the BMV/BIVA or in the SIC, sold through a Mexican intermediary"]},
     "cetes_tax": {"title": "Ley del Impuesto sobre la Renta, articulos 133-135",
                   "url": "https://www.diputados.gob.mx/LeyesBiblio/pdf/LISR.pdf",
                   "rules": ["CETES interest is taxed on real interest (nominal less inflation) at the marginal rate"]},
@@ -179,44 +186,61 @@ def normalize(row: Mapping[str, Any], index: int, today: date) -> tuple[dict | N
         assumptions.append(note)
     payment = D(row.get("monthly_payment", row.get("payment")))
     frequency = row.get("payment_frequency")
-    if payment is not None and frequency in ("biweekly", "annual", "weekly", "quarterly"):
+    if frequency is not None and frequency not in finmath.PER_MONTH:
+        raise ValueError(f"{ident}.payment_frequency must be one of {', '.join(finmath.PER_MONTH)}")
+    if payment is not None and frequency not in (None, "monthly"):
         payment = finmath.per_month(payment, frequency)
+        assumptions.append(f"{ident}: a {frequency} payment is read as {num(payment)} a month "
+                           f"({num(finmath.PER_MONTH[frequency] * 12, 0)} payments a year / 12).")
     if payment is not None and payment <= 0:
         raise ValueError(f"{ident}.monthly_payment must be positive")
     term = row.get("remaining_term_months")
-    if term is None and _as_date(row.get("maturity")) and _as_date(row["maturity"]) > today:
-        term = finmath.months_between(today, _as_date(row["maturity"]))
+    maturity = _as_date(row.get("maturity"))
+    if term is None and maturity and maturity >= today:
+        # A maturity later this month still leaves one payment: never zero months.
+        term = max(finmath.months_between(today, maturity), 1)
     if term is not None and (not isinstance(term, int) or isinstance(term, bool) or term <= 0):
         raise ValueError(f"{ident}.remaining_term_months must be a positive whole number")
     rule = row.get("minimum_payment") if isinstance(row.get("minimum_payment"), Mapping) else None
     debt.update(payment=payment, term=term, rule=None, payment_basis="stated" if payment is not None else None)
+    credit_limit = _money_in(row.get("credit_limit"), f"{ident}.credit_limit")
     if rule is not None:
-        debt["rule"] = _rule(rule, ident, missing)
+        debt["rule"] = _rule(rule, ident, missing, credit_limit)
     if payment is None and debt["rule"] is None and term is not None and balance is not None and rate is not None:
-        debt["payment"], debt["payment_basis"] = annuity_payment(balance, rate, term), "from remaining term"
+        # The level payment that repays it in ``term`` months at the monthly cost, IVA included.
+        debt["payment"], debt["payment_basis"] = payment_for_term(balance, rate, iva, term), "from remaining term"
     if payment is None and debt["rule"] is not None:
         debt["payment_basis"] = "minimum rule"
+    soft: list[dict] = []  # gaps that leave a partial projection rather than none
     if indexed:
-        _indexed(debt, row, today, missing, assumptions)
+        _indexed(debt, row, today, missing, assumptions, soft)
     elif balance is None:
         missing.append({"key": f"liability.{ident}.balance", "reason": "missing", "detail": f"{ident} needs its balance"})
     if debt["payment"] is None and debt["rule"] is None and not indexed:
         missing.append({"key": f"liability.{ident}.monthly_payment", "reason": "missing",
                         "detail": f"{ident} needs its monthly payment, remaining_term_months, or (cards) the "
                                   "minimum_payment rule"})
-    for field in ("original_principal", "credit_limit"):
-        debt[field] = _money_in(row.get(field), f"{ident}.{field}")
+    debt["original_principal"] = _money_in(row.get("original_principal"), f"{ident}.original_principal")
+    debt["credit_limit"] = credit_limit
     ready = not missing
-    return (debt if ready else None), missing, assumptions
+    debt["partial"] = bool(soft)
+    return (debt if ready else None), missing + soft, assumptions
 
 
-def _rule(raw: Mapping[str, Any], ident: str, missing: list[dict]) -> dict:
+def payment_for_term(balance: Decimal, rate: Decimal, iva: Decimal, months: int) -> Decimal:
+    """The level monthly payment that repays ``balance`` in ``months`` at tasa / 12 plus IVA on the interest."""
+    return annuity_payment(balance, rate * (ONE + iva), months)
+
+
+def _rule(raw: Mapping[str, Any], ident: str, missing: list[dict], credit_limit: Decimal | None = None) -> dict:
     percent = _ratio(raw.get("percent_of_balance"), f"{ident}.minimum_payment.percent_of_balance", high=ONE)
     if percent is None:
         raise ValueError(f"{ident}.minimum_payment needs percent_of_balance (0.015 for 1.5%)")
     floor = _money_in(raw.get("floor"), f"{ident}.minimum_payment.floor")
     limit_pct = _ratio(raw.get("percent_of_limit"), f"{ident}.minimum_payment.percent_of_limit", high=ONE)
     limit = _money_in(raw.get("credit_limit"), f"{ident}.minimum_payment.credit_limit")
+    if limit is None:
+        limit = credit_limit  # the card's own credit_limit, beside the rule
     if limit_pct is not None and limit is None:
         missing.append({"key": f"liability.{ident}.minimum_payment.credit_limit", "reason": "missing",
                         "detail": f"{ident}: percent_of_limit needs the credit limit"})
@@ -230,7 +254,8 @@ def _rule(raw: Mapping[str, Any], ident: str, missing: list[dict]) -> dict:
             "floor": lowest}
 
 
-def _indexed(debt: dict, row: Mapping[str, Any], today: date, missing: list[dict], assumptions: list[str]) -> None:
+def _indexed(debt: dict, row: Mapping[str, Any], today: date, missing: list[dict], assumptions: list[str],
+             soft: list[dict]) -> None:
     """Infonavit/Fovissste credit in VSM or UMA: units, the peso value of a unit and its annual update."""
     from . import mexico
     ident, denomination = debt["id"], debt["denomination"]
@@ -266,11 +291,29 @@ def _indexed(debt: dict, row: Mapping[str, Any], today: date, missing: list[dict
     update_month = row.get("update_month", 2 if denomination == "UMA" else 1)
     if not isinstance(update_month, int) or not 1 <= update_month <= 12:
         raise ValueError(f"{ident}.update_month must be 1-12")
-    paid = row.get("months_paid", 0)
-    if not isinstance(paid, int) or paid < 0:
+    paid = row.get("months_paid")
+    origination = _as_date(row.get("origination_date") or row.get("start_date"))
+    if paid is None and origination is not None and origination <= today:
+        paid = finmath.months_between(origination, today)
+        assumptions.append(f"{ident}: {paid} months of payments are counted from the origination date "
+                           f"{origination.isoformat()} (no omissions assumed).")
+    if paid is not None and (not isinstance(paid, int) or isinstance(paid, bool) or paid < 0):
         raise ValueError(f"{ident}.months_paid must be a nonnegative whole number")
+    if paid is None:
+        # Unknown is not zero: without it the 30-year liberation date cannot be placed.
+        soft.append({"key": f"liability.{ident}.months_paid", "reason": "missing",
+                     "detail": f"{ident}: months of payments already made (or origination_date); without it the "
+                               "projection runs to repayment and leaves out the 30-year liberation"})
+    eligible = row.get("liberation_eligible")
+    if eligible is not None and not isinstance(eligible, bool):
+        raise ValueError(f"{ident}.liberation_eligible must be true or false")
+    if eligible is None and paid is not None:
+        assumptions.append(f"{ident}: the 30-year liberation (Ley del Infonavit art. 51 / Fovissste equivalent) is "
+                           f"applied as for a {denomination} credit under the post-1997 regime, and only if no "
+                           "payment was omitted; set liberation_eligible to false if your credit is excluded.")
     debt.update(unit_value=value, unit_value_source=value_source, units=units, growth=growth,
-                payment_units=payment_units, update_month=update_month, months_paid=paid, estimate=True,
+                payment_units=payment_units, update_month=update_month, months_paid=paid,
+                liberation=eligible is not False and paid is not None, estimate=True,
                 balance=units * value if units is not None and value is not None else debt["balance"],
                 payment_basis="stated in pesos" if row.get("monthly_payment_units") is None else "stated in units")
 
@@ -344,7 +387,7 @@ def _plan(debt: Mapping[str, Any], today: date, *, payment: Decimal | None = Non
 def _indexed_plan(debt: Mapping[str, Any], today: date) -> dict:
     """An Infonavit/Fovissste credit in units: interest on units, a payment in units, the unit updated yearly."""
     units, value, rate = debt["units"], debt["unit_value"], debt["rate"]
-    left_months = max(LIBERATION_MONTHS - debt["months_paid"], 0)
+    left_months = max(LIBERATION_MONTHS - debt["months_paid"], 0) if debt["liberation"] else MAX_MONTHS
     rows: list[dict] = []
     totals = {"interest": ZERO, "paid": ZERO, "indexation": ZERO}
     for month in range(1, min(left_months, MAX_MONTHS) + 1):
@@ -365,7 +408,7 @@ def _indexed_plan(debt: Mapping[str, Any], today: date) -> dict:
                      "balance_units": max(units, ZERO), "unit_value": value})
     repaid = units <= Decimal("0.00005")
     # A balance still owed after 30 years of regular payments is cancelled: the credit ends then.
-    liberated = not repaid and len(rows) == left_months
+    liberated = debt["liberation"] and not repaid and len(rows) == left_months
     ended = repaid or liberated
     return {"status": "ready" if ended else "never", "rows": rows, "months": len(rows) if ended else None,
             "date": rows[-1]["date"] if ended and rows else None, "interest": totals["interest"], "iva": ZERO,
@@ -464,7 +507,11 @@ def amortize(debts: list[dict], today: date, monthly_rows: int | None = MONTHLY_
             row.update(denomination=debt["denomination"], balance_units=num(debt["units"], 4),
                        unit_value_mxn=num(debt["unit_value"]), unit_value_source=debt["unit_value_source"],
                        unit_growth_annual=num(debt["growth"], 4), monthly_payment_units=num(debt["payment_units"], 4),
-                       monthly_payment=num(debt["payment_units"] * debt["unit_value"]))
+                       monthly_payment=num(debt["payment_units"] * debt["unit_value"]), months_paid=debt["months_paid"],
+                       liberation_applied=debt["liberation"], projection="partial" if debt["partial"] else "full")
+            if debt["months_paid"] is None:
+                warnings.append(f"{debt['id']}: partial projection. Months already paid are unknown, so the 30-year "
+                                "liberation is left out; give months_paid or origination_date.")
             warnings.append(f"{debt['id']}: an estimate. The {debt['denomination']} rises every year, so pesos paid "
                             "and the balance in pesos depend on future updates; your Infonavit/Fovissste statement "
                             "in pesos is exact.")
@@ -554,8 +601,9 @@ def _simulate(debts: list[dict], budget: Decimal, order: list[str], today: date)
 
 
 def _first_minimum(debt: Mapping[str, Any]) -> Decimal:
+    """This month's minimum: the stated payment (or the card's rule), never more than the balance plus interest."""
     charge = debt["balance"] * _monthly(debt)
-    return _payer(debt)(1, debt["balance"], charge)
+    return min(_payer(debt)(1, debt["balance"], charge), debt["balance"] + charge)
 
 
 def strategies(debts: list[dict], budget: Any, today: date, *, order: list[str] | None = None,
@@ -642,10 +690,11 @@ def _monthly_from_annual(rate: Decimal) -> Decimal:
 
 
 def _paths(balance: Decimal, debt_monthly: Decimal, payment: Decimal, extra: Decimal, lump: Decimal, horizon: int,
-           invest_monthly: Decimal, gains_tax: Decimal) -> dict:
+           invest_monthly: Decimal, gains_tax: Decimal, basis_monthly: Decimal = ZERO) -> dict:
     """Net worth at the horizon when the extra goes to the debt vs into the investment.
 
     Both paths spend the same each month (payment + extra).  Once a debt is gone its whole payment is invested.
+    ``basis_monthly`` updates the cost basis each month (Mexico taxes the gain over the inflation-updated cost).
     """
     out = {}
     for path in ("prepay", "invest"):
@@ -661,6 +710,7 @@ def _paths(balance: Decimal, debt_monthly: Decimal, payment: Decimal, extra: Dec
         interest = ZERO
         for month in range(1, horizon + 1):
             inv *= ONE + invest_monthly
+            basis *= ONE + basis_monthly
             budget = payment + extra
             if bal > CENT:
                 charge = bal * debt_monthly
@@ -679,12 +729,14 @@ def _paths(balance: Decimal, debt_monthly: Decimal, payment: Decimal, extra: Dec
     return out
 
 
-def _after_tax_lump(rate: Decimal, gains_tax: Decimal, years: Decimal) -> Decimal:
-    """Annualised after-tax return of a lump held ``years`` and taxed on the gain at the end."""
+def _after_tax_lump(rate: Decimal, gains_tax: Decimal, years: Decimal, inflation: Decimal = ZERO) -> Decimal:
+    """Annualised after-tax return of a lump held ``years`` and taxed at the end on the gain over its cost,
+    the cost updated by ``inflation`` (Mexico: the real gain; zero leaves the nominal gain)."""
     if years <= 0:
-        return rate * (ONE - gains_tax)
+        return rate - max(rate - inflation, ZERO) * gains_tax
     grown = (ONE + rate) ** years
-    return (grown - (grown - ONE) * gains_tax) ** (ONE / years) - ONE
+    cost = (ONE + inflation) ** years
+    return (grown - max(grown - cost, ZERO) * gains_tax) ** (ONE / years) - ONE
 
 
 def prepay_vs_invest(debt: dict, inputs: Mapping[str, Any], today: date, *, jurisdiction: str | None,
@@ -733,8 +785,21 @@ def prepay_vs_invest(debt: dict, inputs: Mapping[str, Any], today: date, *, juri
         share = min(ONE, US_MORTGAGE_DEBT_LIMIT / principal) if principal > 0 else ONE
         itemizes = inputs.get("itemizes")
         if itemizes is True:
+            standard = _money_in(inputs.get("standard_deduction"), "standard_deduction")
+            other = _money_in(inputs.get("other_itemized_deductions"), "other_itemized_deductions")
+            yearly = debt["balance"] * debt["rate"] * share
+            if standard is not None and other is not None and yearly > 0:
+                # Only the itemized total above the standard deduction saves tax.
+                above = max(other + yearly, standard) - max(other, standard)
+                share = share * above / yearly
+                deduction_note = (f"You itemize: about {num(share * 100, 0)}% of the mortgage interest is above the "
+                                  "standard deduction and lowers tax at your marginal rate.")
+            else:
+                deduction_note = "You itemize, so mortgage interest is deducted at your marginal rate."
+                assumptions.append("All mortgage interest is taken as deductible at your marginal rate; it only saves "
+                                   "tax on the part of your itemized deductions above the standard deduction (give "
+                                   "standard_deduction and other_itemized_deductions to apply that hurdle).")
             deduction_share = [share]
-            deduction_note = "You itemize, so mortgage interest is deducted at your marginal rate."
         elif itemizes is False:
             deduction_note = "You take the standard deduction, so mortgage interest saves no tax."
         else:
@@ -744,6 +809,18 @@ def prepay_vs_invest(debt: dict, inputs: Mapping[str, Any], today: date, *, juri
                             "detail": "Do you itemize deductions? Mortgage interest only lowers tax if you do."})
         if share < 1:
             warnings.append("The mortgage is above $750,000 of acquisition debt; only that share of interest is deductible.")
+    elif debt["kind"] == "student" and jurisdiction == "US":
+        sources.append(SOURCES["irs970"])
+        yearly = debt["balance"] * debt["rate"]
+        cap = min(ONE, US_STUDENT_INTEREST_CAP / yearly) if yearly > 0 else ONE
+        if inputs.get("student_loan_deduction") is False:
+            deduction_note = "The student-loan interest deduction does not apply to you, so the interest saves no tax."
+        else:
+            deduction_share = [cap]
+            deduction_note = (f"Student-loan interest is deductible above the line up to $2,500 a year (IRC 221), "
+                              f"itemizing or not: about {num(cap * 100, 0)}% of this interest lowers tax.")
+            assumptions.append("The student-loan interest deduction phases out with modified AGI; it is taken in full "
+                               "here (set student_loan_deduction to false if your income is above the phase-out).")
     elif debt["kind"] in ("mortgage", *INDEXED_KINDS) and jurisdiction == "MX":
         sources.append(SOURCES["art151"])
         inflation = _ratio(inputs.get("inflation"), "inflation", high=ONE)
@@ -794,11 +871,34 @@ def prepay_vs_invest(debt: dict, inputs: Mapping[str, Any], today: date, *, juri
     account = inputs.get("account", "taxable")
     if account not in ("taxable", "tax_free"):
         raise ValueError("account must be taxable or tax_free (a Roth IRA, or a PPR held to 65)")
+    inflation_mx = _ratio(inputs.get("inflation"), "inflation", high=ONE) or MX_INFLATION_ASSUMED
+    channel = inputs.get("investment_channel")
+    if channel not in (None, "mx_intermediary", "foreign_broker"):
+        raise ValueError("investment_channel must be mx_intermediary (a Mexican casa de bolsa) or foreign_broker")
+    gains_inflation = ZERO      # annual inflation that updates the cost basis (Mexico taxes the real gain)
+    gains_at_marginal = False   # gains taxed at each case's marginal rate instead of a flat rate
     if account == "tax_free":
         gains_tax = ZERO
     elif jurisdiction == "MX":
-        gains_tax = D(mexico.PARAMETERS["art129_rate"]["any"]["value"])
-        sources.append(SOURCES["art129"])
+        gains_inflation = inflation_mx
+        sic = inputs.get("sic_listed")
+        art129 = D(mexico.PARAMETERS["art129_rate"]["any"]["value"])
+        if channel == "foreign_broker" and sic is not True:
+            gains_tax, gains_at_marginal = None, True
+            assumptions.append("Held through a foreign broker and not listed in the SIC: the gain is taxed at your "
+                               "marginal rate (LISR Title IV, Chapter IV) on the real gain, the cost updated by "
+                               f"inflation ({num(inflation_mx * 100, 1)}% a year); give sic_listed true if it is in the SIC.")
+        else:
+            gains_tax = art129
+            sources.append(SOURCES["art129"])
+            if channel is None:
+                assumptions.append("The investment is taken to be listed on the BMV/BIVA or in the SIC and held through "
+                                   "a Mexican intermediary (casa de bolsa); through a foreign broker, a security not in "
+                                   "the SIC is taxed at your marginal rate instead (give investment_channel).")
+            assumptions.append("LISR Art. 129: a 10% definitive tax on the real gain (proceeds less the cost updated by "
+                               f"the INPC, taken at {num(inflation_mx * 100, 1)}% a year) from shares and ETFs listed on "
+                               "the BMV/BIVA or in the SIC and sold through a Mexican intermediary; SIC securities "
+                               "through a foreign broker keep the 10% but you compute and pay it.")
     else:
         gains_tax = _ratio(inputs.get("capital_gains_rate"), "capital_gains_rate", high=ONE)
         if gains_tax is None:
@@ -813,7 +913,6 @@ def prepay_vs_invest(debt: dict, inputs: Mapping[str, Any], today: date, *, juri
                                   + " {rate, source}; save cash_reference_rate for the currency"})
     else:
         sources.append(SOURCES["cetes_tax" if jurisdiction == "MX" else "tbill_tax"])
-    inflation_mx = _ratio(inputs.get("inflation"), "inflation", high=ONE) or MX_INFLATION_ASSUMED
     federal = _ratio(inputs.get("federal_marginal_rate"), "federal_marginal_rate", high=ONE)
 
     cases = []
@@ -827,24 +926,29 @@ def prepay_vs_invest(debt: dict, inputs: Mapping[str, Any], today: date, *, juri
                 rf_after = rf_rate - m * max(rf_rate - inflation_mx, ZERO)
             else:
                 rf_after = rf_rate * (ONE - (federal if federal is not None else m))
-            cons_after = _after_tax_lump(conservative, gains_tax, years)
-            base_after = _after_tax_lump(base, gains_tax, years)
+            gains = m if gains_at_marginal else gains_tax
+            cons_after = _after_tax_lump(conservative, gains, years, gains_inflation)
+            base_after = _after_tax_lump(base, gains, years, gains_inflation)
             verdict, confidence = _verdict(debt_eff, rf_after, cons_after, base_after)
             cases.append({"marginal_rate": num(m, 4), "deduction_share": num(share, 4), "_monthly": monthly,
+                          "_gains_tax": gains, "gains_tax": gains,
                           "debt_after_tax_rate": debt_eff, "risk_free_after_tax": rf_after,
                           "conservative_after_tax": cons_after, "base_after_tax": base_after,
                           "verdict": verdict, "confidence": confidence})
     central = cases[0]
     scenarios = {}
-    for name, pre, invest_monthly, tax in (
-            ("risk_free", rf_rate, _monthly_from_annual(central["risk_free_after_tax"]) if rf_rate is not None else None, ZERO),
-            ("conservative", conservative, _monthly_from_annual(conservative), gains_tax),
-            ("base", base, _monthly_from_annual(base), gains_tax)):
+    basis_monthly = _monthly_from_annual(gains_inflation)
+    for name, pre, invest_monthly in (
+            ("risk_free", rf_rate, _monthly_from_annual(central["risk_free_after_tax"]) if rf_rate is not None else None),
+            ("conservative", conservative, _monthly_from_annual(conservative)),
+            ("base", base, _monthly_from_annual(base))):
         if invest_monthly is None:
             scenarios[name] = {"annual_return": None, "net_worth_difference": None, "winner": None}
             continue
+        safe = name == "risk_free"
         values = [_paths(debt["balance"], c["_monthly"], payment, extra, lump, horizon,
-                         _monthly_from_annual(c["risk_free_after_tax"]) if name == "risk_free" else invest_monthly, tax)
+                         _monthly_from_annual(c["risk_free_after_tax"]) if safe else invest_monthly,
+                         ZERO if safe else c["_gains_tax"], ZERO if safe else basis_monthly)
                   for c in cases]
         diffs = [v["prepay"]["net_worth"] - v["invest"]["net_worth"] for v in values]
         paths = values[0]
@@ -859,7 +963,8 @@ def prepay_vs_invest(debt: dict, inputs: Mapping[str, Any], today: date, *, juri
             "debt_paid_off_month_if_prepay": paths["prepay"]["debt_paid_off_month"],
             "debt_paid_off_month_if_invest": paths["invest"]["debt_paid_off_month"],
             "interest_saved_by_prepaying": num(paths["invest"]["interest"] - paths["prepay"]["interest"])}
-    breakeven = _breakeven(debt["balance"], central["_monthly"], payment, extra, lump, horizon, gains_tax)
+    breakeven = _breakeven(debt["balance"], central["_monthly"], payment, extra, lump, horizon, central["_gains_tax"],
+                           basis_monthly)
     verdicts = {(c["verdict"], c["confidence"]) for c in cases}
     kinds = {v for v, _ in verdicts}
     if len(kinds) == 1:
@@ -874,7 +979,7 @@ def prepay_vs_invest(debt: dict, inputs: Mapping[str, Any], today: date, *, juri
     reserve_status = _reserve_status(reserve)
     # A 20%+ consumer debt only waits for a starter reserve (one month of essentials); lower-rate debt
     # (a mortgage, a car) waits for the full target.
-    high = debt["kind"] not in ("mortgage", *INDEXED_KINDS) and debt["rate"] >= HIGH_INTEREST_RATE
+    high = debt["kind"] not in ("mortgage", *INDEXED_KINDS) and effective_annual(_monthly(debt)) >= HIGH_INTEREST_RATE
     parallel = False
     condition = None
     if reserve_status == "below_starter" or (reserve_status == "below_target" and not high):
@@ -910,7 +1015,25 @@ def prepay_vs_invest(debt: dict, inputs: Mapping[str, Any], today: date, *, juri
                       "base": num(central["base_after_tax"], 4)},
         "risk_free": ({"rate": num(rf_rate, 4), "name": risk_free.get("name"), "source": risk_free.get("source"),
                        "as_of": risk_free.get("as_of")} if rf_rate is not None else None),
-        "gains_tax": num(gains_tax, 4), "account": account,
+        "gains_tax": num(central["_gains_tax"], 4), "account": account,
+        "gains_tax_basis": ("none" if account == "tax_free" else
+                            "real gain (cost updated by inflation)" if jurisdiction == "MX" else "nominal gain"),
+        "gains_tax_rule": ("tax-free account" if account == "tax_free" else
+                           "marginal rate (foreign broker, not in the SIC)" if gains_at_marginal else
+                           "LISR Art. 129: 10% definitive (SIC-listed, through a foreign broker: you compute and pay it)"
+                           if jurisdiction == "MX" and channel == "foreign_broker" else
+                           "LISR Art. 129: 10% definitive (BMV/SIC via a Mexican intermediary)" if jurisdiction == "MX"
+                           else "US long-term capital gains rate"),
+        "after_tax_range": ({key: _range([c[field] for c in cases if c[field] is not None])
+                             for key, field in (("risk_free", "risk_free_after_tax"),
+                                                ("conservative", "conservative_after_tax"),
+                                                ("base", "base_after_tax"))} if len(cases) > 1 else None),
+        "marginal_rate_known": marginal is not None,
+        "marginal_label": (None if marginal is not None else
+                           {"en": f"lowest bracket shown; range by your marginal rate ({num(marginals[0] * 100, 2)}%-"
+                                  f"{num(marginals[-1] * 100, 2)}%)",
+                            "es": f"se muestra la tasa más baja; rango según tu tasa marginal ({num(marginals[0] * 100, 2)}%-"
+                                  f"{num(marginals[-1] * 100, 2)}%)"}),
         "explain": ("Investing returns are expected, not promised: markets can return less than the conservative "
                     "case or lose money over years, and the gap between the cases is that risk."),
     }
@@ -985,9 +1108,10 @@ def _verdict_text(verdict: str, debt_rate: Any, after: Mapping[str, Any], breake
     return {"en": en, "es": es}
 
 
-def _breakeven(balance, debt_monthly, payment, extra, lump, horizon, gains_tax) -> Decimal | None:
+def _breakeven(balance, debt_monthly, payment, extra, lump, horizon, gains_tax, basis_monthly=ZERO) -> Decimal | None:
     def gap(rate: Decimal) -> Decimal:
-        paths = _paths(balance, debt_monthly, payment, extra, lump, horizon, _monthly_from_annual(rate), gains_tax)
+        paths = _paths(balance, debt_monthly, payment, extra, lump, horizon, _monthly_from_annual(rate), gains_tax,
+                       basis_monthly)
         return paths["invest"]["net_worth"] - paths["prepay"]["net_worth"]
     low, high = Decimal("-0.9"), Decimal("3")
     g_low, g_high = gap(low), gap(high)
@@ -1056,6 +1180,9 @@ def refinance(debts: list[dict], offer: Mapping[str, Any], today: date) -> dict:
     iva, iva_note = _iva(offer, "card" if kind == "balance_transfer" else "personal" if kind == "consolidation"
                          else debts[0]["kind"], currency)
     assumptions = [iva_note] if iva_note else []
+    if offer.get("fee") is None and offer.get("fee_percent") is None:
+        assumptions.append("No fee was given, so the offer's fees are taken as 0 (sin comisión indicada; las "
+                           "transferencias suelen cobrar 3–5%).")
     current_payment = sum((d["payment"] if d["payment"] is not None else _first_minimum(d) for d in debts), ZERO)
     term = offer.get("term_months")
     if offer.get("monthly_payment") is not None:
@@ -1063,7 +1190,7 @@ def refinance(debts: list[dict], offer: Mapping[str, Any], today: date) -> dict:
     elif term is not None:
         if not isinstance(term, int) or term <= 0:
             raise ValueError("offer.term_months must be a positive whole number")
-        payment, basis = annuity_payment(balance + (fee if financed else ZERO), rate, term), "offer's term"
+        payment, basis = payment_for_term(balance + (fee if financed else ZERO), rate, iva, term), "offer's term"
     else:
         payment, basis = current_payment, "your current payment"
         assumptions.append(f"The new debt is paid at your current payment ({num(current_payment)} a month).")
@@ -1106,8 +1233,36 @@ def refinance(debts: list[dict], offer: Mapping[str, Any], today: date) -> dict:
                                 "of back interest is charged from day one.")
                 offer_cost += retro
                 saved = current_cost - offer_cost if saved is not None else None
+    if saved is None or saved <= 0:
+        breakeven = None  # fees never paid back when the offer saves nothing overall
+    # The same offer paid at today's payment: a lower rate without stretching the term.
+    same = None
+    if basis != "your current payment":
+        same_plan = _schedule(start, rate_for, iva, lambda _m, _b, _c: current_payment, today)
+        same_cost = same_plan["interest"] + same_plan["iva"] + fee
+        if promo_months is not None and offer.get("deferred_interest") is True:
+            same_end = same_plan["rows"][promo_months - 1]["balance"] if len(same_plan["rows"]) >= promo_months else ZERO
+            if same_end > CENT:
+                same_cost += start * rate / 12 * promo_months * (ONE + iva)
+        same_saved = current_cost - same_cost if current_cost is not None and same_plan["status"] == "ready" else None
+        same = {"status": same_plan["status"], "monthly_payment": num(current_payment), "months": same_plan["months"],
+                "payoff_date": same_plan["date"], "interest": num(same_plan["interest"] + same_plan["iva"]),
+                "total_cost": num(same_cost), "interest_saved": num(same_saved)}
+    same_saved = D(same["interest_saved"]) if same else None
+    longer_lower = (current["status"] == "ready" and new["status"] == "ready" and new["months"] > current["months"]
+                    and payment < current_payment)
+    if saved is not None and saved > 0:
+        verdict = "take_offer"
+    elif same_saved is not None and same_saved > 0:
+        verdict = "take_offer_keep_payment"
+    elif saved is None and same_saved is None:
+        verdict = None
+    else:
+        verdict = "keep"
+    verdict_text = _refinance_text(verdict, saved, same_saved, longer_lower, payment, current_payment)
     if current["status"] == "ready" and new["status"] == "ready" and new["months"] > current["months"]:
-        warnings.append(f"The offer takes {new['months'] - current['months']} months longer to repay than now.")
+        warnings.append(f"The offer takes {new['months'] - current['months']} months longer to repay than now."
+                        + (" A longer term lowers the payment but costs more in total." if longer_lower else ""))
     if rate > max(d["rate"] for d in debts) and promo_months is None:
         warnings.append("The offer's rate is higher than every debt it replaces.")
     result = {
@@ -1119,17 +1274,47 @@ def refinance(debts: list[dict], offer: Mapping[str, Any], today: date) -> dict:
                   "monthly_payment": num(payment), "payment_basis": basis, "starting_balance": num(start),
                   "months": new["months"], "payoff_date": new["date"], "interest": num(new["interest"] + new["iva"]),
                   "total_cost": num(offer_cost)},
+        "same_payment": same,
         "interest_saved": num(saved), "breakeven_month": breakeven,
         "breakeven_date": add_months(today, breakeven).isoformat()[:7] if breakeven else None,
-        "worth_it": (saved > 0) if saved is not None else None, "risk": risk,
+        "verdict": verdict, "verdict_text": verdict_text,
+        "worth_it": verdict in ("take_offer", "take_offer_keep_payment") if verdict is not None else None, "risk": risk,
         "balance_series": {"current": current.get("balance_series") or [], "offer": _series(start, new["rows"], today)},
     }
-    if breakeven is None and saved is not None:
+    if breakeven is None and saved is not None and saved <= 0 and verdict == "keep":
         warnings.append("The offer never recovers its fees: it costs more than keeping the current debt.")
     return {"result": result, "warnings": warnings, "assumptions": assumptions + [
         "interest_saved = current interest - (offer interest + fees); both paths make their payments on time.",
+        "same_payment keeps paying today's monthly amount on the offer's rate, to separate the lower rate from a "
+        "longer term.",
         "The breakeven month is when the interest avoided has paid back the fees."],
         "sources": [SOURCES["liva"]] if iva else []}
+
+
+def _refinance_text(verdict: str | None, saved: Decimal | None, same_saved: Decimal | None, longer_lower: bool,
+                    payment: Decimal, current_payment: Decimal) -> dict | None:
+    if verdict is None:
+        return None
+    longer = (" A longer term lowers the payment but costs more.", " Un plazo más largo baja el pago pero cuesta más.")
+    if verdict == "take_offer":
+        en = f"The offer saves {num(saved)} in interest and fees at its own payment ({num(payment)} a month)."
+        es = f"La oferta ahorra {num(saved)} en intereses y comisiones con su propio pago ({num(payment)} al mes)."
+        if same_saved is not None and same_saved > saved:
+            en += f" Keeping your current {num(current_payment)} a month on it saves more: {num(same_saved)}."
+            es += f" Si sigues pagando tus {num(current_payment)} al mes, ahorras más: {num(same_saved)}."
+    elif verdict == "take_offer_keep_payment":
+        cost_en = f"costs {num(-saved)} more" if saved is not None else "is never repaid"
+        cost_es = f"cuesta {num(-saved)} de más" if saved is not None else "nunca se liquida"
+        en = (f"Worth it only if you keep paying {num(current_payment)} a month: that saves {num(same_saved)}; at the "
+              f"offer's own payment ({num(payment)}) it {cost_en}.")
+        es = (f"Conviene sólo si sigues pagando {num(current_payment)} al mes: así ahorras {num(same_saved)}; con el pago "
+              f"de la oferta ({num(payment)}) {cost_es}.")
+    else:
+        en = "Keep the current debt: the offer costs more in interest and fees, even at your current payment."
+        es = "Conserva tu deuda actual: la oferta cuesta más en intereses y comisiones, aun con tu pago actual."
+    if longer_lower:
+        en, es = en + longer[0], es + longer[1]
+    return {"en": en, "es": es}
 
 
 def _current_costs(debts: list[dict], budget: Decimal, today: date) -> list[Decimal]:
@@ -1171,6 +1356,38 @@ def _unique(sources: list[dict]) -> list[dict]:
             seen.add(source["title"])
             out.append(source)
     return out
+
+
+# --------------------------------------------------------------------------- for proactive
+
+
+def payoff_in(row: Mapping[str, Any], today: date, months: int, *, currency: str | None = None) -> dict | None:
+    """One debt row as the engine sees it: the payment that clears it in ``months`` (IVA included), both paths.
+
+    Returns ``None`` when the row lacks a balance or rate.  ``current`` is ``None`` when the payment is unknown.
+    """
+    keys = ("id", "name", "kind", "type", "lender", "balance", "annual_rate", "iva_on_interest", "cat")
+    src = {k: row[k] for k in keys if row.get(k) is not None}
+    src["currency"] = row.get("currency") or currency
+    src["remaining_term_months"] = months
+    try:
+        debt, _missing, _notes = normalize(src, 0, today)
+    except ValueError:
+        return None
+    if debt is None or debt["indexed"] or not debt["balance"] or debt["balance"] <= 0:
+        return None
+    monthly = _monthly(debt)
+    # Rounded up to the cent, so the payment shown really clears it within ``months``.
+    needed = (debt["payment"] * 100).to_integral_value(rounding="ROUND_CEILING") / 100
+    debt = {**debt, "payment": needed}
+    fast = _plan(debt, today)
+    payment = D(row.get("monthly_payment"))
+    current = _plan(debt, today, payment=payment) if payment is not None and payment > 0 else None
+    summary = lambda p: {"status": p["status"], "months": p["months"], "date": p["date"],  # noqa: E731
+                         "interest": p["interest"] + p["iva"]}
+    return {"monthly_factor": monthly, "effective_annual": effective_annual(monthly), "iva": debt["iva"],
+            "payment_to_clear": debt["payment"], "fast": summary(fast),
+            "current": summary(current) if current is not None else None}
 
 
 # --------------------------------------------------------------------------- the task
@@ -1225,4 +1442,5 @@ def run(inputs: Mapping[str, Any], rows: list[Mapping[str, Any]], today: date, *
             "assumptions": assumptions + report.get("assumptions", [])}
 
 
-__all__ = ["MODES", "run", "normalize", "amortize", "strategies", "prepay_vs_invest", "refinance", "effective_annual"]
+__all__ = ["MODES", "run", "normalize", "amortize", "strategies", "prepay_vs_invest", "refinance", "effective_annual",
+           "payment_for_term", "payoff_in"]

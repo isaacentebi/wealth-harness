@@ -642,8 +642,21 @@ def _debt_amortize(result: Mapping, envelope: Mapping, task: str, cur: Any) -> l
     first = debts[0]
     points = _balance_points(first.get("balance_series"))
     if len(points) >= 2:
-        caption = (L("An estimate: the unit is updated every year", "Estimación: la unidad se actualiza cada año")
-                   if first.get("estimate") else None)
+        # The note under the chart: what the interest costs on the way to zero (or that it never gets there).
+        cost = money(first.get("interest_cost"), first.get("currency"))
+        with_iva = first.get("total_iva") is not None
+        if first.get("status") == "ready":
+            span = months(first.get("months"))
+            note_en = (f"Interest{' and IVA' if with_iva else ''} paid: {format_value(cost, 'en')} over "
+                       f"{format_value(span, 'en')}")
+            note_es = (f"Intereses{' e IVA' if with_iva else ''} pagados: {format_value(cost, 'es')} en "
+                       f"{format_value(span, 'es')}")
+        else:
+            note_en, note_es = "Not repaid at this payment", "No se liquida con este pago"
+        if first.get("estimate"):
+            note_en += "; an estimate: the unit is updated every year"
+            note_es += "; estimación: la unidad se actualiza cada año"
+        caption = L(note_en, note_es)
         out.append(_spec(task, "series", L("Balance until it is paid", "Saldo hasta liquidarla"),
                          {"unit": {"t": "money", "cur": str(first.get("currency") or "")}, "points": points},
                          envelope, result, caption))
@@ -661,23 +674,43 @@ def _debt_amortize(result: Mapping, envelope: Mapping, task: str, cur: Any) -> l
     return out
 
 
+def _pct_range(bounds: Any) -> dict | None:
+    """A text range of two ratios ("6.28%–7.43%"), or None."""
+    if not isinstance(bounds, list) or len(bounds) != 2 or any(_raw(b) is None for b in bounds):
+        return None
+    text = "–".join(f"{float(b) * 100:.2f}%" for b in bounds)
+    return {"t": "text", "v": L(text, text)}
+
+
 def _debt_prepay(result: Mapping, envelope: Mapping, task: str, cur: Any) -> list[dict]:
     scen = result.get("scenarios") or {}
     base, cons, safe = (scen.get(k) or {} for k in ("base", "conservative", "risk_free"))
     guaranteed = result.get("guaranteed") or {}
-    after = (result.get("investing") or {}).get("after_tax") or {}
+    investing = result.get("investing") or {}
+    after = investing.get("after_tax") or {}
+    ranges = investing.get("after_tax_range") or {}
+    # With the marginal rate unknown the headline is the lowest bracket; the range beside it says so.
+    unknown = investing.get("marginal_rate_known") is False
     verdict = _VERDICT.get(str(result.get("verdict")))
     rows = [{"label": L("Paying the debt (guaranteed, after tax)", "Pagar la deuda (garantizado, tras impuestos)"),
              "value": ratio(guaranteed.get("after_tax_rate"))},
             {"label": L("Investing, conservative (after tax)", "Invertir, conservador (tras impuestos)"),
              "value": ratio(after.get("conservative"))},
             {"label": L("Investing, base case (after tax)", "Invertir, caso base (tras impuestos)"),
-             "value": ratio(after.get("base"))},
-            {"label": L("Risk-free (after tax)", "Sin riesgo (tras impuestos)"), "value": ratio(after.get("risk_free"))},
-            {"label": L("Return investing must beat (before tax)", "Lo que invertir debe superar (antes de impuestos)"),
-             "value": ratio((result.get("breakeven") or {}).get("pre_tax_return"))},
-            {"label": L("Prepaying minus investing, base case", "Pagar menos invertir, caso base"),
-             "value": money(base.get("net_worth_difference"), cur)}]
+             "value": ratio(after.get("base"))}]
+    if unknown and _pct_range(ranges.get("base")):
+        rows.append({"label": L("Range by your marginal rate", "Rango según tu tasa marginal"),
+                     "value": _pct_range(ranges.get("base")), "sub": True})
+    rows.append({"label": L("Risk-free (after tax, lowest bracket)", "Sin riesgo (tras impuestos, tasa más baja)")
+                 if unknown else L("Risk-free (after tax)", "Sin riesgo (tras impuestos)"),
+                 "value": ratio(after.get("risk_free"))})
+    if unknown and _pct_range(ranges.get("risk_free")):
+        rows.append({"label": L("Range by your marginal rate", "Rango según tu tasa marginal"),
+                     "value": _pct_range(ranges.get("risk_free")), "sub": True})
+    rows += [{"label": L("Return investing must beat (before tax)", "Lo que invertir debe superar (antes de impuestos)"),
+              "value": ratio((result.get("breakeven") or {}).get("pre_tax_return"))},
+             {"label": L("Prepaying minus investing, base case", "Pagar menos invertir, caso base"),
+              "value": money(base.get("net_worth_difference"), cur)}]
     if result.get("confidence") in _CONFIDENCE:
         rows.append({"label": L("Confidence", "Confianza"), "value": {"t": "text", "v": _CONFIDENCE[result["confidence"]]}})
     caption = L("The debt's return is guaranteed; investing's is expected, not promised",
@@ -702,12 +735,23 @@ def _debt_prepay(result: Mapping, envelope: Mapping, task: str, cur: Any) -> lis
     return out
 
 
+_REFI_VERDICT = {"take_offer": L("Take the offer", "Toma la oferta"),
+                 "take_offer_keep_payment": L("Take it only at your current payment", "Tómala sólo con tu pago actual"),
+                 "keep": L("Keep the current debt", "Conserva tu deuda actual")}
+
+
 def _debt_refinance(result: Mapping, envelope: Mapping, task: str, cur: Any) -> list[dict]:
     now, offer, risk = result.get("current") or {}, result.get("offer") or {}, result.get("risk") or {}
+    same = result.get("same_payment") if isinstance(result.get("same_payment"), Mapping) else None
     rows = [{"label": L("Interest if you keep it", "Intereses si la conservas"), "value": money(now.get("interest"), cur)},
             {"label": L("Offer: interest plus fees", "Oferta: intereses más comisiones"), "value": money(offer.get("total_cost"), cur)},
             {"label": L("Fees", "Comisiones"), "value": money(result.get("fees"), cur), "sub": True},
             {"label": L("Fees paid back after", "Comisiones recuperadas en"), "value": months(result.get("breakeven_month"))}]
+    if same is not None:
+        rows.append({"label": L("Offer at your current payment: saved", "Oferta con tu pago actual: ahorro"),
+                     "value": money(same.get("interest_saved"), cur)})
+    if result.get("verdict") in _REFI_VERDICT:
+        rows.append({"label": L("Verdict", "Veredicto"), "value": {"t": "text", "v": _REFI_VERDICT[result["verdict"]]}})
     if risk.get("promo_months") is not None:
         rows += [{"label": L("Owed when the promo ends", "Saldo al terminar la promoción"),
                   "value": money(risk.get("balance_at_promo_end"), cur)},
@@ -716,14 +760,21 @@ def _debt_refinance(result: Mapping, envelope: Mapping, task: str, cur: Any) -> 
     out = [_spec(task, "ticket", L("Is the offer worth it", "¿Conviene la oferta?"),
                  {"rows": rows, "total": {"label": L("Interest saved", "Intereses ahorrados"),
                                           "value": money(result.get("interest_saved"), cur)}}, envelope, result)]
-    options = [{"label": L("Keep it", "Conservarla"), "best": result.get("worth_it") is False},
-               {"label": L("Take the offer", "Tomar la oferta"), "best": result.get("worth_it") is True}]
+    verdict = result.get("verdict")
+    options = [{"label": L("Keep it", "Conservarla"), "best": verdict == "keep"},
+               {"label": L("Take the offer", "Tomar la oferta"), "best": verdict == "take_offer"}]
+    columns = [now, offer]
+    if same is not None:
+        options.append({"label": L("Offer at your payment", "Oferta con tu pago"),
+                        "best": verdict == "take_offer_keep_payment"})
+        columns.append(same)
     metrics = [{"label": L("Monthly payment", "Pago mensual"),
-                "values": [money(now.get("monthly_payment"), cur), money(offer.get("monthly_payment"), cur)]},
+                "values": [money(c.get("monthly_payment"), cur) for c in columns]},
                {"label": L("Months to repay", "Meses para liquidar"),
-                "values": [months(now.get("months")), months(offer.get("months"))], "better": "lower"},
+                "values": [months(c.get("months")) for c in columns], "better": "lower"},
                {"label": L("Total cost", "Costo total"),
-                "values": [money(now.get("interest"), cur), money(offer.get("total_cost"), cur)], "better": "lower"}]
+                "values": [money(now.get("interest"), cur)] + [money(c.get("total_cost"), cur) for c in columns[1:]],
+                "better": "lower"}]
     out.append(_spec(task, "comparison", L("Now vs the offer", "Hoy contra la oferta"),
                      {"options": options, "metrics": metrics}, envelope, result))
     return out
