@@ -344,8 +344,8 @@ def _profile(facts: _Facts) -> dict:
         "tax_residence_assumed": None if tax_list else country,
         "citizenship": raw.get("citizenship") if isinstance(raw.get("citizenship"), list) else None,
         # A US citizen is a US person (taxed on worldwide income) whether or not anyone said "us_person".
-        "us_person": raw.get("us_person") if isinstance(raw.get("us_person"), bool)
-        else True if _us_citizen(raw.get("citizenship")) else None,
+        "us_person": True if _us_citizen(raw.get("citizenship"))
+        else raw.get("us_person") if isinstance(raw.get("us_person"), bool) else None,
         "dependents": raw.get("dependents") if isinstance(raw.get("dependents"), int) else None,
         "dependent_ages": raw.get("dependent_ages") if isinstance(raw.get("dependent_ages"), list) else None,
         "currencies": raw.get("currencies") if isinstance(raw.get("currencies"), list) else None,

@@ -906,3 +906,31 @@ def test_a_constancia_only_withholding_total_includes_foreign_tax(service):
     report = service.run("tax_pack", inputs={"tax_year": 2025}, client_id="mariana")
     broker = report["result"]["sections"]["mx_dividendos"]["summary"]["brokers"][0]
     assert broker["withheld_mxn"] == "432.59"  # 282.59 ISR + 150.00 abroad
+
+
+def test_us_citizenship_outweighs_a_saved_us_person_false(service):
+    said = {"kind": "user", "ref": "chat", "observed_on": "2026-09-01"}
+    service.remember("mariana", [{"key": "client.profile", "value": {
+        "residence": {"country": "MX"}, "citizenship": ["MX", "US"], "us_person": False}, "source": said}])
+    assert service.situation("mariana")["profile"]["us_person"] is True
+    report = service.run("tax_pack", inputs={"tax_year": 2025}, client_id="mariana")
+    assert report["result"]["jurisdictions"] == ["MX", "US"]
+
+
+@pytest.mark.parametrize("kind, debt_kind", [("card", "card"), ("credit_card", "card"), ("mortgage", "mortgage")])
+def test_a_debt_alias_without_a_label_keeps_its_kind(service, kind, debt_kind):
+    chat = service.ingest("mariana", "chat", {"currency": "MXN", "items": [
+        {"kind": kind, "amount": 1000, "quote": "debo 1000"}]})
+    service.ingest("mariana", "confirm", {"proposal_id": chat["result"]["proposal_id"],
+                                          "acknowledge_discrepancies": True})
+    debts = [f["value"] for f in service.inspect("mariana")["facts"] if f["key"].startswith("liability.")]
+    assert [d["kind"] for d in debts] == [debt_kind]
+
+
+def test_a_retirement_alias_without_a_label_is_a_retirement_account(service):
+    chat = service.ingest("mariana", "chat", {"currency": "USD", "items": [
+        {"kind": "retirement", "amount": 5000, "quote": "tengo 5000 dólares para el retiro"}]})
+    service.ingest("mariana", "confirm", {"proposal_id": chat["result"]["proposal_id"],
+                                          "acknowledge_discrepancies": True})
+    saved = [f["value"] for f in service.inspect("mariana")["facts"] if f["key"].startswith("investment.")]
+    assert [v["kind"] for v in saved] == ["retirement"]

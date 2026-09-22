@@ -26,10 +26,11 @@ from .model import build_proposal
 
 
 _KINDS = ("cash", "account", "position", "liability", "income")
+_DEBT_LABELS = {"card": "Credit card", "credit_card": "Credit card", "mortgage": "Mortgage", "loan": "Personal loan"}
 # The words a model naturally writes for each kind, and the account type they imply.
 _KIND_ALIASES = {
     "investment": ("account", "brokerage"), "investments": ("account", "brokerage"),
-    "brokerage": ("account", "brokerage"), "retirement": ("account", None), "afore": ("account", "afore"),
+    "brokerage": ("account", "brokerage"), "retirement": ("account", "retirement"), "afore": ("account", "afore"),
     "savings": ("cash", "savings"), "checking": ("cash", "checking"), "bank": ("cash", "checking"),
     "deposit": ("cash", "savings"), "debt": ("liability", None), "loan": ("liability", None),
     "card": ("liability", None), "credit_card": ("liability", None), "mortgage": ("liability", None),
@@ -74,6 +75,8 @@ def _canonical(item: dict[str, Any]) -> dict[str, Any]:
     out = {**item, "kind": canonical}
     if implied and not out.get("account_type") and canonical in ("account", "cash"):
         out["account_type"] = implied
+    if canonical == "liability" and not out.get("label") and kind in _DEBT_LABELS:
+        out["label"] = _DEBT_LABELS[kind]  # {kind: card} with no label is still a card, never "Debt" of kind other
     return out
 
 
@@ -102,7 +105,8 @@ _LIABILITY_WORDS = ((re.compile(r"(?i)\b(hipoteca|mortgage|infonavit|fovissste)\
                     (re.compile(r"(?i)\b(tarjeta|card|tdc)\b"), "card"),
                     (re.compile(r"(?i)\b(student|educativo|estudiantil)\b"), "student"),
                     (re.compile(r"(?i)\b(personal|n[oó]mina)\b"), "personal"))
-_INVESTMENT_KINDS = {"brokerage": "brokerage", "afore": "afore", "ira": "retirement", "roth_ira": "retirement",
+_INVESTMENT_KINDS = {"brokerage": "brokerage", "afore": "afore", "retirement": "retirement", "ira": "retirement",
+                     "roth_ira": "retirement",
                      "401k": "retirement", "ppr": "retirement", "hsa": "retirement"}
 
 

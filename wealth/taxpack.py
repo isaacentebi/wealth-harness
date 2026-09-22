@@ -2485,9 +2485,13 @@ def _jurisdictions(inputs: Mapping[str, Any], book: _Book) -> tuple[list[str], s
     citizenship = profile.get("citizenship")
     # A US citizen is a US person whether or not anyone wrote us_person.
     citizen = isinstance(citizenship, list) and any(str(c).strip().upper() in {"US", "USA"} for c in citizenship)
-    if (profile.get("us_person") is True or (citizen and profile.get("us_person") is not False)) and "US" not in codes:
+    if (profile.get("us_person") is True or citizen) and "US" not in codes:
         codes.append("US")
         basis += "; US person (citizen or green card): US tax on worldwide income"
+        if citizen and profile.get("us_person") is False:
+            # Citizenship makes a US person; a saved "not a US person" beside it is stale or wrong, never a reason
+            # to leave out the US return.
+            basis += " (the profile also says us_person false; citizenship decides: check it)"
     return sorted(set(codes)), basis if codes else "unknown"
 
 
