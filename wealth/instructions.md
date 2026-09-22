@@ -274,7 +274,7 @@ Source and confidence:
   from these are saved as inferred until the person confirms them.
 - inference: your own interpretation, always inferred.
 
-Keys (fact_contract.schema has every field): client.profile (name, birth_year,
+Keys (fact_contract.schema, from wealth_context(client_id, intent=remember), has every field): client.profile (name, birth_year,
 residence {country, region, city}, tax_residence only as stated, dependents,
 language); income.<id> (amount, currency, frequency, net, kind; aguinaldo is
 annual with month 12); spending.monthly (total and/or essential); cash.<id>
@@ -368,9 +368,10 @@ from one reaction; risk tolerance comes from what they say about themselves
 in calm terms.
 
 Writes: new keys need no expected_revision. To change part of an existing value,
-send merge=true with only the changed fields; goals and other lists of objects
-merge by id, and null removes a field. To replace a value wholesale, pass the
-client_revision you read. Omit expires_on
+send merge=true with only the changed fields (an object sent without merge for a
+key that holds an object merges the same way); goals and other lists of objects
+merge by id, and null removes a field. To replace a value wholesale, send
+merge=false with the client_revision you read. Omit expires_on
 unless the source gives a shorter validity (see fact_contract.review_days).
 After a conflict error, reload, reconcile and retry. Mention a consequential
 correction naturally; never give save receipts. Saving a preference does not

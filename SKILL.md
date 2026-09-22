@@ -177,7 +177,7 @@ passwords, tokens or other credentials; the store rejects them.
   the file or URL as `ref`) for what you read, and goals, profile, preferences,
   constraints and tax profile from them are saved as `inferred`; `inference`
   for your own reading, always `inferred`.
-- Keys and fields are in `fact_contract.schema` (`client.profile`,
+- Keys and fields are in `fact_contract.schema` (`wealth_context(client_id, intent=remember)`; `client.profile`,
   `income.<id>`, `spending.monthly`, `cash.<id>`, `liability.<id>`,
   `investment.<id>`, `goals`, `reserve`, `preference.*`, `constraint.*`,
   `thread.<id>`). One fact per income, account and debt.

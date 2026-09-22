@@ -367,9 +367,29 @@ def test_partial_weights_are_never_silently_rescaled():
     assert market.run("analyze", {**base, "weights": {"AAPL": 0.5, "MSFT": 0.489}}, {})["status"] == "needs_input"
     shape = market.run("stress", {"scenarios": [{"name": "crash", "shocks": {"AAPL": -0.3}}]}, {})["missing"][0]
     assert '"weights": {' in shape and "positions: [{symbol, value" in shape and "client_id" in shape
-    with pytest.raises(ValueError, match=r"needs shocks \{SYMBOL: return\}.*\['equity_shock'\]"):
+    with pytest.raises(ValueError, match=r"needs shocks \{SYMBOL: return\}.*\['drop'\]"):
         market.run("stress", {"currency": "USD", "weights": {"AAPL": 1.0},
-                              "scenarios": [{"name": "crash", "equity_shock": -0.3}]}, {})
+                              "scenarios": [{"name": "crash", "drop": -0.3}]}, {})
+
+
+def test_an_equity_or_market_shock_is_a_broad_index_shock_propagated_by_beta():
+    held = market.run("stress", {"currency": "USD", "weights": {"IVV": 0.5, "BND": 0.3, "CASH::USD": 0.2},
+                                 "asset_classes": {"IVV": "equity", "BND": "bond"},
+                                 "scenarios": [{"name": "crash", "equity_shock": -0.3}]}, {})
+    row = held["result"]["scenarios"][0]
+    assert row["propagation"]["factor"] == "IVV" and row["propagation"]["factor_shock"] == -0.3
+    assert row["portfolio_return"] == pytest.approx(0.5 * -0.3 + 0.3 * 0.1 * -0.3, abs=1e-9)
+    assert any("equity_shock -30% is applied to IVV" in a for a in held["assumptions"])
+    # No index fund held: the shock lands on SPY and every holding moves by its class beta to it.
+    other = market.run("stress", {"currency": "USD", "weights": {"AAPL": 0.6, "BND": 0.4},
+                                  "asset_classes": {"AAPL": "equity", "BND": "bond"},
+                                  "scenarios": [{"name": "crash", "market_shock": -0.2}]}, {})
+    row = other["result"]["scenarios"][0]
+    assert row["propagation"]["factor"] == "SPY"
+    assert row["portfolio_return"] == pytest.approx(0.6 * -0.2 + 0.4 * 0.1 * -0.2, abs=1e-9)
+    with pytest.raises(ValueError, match="not both"):
+        market.run("stress", {"currency": "USD", "weights": {"AAPL": 1.0},
+                              "scenarios": [{"name": "x", "equity_shock": -0.3, "market_shock": -0.2}]}, {})
 
 
 def test_stress_window_and_regime_table_use_the_same_close_to_close_convention(monkeypatch):
