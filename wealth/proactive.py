@@ -6,7 +6,7 @@ condenses the week into at most five lines of data for the model to phrase.
 :func:`calendar` is the annual calendar (Mexico, United States and life events)
 filtered to what is relevant for this person.
 
-Contract (docs/scope.md sections 2 and 3):
+Contract (docs/notes/scope.md sections 2 and 3):
 
 * Every trigger is deterministic and reads only known data.  A trigger whose
   inputs are unknown does not fire; it is listed in ``unknown`` with what is
@@ -42,7 +42,7 @@ DEADLINE_DAYS = 14
 PRIORITIES = ("risk", "deadline", "opportunity", "info")
 SEVERITIES = ("act", "consider", "fyi")
 
-# Trigger thresholds (docs/scope.md section 3).
+# Trigger thresholds (docs/notes/scope.md section 3).
 SURPLUS_BALANCE_MULTIPLE = Decimal("1.5")     # checking > 1.5x monthly spend ...
 SURPLUS_CYCLES = 2                            # ... at two consecutive month ends
 SURPLUS_ADVICE_TOLERANCE = Decimal("0.05")    # a thread naming the monthly surplus within 5% is about it

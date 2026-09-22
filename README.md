@@ -146,7 +146,10 @@ Every task with its inputs and an example: [docs/cli.md](docs/cli.md#tasks).
   SQLite file. Statement uploads are deleted after they are saved (or after 30
   days), and ingestion masks account numbers and drops RFC, CURP and SSN. The
   model provider sees the conversation, a short summary of your situation each
-  turn and the tool results the model reads.
+  turn and the tool results the model reads. Each turn fetches prices for held
+  symbols from Yahoo Finance (symbols only, no amounts or identity); `WEALTH_OFFLINE=1`
+  turns that off. The local web page loads fonts from Google Fonts, which sees
+  the IP and the font request but no financial data.
 
 ## Documentation
 

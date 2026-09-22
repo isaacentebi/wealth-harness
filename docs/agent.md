@@ -19,7 +19,8 @@ Open **http://127.0.0.1:8765/**. `--client` defaults to `personal`. The page str
 progress ("Checking your saved profile", "Searching the web", "Running a stress
 test"), can stop a response, and renders headings, lists, tables and source
 links. Response depth is Fast, Balanced or Deep (Codex reasoning low, medium,
-high); Fast is the default. Native web search is enabled by default; Python
+high); Fast is the default. Native web search is enabled by default, and stays
+off for the rest of a conversation once a file has been read; Python
 calculations run through Wealth tools, not an unrestricted shell. A small chip
 notes when facts were saved to memory. **New conversation** clears the transcript
 and Codex session, not memory. Light and dark themes follow the system setting.

@@ -74,8 +74,8 @@ def _param(value: Any, status: str, title: str, url: str | None = None, note: st
 
 
 PARAMETERS: dict[str, dict] = {
-    # Wealth's own play-money policy (docs/scope.md 1.6: a capped satellite sleeve of at most 5-10%).
-    "speculation_cap_share": _param(0.05, "policy", "Wealth play-money policy (docs/scope.md 1.6)"),
+    # Wealth's own play-money policy (docs/notes/scope.md 1.6: a capped satellite sleeve of at most 5-10%).
+    "speculation_cap_share": _param(0.05, "policy", "Wealth play-money policy (docs/notes/scope.md 1.6)"),
     "speculation_cap_ceiling": _param(0.10, "policy", "Wealth play-money policy: the person may set up to 10%"),
     "speculation_debt_rate": _param(0.15, "policy", "Wealth: no play money while any debt costs more than 15% a year"),
     "max_position_loss_share": _param(0.01, "policy", "Wealth: at most 1% of liquid net worth at risk in one position"),

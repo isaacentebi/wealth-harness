@@ -62,12 +62,12 @@ PARAMETERS: dict[str, dict] = {
     "hdhp_oop_max_2026": _p({"self": 8500, "family": 17000}, "verified", "IRS Rev. Proc. 2025-19", IRS_RP_2025_19_URL),
     "mx_gmm_premium_deductible": _p("LISR Art. 151 fr. VI", "needs_verification",
                                     "SAT, Deducciones personales (gastos médicos mayores premiums)", SAT_DEDUCTIONS_URL,
-                                    note="Cited in docs/scope.md 1.10; fraction not re-read on the SAT page."),
+                                    note="Cited in docs/notes/scope.md 1.10; fraction not re-read on the SAT page."),
     "mes_del_testamento": _p("September, notary fees up to 50% off", "verified",
                              "Colegio Nacional del Notariado Mexicano / SEGOB, Septiembre Mes del Testamento (24th edition, 2026)",
                              MES_TESTAMENTO_URL),
     "will_review_years": _p(5, "policy", "Wealth: review estate documents every 3-5 years and after any life event "
-                                         "(docs/scope.md 1.11)"),
+                                         "(docs/notes/scope.md 1.11)"),
 }
 
 

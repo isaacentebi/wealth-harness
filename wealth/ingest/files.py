@@ -10,7 +10,8 @@ from .common import envelope
 from .llm import extraction_request
 from .model import build_proposal
 from .pdf import ingest_pdf, provenance_for
-from .safety import IMAGE_KINDS, LIMITS, UnsafeInput, check_xlsx, read_upload, resolve_upload, sniff
+from .safety import (IMAGE_KINDS, LIMITS, MAX_ROWS, UnsafeInput, check_xlsx, flag_instructions, mark_untrusted,
+                     read_upload, resolve_upload, sniff)
 from .statement import parse_statement_text
 from .tabular import parse_export, read_rows
 
@@ -50,12 +51,14 @@ def ingest_bytes(data: bytes, filename: str, *, owner_id: str = "self", preset: 
                         warnings=[f"The {group.upper()} upload exceeds {LIMITS[group] // (1024 * 1024)} MB."])
     try:
         if kind == "pdf":
-            return ingest_pdf(data, name, owner_id=owner_id, aliases=aliases, tolerance=tolerance)
-        if group == "image":
-            return _ingest_image(data, name, kind, owner_id=owner_id, aliases=aliases, tolerance=tolerance,
-                                 source_text=source_text)
-        return _ingest_table(data, name, kind, owner_id=owner_id, preset=preset, aliases=aliases, currency=currency,
-                             as_of=as_of, tolerance=tolerance)
+            report = ingest_pdf(data, name, owner_id=owner_id, aliases=aliases, tolerance=tolerance)
+        elif group == "image":
+            report = _ingest_image(data, name, kind, owner_id=owner_id, aliases=aliases, tolerance=tolerance,
+                                   source_text=source_text)
+        else:
+            report = _ingest_table(data, name, kind, owner_id=owner_id, preset=preset, aliases=aliases,
+                                   currency=currency, as_of=as_of, tolerance=tolerance)
+        return mark_untrusted(report)  # page text and descriptions are the file's words, not instructions
     except UnsafeInput as exc:
         return envelope("rejected", {"reason": "unsafe_input"}, warnings=[str(exc)])
     except (ValueError, KeyError, IndexError) as exc:
@@ -68,6 +71,7 @@ def _ingest_table(data: bytes, name: str, kind: str, *, owner_id, preset, aliase
     rows = read_rows(data, kind)
     parsed = parse_export(rows, preset=preset, aliases=aliases, currency=currency, as_of=as_of)
     provenance = provenance_for(data, name, _MEDIA[kind], rows=len(rows), parser=f"export:{parsed['preset'] or 'generic'}")
+    flag_instructions(provenance, (cell for row in rows[:MAX_ROWS] for cell in row))
     if not parsed["parsed"]:
         text = "\n".join(",".join(row) for row in rows[:2000])
         request = extraction_request([(1, text)], provenance=provenance,
@@ -83,6 +87,7 @@ def _ingest_table(data: bytes, name: str, kind: str, *, owner_id, preset, aliase
 
 def _ingest_image(data: bytes, name: str, kind: str, *, owner_id, aliases, tolerance, source_text) -> dict[str, Any]:
     provenance = provenance_for(data, name, _MEDIA[kind], parser="host-text")
+    flag_instructions(provenance, [source_text or ""])
     if source_text:
         parsed = parse_statement_text([(1, source_text)], aliases=aliases)
         if parsed["parsed"]:

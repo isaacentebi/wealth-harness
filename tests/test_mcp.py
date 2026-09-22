@@ -123,16 +123,20 @@ def test_stdio_tool_journey_and_annotations(tmp_path, capfd):
                     "expected_revision": 1,
                 },
             )
+            accept = {
+                "action": "accept",
+                "client_id": "mcp-client",
+                "inputs": {
+                    "decision_id": proposal["id"],
+                    "expected_revision": 2,
+                },
+            }
+            # No turn session: the first call only returns a summary and a code for the person.
+            pending = await call("wealth_decision", accept)
+            assert pending["status"] == "needs_person"
             rejected = await client.call_tool(
                 "wealth_decision",
-                {
-                    "action": "accept",
-                    "client_id": "mcp-client",
-                    "inputs": {
-                        "decision_id": proposal["id"],
-                        "expected_revision": 2,
-                    },
-                },
+                {**accept, "confirm": True, "confirmation_code": pending["result"]["confirmation_code"]},
             )
             assert rejected.is_error
             assert "IneligibleEvidenceError" in str(rejected.content)

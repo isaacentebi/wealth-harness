@@ -24,6 +24,40 @@ def _destructive(operation: str, payload: object) -> bool:
         operation == "client" and isinstance(payload, dict) and payload.get("action") == "forget")
 
 
+def _saves_on_consent(operation: str, payload: object) -> str | None:
+    """What an operation that needs the person's yes would do, or None."""
+    action = payload.get("action") if isinstance(payload, dict) else None
+    if operation == "ingest" and action in {"confirm", "confirm_duplicates"}:
+        return "save this statement or proposal"
+    if operation == "decision" and action == "accept":
+        return "accept this decision"
+    if operation == "resolve_contradiction":
+        return "save this answer to the contradiction"
+    return None
+
+
+def _confirm_save(what: str) -> None:
+    """Require a person at a terminal (or ``--yes``, passed after the person agreed) to save.
+
+    Piped stdin alone is never consent: a script or agent could send it.
+    """
+
+    if not sys.stdin.isatty():
+        raise PermissionError(f"this would {what}; it needs an interactive terminal, or --yes once the person "
+                              "has agreed to exactly this")
+    print(f"This will {what}. Type 'yes' to confirm: ", end="", file=sys.stderr, flush=True)
+    try:
+        with open("/dev/tty", encoding="utf-8") as terminal:  # stdin may already be at EOF after the payload
+            answer = terminal.readline()
+    except OSError:
+        try:
+            answer = input()
+        except EOFError:
+            answer = ""
+    if answer.strip().lower() not in {"yes", "y", "si", "sí"}:
+        raise PermissionError("not confirmed; nothing was saved")
+
+
 def _confirm_forget(payload: dict) -> None:
     """Require a person at a terminal to type the client id and DELETE.
 
@@ -93,6 +127,9 @@ def _main(argv: list[str] | None = None) -> int:
                         help="foreground watch interval in seconds (default: 300)")
     parser.add_argument("--once", action="store_true",
                         help="evaluate monitoring once and exit")
+    parser.add_argument("--yes", action="store_true",
+                        help="the person has agreed: run ingest confirm, decision accept or resolve_contradiction "
+                             "without an interactive terminal")
     args = parser.parse_args(argv)
     try:
         if args.operation == "watch":
@@ -125,6 +162,9 @@ def _main(argv: list[str] | None = None) -> int:
             payload = {} if args.operation == "context" and not raw.strip() else json.loads(raw, parse_constant=_reject_constant)
         if _destructive(args.operation, payload):
             _confirm_forget(payload if args.operation == "forget" else {"client_id": payload.get("client_id")})
+        what = _saves_on_consent(args.operation, payload)
+        if what and not args.yes:
+            _confirm_save(what)
         result = dispatch(args.operation, payload, args.db)
         print(json.dumps(result, ensure_ascii=False, allow_nan=False, indent=2), flush=True)
         return 0
