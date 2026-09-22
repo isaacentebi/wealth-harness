@@ -1,0 +1,6 @@
+{"bmx": {"series": [
+ {"idSerie": "SF43936", "titulo": "Valores gubernamentales Resultados de la subasta semanal Cetes a 28 días Tasa de rendimiento", "datos": [{"fecha": "24/09/2026", "dato": "6.15"}]},
+ {"idSerie": "SF43939", "titulo": "Valores gubernamentales Resultados de la subasta semanal Cetes a 91 días Tasa de rendimiento", "datos": [{"fecha": "24/09/2026", "dato": "6.59"}]},
+ {"idSerie": "SF43942", "titulo": "Valores gubernamentales Resultados de la subasta semanal Cetes a 182 días Tasa de rendimiento", "datos": [{"fecha": "24/09/2026", "dato": "6.91"}]},
+ {"idSerie": "SF43945", "titulo": "Valores gubernamentales Resultados de la subasta semanal Cetes a 364 días Tasa de rendimiento", "datos": [{"fecha": "17/09/2026", "dato": "7.24"}, {"fecha": "24/09/2026", "dato": "N/E"}]}
+]}}

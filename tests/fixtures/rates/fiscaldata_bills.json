@@ -1,0 +1,99 @@
+{
+ "data": [
+  {
+   "cusip": "912797TC1",
+   "security_type": "Bill",
+   "security_term": "13-Week",
+   "auction_date": "2026-09-21",
+   "issue_date": "2026-09-24",
+   "high_investment_rate": "4.113000",
+   "high_discnt_rate": "4.015000",
+   "cash_management_bill_cmb": "No"
+  },
+  {
+   "cusip": "912797WL7",
+   "security_type": "Bill",
+   "security_term": "26-Week",
+   "auction_date": "2026-09-21",
+   "issue_date": "2026-09-24",
+   "high_investment_rate": "4.303000",
+   "high_discnt_rate": "4.155000",
+   "cash_management_bill_cmb": "No"
+  },
+  {
+   "cusip": "912797UD7",
+   "security_type": "Bill",
+   "security_term": "26-Week",
+   "auction_date": "2026-09-14",
+   "issue_date": "2026-09-17",
+   "high_investment_rate": "4.203000",
+   "high_discnt_rate": "4.060000",
+   "cash_management_bill_cmb": "No"
+  },
+  {
+   "cusip": "912797VH7",
+   "security_type": "Bill",
+   "security_term": "13-Week",
+   "auction_date": "2026-09-14",
+   "issue_date": "2026-09-17",
+   "high_investment_rate": "4.066000",
+   "high_discnt_rate": "3.970000",
+   "cash_management_bill_cmb": "No"
+  },
+  {
+   "cusip": "912797WK9",
+   "security_type": "Bill",
+   "security_term": "26-Week",
+   "auction_date": "2026-09-08",
+   "issue_date": "2026-09-10",
+   "high_investment_rate": "4.023000",
+   "high_discnt_rate": "3.890000",
+   "cash_management_bill_cmb": "No"
+  },
+  {
+   "cusip": "912797VG9",
+   "security_type": "Bill",
+   "security_term": "13-Week",
+   "auction_date": "2026-09-08",
+   "issue_date": "2026-09-10",
+   "high_investment_rate": "3.890000",
+   "high_discnt_rate": "3.800000",
+   "cash_management_bill_cmb": "No"
+  },
+  {
+   "cusip": "912797WA1",
+   "security_type": "Bill",
+   "security_term": "52-Week",
+   "auction_date": "2026-09-01",
+   "issue_date": "2026-09-03",
+   "high_investment_rate": "4.161000",
+   "high_discnt_rate": "3.980000",
+   "cash_management_bill_cmb": "No"
+  },
+  {
+   "cusip": "912797VA2",
+   "security_type": "Bill",
+   "security_term": "13-Week",
+   "auction_date": "2026-08-31",
+   "issue_date": "2026-09-03",
+   "high_investment_rate": "3.859000",
+   "high_discnt_rate": "3.770000",
+   "cash_management_bill_cmb": "No"
+  },
+  {
+   "cusip": "912797WD5",
+   "security_type": "Bill",
+   "security_term": "26-Week",
+   "auction_date": "2026-08-31",
+   "issue_date": "2026-09-03",
+   "high_investment_rate": "4.018000",
+   "high_discnt_rate": "3.885000",
+   "cash_management_bill_cmb": "No"
+  }
+ ],
+ "meta": {
+  "count": 9,
+  "total-count": 13,
+  "total-pages": 1
+ }
+}

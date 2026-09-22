@@ -64,16 +64,17 @@ class Secret:
         raise TypeError("Secret cannot be serialized")
 
 
-def keychain_command(service: str, account: str, platform: str | None = None) -> list[str] | None:
+def keychain_command(service: str, account: str | None, platform: str | None = None) -> list[str] | None:
+    """The read-only lookup of one keychain item (``account`` None: the service's only item)."""
     platform = platform or sys.platform
     if platform == "darwin":
-        return ["security", "find-generic-password", "-s", service, "-a", account, "-w"]
+        return ["security", "find-generic-password", "-s", service, *(["-a", account] if account else []), "-w"]
     if platform.startswith("linux") and shutil.which("secret-tool"):
-        return ["secret-tool", "lookup", "service", service, "account", account]
+        return ["secret-tool", "lookup", "service", service, *(["account", account] if account else [])]
     return None
 
 
-def load_secret(env_name: str, service: str, account: str, *, label: str,
+def load_secret(env_name: str, service: str, account: str | None, *, label: str,
                 environ: Mapping[str, str] | None = None, runner: Callable[..., Any] | None = None,
                 platform: str | None = None) -> Secret | None:
     """``env_name`` if set, else the keychain item (service, account), else ``None``."""
@@ -144,8 +145,9 @@ class ConnectorTimeout(ConnectorError):
 Transport = Callable[[str, str, Mapping[str, str], float], tuple[int, Mapping[str, str], bytes]]
 
 
-def https_transport(allowed_hosts: Iterable[str]) -> Transport:
-    """HTTPS GET with certificate verification, a size cap and no redirects off ``allowed_hosts``."""
+def https_transport(allowed_hosts: Iterable[str], context: ssl.SSLContext | None = None) -> Transport:
+    """HTTPS GET with certificate verification (``context``, default the system store), a size cap and no
+    redirects off ``allowed_hosts``."""
     hosts = frozenset(h.lower() for h in allowed_hosts)
 
     def allowed(url: str) -> bool:
@@ -164,7 +166,7 @@ def https_transport(allowed_hosts: Iterable[str]) -> Transport:
         if not allowed(url):
             raise ConnectorError("Refusing to call an address outside the provider's API host or without HTTPS.")
         request = urllib.request.Request(url, headers=dict(headers), method="GET")
-        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ssl.create_default_context()),
+        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=context or ssl.create_default_context()),
                                              _Redirects())
         failure: ConnectorError | None = None
         status, reply_headers, chunks = 0, {}, []

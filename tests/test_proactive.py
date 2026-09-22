@@ -781,8 +781,19 @@ def test_idle_yield_is_silent_when_the_rate_or_a_balance_is_unknown():
     assert "idle_yield" not in kinds(found) and unknown(found, "idle_yield")
     us = [("client.profile", US), ("spending.monthly", {"essential": 3000, "currency": "USD"}),
           ("cash.chase", {"amount": 90000, "currency": "USD", "purpose": "reserve"}), ("reserve", {"target_months": 6})]
-    found = evaluate(us)
-    assert "idle_yield" not in kinds(found) and "reference rate for USD" in unknown(found, "idle_yield")[0]
+    # A US filer's dollars are priced at the 13-week T-bill (here the built-in dated value: nothing is cached).
+    data = kinds(evaluate(us))["idle_yield"]["data"]
+    assert data["reference_name"] == "US Treasury bill 13 weeks" and data["reference_as_of"] == "2026-09-21"
+    assert data["reference_origin"].startswith("Wealth dated constant") and "Treasury" in data["reference_source"]
+    assert data["lost_per_year"] == pytest.approx(72000 * 0.04113, abs=0.01) and "state and local" in \
+        data["assumptions"][0]
     priced = evaluate(us + [("cash_reference_rate", {"low": 4.1, "unit": "percent", "currency": "USD",
                                                      "source": "3-month T-bill, US Treasury"})])
     assert kinds(priced)["idle_yield"]["data"]["lost_per_year"] == pytest.approx(72000 * 0.041)
+    # With no jurisdiction to price for (no MX or US tax residence) and nothing saved, it stays silent.
+    elsewhere = [("client.profile", {"name": "Ana", "residence": {"country": "ES"}, "tax_residence": ["ES"]}),
+                 ("spending.monthly", {"essential": 3000, "currency": "USD"}),
+                 ("cash.chase", {"amount": 90000, "currency": "USD", "purpose": "reserve"}),
+                 ("reserve", {"target_months": 6})]
+    found = evaluate(elsewhere)
+    assert "idle_yield" not in kinds(found) and "reference rate for EUR" in unknown(found, "idle_yield")[0]
