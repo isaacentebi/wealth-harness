@@ -2,7 +2,7 @@
 
     python openclaw_config.py json   --home H --db D --uploads U --views V   # print the two JSON values
     python openclaw_config.py merge  --config C --home H --db D --uploads U --views V [--no-mcp] [--dry-run]
-    python openclaw_config.py remove --config C [--dry-run]
+    python openclaw_config.py remove --config C [--dry-run] [--no-backup]
 
 ``merge`` and ``remove`` edit only ``mcp.servers.wealth`` and ``skills.entries.wealth``,
 back the file up first (``<config>.wealth-backup-<timestamp>``) and keep every other
@@ -109,14 +109,25 @@ def merge(config: dict, home: str, db: str, uploads: str, views: str, mcp: bool 
     return out
 
 
+def _prune(config: dict, outer: str, inner: str) -> None:
+    """Drop ``outer.inner`` when it is an empty object, then ``outer`` when that leaves it empty."""
+    parent = config.get(outer)
+    if not isinstance(parent, dict):
+        return
+    if parent.get(inner) == {}:
+        del parent[inner]
+    if not parent:
+        del config[outer]
+
+
 def remove(config: dict) -> dict:
+    """A copy of ``config`` without Wealth's entries, and without the empty objects they leave behind."""
     out = json.loads(json.dumps(config))
-    servers = (out.get("mcp") or {}).get("servers")
-    if isinstance(servers, dict):
-        servers.pop(SERVER, None)
-    entries = (out.get("skills") or {}).get("entries")
-    if isinstance(entries, dict):
-        entries.pop(SKILL, None)
+    for outer, inner, name in (("mcp", "servers", SERVER), ("skills", "entries", SKILL)):
+        section = (out.get(outer) or {}).get(inner) if isinstance(out.get(outer), dict) else None
+        if isinstance(section, dict):
+            section.pop(name, None)
+        _prune(out, outer, inner)
     return out
 
 
@@ -130,6 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--views")
     parser.add_argument("--no-mcp", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--no-backup", action="store_true", help="the caller already backed the file up")
     args = parser.parse_args(argv)
     values = (args.home, args.db, args.uploads, args.views)
     if args.command in ("json", "snippet", "merge") and not all(values):
@@ -159,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         print(f"[dry-run] would back up and update {path}")
         return 0
-    backup = _backup(path)
+    backup = None if args.no_backup else _backup(path)
     _write(path, updated)
     print(f"updated {path}" + (f" (backup: {backup.name})" if backup else ""))
     return 0

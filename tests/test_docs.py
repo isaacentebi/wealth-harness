@@ -14,8 +14,9 @@ from wealth.service import OPERATIONS, TASKS
 ROOT = Path(__file__).resolve().parents[1]
 README = ROOT / "README.md"
 SKILL = ROOT / "SKILL.md"
-OWNED = [README, SKILL, ROOT / "HANDOFF.md", *(ROOT / "docs" / name for name in (
-    "architecture.md", "cli.md", "agent.md", "verification.md", "open-source.md"))]
+CLI = ROOT / "docs" / "cli.md"
+OWNED = [README, SKILL, ROOT / "CONTRIBUTING.md", ROOT / "SECURITY.md", *(ROOT / "docs" / name for name in (
+    "architecture.md", "cli.md", "agent.md", "verification.md", "open-source.md", "trading.md", "openclaw.md"))]
 NUMBERS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
            "nine": 9, "ten": 10, "eleven": 11, "twelve": 12}
 CODE = re.compile(r"`([^`\n]+)`")
@@ -47,7 +48,7 @@ def named_tasks(text: str, tools: set[str]) -> set[str]:
     return names - tools - set(connectors.names())
 
 
-@pytest.mark.parametrize("path, heading", [(README, "What it can do"), (SKILL, "Tasks by question")])
+@pytest.mark.parametrize("path, heading", [(CLI, "Tasks"), (SKILL, "Tasks by question")])
 def test_task_index_names_every_task_and_only_real_ones(path, heading, tools):
     named = named_tasks(section(path, heading), tools)
     assert not named - set(TASKS), f"{path.name} names tasks that do not exist: {sorted(named - set(TASKS))}"
@@ -121,3 +122,23 @@ def test_internal_markdown_links_resolve():
                 if anchor not in {_slug(h) for h in headings}:
                     broken.append(f"{path.relative_to(ROOT)} -> {target} (no such heading)")
     assert not broken, "broken links:\n" + "\n".join(broken)
+
+
+def test_one_name_and_no_private_paths():
+    """The product is Wealth and the repository is wealth-harness; no stale checkout names or local paths."""
+    for path in _markdown_files():
+        text = path.read_text(encoding="utf-8")
+        assert "wealth-mgmgt" not in text, f"{path.relative_to(ROOT)} still says wealth-mgmgt"
+        assert not re.search(r"/Users/(?!you/)", text), f"{path.relative_to(ROOT)} contains a local path"
+
+
+def test_readme_images_exist_and_stay_small():
+    text = README.read_text(encoding="utf-8")
+    images = re.findall(r"!\[[^\]]*\]\(([^)\s]+)\)", text) + re.findall(r'<img [^>]*src="([^"]+)"', text)
+    assert images, "the README has no screenshots"
+    local = [image for image in images if not re.match(r"[a-z]+:", image)]  # the CI badge is remote
+    assert local, "the README has no screenshots"
+    for image in local:
+        path = ROOT / image
+        assert path.exists(), image
+        assert path.stat().st_size < 400_000, f"{image} is {path.stat().st_size} bytes"

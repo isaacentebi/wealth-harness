@@ -280,6 +280,7 @@ def test_launcher_supplies_behavior_once_and_preserves_standalone_mcp_contract(t
     assert ASSISTANT_CONTRACT not in prompt
     assert 'model_verbosity="low"' in command
     assert ASSISTANT_CONTRACT not in build_server(include_behavior=False).instructions
-    assert ASSISTANT_CONTRACT in build_server().instructions
+    assert ASSISTANT_CONTRACT not in build_server().instructions  # foreign hosts get the compact contract
+    assert ASSISTANT_CONTRACT in build_server(include_behavior=True).instructions
     assert "client_id: 'profile'" in prompt
     assert "WITHOUT client_id" in ASSISTANT_CONTRACT

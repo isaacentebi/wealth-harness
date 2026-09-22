@@ -54,10 +54,10 @@ Nine MCP tools. Each instance serves one person: use the host's profile ID as
 
 | Tool | Use |
 | --- | --- |
-| `wealth_context` | Without `client_id`: task schemas (`intent="overview"` or one exact task name). With it: relevant facts, fresh or stale; `intent="situation"` returns the whole picture |
+| `wealth_context` | Without `client_id`: every task's purpose and required inputs (`intent="overview"`), or one task's full schema and runnable example (`intent="<task>"`). With it: relevant facts, fresh or stale; `intent="situation"` returns the whole picture |
 | `wealth_run` | Run one task; `client_id` adds saved facts and the ledger; direct inputs override them for that call |
 | `wealth_remember` | Save sourced facts, corrections and merge patches |
-| `wealth_recall` | Search all remembered facts |
+| `wealth_recall` | Search all remembered facts for an open question; exact keys go to `wealth_inspect` |
 | `wealth_inspect` | A fact's full value, one key's history, pending contradictions, or an export (only on request) |
 | `wealth_resolve_contradiction` | Save the person's answer to a contradiction |
 | `wealth_ingest` | Statements, stated balances and connector syncs into a proposal; `confirm` saves it |

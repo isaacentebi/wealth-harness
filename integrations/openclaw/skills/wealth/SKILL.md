@@ -20,12 +20,17 @@ person's profile ID is `me`. Use it as `client_id` / `--client`; never show it.
 **MCP (preferred).** The installer registers an MCP server named `wealth`
 under `mcp.servers` in `openclaw.json`. Its tools: `wealth_context`,
 `wealth_run`, `wealth_remember`, `wealth_recall`, `wealth_ingest`,
-`wealth_decision`, `wealth_inspect`, `wealth_client`.
+`wealth_decision`, `wealth_inspect`, `wealth_resolve_contradiction`,
+`wealth_client`.
 
 - Personal context: `wealth_context(client_id="me", intent="<task>", query=...)`.
 - Task inputs: `wealth_context(intent="<task>")` without `client_id`;
   `intent="overview"` lists tasks. Discover only the task you need.
 - Run: `wealth_run(task=..., inputs=..., client_id="me")`.
+- When a statement or result disagrees with what they told you, it comes back
+  as a contradiction: ask them its question, then save their answer with
+  `wealth_resolve_contradiction` (`keep`, `use_new` or `changed`). Never pick
+  a side yourself.
 
 **Shell, for chat-channel helpers** (host exec; one command, no pipes or `&&`).
 Put the person's words in single quotes and replace every `'` with `'\''`.

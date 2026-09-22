@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sqlite3
 import sys
 import time
@@ -60,6 +61,24 @@ def _command(argv: list[str]) -> str | None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the CLI; a reader that closes the pipe early (``wealth context | head``) ends it quietly."""
+    try:
+        return _main(argv)
+    except BrokenPipeError:
+        _silence_stdout()
+        return 1
+
+
+def _silence_stdout() -> None:
+    """Point stdout at /dev/null so the interpreter's final flush cannot raise again."""
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+    except (OSError, ValueError, AttributeError):
+        pass  # stdout is not a real file (tests capture it); nothing left to flush
+
+
+def _main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else list(argv)
     if _command(argv) in TEXT_COMMANDS:  # text-channel helpers, see docs/openclaw.md
         return text_main(argv)
@@ -107,8 +126,10 @@ def main(argv: list[str] | None = None) -> int:
         if _destructive(args.operation, payload):
             _confirm_forget(payload if args.operation == "forget" else {"client_id": payload.get("client_id")})
         result = dispatch(args.operation, payload, args.db)
-        print(json.dumps(result, ensure_ascii=False, allow_nan=False, indent=2))
+        print(json.dumps(result, ensure_ascii=False, allow_nan=False, indent=2), flush=True)
         return 0
+    except BrokenPipeError:
+        raise
     except (ValueError, TypeError, KeyError, OSError, sqlite3.Error) as exc:
         print(json.dumps({"error": str(exc), "error_type": type(exc).__name__}), file=sys.stderr)
         return 2

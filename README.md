@@ -1,117 +1,159 @@
 # Wealth
 
-A personal financial adviser that runs on your own computer and remembers you.
-It is for people living in Mexico or the United States who want one place to
-understand their money: what comes in and goes out, what they own, what to
-invest in, what they will owe in tax, whether retirement works, and what to do
-next. It answers in Mexican Spanish or English, with the products, taxes and
-institutions of where you live.
+[![Check](https://github.com/isaacentebi/wealth-harness/actions/workflows/check.yml/badge.svg)](https://github.com/isaacentebi/wealth-harness/actions/workflows/check.yml)
 
-Every figure comes from deterministic Python code with its sources and
-assumptions; the language model explains and decides what matters. Your data
-stays in a local SQLite file.
+**A private financial adviser for people in Mexico and the US that starts from
+your whole financial life, not a portfolio: deterministic engines compute every
+figure from your own statements, an AI explains what matters, and it reads your
+broker and bank but places an order only when you tap to confirm.**
+
+It answers in Mexican Spanish or English, with the products, taxes and
+institutions of where you live: CETES and AFORE, Art. 129 and PPR, IRAs and wash
+sales. It runs on your computer, and your data stays in a local SQLite file.
+
+<p align="center">
+  <img src="docs/assets/chat-chart.png" alt="The chat answers 'How is my portfolio doing?' with a portfolio value chart drawn by the engine, a recommendation and today's nudges" width="49%">
+  <img src="docs/assets/chat-order.png" alt="An Alpaca practice order card for 4 VOO at a $512 limit, placed only when the person taps Place orders" width="49%">
+</p>
+<p align="center">
+  <img src="docs/assets/you-page.png" alt="The You page in Spanish: net worth, today's items, the month's savings rate, goals and emergency fund" width="98%">
+</p>
+
+## Why it is different
+
+- **Wealth-first.** It starts with income, spending, savings, debts, goals and
+  retirement, and treats investing as one part of that picture.
+- **Numbers come from code, not the model.** Fifty deterministic tasks
+  (tax lots, Mexican real interest, IMSS pensions, rebalancing, 13F
+  look-through) return each figure with its sources and assumptions. The model
+  chooses what matters and says it plainly.
+- **Statements are the source of truth.** Upload a PDF or CSV statement, or sync
+  Interactive Brokers, Alpaca or Cuenca. Wealth reconciles it with what you told
+  it, shows the differences and saves nothing until you say yes.
+- **Read-write brokers, tap to confirm.** Connectors only read. For Alpaca the
+  model can prepare an order ticket with pre-trade checks; only your tap on its
+  card sends it. Paper trading is the default.
+- **Memory you can see.** Every fact records where it came from and when it was
+  last checked, and you can edit, confirm or delete it on the You page.
 
 ## Quick start
 
-Needs Python 3.11+, [uv](https://docs.astral.sh/uv/) and the Codex CLI signed in
-with your ChatGPT account (`codex login`).
+Needs Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
 ```sh
+git clone https://github.com/isaacentebi/wealth-harness.git
+cd wealth-harness
 uv sync
-uv run wealth-chat --client me
 ```
 
-Open **http://127.0.0.1:8765/**. For a fictional profile instead of your own,
-add `--demo`. Models, depth, fresh test profiles and the terminal version:
-[docs/agent.md](docs/agent.md).
+### Plug into your agent (no model needed)
 
-## The chat and the You page
+Wealth is also an MCP server with nine tools. Your host brings the model and
+web search; Wealth brings the engines and the memory. Give the host
+[SKILL.md](SKILL.md) as its instructions.
 
-**The chat** starts with your situation: a few one-question cards (who you are,
-income, spending, savings, debts, goals, risk) that you can answer, skip or
-replace with a statement upload, then a first synthesis of where you stand.
-After that, ask anything. Progress streams while it works, answers can be
-stopped, and results arrive with charts and tickets drawn by the engine, not
-the model. Attach a PDF, CSV or photo of a statement and it shows what the
-statement means next to what you told it, then asks before saving.
+**Claude Code**, from the checkout:
 
-**The You page** (`/profile`) shows everything Wealth knows about you, where each
-fact came from (you, a statement, a calculation) and when it was last checked.
-You can edit, confirm or delete any fact, see its history, and settle any
-contradiction between what you said and what a document shows.
+```sh
+claude mcp add wealth -e WEALTH_DB="$HOME/.local/share/wealth-harness/clients.sqlite3" \
+  -- uv --directory "$PWD" run wealth-mcp
+```
 
-## What it can do
-
-| Life area | What Wealth does (tasks) |
-| --- | --- |
-| Money in and out | Where money goes and what is investable, cash calendars, projections, withdrawal and liability matching, debt payoff, reserves and goals (`spending`, `calendar`, `income`, `project`, `ladder`, `debt_payoff`, `plan`) |
-| What you own | Holdings, lots, gains and income from a transaction ledger, returns, exposure and overlap, household import, SIC premium (`ledger`, `performance`, `exposure`, `import`, `sic_premium`) |
-| Investing | Investment policy, tax-aware rebalancing, asset location, recurring investing, portfolio analysis and construction, company and fund research (`policy_draft`, `policy_check`, `rebalance`, `asset_location`, `dca`, `compare`, `construct`, `analyze`, `factors`, `stress`, `research`, `value`) |
-| Tax | US federal lots, wash sales and harvesting; Mexico Art. 129, real interest, deductions and PPR, foreign securities, tax calendar; US estate exposure for non-residents (`tax`, `mx_holdings`, `mx_interest`, `mx_deductions`, `mx_foreign`, `mx_calendar`, `estate`) |
-| Retirement | IMSS Ley 73/97, AFORE and Modalidad 40; Social Security, contribution limits and withdrawal order; a readiness range (`retirement_mx`, `retirement_us`, `retirement_readiness`) |
-| Protection | Insurance and estate gaps, life events, and guardrails for speculation, panic selling and scams (`protection_review`, `life_event`, `speculation_check`, `panic_check`, `scam_check`) |
-| Reviews and nudges | What needs attention today, a weekly letter, a quarterly review, a fee audit, opt-in monitor rules (`today`, `weekly`, `quarterly_review`, `fee_audit`, `monitor`) |
-| Following managers | Find a fund manager's SEC 13F filings, read and profile them, compare managers, size a mirror within your policy (`manager_search`, `manager_holdings`, `manager_profile`, `manager_compare`, `manager_mirror`) |
-| Connections | Statement uploads, plus read-only syncs from Interactive Brokers, Alpaca and Cuenca, each saved only after you say yes (`wealth_ingest`: `ibkr_flex`, `alpaca`, `cuenca`) |
-| Execution | An order ticket with pre-trade checks for Alpaca that you place yourself by tapping its card (`order_ticket`) |
-
-`printf '{}' | uv run wealth context` lists every task with its inputs and a
-runnable example.
-
-## Boundaries
-
-- **Connectors only read.** IBKR Flex, Alpaca and Cuenca are pulled when you
-  ask, never in the background, and only send read requests. A sync returns a
-  proposal; nothing is saved until you say yes. Keys live in the OS keychain or
-  environment variables, never in the database, logs or chat.
-- **Only you place an order.** The model can prepare an order ticket; it is
-  placed only when you tap **Place orders** on its card in the local chat page.
-  No tool, command or "yes" in chat places one. Paper trading is the default;
-  live trading needs a server-side opt-in, a typed confirmation the first time
-  and per-order and daily limits. Wealth never moves money or sends messages.
-  Details and threat model: [docs/trading.md](docs/trading.md).
-- **Not a licensed adviser.** Wealth gives analysis and decision support, sizes
-  only as ranges from your own figures, and does not prepare returns or take
-  filing positions. It refers you by where you live: a contador público or CPA
-  for tax, an abogado, notario or attorney for legal matters, CONDUSEF for
-  disputes with Mexican financial institutions, a licensed adviser for ongoing
-  discretionary management.
-- **Privacy.** Your profile, ledger and decisions live in a local, plaintext
-  SQLite file. Statement uploads are deleted after they are saved (or after 30
-  days), and ingestion masks account numbers and drops RFC, CURP and SSN. The
-  model provider (OpenAI through Codex, or your own host's provider) sees the
-  conversation, a short summary of your situation each turn, and the tool
-  results the model reads. Market, research and 13F data come from public
-  sources when you ask.
-
-## Connect your own agent
-
-Wealth is also a model-independent MCP server with nine tools; the host brings
-the model and web search. Give the host [SKILL.md](SKILL.md) and configure:
+**Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`
+on macOS); use absolute paths, and the full path to `uv` (`which uv`) if the app
+cannot find it:
 
 ```json
 {
   "mcpServers": {
     "wealth": {
       "command": "uv",
-      "args": ["--directory", "/absolute/path/to/wealth-mgmgt", "run", "wealth-mcp"],
-      "env": {"WEALTH_DB": "/absolute/private/path/wealth.sqlite3"}
+      "args": ["--directory", "/absolute/path/to/wealth-harness", "run", "wealth-mcp"],
+      "env": {"WEALTH_DB": "/absolute/private/path/clients.sqlite3"}
     }
   }
 }
 ```
 
-To talk to Wealth over WhatsApp, Telegram, iMessage or Signal through
-[OpenClaw](https://github.com/openclaw/openclaw), run
-`integrations/openclaw/install.sh --dry-run`, then without `--dry-run`, and
-restart the gateway: [docs/openclaw.md](docs/openclaw.md).
+**OpenClaw**, to talk to Wealth over WhatsApp, Telegram, iMessage or Signal:
+
+```sh
+integrations/openclaw/install.sh --dry-run   # shows every change, touches nothing
+integrations/openclaw/install.sh
+openclaw gateway restart
+```
+
+Details: [docs/openclaw.md](docs/openclaw.md).
+
+### Local chat (Codex)
+
+The browser chat and the You page use the Codex CLI signed in with your ChatGPT
+account:
+
+```sh
+codex login
+uv run wealth-chat --client me
+```
+
+Open **http://127.0.0.1:8765/**. Add `--demo` for a fictional profile instead of
+your own. Models, depth, fresh test profiles and the terminal version:
+[docs/agent.md](docs/agent.md).
+
+The chat starts with your situation: a few one-question cards you can answer,
+skip or replace with a statement upload, then a first synthesis of where you
+stand. After that, ask anything; answers stream, can be stopped, and arrive with
+charts and order cards drawn by the engine, not the model.
+
+## What it can do
+
+- **Money in and out:** spending, cash calendars, projections, debt payoff,
+  reserves and goals.
+- **What you own:** a transaction ledger with lots, gains and income; returns,
+  exposure and overlap.
+- **Investing:** an investment policy, tax-aware rebalancing, asset location,
+  recurring investing, portfolio construction, stress tests, company and fund
+  research.
+- **Tax:** US federal lots, wash sales and harvesting; Mexico Art. 129, real
+  interest, deductions and PPR, foreign securities, the tax calendar; US estate
+  exposure for non-residents.
+- **Retirement:** IMSS Ley 73 and 97, AFORE and Modalidad 40; Social Security,
+  contribution limits and withdrawal order.
+- **Protection and guardrails:** insurance and estate gaps, life events,
+  speculation, panic selling and scam checks.
+- **Reviews:** what needs attention today, a weekly letter, a quarterly review,
+  a fee audit.
+- **Following managers:** SEC 13F holdings, profiles and comparisons, and a
+  mirror sized within your policy.
+
+Every task with its inputs and an example: [docs/cli.md](docs/cli.md#tasks).
+
+## Boundaries
+
+- **Connectors only read.** IBKR Flex, Alpaca and Cuenca are pulled when you
+  ask, never in the background. A sync returns a proposal; nothing is saved
+  until you say yes. Keys live in the OS keychain or environment variables,
+  never in the database, logs or chat.
+- **Only you place an order.** No tool, command or "yes" in chat places one.
+  Live trading needs a server-side opt-in, a typed confirmation the first time
+  and per-order and daily limits. Wealth never moves money or sends messages.
+  Threat model: [docs/trading.md](docs/trading.md).
+- **Not a licensed adviser.** Wealth gives analysis and decision support, sizes
+  only as ranges from your own figures, and does not prepare returns or take
+  filing positions. It refers you to a contador público or CPA for tax, an
+  abogado, notario or attorney for legal matters, and CONDUSEF for disputes
+  with Mexican financial institutions.
+- **Privacy.** Your profile, ledger and decisions live in a local plaintext
+  SQLite file. Statement uploads are deleted after they are saved (or after 30
+  days), and ingestion masks account numbers and drops RFC, CURP and SSN. The
+  model provider sees the conversation, a short summary of your situation each
+  turn and the tool results the model reads.
 
 ## Documentation
 
 | Document | For |
 | --- | --- |
 | [docs/agent.md](docs/agent.md) | Running the chat and terminal assistant, fresh test profiles, runtime policy |
-| [docs/cli.md](docs/cli.md) | Every CLI command and MCP tool, with an example; ingestion and connector setup |
+| [docs/cli.md](docs/cli.md) | Every task, CLI command and MCP tool, with an example; ingestion and connector setup |
 | [docs/architecture.md](docs/architecture.md) | Module map, data flow, invariants and trust boundaries |
 | [docs/trading.md](docs/trading.md) | Guarded order execution: checks, setup, threat model |
 | [docs/openclaw.md](docs/openclaw.md) | Text-channel setup through OpenClaw |
@@ -120,7 +162,8 @@ restart the gateway: [docs/openclaw.md](docs/openclaw.md).
 | [SKILL.md](SKILL.md) | Condensed policy for an MCP host |
 | [wealth/instructions.md](wealth/instructions.md) | The assistant's full conversation policy |
 | [references/playbook.md](references/playbook.md) | Interpreting financial results |
-| [HANDOFF.md](HANDOFF.md) | Where a new contributor starts |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Setup, checks and the rules for changes |
+| [SECURITY.md](SECURITY.md) | Reporting a vulnerability; what Wealth defends |
 
 ## Development
 

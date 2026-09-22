@@ -20,6 +20,7 @@ Consent and provenance come from the person, not the model (see ``consent.py``):
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 from functools import wraps
 from typing import Any, Literal, Mapping
@@ -31,7 +32,7 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, StrictInt
 
 from . import consent as _consent
-from .behavior import ASSISTANT_CONTRACT
+from .behavior import ASSISTANT_CONTRACT, HOST_CONTRACT
 from .service import WealthService
 from .store import StaleRevisionError, StoreError, ValidationError
 
@@ -60,13 +61,38 @@ READ = ToolAnnotations(
 WRITE = ToolAnnotations(
     read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=False
 )
+# wealth_run can fetch public market, fund and SEC data, and some tasks keep state even without
+# save_as (monitor rules, dismissed nudges, prepared order tickets), so it cannot be read-only.
+RUN = ToolAnnotations(
+    read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True
+)
+# Connector syncs read from a broker or bank the person configured.
+INGEST = RUN
+
+_UNKNOWN_TASK = re.compile(r"^unknown task ('[^']*'|\S+)")
 
 
 def _safe_reason(error: Exception) -> str:
     """Return bounded domain guidance without echoing payloads or trace details."""
 
     reason = " ".join(str(error).split())
+    unknown = _UNKNOWN_TASK.match(reason)
+    if unknown:  # the full task list does not fit; point at discovery instead of truncating it
+        return f"unknown task {unknown.group(1)}; call wealth_context without client_id to list tasks."
     return (reason or "Input failed the operation contract; check field names and types.")[:600]
+
+
+def _task_index(catalog: dict) -> dict:
+    """Discovery overview: each task's purpose and required inputs, without the full examples."""
+
+    index = {key: value for key, value in catalog.items() if key not in {"tasks", "connectors", "fact_contract"}}
+    index["tasks"] = {name: {"purpose": spec.get("purpose", ""), "required": spec.get("required", [])}
+                      for name, spec in catalog["tasks"].items()}
+    index["connectors"] = {name: spec.get("purpose", "") for name, spec in (catalog.get("connectors") or {}).items()}
+    index["next_step"] = ("Call wealth_context with intent=<task name> (no client_id) for that task's optional "
+                          "inputs, notes and a runnable example; with client_id for the facts it uses and the "
+                          "fact contract wealth_remember expects; or detail=full for every schema at once.")
+    return index
 
 
 CONSENT_TOOLS = _consent.CONSENT_TOOLS
@@ -95,9 +121,14 @@ def _cites_ingested(ref: str, sources: list[dict]) -> bool:
     return False
 
 
-def build_server(db_path: str | None = None, *, include_behavior: bool = True,
+def build_server(db_path: str | None = None, *, include_behavior: bool = False,
                  tools: frozenset[str] | None = None, environ: Mapping[str, str] | None = None) -> MCPServer:
     """Build the MCP server; ``tools`` limits it to those tool names (all when None).
+
+    The instructions carry the tool rules and a compact conversation contract
+    (``HOST_CONTRACT``). ``include_behavior=True`` appends the full policy in
+    ``instructions.md`` instead, for a host that has no other copy of it; the
+    Wealth launcher passes that policy to the model directly.
 
     ``environ`` (default ``os.environ``) carries the launcher's per-turn consent
     evidence; see ``consent.py``.
@@ -200,13 +231,20 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = True,
         client_id: str | None = None,
         intent: str = "overview",
         query: str = "",
+        detail: Literal["summary", "full"] = "summary",
     ) -> dict[str, Any]:
-        """Without client_id: task schemas (intent=overview lists all, or one exact task name).
+        """Without client_id: task discovery. intent=overview lists every task with its purpose and
+        required inputs; intent=<task name> returns that task's full schema and a runnable example
+        (detail=full returns every task's full schema, which is large).
 
-        With client_id: the facts relevant to that task, marked fresh or stale.
-        intent is a task name such as plan, exposure, tax or spending, not free text.
+        With client_id: the facts relevant to that task, marked fresh or stale; intent=situation
+        returns the whole picture. intent is a task name such as plan, exposure, tax or spending,
+        not free text.
         """
-        return service.context(client_id=client_id, intent=intent, query=query)
+        result = service.context(client_id=client_id, intent=intent, query=query)
+        if client_id is None and intent == "overview" and detail == "summary":
+            return _task_index(result)
+        return result
 
     @tool(annotations=WRITE)
     def wealth_remember(
@@ -230,7 +268,7 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = True,
             receipt["warnings"] = [*warnings, *(receipt.get("warnings") or [])]
         return receipt
 
-    @tool(annotations=WRITE)
+    @tool(annotations=RUN)
     def wealth_run(
         task: str,
         inputs: dict[str, Any] | None = None,
@@ -240,8 +278,9 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = True,
     ) -> dict[str, Any]:
         """Run one catalog task (schemas: wealth_context without client_id).
 
-        client_id adds remembered facts and the ledger; inputs override them.
-        save_as (analysis.<name>, research.<symbol>, or household for import) needs expires_on.
+        client_id adds remembered facts and the ledger; inputs override them for this call only.
+        Without save_as the result is not saved to memory; save_as (analysis.<name>,
+        research.<symbol>, or household for import) saves it and needs expires_on.
         """
         return service.run(
             task=task,
@@ -260,7 +299,14 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = True,
         embedding_model: str | None = None,
         include_stale: bool = False,
     ) -> dict[str, Any]:
-        """Search all remembered facts by keyword (optionally a host vector); stale facts are marked."""
+        """Search every remembered fact for this client by keyword and concept; returns the best
+        matches with their value, source, observation date and whether they are stale.
+
+        Use it for open questions ("what did they say about the house?"); use wealth_context for
+        a task's facts and wealth_inspect for exact keys. query_embedding with embedding_model
+        ranks by a vector the host computed (index facts first with wealth_client action=index).
+        include_stale adds facts past their review date.
+        """
         return service.recall(
             client_id=client_id,
             query=query,
@@ -285,7 +331,7 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = True,
             require("accept this decision", _consent.is_affirmative(turn.message))
         return service.decision(action=action, client_id=client_id, inputs=inputs)
 
-    @tool(annotations=WRITE)
+    @tool(annotations=INGEST)
     def wealth_ingest(
         client_id: str,
         action: Literal["file", "extraction", "chat", "confirm", "confirm_duplicates", "diff", "connector", "connector_status"],
@@ -341,7 +387,14 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = True,
         client_id: str,
         inputs: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """create: inputs.display_name (once, at setup). index: inputs.fact_id, embedding, model."""
+        """Set up the profile or index a fact for semantic recall.
+
+        create: inputs.display_name; call once, when the host first provisions this person
+        (fails with ClientExistsError if the profile exists). index: inputs.fact_id (from
+        wealth_inspect), embedding (list of numbers the host computed for that fact) and model (its
+        name), so wealth_recall can rank by query_embedding. Deleting a profile is not a tool;
+        the person runs `wealth client` forget themselves.
+        """
         return service.client(action=action, client_id=client_id, inputs=inputs)
 
     if tools is not None:
@@ -371,15 +424,18 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = True,
             "Exports contain sensitive history and should be fetched only when requested. "
             "Deleting a profile is not available here; the person runs `wealth client` forget "
             "themselves.\n"
-            + (ASSISTANT_CONTRACT if include_behavior else "")
+            + (ASSISTANT_CONTRACT if include_behavior else HOST_CONTRACT)
         ),
     )
 
 
 def main() -> None:
     allowed = os.environ.get("WEALTH_MCP_TOOLS")
+    # The full policy (~21k characters) is opt-in: WEALTH_BEHAVIOR_IN_SERVER=1. WEALTH_BEHAVIOR_IN_HOST=1,
+    # which the Wealth launcher sets, always leaves it out.
     build_server(
-        include_behavior=os.environ.get("WEALTH_BEHAVIOR_IN_HOST") != "1",
+        include_behavior=(os.environ.get("WEALTH_BEHAVIOR_IN_SERVER") == "1"
+                          and os.environ.get("WEALTH_BEHAVIOR_IN_HOST") != "1"),
         tools=frozenset(name.strip() for name in allowed.split(",") if name.strip()) if allowed else None,
     ).run(transport="stdio")
 

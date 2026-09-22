@@ -587,7 +587,7 @@ def _fetch_yfinance(symbol: str, entity_type: str, retrieved_on: date) -> dict[s
     try:
         import yfinance as yf  # type: ignore
     except ImportError as exc:
-        raise RuntimeError("live_fetch requires the optional analytics dependency: install wealth-harness[analytics]") from exc
+        raise RuntimeError("live_fetch needs yfinance, a core dependency of wealth-harness; reinstall it (uv sync)") from exc
 
     ticker = yf.Ticker(symbol)
     info = dict(ticker.get_info() or {})

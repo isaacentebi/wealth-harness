@@ -68,7 +68,7 @@ Surfaces
 | `cli_text.py` | Text-channel commands for hosts like OpenClaw: `onboarding`, `today`, `view` |
 | `web.py`, `chat.html`, `profile.html` | Loopback browser chat, the You page, uploads, onboarding cards, order cards |
 | `agent.py` | Codex launcher: command, prompt, streaming events, deferred memory step, demo profile |
-| `behavior.py`, `instructions.md` | The shared conversation policy |
+| `behavior.py`, `instructions.md` | The shared conversation policy, and the compact contract the MCP server gives other hosts |
 | `catalog.py` | Task catalog: purpose, inputs and a runnable example per task; connectors |
 | `onboarding.py` | Deterministic onboarding cards that write canonical facts |
 | `profile.py` | Read model and fact edits for the You page |

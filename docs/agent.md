@@ -42,7 +42,7 @@ turns image viewing off.
 Onboarding is a short run of one-question cards (name and residence, age and
 dependents, income, spending, savings and investments, debts, goals, risk,
 statements) that write facts directly; each can be skipped, and a statement
-upload can replace typing. A first synthesis of where you stand follows. Design notes: [onboarding.md](onboarding.md).
+upload can replace typing. A first synthesis of where you stand follows. Design notes: [notes/onboarding.md](notes/onboarding.md).
 
 **The You page** (`/profile`, linked from the chat) shows what Wealth knows,
 where each fact came from and when it was last checked. Facts can be edited,
@@ -120,8 +120,9 @@ a response ends the whole Codex process group, including the Wealth MCP server.
 
 [wealth/instructions.md](../wealth/instructions.md) replaces Codex's built-in
 coding instructions; inherited AGENTS files are disabled for this assistant.
-The standalone MCP server reads the same policy. The launcher suppresses that
-MCP copy so the policy is supplied once. Low response verbosity is independent
+The standalone MCP server gives other hosts a compact contract instead and
+appends this full policy only with `WEALTH_BEHAVIOR_IN_SERVER=1`; the launcher
+sets `WEALTH_BEHAVIOR_IN_HOST=1` so the policy reaches the model exactly once. Low response verbosity is independent
 of reasoning effort; explicit requests for detail can still receive long answers.
 
 The browser server binds only to a loopback address (`127.0.0.1`, or `::1` with
@@ -132,7 +133,7 @@ a local personal interface, not a hosted multi-user service.
 ## Other model providers
 
 To use OpenRouter or another API provider, configure it in your own host agent,
-then attach Wealth through the [MCP configuration](../README.md#connect-your-own-agent).
+then attach Wealth through the [MCP configuration](../README.md#plug-into-your-agent-no-model-needed).
 Keep credentials in that host's secret configuration, outside prompts and Git.
 The host supplies web search, scheduling and any embedding service. Wealth does
 not supply a hosted model-provider integration or public authentication layer.

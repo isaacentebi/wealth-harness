@@ -28,7 +28,7 @@ Then message your claw: *hola, quiero ordenar mis finanzas*.
 The installer:
 
 1. checks for `uv` (and warns when `openclaw` is not on PATH);
-2. runs `uv sync --inexact --extra images` (Pillow, for PNG views), the only
+2. runs `uv sync --locked --inexact --extra images` (Pillow, for PNG views), the only
    network step, and checks Python ≥ 3.11;
 3. creates a private data directory (mode 0700) at
    `${WEALTH_DATA_DIR:-~/.local/share/wealth-harness}` with the database

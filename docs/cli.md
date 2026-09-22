@@ -26,14 +26,28 @@ uv run wealth-mcp                         # speaks MCP on stdin/stdout
 
 The two assistants need a signed-in Codex CLI; `wealth` and `wealth-mcp` need
 no model at all. `WEALTH_MCP_TOOLS=wealth_context,wealth_run` limits the MCP
-server to the named tools, and `WEALTH_BEHAVIOR_IN_HOST=1` leaves the
-conversation policy out of its instructions when the host already has it.
+server to the named tools. The server's instructions carry the tool rules and
+a compact conversation contract (about 2,400 characters); set
+`WEALTH_BEHAVIOR_IN_SERVER=1` to append the full policy
+([wealth/instructions.md](../wealth/instructions.md), about 21,000 characters)
+for a host that has no other copy of it. `WEALTH_BEHAVIOR_IN_HOST=1`, which the
+Wealth launcher sets because it gives the model the policy directly, always
+leaves the full policy out.
 
 ## MCP tools
 
 Nine tools. `wealth_context`, `wealth_recall` and `wealth_inspect` are
-read-only; none is destructive. Arguments are strict: unknown fields are
-rejected, and errors name the field and the expected inputs.
+read-only; none is destructive. `wealth_run` and `wealth_ingest` are marked
+open-world: they may fetch public market, fund and SEC data or read a
+connected broker. `wealth_run` is not read-only even without `save_as`,
+because some tasks keep state (monitor rules, dismissed nudges, prepared order
+tickets). Arguments are strict: unknown fields are rejected, and errors name
+the field and the expected inputs.
+
+Discovery is sized for a model's context: `wealth_context` with no arguments
+lists every task with its purpose and required inputs; `{"intent": "<task>"}`
+returns one task's full schema and a runnable example; `{"detail": "full"}`
+returns every schema at once (large).
 
 | Tool | What it does | Example arguments |
 | --- | --- | --- |
@@ -46,6 +60,24 @@ rejected, and errors name the field and the expected inputs.
 | `wealth_resolve_contradiction` | Save the person's answer (`keep`, `use_new`, `changed`) to a contradiction | `{"client_id": "ana", "contradiction_id": "<id from needs_user>", "choice": "keep"}` |
 | `wealth_ingest` | Uploads, extractions, stated balances and connector syncs into a held proposal; `confirm` saves it after the person's yes | `{"client_id": "ana", "action": "connector_status", "inputs": {}}` |
 | `wealth_decision` | Propose, accept or dismiss an evidence-bound decision; acceptance is not execution | `{"action": "propose", "client_id": "ana", "inputs": {"title": "Pay the card first", "rationale": "42% costs more than any safe return", "expected_revision": 1, "evidence_ids": ["<fact id>"]}}` |
+
+## Tasks
+
+`wealth_run` (CLI `run`) takes one of these task names. `printf '{}' | uv run
+wealth context` prints every task with its inputs and a runnable example.
+
+| Life area | What Wealth does (tasks) |
+| --- | --- |
+| Money in and out | Where money goes and what is investable, cash calendars, projections, withdrawal and liability matching, debt payoff, reserves and goals (`spending`, `calendar`, `income`, `project`, `ladder`, `debt_payoff`, `plan`) |
+| What you own | Holdings, lots, gains and income from a transaction ledger, returns, exposure and overlap, household import, SIC premium (`ledger`, `performance`, `exposure`, `import`, `sic_premium`) |
+| Investing | Investment policy, tax-aware rebalancing, asset location, recurring investing, portfolio analysis and construction, company and fund research (`policy_draft`, `policy_check`, `rebalance`, `asset_location`, `dca`, `compare`, `construct`, `analyze`, `factors`, `stress`, `research`, `value`) |
+| Tax | US federal lots, wash sales and harvesting; Mexico Art. 129, real interest, deductions and PPR, foreign securities, tax calendar; US estate exposure for non-residents (`tax`, `mx_holdings`, `mx_interest`, `mx_deductions`, `mx_foreign`, `mx_calendar`, `estate`) |
+| Retirement | IMSS Ley 73/97, AFORE and Modalidad 40; Social Security, contribution limits and withdrawal order; a readiness range (`retirement_mx`, `retirement_us`, `retirement_readiness`) |
+| Protection | Insurance and estate gaps, life events, and guardrails for speculation, panic selling and scams (`protection_review`, `life_event`, `speculation_check`, `panic_check`, `scam_check`) |
+| Reviews and nudges | What needs attention today, a weekly letter, a quarterly review, a fee audit, opt-in monitor rules (`today`, `weekly`, `quarterly_review`, `fee_audit`, `monitor`) |
+| Following managers | Find a fund manager's SEC 13F filings, read and profile them, compare managers, size a mirror within your policy (`manager_search`, `manager_holdings`, `manager_profile`, `manager_compare`, `manager_mirror`) |
+| Connections | Statement uploads, plus read-only syncs from Interactive Brokers, Alpaca and Cuenca, each saved only after you say yes (`wealth_ingest`: `ibkr_flex`, `alpaca`, `cuenca`) |
+| Execution | An order ticket with pre-trade checks for Alpaca that you place yourself by tapping its card (`order_ticket`) |
 
 ## CLI commands
 
