@@ -81,7 +81,6 @@ from collections import deque
 import os
 import re
 import ssl
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -242,12 +241,8 @@ def urllib_transport(method: str, url: str, headers: Mapping[str, str], body: by
 default_transport: Transport = urllib_transport
 
 
-def default_sleep(seconds: float) -> None:
-    time.sleep(seconds)
-
-
-def default_clock() -> float:
-    return time.monotonic()
+default_sleep = _rest.default_sleep
+default_clock = _rest.default_clock
 
 
 # -- redaction -----------------------------------------------------------------

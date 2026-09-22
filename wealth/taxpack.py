@@ -36,6 +36,7 @@ from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Mapping
 
+from . import _common
 from . import mexico
 from . import retirement
 from .finmath import FxTable
@@ -221,13 +222,7 @@ def _q(value: Decimal | None) -> str | None:
     return text.rstrip("0").rstrip(".") if "." in text else text
 
 
-def _sum(values: Iterable[Decimal | None]) -> Decimal | None:
-    total = ZERO
-    for value in values:
-        if value is None:
-            return None
-        total += value
-    return total
+_sum = _common.decimal_sum
 
 
 def _need(section: str, key: str, es: str, en: str, reason: str = "missing") -> dict[str, str]:

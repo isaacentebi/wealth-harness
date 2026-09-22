@@ -17,7 +17,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Iterable
 
-from . import finmath
+from . import _common, finmath
 from .policy import current as current_policy, summary as policy_summary
 from .situation import build as build_situation, sentences, summaries
 from .situation.model import goal_name
@@ -1306,8 +1306,7 @@ def _situation(service: Any, client_id: str, snapshot: dict, today: date) -> dic
     return build_situation(snapshot, None, today)
 
 
-def _memory_lang(language: str | None) -> str:
-    return "es" if str(language or "").lower().startswith("es") else "en"
+_memory_lang = _common.lang
 
 
 def profile_view(service: Any, client_id: str, today: Any = None, language: str | None = None) -> dict:

@@ -25,7 +25,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Mapping
 
 from . import estate as estate_module
-from .guardrails import CHECKED_ON, _country, _num
+from .guardrails import _country, _num, _param
 
 LIFE_HAPPENS_URL = "https://lifehappens.org/life-insurance-101/how-much-life-insurance-do-i-need/"
 LIFE_HAPPENS_DI_URL = "https://lifehappens.org/disability-insurance-101/how-much-does-disability-insurance-cost/"
@@ -34,13 +34,7 @@ SAT_DEDUCTIONS_URL = "https://www.sat.gob.mx/minisitio/DeduccionesPersonales/ind
 MES_TESTAMENTO_URL = "https://colegiodenotarios.org.mx/septiembre-mes-testamento"
 
 
-def _p(value: Any, status: str, title: str, url: str | None = None, note: str | None = None) -> dict:
-    row = {"value": value, "status": status, "checked_on": CHECKED_ON, "source": {"title": title}}
-    if url:
-        row["source"]["url"] = url
-    if note:
-        row["note"] = note
-    return row
+_p = _param
 
 
 PARAMETERS: dict[str, dict] = {

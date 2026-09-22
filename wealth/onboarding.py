@@ -31,6 +31,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Mapping
 
+from . import _common
 from .situation.schema import SchemaError, country_code, validate
 
 RESOLVED = ("done", "skipped", "unsure")
@@ -39,8 +40,7 @@ SOURCE_REF = "onboarding"
 MAX_AMOUNT = Decimal("1e12")
 
 
-def _lang(language: str | None) -> str:
-    return "es" if str(language or "").lower().startswith("es") else "en"
+_lang = _common.lang
 
 
 def _now() -> str:

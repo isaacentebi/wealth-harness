@@ -10,6 +10,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
 
+from . import _common
 from ._common import currency as iso_currency
 from ._common import decimal_text, iso_date, money
 
@@ -52,8 +53,7 @@ def _money(number: Decimal, currency: str) -> dict[str, str]:
     return money(number, currency)
 
 
-def _missing(key: str, reason: str, detail: str) -> dict[str, str]:
-    return {"key": key, "reason": reason, "detail": detail}
+_missing = _common.missing
 
 
 def _question(missing: list[dict[str, str]]) -> str | None:

@@ -27,10 +27,10 @@ the number it produced.
 """
 from __future__ import annotations
 
-import math
 from datetime import date, datetime, timezone
 from typing import Any, Iterable, Mapping
 
+from . import guardrails
 from .situation.model import UNDERLYING, add_months, build as build_situation
 
 # ------------------------------------------------------------------ rules
@@ -163,14 +163,7 @@ POLICY_FACT_KEYS = ("client.profile", "income.", "spending.monthly", "cash.", "l
 # ------------------------------------------------------------------ small helpers
 
 
-def _num(value: Any) -> float | None:
-    if isinstance(value, bool) or value is None:
-        return None
-    try:
-        out = float(value)
-    except (TypeError, ValueError):
-        return None
-    return out if math.isfinite(out) else None
+_num = guardrails._num
 
 
 def _round(value: float | None, places: int = 4) -> float | None:

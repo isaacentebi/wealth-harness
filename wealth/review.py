@@ -32,7 +32,7 @@ from decimal import Decimal
 import json
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
-from . import cashflow, dca as dca_module, policy
+from . import _common, cashflow, dca as dca_module, policy
 from .ledger.derive import FxTable, active_entries, price_table, realized_gains, replay
 from .ledger.model import fold, money
 from .ledger.performance import performance, performance_by_account
@@ -138,13 +138,7 @@ def _section(data: Any, *, missing: Iterable = (), sources: Iterable = (), assum
             "sources": list(sources), "assumptions": list(assumptions), "warnings": list(warnings)}
 
 
-def _sum(values: Iterable[Decimal | None]) -> Decimal | None:
-    total = ZERO
-    for value in values:
-        if value is None:
-            return None
-        total += value
-    return total
+_sum = _common.decimal_sum
 
 
 def _brief(value: Any, limit: int = 160) -> Any:

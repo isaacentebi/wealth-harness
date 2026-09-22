@@ -113,17 +113,7 @@ def _money(value: Decimal | None, currency: str | None) -> dict | None:
     return None if value is None else {"amount": num(value), "currency": currency}
 
 
-def _as_date(value: Any) -> date | None:
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    if isinstance(value, str) and len(value) >= 10:
-        try:
-            return date.fromisoformat(value[:10])
-        except ValueError:
-            return None
-    return None
+_as_date = finmath.as_date
 
 
 _ACRONYMS = {"gbm": "GBM", "ibkr": "IBKR", "bbva": "BBVA", "hsbc": "HSBC", "afore": "AFORE", "ppr": "PPR",
