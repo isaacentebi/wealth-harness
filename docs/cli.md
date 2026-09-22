@@ -68,7 +68,7 @@ wealth context` prints every task with its inputs and a runnable example.
 
 | Life area | What Wealth does (tasks) |
 | --- | --- |
-| Money in and out | Where money goes and what is investable, cash calendars, projections, withdrawal and liability matching, debt payoff, the debt engine (amortization, prepay vs invest, refinance offers, payoff strategies), reserves and goals (`spending`, `calendar`, `income`, `project`, `ladder`, `debt_payoff`, `debt`, `plan`) |
+| Money in and out | Where money goes and what is investable, cash calendars, projections, withdrawal and liability matching, debt payoff, the debt engine (amortization, prepay vs invest, refinance offers, payoff strategies), reserves and goals, today's CETES and T-bill rates (`spending`, `calendar`, `income`, `project`, `ladder`, `debt_payoff`, `debt`, `plan`, `reference_rates`) |
 | What you own | Holdings, lots, gains and income from a transaction ledger, returns, exposure and overlap, household import, SIC premium (`ledger`, `performance`, `exposure`, `import`, `sic_premium`) |
 | Investing | Investment policy, tax-aware rebalancing, asset location, recurring investing, portfolio analysis and construction, company and fund research (`policy_draft`, `policy_check`, `rebalance`, `asset_location`, `dca`, `compare`, `construct`, `analyze`, `factors`, `stress`, `research`, `value`) |
 | Tax | US federal lots, wash sales and harvesting; Mexico Art. 129, real interest, deductions and PPR, foreign securities, tax calendar; US estate exposure for non-residents; the annual tax pack for your contador or CPA (`tax`, `mx_holdings`, `mx_interest`, `mx_deductions`, `mx_foreign`, `mx_calendar`, `estate`, `tax_pack`) |
@@ -103,6 +103,7 @@ after the person has agreed; piped stdin alone is refused.
 | `execution_status` | none | Trading mode, whether keys exist, limits, today's usage |
 | `order_status` | none | Order tickets and line states; `refresh` reads the broker |
 | `prices` | none | Market-data cache: `status`, or `refresh` now |
+| `rates` | `wealth_run` `task=reference_rates` | CETES and T-bill reference rates: `status`, or `refresh` now |
 | `forget` | none | Delete a profile; interactive terminal only |
 | `watch` | none | Foreground monitor polling |
 | `tax-pack` | `wealth_run` `task=tax_pack` | Write the annual tax pack: JSON, one CSV per section, printable HTML |
@@ -288,6 +289,34 @@ rate), US bonds AGG, USD cash BIL, the 60/40 reference ACWI with BNDW, and
 CETES accrue at the published 28-day rate only when one is supplied (otherwise
 that benchmark is missing). Each derived number names its price source and
 date in `sources` or `market_data`.
+
+**rates** manages the reference-rate cache ([wealth/rates.py](../wealth/rates.py)),
+the one source of the CETES and T-bill rates that price idle cash (`today`),
+the risk-free side of `debt` `prepay_vs_invest` and the fee audit's cash drag.
+The 13-week, 26-week and 52-week bills come from Treasury Fiscal Data's
+auction results (high investment rate, the bond-equivalent yield, of the latest
+auction), with TreasuryDirect as the backup. CETES 28 days comes from the
+primary-auction yield Banco de México publishes on its home page, no token
+needed. With a free Banxico SIE token in `BANXICO_TOKEN` or the keychain
+(service `wealth-banxico`, read only) the 91, 182 and 364-day CETES come from
+SIE series SF43939, SF43942 and SF43945 (SF43936 backs up the 28-day rate).
+Rates are cached in the Wealth database and fetched at most once a day, in the
+background: a turn never waits for the network. The order is a saved
+`cash_reference_rate` in that currency, then the latest fetched auction, then
+Wealth's built-in dated value. Each rate carries `as_of` (the auction date),
+`source`, `origin` (`saved_fact`, `fetched` or `builtin`) and `stale` (more
+than 30 days old). Only rates dated on or before the day asked about count;
+with none, `origin` is `unavailable` and the rate is asked for. A saved rate
+that names no currency counts only when its source (CETES, T-bill) or a
+single-country household says which. Background refreshes run on daemon
+threads, so a CLI command never waits for one to exit. `WEALTH_OFFLINE=1` never fetches. `status` reads the cache;
+`refresh` fetches now (`currency` MXN or USD, default both).
+
+```sh
+printf '%s' '{"action":"status"}' | uv run wealth rates
+printf '%s' '{"action":"refresh","currency":"MXN"}' | uv run wealth rates
+security add-generic-password -U -s wealth-banxico -a "$USER" -w   # optional SIE token; prompts for it
+```
 
 **watch** evaluates the client's opt-in monitor rules and prints only changed
 events; it runs in the foreground until stopped (`--interval` seconds, default
@@ -594,8 +623,10 @@ or a side-by-side.
   deduction reuses `mx_deductions`' LISR Art. 151 fr. IV real-interest rule
   (`mx_mortgage`). Investing uses `expected_return {conservative, base}` after
   tax (Art. 129 10% in Mexico, `capital_gains_rate` in the US) and the risk-free
-  rate after tax. The risk-free rate is CETES 28 days for MXN and the T-bill for
-  USD, from a saved `cash_reference_rate` or `risk_free`. The result gives the
+  rate after tax. The risk-free rate is CETES 28 days for MXN and the 13-week
+  T-bill for USD: `risk_free`, else a saved `cash_reference_rate`, else the
+  latest auction from `rates` (with its `as_of`, `source`, `origin` and
+  `stale`). The result gives the
   `breakeven` return, the net-worth difference at `horizon_months` per
   scenario, and a `verdict` (`prepay`, `close_call`, `invest`, `depends`,
   `build_reserve_first`) with a `confidence`. A debt at 20% or more (not a
@@ -649,9 +680,11 @@ printf '%s' '{"task":"order_ticket","client_id":"ana","inputs":{"source":"user_r
 **Idle cash.** `today` adds an `idle_yield` item: cash above the reserve
 target, earmarked goal cash and `protect_now` goals, priced at a reference
 rate. The rate is a saved `cash_reference_rate` fact
-(`{low, high, unit, source, as_of?, currency?}`). Mexico residents without one
-get the dated CETES 28-day constant (Banxico auction of 2026-09-15, 6.25%). The
-item says when the rate is more than 30 days old. A saved `cash_yield` (what the
+(`{low, high, unit, source, as_of?, currency?}`). Without one, Mexico
+residents get the latest CETES 28-day auction rate and US filers' USD cash the
+13-week T-bill, from `rates` (or Wealth's built-in dated value until a fetch
+has succeeded; `data.reference_origin` says which). The item names the rate's
+date and says when it is more than 30 days old. A saved `cash_yield` (what the
 cash earns) makes the loss exact. Without it the figure is `bound: at_most`.
 `data.offer` holds `ladder` inputs for four weekly CETES rungs. Nothing fires
 when the rate, the reserve target or a balance is unknown.
