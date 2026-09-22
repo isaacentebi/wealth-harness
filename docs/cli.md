@@ -73,7 +73,7 @@ wealth context` prints every task with its inputs and a runnable example.
 | Investing | Investment policy, tax-aware rebalancing, asset location, recurring investing, portfolio analysis and construction, company and fund research (`policy_draft`, `policy_check`, `rebalance`, `asset_location`, `dca`, `compare`, `construct`, `analyze`, `factors`, `stress`, `research`, `value`) |
 | Tax | US federal lots, wash sales and harvesting; Mexico Art. 129, real interest, deductions and PPR, foreign securities, tax calendar; US estate exposure for non-residents (`tax`, `mx_holdings`, `mx_interest`, `mx_deductions`, `mx_foreign`, `mx_calendar`, `estate`) |
 | Retirement | IMSS Ley 73/97, AFORE and Modalidad 40; Social Security, contribution limits and withdrawal order; a readiness range (`retirement_mx`, `retirement_us`, `retirement_readiness`) |
-| Protection | Insurance and estate gaps, life events, and guardrails for speculation, panic selling and scams (`protection_review`, `life_event`, `speculation_check`, `panic_check`, `scam_check`) |
+| Protection | Insurance and estate gaps, an estate and beneficiary register (who receives each account at death, by which mechanism, and the gaps ranked by amount at risk), life events, and guardrails for speculation, panic selling and scams (`protection_review`, `estate_register`, `life_event`, `speculation_check`, `panic_check`, `scam_check`) |
 | Reviews and nudges | What needs attention today, a weekly letter, a quarterly review, a fee audit, opt-in monitor rules (`today`, `weekly`, `quarterly_review`, `fee_audit`, `monitor`) |
 | Following managers | Find a fund manager's SEC 13F filings, read and profile them, compare managers, size a mirror within your policy (`manager_search`, `manager_holdings`, `manager_profile`, `manager_compare`, `manager_mirror`) |
 | Connections | Statement uploads, plus read-only syncs from Interactive Brokers, Alpaca and Cuenca, each saved only after you say yes (`wealth_ingest`: `ibkr_flex`, `alpaca`, `cuenca`) |
@@ -637,6 +637,53 @@ taxes `social_security_annual_benefit_usd` under IRC 86 (25k/34k single,
 32k/44k joint; fixed nominal thresholds deflated at `threshold_inflation`). It
 charges IRMAA from the 2026 CMS table on MAGI from two years earlier. Other
 years use the latest table with a dated warning.
+
+## Estate register
+
+`estate_register` answers "what happens to each account if I die". Each row
+is an account, life policy or property with its mechanism: a beneficiary
+designation (bank beneficiaries under LIC Art. 56, casa de bolsa under LMV
+Art. 201, AFORE under LSS Art. 193, life policies, US TOD/POD and plan
+beneficiaries), a trust, survivorship on a US joint account, the will, or
+intestate succession. It also lists who receives the account and an estimated
+amount per heir. A cuenta mancomunada is not a beneficiary: the co-holder keeps
+their own part and yours passes by your designation or your will.
+
+`gaps` are ranked by the amount at risk. They cover no beneficiary, AFORE
+beneficiaries, shares that do not add to 100%, a minor named directly without a
+guardian or trust, a predeceased or ex-spouse beneficiary, a designation older
+than `review_years` (5) or older than a marriage, divorce or child, ERISA
+spousal consent for a 401(k), US-situs assets over US$60,000 for a non-resident
+alien (through `estate`), no will (with Mes del Testamento in September), a
+will older than a marriage or child, and no guardian for minors. What nobody
+said (for example an AFORE with no beneficiaries recorded) goes to `questions`
+and is never read as "none".
+
+`completeness.score` (0-100) weighs designations by value (60), the will (30)
+and a guardian when there are minors (10). The run draws two views: accounts to
+heirs with the score, and the amount per heir. `today` shows the top three gaps
+as `estate_gap` items once the person has told Wealth anything about their
+estate. The You page shows one collapsed Herencia / Estate line. Statutes and
+the not-legal-advice caveat are in `sources` and `assumptions`.
+
+Fields: `cash.<id>` and `investment.<id>` take `beneficiaries`
+(`[{name, relationship?, share?, contingent?, minor?, birth_year?, deceased?,
+via_trust?}]`, where `[]` means none), `designation_date`, `titling`
+(`individual`, `joint`, `mancomunada`, `fideicomiso`, `trust`), `co_owners`,
+`owner_share` and `country`. Investments also take `plan_type` and
+`spousal_consent`. New keys: `insurance.<id>` (`kind`, `coverage`,
+`beneficiaries`), `property.<id>` (`kind`, `value`, `titling`), `estate.will`
+(`exists`, `date`, `notaria`, `jurisdiction`, `heirs`), `estate.guardianship`
+(`guardian`, `alternate`) and `estate.family` (`marital_status`,
+`marriage_date`, `marital_regime`, `spouse`, `children`, `ex_spouses`,
+`deceased`, `parents_living`).
+
+```sh
+printf '%s' '{"task":"estate_register","inputs":{"as_of":"2026-09-22","facts":[
+  {"key":"client.profile","value":{"residence":{"country":"MX"}}},
+  {"key":"investment.gbm","value":{"amount":217000,"currency":"MXN","institution":"GBM","beneficiaries":[]}},
+  {"key":"estate.will","value":{"exists":false}}]}}' | uv run wealth run
+```
 
 ## Facts
 

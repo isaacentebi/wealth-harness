@@ -1372,9 +1372,17 @@ def profile_view(service: Any, client_id: str, today: Any = None, language: str 
         "upcoming": upcoming(snapshot, today, labels=fact_labels(sit, language or (sit.get("profile") or {}).get("language"))),
         # The accepted investment policy (profile, sleeves with ranges, reserve, review), or None.
         "policy": policy_summary(current_policy(snapshot, today)),
+        # One collapsed Herencia / Estate line: completeness and the top gap (only once they told us something).
+        "estate": _estate_line(sit, snapshot, today),
         # Saved facts left out of every number because they cannot be read; each can be removed.
         "invalid_facts": invalid,
     }
+
+
+def _estate_line(sit: dict, snapshot: dict, today: date) -> dict | None:
+    from .estate_register import summary
+    from .proactive import _estate_facts
+    return summary(sit, snapshot, today) if _estate_facts(snapshot) else None
 
 
 def _invalid_items(invalid: list[dict], language: str) -> list[dict]:

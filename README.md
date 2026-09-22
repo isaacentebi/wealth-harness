@@ -119,8 +119,9 @@ charts and order cards drawn by the engine, not the model.
   exposure for non-residents.
 - **Retirement:** IMSS Ley 73 and 97, AFORE and Modalidad 40; Social Security,
   contribution limits and withdrawal order.
-- **Protection and guardrails:** insurance and estate gaps, life events,
-  speculation, panic selling and scam checks.
+- **Protection and guardrails:** insurance and estate gaps, an estate and
+  beneficiary register (who receives each account at death and the gaps by
+  amount at risk), life events, speculation, panic selling and scam checks.
 - **Reviews:** what needs attention today, a weekly letter, a quarterly review,
   a fee audit.
 - **Following managers:** SEC 13F holdings, profiles and comparisons, and a
