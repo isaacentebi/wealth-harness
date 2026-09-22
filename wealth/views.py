@@ -25,7 +25,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Mapping, Sequence
 from xml.sax.saxutils import escape as _xml
 
-KINDS = ("ticket", "allocation", "series", "comparison", "payoff")
+KINDS = ("ticket", "allocation", "series", "comparison", "payoff", "pnl")
 VALUE_TYPES = ("money", "ratio", "percent", "months", "date", "count", "range", "text")
 MAX_VIEWS = 2          # per result, and per answer
 MAX_ROWS = 12          # ticket, allocation and payoff rows
@@ -137,6 +137,7 @@ TASK_LABELS = {
     "manager_holdings": L("13F holdings", "Posiciones 13F"), "manager_profile": L("Manager profile", "Perfil del administrador"),
     "manager_compare": L("Manager comparison", "Comparación de administradores"),
     "manager_mirror": L("Mirror a manager", "Replicar a un administrador"),
+    "speculation_check": L("Play-money check", "Revisión de dinero de juego"),
 }
 
 
@@ -257,6 +258,23 @@ def validate(spec: Mapping[str, Any]) -> None:
              and all(_value_ok(total[k]) for k in total), "payoff total")
         need(data["method"] is None or _label_ok(data["method"]), "payoff method")
         need(data["alt_label"] is None or _label_ok(data["alt_label"]), "payoff alt label")
+    elif kind == "pnl":
+        # P&L against the underlying price: x is a price (not a date), y the profit or loss at expiry.
+        need(set(data) == {"unit", "points", "spot", "breakevens", "loss", "gain"}, "pnl fields")
+        unit = data["unit"]
+        need(isinstance(unit, Mapping) and unit.get("t") == "money" and isinstance(unit.get("cur"), str), "pnl unit")
+        points = data["points"]
+        need(isinstance(points, list) and 2 <= len(points) <= MAX_POINTS, "pnl points")
+        for point in points:
+            need(isinstance(point, Mapping) and set(point) == {"x", "y"} and _raw(point["x"]) == point["x"]
+                 and _raw(point["y"]) == point["y"] and point["x"] is not None and point["y"] is not None, "pnl point")
+        need(data["spot"] is None or _raw(data["spot"]) == data["spot"], "pnl spot")
+        need(isinstance(data["breakevens"], list) and len(data["breakevens"]) <= 4
+             and all(_raw(b) == b and b is not None for b in data["breakevens"]), "pnl breakevens")
+        for side in ("loss", "gain"):
+            edge = data[side]
+            need(isinstance(edge, Mapping) and set(edge) == {"v", "unbounded"} and isinstance(edge["unbounded"], bool)
+                 and (edge["v"] is None or _raw(edge["v"]) == edge["v"]), f"pnl {side}")
 
 
 # --------------------------------------------------------------------------- labels
@@ -579,6 +597,63 @@ def _debt_payoff(result: Mapping, envelope: Mapping, task: str) -> list[dict]:
                   envelope, result)]
 
 
+def _price_label(value: Any) -> str:
+    number = _dec(value)
+    return "—" if number is None else f"{number:,.2f}".rstrip("0").rstrip(".")
+
+
+def _speculation(result: Mapping, envelope: Mapping, task: str) -> list[dict]:
+    """The payoff sandbox: P&L at a spread of prices, then the limits (max loss, gain, breakevens, sizing)."""
+    pay = result.get("payoff")
+    if not isinstance(pay, Mapping) or not pay.get("grid"):
+        return []
+    cur = (pay.get("sizing") or {}).get("currency") or pay.get("currency")
+    grid = [g for g in pay["grid"] if isinstance(g, Mapping)
+            and _raw(g.get("price")) is not None and _raw(g.get("pnl")) is not None]
+    if len(grid) > MAX_POINTS:
+        step = (len(grid) - 1) / (MAX_POINTS - 1)
+        grid = [grid[round(i * step)] for i in range(MAX_POINTS)]
+    name = _name(pay.get("symbol")) if pay.get("symbol") else ""
+    caption = L("At expiry for options; before costs and taxes", "Al vencimiento en opciones; antes de costos e impuestos")
+    title = L(f"{name}: profit or loss by price" if name else "Profit or loss by price",
+              f"{name}: ganancia o pérdida según el precio" if name else "Ganancia o pérdida según el precio")
+    out: list[dict] = []
+    if len(grid) >= 2:
+        # The chart: x is the underlying price, y the P&L; the zero line, breakevens, the floor and today's price.
+        data = {"unit": {"t": "money", "cur": str(pay.get("currency") or "")},
+                "points": [{"x": _raw(g["price"]), "y": _raw(g["pnl"])} for g in grid],
+                "spot": _raw(pay.get("spot")),
+                "breakevens": [_raw(b) for b in (pay.get("breakevens") or [])[:4] if _raw(b) is not None],
+                "loss": {"v": _raw(pay.get("max_loss")), "unbounded": bool(pay.get("max_loss_unbounded"))},
+                "gain": {"v": _raw(pay.get("max_gain")), "unbounded": bool(pay.get("max_gain_unbounded"))}}
+        out.append(_spec(task, "pnl", title, data, envelope, result, caption))
+    else:
+        rows = [{"label": L(f"{name} at {_price_label(g.get('price'))}".strip(), f"{name} a {_price_label(g.get('price'))}".strip()),
+                 "value": money(g.get("pnl"), pay.get("currency"))} for g in grid[:MAX_ROWS]]
+        if rows:
+            out.append(_spec(task, "ticket", L("What it makes or loses at each price", "Cuánto gana o pierde a cada precio"),
+                             {"rows": rows, "total": None}, envelope, result, caption))
+    no_ceiling = {"t": "text", "v": L("No ceiling", "Sin techo")}
+    summary = [
+        {"label": L("Most you can lose", "Lo más que puedes perder"),
+         "value": no_ceiling if pay.get("max_loss_unbounded") else money(pay.get("max_loss"), pay.get("currency"))},
+        {"label": L("Most you can make", "Lo más que puedes ganar"),
+         "value": no_ceiling if pay.get("max_gain_unbounded") else money(pay.get("max_gain"), pay.get("currency"))},
+    ]
+    for price in (pay.get("breakevens") or [])[:2]:
+        summary.append({"label": L("Breakeven price", "Precio de equilibrio"), "value": money(price, pay.get("currency"))})
+    sizing = pay.get("sizing") if isinstance(pay.get("sizing"), Mapping) else {}
+    if sizing:
+        summary += [{"label": L("Capital at risk", "Capital en riesgo"), "value": money(sizing.get("capital_at_risk"), cur)},
+                    {"label": L("Share of net worth", "Parte de tu patrimonio"),
+                     "value": ratio(sizing.get("share_of_net_worth"))},
+                    {"label": L("Share of the play-money budget", "Parte del presupuesto de juego"),
+                     "value": ratio(sizing.get("share_of_speculation_budget"))}]
+    out.append(_spec(task, "ticket", L("Limits of this position", "Límites de esta posición"),
+                     {"rows": summary[:MAX_ROWS], "total": None}, envelope, result))
+    return out
+
+
 def _tax(result: Mapping, envelope: Mapping, task: str) -> list[dict]:
     cur = result.get("currency")
     mode = result.get("mode")
@@ -809,7 +884,7 @@ BUILDERS: dict[str, Callable[[Mapping, Mapping, str], list[dict]]] = {
     "stress": _stress, "debt_payoff": _debt_payoff, "tax": _tax, "rebalance": _rebalance,
     "asset_location": _asset_location,
     "manager_holdings": _manager_holdings, "manager_profile": _manager_profile, "manager_compare": _manager_compare,
-    "manager_mirror": _manager_mirror,
+    "manager_mirror": _manager_mirror, "speculation_check": _speculation,
 }
 
 
@@ -930,7 +1005,7 @@ def format_value(value: Mapping[str, Any], lang: str) -> str:
 
 # --------------------------------------------------------------------------- drawing (SVG and PNG share one display list)
 
-INK, SOFT, MUTED, HAIRLINE, SURFACE, COBALT = "#2B2522", "#4A413C", "#6E625B", "#D9CEC6", "#FFFCF7", "#4358C7"
+INK, SOFT, MUTED, HAIRLINE, SURFACE, COBALT, BLUSH = "#2B2522", "#4A413C", "#6E625B", "#D9CEC6", "#FFFCF7", "#4358C7", "#F4DED9"
 WIDTH, PAD = 640, 32
 
 
@@ -1075,6 +1150,50 @@ def _ops(spec: Mapping[str, Any], lang: str) -> tuple[list[tuple], int]:
                 ops.append(("text", right - col * (len(options) - 1 - i), y, value(v), 16, weight, "end", True, INK))
             y += 12
             rule(y)
+    elif kind == "pnl":
+        # Price across, P&L up: the loss side is a quiet blush, the line ink, today's price the one cobalt mark.
+        unit = data["unit"]
+        fmt = lambda raw: value({"t": "money", "v": raw, "cur": unit.get("cur", "")})  # noqa: E731
+        xs = [float(Decimal(str(p["x"]))) for p in data["points"]]
+        ys = [float(Decimal(str(p["y"]))) for p in data["points"]]
+        lo, hi = min(ys + [0.0]), max(ys + [0.0])
+        pad = (hi - lo) * 0.12 or abs(hi) * 0.1 or 1
+        lo, hi = lo - pad, hi + pad
+        x0, x1 = min(xs), max(xs)
+        top, bottom, left, plot_right = y + 44, y + 224, PAD, right - 110
+        sx = lambda v: left + (plot_right - left) * ((v - x0) / ((x1 - x0) or 1))  # noqa: E731
+        sy = lambda v: bottom - (bottom - top) * ((v - lo) / (hi - lo))  # noqa: E731
+        zero = sy(0.0)
+        ops.append(("rect", left, zero, plot_right - left, bottom - zero, BLUSH))
+        ops.append(("line", left, zero, plot_right, zero, 1, MUTED))
+        coords = [(sx(x), sy(v)) for x, v in zip(xs, ys)]
+        ops.append(("poly", coords, 2, INK))
+        for b in data["breakevens"]:
+            bx = sx(float(Decimal(str(b))))
+            ops.append(("line", bx, zero - 6, bx, zero + 6, 1.5, INK))
+            ops.append(("text", bx, bottom + 22, _price_label(b), 12, 400, "middle", True, SOFT))
+        loss = data["loss"]
+        floor = min(range(len(ys)), key=lambda i: ys[i])
+        floor_text = (text(L("No floor", "Sin piso"), lang) if loss["unbounded"] else
+                      f"{text(L('Most you can lose', 'Lo más que pierdes'), lang)} {fmt(loss['v'])}" if loss["v"] is not None else "")
+        if floor_text:
+            ops.append(("text", plot_right + 12, coords[floor][1] + 4, floor_text, 12, 400, "start", True, MUTED))
+        gain = data["gain"]
+        if gain["unbounded"]:
+            ops.append(("text", plot_right + 12, top + 4, text(L("No ceiling", "Sin techo"), lang), 12, 400, "start", True, MUTED))
+        if data["spot"] is not None:
+            spot = float(Decimal(str(data["spot"])))
+            if x0 <= spot <= x1:
+                # P&L at the spot price by linear interpolation along the drawn line.
+                after = next((i for i, x in enumerate(xs) if x >= spot), len(xs) - 1)
+                before = max(0, after - 1)
+                share = 0.0 if xs[after] == xs[before] else (spot - xs[before]) / (xs[after] - xs[before])
+                py = ys[before] + (ys[after] - ys[before]) * share
+                ops.append(("circle", sx(spot), sy(py), 4, COBALT))
+                ops.append(("text", sx(spot), top - 8, f"{text(L('Today', 'Hoy'), lang)} {_price_label(data['spot'])}", 12, 500, "middle", True, INK))
+        ops.append(("text", left, bottom + 22, _price_label(data["points"][0]["x"]), 12, 400, "start", True, MUTED))
+        ops.append(("text", plot_right, bottom + 22, _price_label(data["points"][-1]["x"]), 12, 400, "end", True, MUTED))
+        y = bottom + 30
     elif kind == "payoff":
         y += 12
         for i, row in enumerate(data["rows"]):
@@ -1102,10 +1221,10 @@ def _ops(spec: Mapping[str, Any], lang: str) -> tuple[list[tuple], int]:
         y += 6
     source = spec["source"]
     y += 30
-    origin = text(source["label"], lang).upper()
+    origin = text(source["label"], lang)
     if source.get("as_of"):
-        origin += " · " + format_date(source["as_of"], lang).upper()
-    ops.append(("text", PAD, y, origin, 11, 400, "start", True, MUTED))
+        origin += " · " + format_date(source["as_of"], lang)
+    ops.append(("text", PAD, y, origin, 12, 400, "start", False, MUTED))
     if unknown:
         y += 20
         ops.append(("text", PAD, y, text(UNKNOWN, lang), 12, 400, "start", False, MUTED))

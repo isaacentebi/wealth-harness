@@ -135,6 +135,30 @@ def test_with_the_openclaw_cli_it_uses_mcp_set_and_config_set(home):
     assert ["mcp", "unset", "wealth"] in lines and ["config", "unset", "skills.entries.wealth"] in lines
 
 
+def test_uninstall_leaves_no_empty_stubs(home):
+    home, bin_dir, _ = home
+    config = home / ".openclaw" / "openclaw.json"
+    config.parent.mkdir()
+    config.write_text(json.dumps({"agents": {"defaults": {"workspace": "~/clawd"}}}))
+    assert _run(home, bin_dir).returncode == 0
+    assert "wealth" in json.loads(config.read_text())["mcp"]["servers"]
+    assert _run(home, bin_dir, "--uninstall").returncode == 0
+    assert json.loads(config.read_text()) == {"agents": {"defaults": {"workspace": "~/clawd"}}}
+
+
+def test_uninstall_with_the_cli_tidies_what_it_leaves(home):
+    home, bin_dir, _ = home
+    stub = bin_dir / "openclaw"
+    stub.write_text("#!/bin/sh\nexit 0\n")  # like `openclaw mcp unset`, which leaves the empty parent
+    stub.chmod(0o755)
+    config = home / ".openclaw" / "openclaw.json"
+    config.parent.mkdir()
+    config.write_text(json.dumps({"mcp": {"servers": {}}, "skills": {"entries": {}}, "agents": {"a": 1}}))
+    assert _run(home, bin_dir, "--uninstall").returncode == 0
+    assert json.loads(config.read_text()) == {"agents": {"a": 1}}
+    assert len(list(config.parent.glob("openclaw.json.wealth-backup-*"))) == 1
+
+
 def test_a_skill_it_did_not_install_is_moved_aside_not_deleted(home):
     home, bin_dir, _ = home
     foreign = home / ".openclaw" / "skills" / "wealth"
@@ -164,7 +188,11 @@ def test_merge_and_remove_are_pure():
     merged = openclaw_config.merge(base, "/w", "/d/db", "/d/up", "/d/v")
     assert base == {"mcp": {"servers": {"a": {"url": "https://x"}}}}
     assert set(merged["mcp"]["servers"]) == {"a", "wealth"}
-    assert openclaw_config.remove(merged) == {**base, "skills": {"entries": {}}}
+    assert openclaw_config.remove(merged) == base  # no empty skills.entries stub left behind
+    only_ours = openclaw_config.merge({"agents": {"x": 1}}, "/w", "/d/db", "/d/up", "/d/v")
+    assert openclaw_config.remove(only_ours) == {"agents": {"x": 1}}
+    assert openclaw_config.remove({"skills": {"load": {"dirs": []}, "entries": {"wealth": {}}}}) == {
+        "skills": {"load": {"dirs": []}}}
     no_mcp = openclaw_config.merge({}, "/w", "/d/db", "/d/up", "/d/v", mcp=False)
     assert "mcp" not in no_mcp
 

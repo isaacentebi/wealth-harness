@@ -22,7 +22,7 @@ as current capability claims.
 - Connector and execution checks run against in-memory fakes of IBKR, Alpaca and
   Cuenca, with no network. They assert that connectors send only reads and that
   no MCP tool, CLI operation or service method can submit an order.
-- `tests/test_docs.py` checks that the tasks and tools the README and SKILL.md
+- `tests/test_docs.py` checks that the tasks and tools docs/cli.md and SKILL.md
   name exist, that the tool count is stated correctly, and that internal
   Markdown links resolve.
 - The complete journey uses fictional offline data to exercise memory, decisions,

@@ -35,7 +35,7 @@ from . import agent as _agent
 from . import onboarding as _onboarding
 from .agent import (
     AgentError, REASONING_LEVELS, TurnControl, TurnEvent, profile_state, remember_exchange, resolve_model,
-    situation_brief, situation_views,
+    situation_context,
     run_turn, seed_demo, stream_turn,
 )
 from .views import placed_ids, png_available, render_png, render_svg
@@ -116,7 +116,25 @@ def _store_message(exc: Exception) -> str:
     return text if text.endswith((".", "?", "!")) else text + "."
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_ATTACHMENTS = 5
-MEMORY_WAIT_SECONDS = 180
+# Words that make a message a bare greeting or thanks. Deliberately short: "ok", "sí", "no", "listo" can
+# accept advice or answer a question, so they always go to the memory step.
+_SMALL_TALK = frozenset("""
+hola hi hello hey buenas buenos buen dia dias día días tardes noches morning afternoon evening good
+gracias muchas muchísimas thanks thank you thx ty que qué tal how are estas estás cómo como saludos
+adios adiós bye nos vemos hasta luego
+""".split())
+
+
+def is_small_talk(message: str) -> bool:
+    """A greeting or thanks that states nothing (no digits, only greeting words): the memory step is skipped."""
+
+    text = (message or "").strip().lower()
+    if not text or len(text) > 60 or re.search(r"\d", text):
+        return False
+    words = re.findall(r"[^\W\d_]+", text)
+    return bool(words) and len(words) <= 6 and all(word in _SMALL_TALK for word in words)
+
+
 MAX_TURN_VIEWS = 24
 UPLOAD_TYPES = {
     "application/pdf": ".pdf",
@@ -376,10 +394,8 @@ class Chat:
         card = _onboarding.next_step(sit, language)
         if card is None:
             return {"active": False, "card": None}
-        progress = _onboarding.progress(sit)
-        remaining = len(progress["pending"]) + (0 if progress["completed"] else 1)  # + the statements offer
         return {"active": True, "mode": "flow" if self.onboarding_live else "resume", "card": card,
-                "picture": _onboarding.picture(sit, language), "remaining": remaining}
+                "picture": _onboarding.picture(sit, language), "remaining": len(_onboarding.remaining(sit))}
 
     def answer_onboarding(self, body: dict[str, Any]) -> dict[str, Any]:
         """Write one answer (or a skip, or typed text) and start the reveal when setup completes."""
@@ -490,7 +506,8 @@ class Chat:
             if meta is None:
                 raise ValueError("An attachment is no longer available. Attach it again.")
             files.append(meta)
-        if not self.lock.acquire(blocking=False):
+        # A short grace: the previous turn may be tidying up the instant its answer shows.
+        if not self.lock.acquire(timeout=2):
             raise BlockingIOError("A response is already in progress. Please wait.")
         try:
             self.reasoning = reasoning
@@ -505,17 +522,15 @@ class Chat:
         return turn
 
     def _work(self, turn: Turn, reasoning: str, timezone_name: str | None) -> None:
+        # The next turn does not wait for the last one's memory step: saves run in the background, one at a
+        # time and in order (see _queue_memory); the resumed thread already holds the last exchange.
         status = "error"
-        pending = self.memory_thread
-        if pending is not None:
-            pending.join(timeout=MEMORY_WAIT_SECONDS)  # the next turn starts from what the last one saved
         defer = self.defers_memory
         handed_off = False
         thread_before, thread_saved = self.thread_id, False
         try:
             state = profile_state(self.db, self.client_id)
-            brief, revision = situation_brief(self.db, self.client_id, turn.message, self.brief_revision)
-            offered = situation_views(self.db, self.client_id)
+            brief, revision, offered = situation_context(self.db, self.client_id, turn.message, self.brief_revision)
             history = [(m["role"], m["content"]) for m in self.messages]
             answer = None
             for event in self._events(
@@ -571,11 +586,9 @@ class Chat:
             turn.answer = answer
             turn.emit("answer", user=None if turn.internal else user, message=reply)
             status = "done"
-            if defer and not turn.internal:
+            if defer and not turn.internal and not is_small_talk(turn.message):
                 # Saving runs after the reply is on screen; the turn closes when it finishes.
-                self.memory_thread = threading.Thread(
-                    target=self._remember, args=(turn, reply, brief), daemon=True, name=f"wealth-memory-{turn.id}")
-                self.memory_thread.start()
+                self._queue_memory(turn, reply, brief)
                 handed_off = True
         except AgentError as exc:
             status = "cancelled" if exc.kind == "cancelled" else "error"
@@ -588,16 +601,32 @@ class Chat:
         finally:
             if not thread_saved and self.thread_id != thread_before:
                 self._persist([], self.thread_id or "")  # a failed turn may still have opened the thread
+            # Free the chat before announcing the end, so a reply sent the moment the answer shows is never "busy".
+            self.lock.release()
             if not handed_off:
                 turn.finish(status)
-            self.lock.release()
 
-    def _remember(self, turn: Turn, reply: dict[str, Any], brief: str | None) -> None:
+    def _queue_memory(self, turn: Turn, reply: dict[str, Any], brief: str | None) -> None:
+        """Start this exchange's memory step after every earlier one (saves stay serial and in order).
+
+        ``memory_thread`` is the newest save; joining it waits for all of them.
+        """
+        earlier = [str(m.get("content") or "") for m in self.messages if m.get("role") == "user"]
+        recent = earlier[:-1] if earlier and earlier[-1] == turn.message else earlier  # captured now, not later
+        previous = self.memory_thread
+
+        def run() -> None:
+            if previous is not None:
+                previous.join()
+            self._remember(turn, reply, brief, recent)
+
+        self.memory_thread = threading.Thread(target=run, daemon=True, name=f"wealth-memory-{turn.id}")
+        self.memory_thread.start()
+
+    def _remember(self, turn: Turn, reply: dict[str, Any], brief: str | None, recent: list[str]) -> None:
         try:
-            earlier = [str(m.get("content") or "") for m in self.messages if m.get("role") == "user"]
             keys = remember_exchange(turn.message, turn.answer or "", client_id=self.client_id, db_path=self.db,
-                                     model=self.model, brief=brief, control=turn.control,
-                                     recent_person=earlier[:-1] if earlier and earlier[-1] == turn.message else earlier)
+                                     model=self.model, brief=brief, control=turn.control, recent_person=recent)
             items = [self._memory_item(k) for k in keys]
             if items:
                 turn.memory.extend(items)
@@ -1028,7 +1057,12 @@ def main(argv=None):
     parser.add_argument("--web-search", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--ephemeral", action="store_true",
                         help="do not keep a Codex session between turns (no resume)")
+    parser.add_argument("--service-tier", choices=_agent.SERVICE_TIERS, default=None,
+                        help="fast: Codex priority processing, quicker answers at a higher cost "
+                             "(default: your account's tier; also WEALTH_SERVICE_TIER=fast)")
     args = parser.parse_args(argv)
+    if args.service_tier:
+        _agent.set_service_tier(args.service_tier)
     db = database_path(args.db)
     if args.demo:
         if args.db is None:

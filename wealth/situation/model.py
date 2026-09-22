@@ -660,6 +660,7 @@ def _liabilities(facts: _Facts, statement_accounts: list[dict]) -> tuple[list[di
                               else (D(raw["annual_rate_percent"]) / 100 if D(raw.get("annual_rate_percent")) is not None
                                     else raw.get("annual_rate")),
                               "source": "household", "as_of": household.get("as_of")})
+    _legacy_payments(facts, items)
     if any(i["source"] == "stated" for i in items):
         return items, None
     resources = _plan_resources(facts)
@@ -681,6 +682,42 @@ def _liabilities(facts: _Facts, statement_accounts: list[dict]) -> tuple[list[di
                       "currency": stated["currency"], "source": "stated", "legacy": True})
         legacy_from = "client.profile"
     return items, legacy_from
+
+
+_PAYMENT_KEY = re.compile(r"(^|[_-])(payment|pago|mensualidad)s?($|[_-])")
+
+
+def _legacy_payments(facts: _Facts, items: list[dict]) -> None:
+    """Read a payment saved as ``constraint.<debt>_payment`` (an old memory mistake) onto its liability.
+
+    The constraint names the liability (``liability: "liability.mortgage"``) or its kind in the key
+    (``constraint.mortgage_payment``).  A payment already on the liability wins.  Without a stated
+    frequency a mortgage or loan payment is read as monthly, and the row says so.
+    """
+    for key in facts.keys("constraint."):
+        value = facts.value(key)
+        if not isinstance(value, dict) or D(value.get("payment", value.get("amount"))) is None:
+            continue
+        rest = key.split(".", 1)[1]
+        if not _PAYMENT_KEY.search(rest) and value.get("payment") is None:
+            continue
+        target = value.get("liability") if isinstance(value.get("liability"), str) else None
+        kind = _liability_kind(_PAYMENT_KEY.sub(" ", rest))
+        match = next((i for i in items if target and i.get("key") == target), None)
+        if match is None and target is None:
+            candidates = [i for i in items if kind != "other" and (i.get("kind") or _liability_kind(i.get("name"))) == kind]
+            match = candidates[0] if len(candidates) == 1 else None
+        if match is None or D(match.get("payment")) is not None:
+            continue
+        currency = value.get("currency")
+        if currency and match.get("currency") and currency != match.get("currency"):
+            continue
+        frequency = value.get("payment_frequency") or value.get("frequency")
+        match["payment"] = value.get("payment", value.get("amount"))
+        match["payment_frequency"] = frequency if frequency in ("monthly", "biweekly", "annual") else "monthly"
+        match["payment_from"] = key
+        match["payment_frequency_assumed"] = frequency not in ("monthly", "biweekly", "annual")
+        facts.used[key] = facts.all[key].get("id")
 
 
 def _lender(item: Mapping[str, Any]) -> str | None:
@@ -764,9 +801,13 @@ def _liability_view(item: dict, fx: _FX, currency: str | None, today: date) -> d
         "id": item["id"], "key": item["key"], "kind": item.get("kind") or "other", "name": item.get("name"),
         "lender": item.get("lender"), "balance": num(balance), "currency": item.get("currency"),
         "value": num(converted), "annual_rate": num(rate, 6), "monthly_payment": num(monthly),
-        "payment_basis": payment_basis, "in_spending": bool(item.get("in_spending")),
+        "payment_basis": payment_basis,
+        # True: the payment is already inside spending.monthly; False: it is not; None: nobody said.
+        "in_spending": item["in_spending"] if isinstance(item.get("in_spending"), bool) else None,
         "payoff": plan, "missing": missing, "source": item.get("source", "stated"),
         "approximate": bool(item.get("approximate")), "legacy": bool(item.get("legacy")),
+        "payment_from": item.get("payment_from"),
+        "payment_frequency_assumed": bool(item.get("payment_frequency_assumed")),
     }
 
 
@@ -1073,6 +1114,85 @@ def _sum_by(rows: list[dict], key) -> dict[str, Decimal]:
     return out
 
 
+_CASH_LIKE_WORDS = ("cetes", "cetesdirecto", "bondes", "money market", "mercado de dinero", "fondo de liquidez",
+                    "liquidez diaria", "liquidez inmediata", "deuda de corto plazo", "sofipo", "t bill", "t bills",
+                    "treasury bill", "treasury bills", "high yield savings", "hysa", "savings", "ahorro", "cajita",
+                    "cajitas", "nu", "nubank", "klar", "finsus", "supertasas", "stori", "mercado pago", "didi",
+                    "hey banco", "uala", "openbank", "sweep")
+
+
+def cash_like(item: Mapping[str, Any]) -> bool:
+    """Whether a stated investment is money out within a month: reserve money unless earmarked.
+
+    CETES and other short government paper, money-market and sofipo or fintech savings, or anything with a
+    stated ``liquidity_days`` of 31 or less.  Brokerage, retirement and anything marked illiquid never are:
+    equities are not an emergency fund.
+    """
+    if item.get("liquid") is False:
+        return False
+    kind = item.get("kind")
+    if kind_family(kind) in ("retirement", "debt") or (
+            isinstance(kind, str) and _fold(kind.replace("_", " ")) in ("brokerage", "stocks", "etf", "real estate")):
+        return False
+    days = item.get("liquidity_days")
+    if isinstance(days, int) and not isinstance(days, bool):
+        return days <= 31
+    words = " ".join(str(item.get(f) or "") for f in ("kind", "name", "institution", "note"))
+    padded = f" {_fold(words.replace('_', ' '))} "
+    return any(f" {word} " in padded for word in _CASH_LIKE_WORDS)
+
+
+def _goal_accounts(facts: _Facts) -> set[str]:
+    raw = facts.any_value("goals")
+    if not isinstance(raw, list):
+        return set()
+    return {str(a) for g in raw if isinstance(g, dict) and isinstance(g.get("accounts"), list) for a in g["accounts"]}
+
+
+def _goal_funding(goals: list[dict], rows: Iterable[dict], fx: "_FX", currency: str | None) -> None:
+    """What is already set aside for each goal: a stated ``funded_amount``, else the earmarked money.
+
+    Earmarked money is any cash or investment whose purpose is ``goal:<id>`` or whose key the goal lists in
+    ``accounts``.  ``funded`` is in the goal's currency; ``None`` when nothing was set aside or said.
+    """
+    for goal in goals:
+        goal["funded_sources"] = []
+        if goal.get("funded_amount") is not None:
+            goal["funded"], goal["funded_basis"] = goal["funded_amount"], "stated"
+            continue
+        total, known, found = Decimal(0), True, False
+        by_key = {r.get("key"): r for r in rows}
+        # A stated account a statement replaced counts through that statement: the current balance, once.
+        chosen: dict[Any, dict] = {}
+        for row in by_key.values():
+            key = row.get("key")
+            if row.get("purpose") != f"goal:{goal['id']}" and key not in goal["accounts"]:
+                continue
+            if row.get("counted") is False and row.get("covered_by"):
+                for cover in row["covered_by"]:
+                    if cover in by_key:
+                        chosen[cover] = by_key[cover]
+                continue
+            chosen[key] = row
+        for row in chosen.values():
+            key = row.get("key")
+            found = True
+            goal["funded_sources"].append(key)
+            amount, cur = D(row.get("amount")), row.get("currency")
+            if amount is not None and cur and cur == goal.get("currency"):
+                total += amount
+            elif row.get("value") is not None and goal.get("currency") in (None, currency):
+                total += D(row["value"])
+            else:
+                converted = fx.convert(D(row.get("value")), currency, goal.get("currency"))
+                if converted is None:
+                    known = False
+                else:
+                    total += converted
+        goal["funded"] = num(total) if found and known else None
+        goal["funded_basis"] = "accounts" if found and known else None
+
+
 def goal_name(goal: Mapping[str, Any]) -> str:
     for field in ("name", "description", "label", "title"):
         if isinstance(goal.get(field), str) and goal[field].strip():
@@ -1117,6 +1237,9 @@ def _goals(facts: _Facts, fx: _FX, currency: str | None, today: date) -> list[di
             "priority": goal.get("priority"), "status": goal.get("status") or "active",
             "protect_now": goal.get("protect_now") if isinstance(goal.get("protect_now"), bool) else None,
             "months_left": finmath.months_between(today, when) if when else None,
+            "funded_amount": num(D(goal.get("funded_amount"))),
+            "accounts": [a for a in goal.get("accounts") or [] if isinstance(a, str)]
+            if isinstance(goal.get("accounts"), list) else [],
             "approximate": bool(goal.get("approximate")) or "aproximad" in text or "about" in text,
             "eligible": usable, "legacy": "name" not in goal,
         })
@@ -1311,7 +1434,9 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
                "name": item.get("name"), "amount": num(amount), "currency": item.get("currency"),
                "approximate": bool(item.get("approximate")), "legacy": bool(item.get("legacy")),
                "liquid": (item.get("kind") or "").lower() not in _ILLIQUID_TYPES, "counted": True, "value": None,
-               "balance_unknown": amount is None}
+               "balance_unknown": amount is None, "purpose": item.get("purpose"),
+               "liquidity_days": item.get("liquidity_days") if isinstance(item.get("liquidity_days"), int) else None}
+        row["cash_like"] = cash_like(item)
         # One matching rule (``stated_matches``): by institution, or by a name that names the institution with a
         # compatible kind.  An AFORE, PPR or 401(k) is never folded into a brokerage or bank statement.
         # An unsized item stays settled by its statement even after the statement passes its review date.
@@ -1397,16 +1522,22 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
         net_worth["price_sources"] = [{"source": s, "date": d} for s, d in net_worth["price_sources"]]
 
     # -- monthly flow
-    paying = [r for r in liabilities if r["monthly_payment"] is not None and not r["in_spending"]]
-    debt_unknown = [r["id"] for r in liabilities if r["monthly_payment"] is None and not r["in_spending"]
+    paying = [r for r in liabilities if r["monthly_payment"] is not None and r["in_spending"] is not True]
+    debt_unknown = [r["id"] for r in liabilities if r["monthly_payment"] is None and r["in_spending"] is not True
                     and (r["balance"] or 0) > 0]
-    debt_known, debt_unconverted = Decimal(0), []
+    # A stated monthly spending figure may or may not already include a debt payment.  Nobody said which:
+    # the surplus is unknown (asked, never assumed); both readings are kept as a range.  Spending read from
+    # transactions and payments with in_spending false are subtracted as before.
+    maybe_inside = [r for r in paying if r["in_spending"] is None and spending["source"] != "ledger"]
+    debt_known, debt_unconverted, maybe_inside_total = Decimal(0), [], Decimal(0)
     for r in paying:
         converted = fx.convert(D(r["monthly_payment"]), r["currency"], currency)
         if converted is None:
             debt_unconverted.append(_money(D(r["monthly_payment"]), r["currency"]))
         else:
             debt_known += converted
+            if r in maybe_inside:
+                maybe_inside_total += converted
     # A payment without a rate, or a debt whose payment nobody gave, is unknown, never zero: the surplus is
     # unknown too.  ``surplus_before_unknown_debts`` keeps the known part, named as such, for "before your
     # card payment" sentences; it is never the surplus.
@@ -1414,7 +1545,9 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
     income_monthly, spend_monthly = D(income["monthly"]), D(spending["monthly"])
     known_part = (income_monthly - spend_monthly - debt_converted
                   if None not in (income_monthly, spend_monthly, debt_converted) else None)
-    surplus = known_part if not debt_unknown else None
+    surplus = known_part if not debt_unknown and not maybe_inside else None
+    surplus_range = ({"low": num(known_part), "high": num(known_part + maybe_inside_total)}
+                     if known_part is not None and maybe_inside and not debt_unknown else None)
     flow_missing_fx = sorted(set(finmath.pairs(debt_unconverted, currency)) | set(spending["missing_fx"]))
     cash_flow = {"currency": currency, "income": income["monthly"], "spending": spending["monthly"],
                  "spending_basis": spending["monthly_basis"], "spending_source": spending["source"],
@@ -1423,7 +1556,10 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
                  "debt_payments_unconverted": debt_unconverted,
                  "surplus": num(surplus), "missing_fx": flow_missing_fx,
                  "surplus_before_unknown_debts": num(known_part) if debt_unknown else None,
-                 "missing": [f"liability.{i}.payment" for i in debt_unknown],
+                 # Payments that may already be inside the stated spending: ask, then save in_spending.
+                 "in_spending_unknown": [r["id"] for r in maybe_inside], "surplus_range": surplus_range,
+                 "missing": [f"liability.{i}.payment" for i in debt_unknown]
+                 + [f"liability.{r['id']}.in_spending" for r in maybe_inside],
                  "complete": surplus is not None and not debt_unknown and spending["complete"]}
 
     # -- commitments
@@ -1473,43 +1609,80 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
     if target_months is None and _plan_resources(facts).get("reserve_months") is not None:
         target_months = D(_plan_resources(facts)["reserve_months"])
     funded_by = set(reserve_fact.get("funded_by") or [])
-    # Liquid bank accounts from statements are cash like any stated balance (the statement replaced the estimate).
-    goal_accounts = {str(a) for g in (facts.any_value("goals") or []) if isinstance(g, dict)
-                     for a in (g.get("accounts") or [])} if isinstance(facts.any_value("goals"), list) else set()
-    # A statement that settled stated cash keeps that cash's designation (the reserve stays the reserve).
+    goal_accounts = _goal_accounts(facts)
+    # A statement that settled a stated balance keeps that balance's designation (the reserve stays the reserve).
     inherited: dict[str, str] = {}
-    for row in cash_rows:
+    for row in (*cash_rows, *investments):
         for account_key in row.get("covered_by") or []:
             if row["purpose"] == "reserve" or row["id"] in funded_by:
                 inherited[account_key] = "reserve"
             elif row["purpose"] not in (None, "general"):
                 inherited.setdefault(account_key, row["purpose"])
-    bank_rows = [{"id": a["id"], "key": a["key"], "value": a["value"], "liquid": a["liquid"], "counted": True,
-                  "purpose": "goal" if a["id"] in goal_accounts or a["key"] in goal_accounts else inherited.get(a["key"]),
-                  "balance_unknown": False}
-                 for a in accounts if a["source"] != "ledger" and not a["stale"] and not a.get("superseded_by")
-                 and not a.get("duplicate_of") and a["value"] is not None and a["liquid"]
-                 and kind_family(a.get("type")) == "cash"]
-    designated = [r for r in (*cash_rows, *bank_rows) if r["counted"] and r["value"] is not None
+            elif row.get("key") in goal_accounts:
+                inherited.setdefault(account_key, "goal")
+    # Liquid bank accounts and cash-like statements are reserve money like any stated balance (the statement
+    # replaced the estimate).
+    statement_rows = []
+    for a in accounts:
+        if a["source"] == "ledger" or a["stale"] or a.get("superseded_by") or a.get("duplicate_of") \
+                or a["value"] is None or not a["liquid"]:
+            continue
+        family = kind_family(a.get("type"))
+        instrument = family != "cash" and cash_like({"kind": a.get("type"), "institution": a.get("institution"),
+                                                     "name": a.get("label")})
+        if family != "cash" and not instrument:
+            continue
+        statement_rows.append({"id": a["id"], "key": a["key"], "value": a["value"], "liquid": True, "counted": True,
+                               "currency": a.get("currency"),
+                               "purpose": "goal" if a["id"] in goal_accounts or a["key"] in goal_accounts
+                               else inherited.get(a["key"]), "balance_unknown": False,
+                               "part": "instrument" if instrument else "cash",
+                               "label": a.get("institution") or a.get("label")})
+    cash_candidates = [{**r, "part": "cash", "label": r.get("institution") or r.get("name") or humanize(r["id"])}
+                       for r in cash_rows]
+    # Cash-like instruments (CETES, money-market funds, sofipo and fintech savings, anything out in a month or
+    # less) are reserve money unless they are earmarked; brokerage and retirement accounts never are.
+    instrument_candidates = [{**r, "part": "instrument", "liquid": True,
+                              "label": r.get("name") or r.get("institution") or humanize(r["id"])}
+                             for r in investments if r.get("cash_like")]
+    candidates = [r for r in (*cash_candidates, *statement_rows, *instrument_candidates)
+                  if r["key"] not in goal_accounts or r["purpose"] == "reserve"]
+    designated = [r for r in candidates if r["counted"] and r["value"] is not None
                   and (r["purpose"] == "reserve" or r["id"] in funded_by or r["key"] in funded_by)]
     basis = "designated"
     if not designated:
-        designated = [r for r in (*cash_rows, *bank_rows) if r["counted"] and r["value"] is not None and r["liquid"]
+        designated = [r for r in candidates if r["counted"] and r["value"] is not None and r["liquid"]
                       and (r["purpose"] in (None, "general"))]
-        basis = "all undesignated cash" if designated else None
+        basis = ("all undesignated cash" if all(r["part"] == "cash" for r in designated)
+                 else "undesignated cash and cash-like instruments") if designated else None
     reserve_amount = sum((D(r["value"]) for r in designated), Decimal(0)) if designated else None
-    if any(r["balance_unknown"] and r["counted"] and r["liquid"] for r in cash_rows):
+    if any(r["balance_unknown"] and r["counted"] and r["liquid"] and r["purpose"] in (None, "general", "reserve")
+           and r["key"] not in goal_accounts for r in (*cash_rows, *(i for i in investments if i.get("cash_like")))):
         reserve_amount = None  # money they hold but did not size: the reserve is unknown, not empty
     essential = D(spending["essential_for_reserve"])
     months = reserve_amount / essential if reserve_amount is not None and essential else None
     target_amount = D(reserve_fact.get("target_amount"))
     if target_amount is None and target_months is not None and essential:
         target_amount = target_months * essential
+    parts: list[dict] = []
+    if reserve_amount is not None:
+        cash_part = [r for r in designated if r["part"] == "cash"]
+        if cash_part:
+            parts.append({"kind": "cash", "label": None,
+                          "value": num(sum((D(r["value"]) for r in cash_part), Decimal(0))),
+                          "sources": [r["key"] for r in cash_part]})
+        for r in designated:
+            if r["part"] == "instrument":
+                parts.append({"kind": "instrument", "label": r["label"], "value": r["value"], "sources": [r["key"]]})
     reserve = {"currency": currency, "amount": num(reserve_amount), "months": num(months, 1),
                "basis": basis, "spending_basis": "essential" if spending["essential"] is not None else spending["monthly_basis"],
                "target_months": num(target_months, 1), "target_amount": num(target_amount),
                "gap": num(target_amount - reserve_amount) if target_amount is not None and reserve_amount is not None else None,
-               "sources": [r["id"] for r in designated]}
+               "sources": [r["id"] for r in designated], "source_keys": [r["key"] for r in designated],
+               # What the reserve is made of: cash first, then each cash-like instrument by name.
+               "parts": parts}
+
+    _goal_funding(goals, (*cash_rows, *investments, *statement_rows), fx, currency)
 
     holdings = _holdings([a for a in statement_accounts if a["key"] not in superseded], fx, currency)
     threads = _threads(facts)
@@ -1525,6 +1698,9 @@ def build(snapshot: Mapping[str, Any], ledger: Mapping[str, Any] | None = None, 
         for field in row["missing"]:
             code = "liability_rate" if field == "annual_rate" else "liability_payment"
             unknowns.append({"code": code, "field": f"liability.{row['id']}.{field.split()[0]}", "liability": row["id"]})
+    for row in maybe_inside:
+        unknowns.append({"code": "liability_in_spending", "field": f"liability.{row['id']}.in_spending",
+                         "liability": row["id"]})
     for currency_code in sorted({u["currency"] for u in (*unconverted, *debt_unconverted, *commit_unconverted)
                                  if u and u.get("currency")} | {p.split("/")[0] for p in spending["missing_fx"]}):
         if currency:
@@ -1588,7 +1764,7 @@ def missing_for_onboarding(sit: Mapping[str, Any]) -> list[str]:
         "debts": bool(sit["liabilities"]),
         "investments": bool(sit["investments"]) or any(a["source"] != "ledger" for a in sit["accounts"]),
         "goals": bool(sit["goals"]),
-        "risk": bool(risk.get("drop_reaction")) and bool(risk.get("experience")),
+        "risk": bool(risk.get("drop_reaction")),  # experience is optional on the risk card
     }
     return [step for step in ONBOARDING_STEPS if not known[step] and steps.get(step) not in ("done", "skipped")]
 

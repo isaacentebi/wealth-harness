@@ -100,7 +100,8 @@ def test_legacy_shapes_read_the_same_as_canonical_keys(tmp_path):
 
 
 def test_payoff_date_when_payment_or_term_is_known(tmp_path):
-    facts = {**CANONICAL, "liability.car": {**CANONICAL["liability.car"], "payment": 5000, "payment_frequency": "monthly"}}
+    facts = {**CANONICAL, "liability.car": {**CANONICAL["liability.car"], "payment": 5000, "payment_frequency": "monthly",
+                                            "in_spending": False}}
     sit = situation.build({"client": {"revision": 1}, "facts": [
         {"key": k, "value": v, "id": k, "confidence": "reported", "source": _source(), "expires_on": None}
         for k, v in facts.items()]}, None, date(2026, 9, 21))

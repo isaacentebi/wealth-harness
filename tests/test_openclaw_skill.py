@@ -37,11 +37,13 @@ def test_frontmatter_has_required_fields_and_requirements():
     assert body.strip().startswith("# Wealth")
 
 
-def test_the_tools_the_skill_names_exist(tmp_path):
+def test_the_skill_names_exactly_the_tools_the_server_serves(tmp_path):
     body = SKILL.read_text(encoding="utf-8")
     named = set(re.findall(r"`(wealth_[a-z_]+)", body))
     served = {tool.name for tool in asyncio.run(build_server(str(tmp_path / "w.sqlite3")).list_tools())}
-    assert named and named <= served
+    assert named == served, f"missing: {sorted(served - named)}; unknown: {sorted(named - served)}"
+    listed = set(re.findall(r"`(wealth_[a-z_]+)`", body.split("Its tools:", 1)[1].split("\n\n", 1)[0]))
+    assert listed == served, "the 'Its tools:' list must name every tool"
 
 
 def test_policy_for_chat_channels_is_in_the_skill():

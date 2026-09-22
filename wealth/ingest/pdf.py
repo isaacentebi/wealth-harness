@@ -18,7 +18,7 @@ from .common import envelope
 from .llm import extraction_request
 from .model import build_proposal
 from .redact import redact_text
-from .safety import MAX_PDF_PAGES, pdf_risks
+from .safety import MAX_PDF_PAGES, flag_instructions, pdf_risks
 from .statement import parse_statement_text
 
 
@@ -94,6 +94,7 @@ def ingest_pdf(data: bytes, filename: str, *, owner_id: str = "self", aliases: d
     if extracted["truncated"]:
         reasons.append("The statement was truncated at the page limit.")
     provenance["risk_flags"] = extracted["risks"]
+    flag_instructions(provenance, [text for _, text in pages])  # build_proposal turns the flag into a review reason
     if not any(text.strip() for _, text in pages):
         request = extraction_request([], provenance=provenance,
                                      reason="The PDF has no text layer (likely scanned). Wealth includes no OCR.")

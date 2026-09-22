@@ -2,7 +2,7 @@
 
 Sept 2026. Sources: Appllama screens, cited as **[A] App › Screen**, which I looked at image by image. Web and help-centre material is cited as **[W]**. Robinhood, Wealthfront, Public, Nu, GBM, Bitso and Fintual aren't in the Appllama library, so their entries come from the web. P0 = before launch, P1 = next quarter, P2 = later.
 
-Every "Adopt" note follows the repo's `docs/ux-bar.md`: value first, one primary vermilion action, cobalt only for live data, ink for settled numbers, hairlines instead of cards, Roboto Mono tabular figures, and es-MX and en as equals.
+Every "Adopt" note follows the repo's `docs/notes/ux-bar.md`: value first, one primary vermilion action, cobalt only for live data, ink for settled numbers, hairlines instead of cards, Roboto Mono tabular figures, and es-MX and en as equals.
 
 ---
 

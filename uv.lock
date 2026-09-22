@@ -2079,7 +2079,7 @@ requires-dist = [
     { name = "statsmodels", specifier = ">=0.14" },
     { name = "yfinance", specifier = ">=0.2.50" },
 ]
-provides-extras = ["mcp", "analytics", "images", "dev"]
+provides-extras = ["images", "dev"]
 
 [[package]]
 name = "websockets"

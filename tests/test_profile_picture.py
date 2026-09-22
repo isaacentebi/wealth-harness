@@ -266,9 +266,9 @@ def test_every_chart_has_a_text_alternative():
     # Charts are drawn by chart() (visual aria-hidden plus a table) or by lineChart, which appends its own table.
     assert "function chart(caption, visual, head, rows, extra)" in script
     assert "h('div', { 'aria-hidden': 'true' }, visual), srTable(caption, head, rows)" in script
-    drawn = re.findall(r"\b(stack|sparkline|lineChart|payoffChart)\(", script)
+    drawn = re.findall(r"\b(stack|sparkline|lineChart|payoffBar)\(", script)
     assert drawn and "srTable(t('returnsTable')" in script
-    for fn in ("renderMonth", "renderSpending", "renderHave", "payoffChart", "renderGoals", "renderReserve", "sparkline"):
+    for fn in ("renderMonthTile", "renderMonthDetail", "renderSpending", "renderHave", "payoffBar", "renderGoalsTile", "renderReserveTile", "sparkline"):
         body = script[script.index(f"function {fn}("):]
         body = body[:body.index("\n    }\n")]
         assert "chart(" in body, fn

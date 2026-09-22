@@ -925,7 +925,7 @@ def goals_view(snapshot: dict, today: date) -> dict:
                 reserved, basis = target, "plan_reserved"
             elif goal.get("protect_now") is False:
                 reserved, basis = outside, "outside_pool"
-        due = _as_date(goal.get("due"))
+        due = _as_date(goal.get("due") or goal.get("target_date"))
         items.append({
             "id": str(goal.get("id") or index), "name": goal.get("name") or goal.get("id"),
             "target": {"amount": target, "currency": currency} if target is not None else None,
@@ -2687,7 +2687,11 @@ def _debts(sit: dict) -> list[dict]:
 
 
 def _goal_funded(goal: dict, sit: dict) -> float | None:
-    """Cash earmarked for the goal (purpose goal:<id>), in the goal's currency; None when it cannot be converted."""
+    """Cash earmarked for the goal (purpose goal:<id>), in the goal's currency.
+
+    None when nothing is earmarked or it cannot be converted: with no account tied to the goal the
+    progress is not known, and the page says so rather than showing $0.
+    """
     total, found = 0.0, False
     for row in sit.get("cash") or []:
         if row.get("purpose") != f"goal:{goal['id']}" or not row.get("counted", True):
@@ -2699,7 +2703,7 @@ def _goal_funded(goal: dict, sit: dict) -> float | None:
             total += _num(row["value"])
         else:
             return None
-    return total if found else 0.0
+    return total if found else None
 
 
 def _dca_plans(snapshot_facts: dict[str, dict]) -> list[dict]:
@@ -2742,7 +2746,9 @@ def _goals_picture(sit: dict, facts: dict[str, dict], ledger: dict | None, today
         if goal.get("status") != "active":
             continue
         target, monthly, months = _num(goal.get("target_amount")), _num(goal.get("monthly_contribution")), goal.get("months_left")
-        funded = _goal_funded(goal, sit) if target is not None else None
+        # The situation's own funding (a stated amount, or the accounts linked to the goal); the earmarked-cash
+        # fallback serves an older situation that has not worked it out.
+        funded = (_num(goal["funded"]) if "funded" in goal else _goal_funded(goal, sit)) if target is not None else None
         projected = funded + monthly * months if None not in (funded, monthly, months) and months >= 0 else None
         if target is not None and funded is not None and funded >= target:
             status = "funded"
@@ -2865,8 +2871,11 @@ def _market_picture(service: Any, ledger: dict | None, sit: dict, today: date) -
                    "currency": currency}
         break
     invest = {"brokerage", "taxable", "investment", "retirement", "ira", "401k", "ppr", "afore"}
-    scope = [a for a in valued if kinds.get(a) in invest]
-    skipped = sorted({labels[a] for a in first if kinds.get(a) in invest and a not in scope})
+    # A return needs prices: an account that only ever carried a balance (no instrument to price) has none to
+    # measure, so it neither joins the line nor is "left out for lack of prices".
+    priced = {e["account_id"] for e in entries if e.get("instrument_id")}
+    scope = [a for a in valued if kinds.get(a) in invest and a in priced]
+    skipped = sorted({labels[a] for a in first if kinds.get(a) in invest and a in priced and a not in scope})
     if not scope:
         return history, {"status": "insufficient", "reason": "prices" if skipped else "no_history", "left_out": skipped}
     # Accounts whose data starts later join as money coming in (opening balances are external flows).
@@ -2886,6 +2895,9 @@ def _market_picture(service: Any, ledger: dict | None, sit: dict, today: date) -
     every = sorted({*(d.isoformat() for d in samples), *flows})
     values = {p["date"]: p["value"] for p in valuation_series(ledger, every, currency, prices, account_ids=scope)["points"]}
     if any(v is None for v in values.values()) or not values[every[0]]:
+        return history, {"status": "insufficient", "reason": "prices", "left_out": skipped}
+    # A line that never moves is a balance carried forward, not a return: unknown, never 0%.
+    if len({round(float(v), 2) for v in values.values()}) == 1 and not flows:
         return history, {"status": "insufficient", "reason": "prices", "left_out": skipped}
     index, growth = {every[0]: 100.0}, 1.0
     for d0, d1 in zip(every, every[1:]):
@@ -2913,8 +2925,9 @@ def _market_picture(service: Any, ledger: dict | None, sit: dict, today: date) -
                     return None
                 return 100.0 * (weights[0] * e / e0 + (weights[1] * b / b0 if b0 else 0.0))
             bench = level
-            bench_name = (_pair(("Global 60/40 (ACWI and BNDW proxies)", "Global 60/40 (referencia ACWI y BNDW)")) if b0
-                          else _pair(("Global equity (ACWI proxy)", "Acciones globales (referencia ACWI)")))
+            # Named once: the page already calls this the reference, so the name only says what it is made of.
+            bench_name = (_pair(("Global 60/40 (ACWI and BNDW)", "Global 60/40 (ACWI y BNDW)")) if b0
+                          else _pair(("Global equity (ACWI)", "Acciones globales (ACWI)")))
     series = [{"d": d.isoformat(), "p": round(index[d.isoformat()], 3),
                "b": _r(bench(d), 3) if bench else None} for d in samples]
     periods = {}

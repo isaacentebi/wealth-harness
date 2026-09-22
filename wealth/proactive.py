@@ -6,7 +6,7 @@ condenses the week into at most five lines of data for the model to phrase.
 :func:`calendar` is the annual calendar (Mexico, United States and life events)
 filtered to what is relevant for this person.
 
-Contract (docs/scope.md sections 2 and 3):
+Contract (docs/notes/scope.md sections 2 and 3):
 
 * Every trigger is deterministic and reads only known data.  A trigger whose
   inputs are unknown does not fire; it is listed in ``unknown`` with what is
@@ -42,7 +42,7 @@ DEADLINE_DAYS = 14
 PRIORITIES = ("risk", "deadline", "opportunity", "info")
 SEVERITIES = ("act", "consider", "fyi")
 
-# Trigger thresholds (docs/scope.md section 3).
+# Trigger thresholds (docs/notes/scope.md section 3).
 SURPLUS_BALANCE_MULTIPLE = Decimal("1.5")     # checking > 1.5x monthly spend ...
 SURPLUS_CYCLES = 2                            # ... at two consecutive month ends
 SURPLUS_ADVICE_TOLERANCE = Decimal("0.05")    # a thread naming the monthly surplus within 5% is about it
@@ -69,14 +69,25 @@ STATEMENT_OVERDUE_DAYS = 35
 GUILT_FREE_MONTHS = 3
 GUILT_FREE_UNSPENT = Decimal("0.20")
 MEDICARE_AGE = 64
+# Idle-cash yield gap: the reference rate for MXN cash when none is stored.  Banxico weekly primary auction
+# (subasta de valores gubernamentales) of 2026-09-15: CETES 28 days at 6.25% (91d 6.66%, 182d 6.90%, 364d
+# 7.24%), as published by Banxico and reported the same week.  Past REFERENCE_RATE_STALE_DAYS the item says so.
+CETES_28D_REFERENCE = {
+    "rate": "0.0625", "as_of": "2026-09-15", "checked_on": "2026-09-21", "name": "CETES 28 days",
+    "source": "Banxico, subasta primaria de valores gubernamentales del 2026-09-15 (CETES 28 dias 6.25%); "
+              "https://www.banxico.org.mx/mercados/resultados-subastas-valores-g.html",
+}
+REFERENCE_RATE_STALE_DAYS = 30
+IDLE_YIELD_MIN_LOST = {"MXN": Decimal(1000), "USD": Decimal(50)}  # below this a year, not worth a nudge
 STALE_KEYS_THAT_MATTER = ("client.profile", "income.", "spending.monthly", "cash.", "liability.", "investment.",
-                          "goals", "reserve", "policy.ips", "planning.dca", "tax.profile")
+                          "goals", "reserve", "policy.ips", "planning.dca", "tax.profile", "cash_reference_rate",
+                          "cash_yield")
 CHECKING_TYPES = frozenset({"checking", "bank", "debit"})
 TAXABLE_TYPES = frozenset({"brokerage", "taxable"})
 RETIREMENT_SAVINGS_TYPES = frozenset({"ppr", "afore"})
 FIBRA_TICKERS = frozenset({"FUNO11", "FMTY14", "FIBRAPL14", "DANHOS13", "TERRA13", "FIHO12", "FIBRAMQ12", "FSHOP13"})
 KIND_ORDER = ("scam", "high_interest_debt", "reserve_low", "concentration", "tax_deadline", "harvest", "ppr_headroom", "windfall",
-              "drift", "surplus", "follow_through", "cash_drag", "dca_slipped", "fee_creep", "thread_ready", "life_calendar",
+              "drift", "surplus", "follow_through", "idle_yield", "cash_drag", "dca_slipped", "fee_creep", "thread_ready", "life_calendar",
               "guilt_free", "statement_overdue", "stale_facts")
 
 _MONTHS_ES = ("ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic")
@@ -383,7 +394,7 @@ def _surplus(run: _Run) -> None:
         # The adviser already said where this money goes: never call it "sin destino". Ask whether it is
         # happening instead, and say nothing once the person committed to it.
         thread, target, committed = advised
-        if committed:
+        if committed or target is None:
             return
         run.items.append(_item(
             "follow_through", thread["id"], severity="consider", priority="opportunity",
@@ -511,10 +522,28 @@ def _near(value: Decimal | None, amount: Decimal) -> bool:
     return value is not None and amount > 0 and abs(value - amount) <= SURPLUS_ADVICE_TOLERANCE * amount
 
 
-def _advice_target(run: _Run, thread: Mapping[str, Any]) -> tuple[str, str]:
+_RESERVE_WORDS = re.compile(r"\breserv|fondo de emergencia|colch[oó]n|emergency fund", re.I)
+
+
+def _reserve_first(run: _Run) -> bool:
+    """The reserve comes before paying a debt faster: it is below its target, or open advice sends money to it."""
+    reserve = run.sit.get("reserve") or {}
+    months, target = D(reserve.get("months")), D(reserve.get("target_months"))
+    if months is not None and target is not None and months < target:
+        return True
+    return any(t.get("kind") in ("advice", "commitment") and _RESERVE_WORDS.search(t.get("text") or "")
+               for t in (run.sit.get("threads") or {}).get("open") or [])
+
+
+def _advice_target(run: _Run, thread: Mapping[str, Any]) -> tuple[str, str] | None:
+    """Where the advised surplus goes; None when that is a debt prepayment the reserve comes before."""
+    if _RESERVE_WORDS.search(thread.get("text") or ""):
+        return ("to your emergency fund", "a tu reserva")
     related = [k for k in thread.get("related") or [] if isinstance(k, str)]
     for liability in run.sit.get("liabilities") or []:
         if liability.get("key") in related:
+            if _reserve_first(run):
+                return None
             if liability.get("kind") in _TARGETS:
                 return _TARGETS[liability["kind"]]
             lender = liability.get("lender") or liability.get("name")
@@ -568,7 +597,8 @@ def _reserve(run: _Run) -> None:
         run.missing("reserve_low", *(["reserve cash"] if amount is None else []),
                     *(["essential spending"] if months is None else []))
         return
-    sources = ["reserve", *(f"cash.{s}" for s in reserve.get("sources") or []), run.sit["spending"].get("key") or "ledger"]
+    sources = ["reserve", *(reserve.get("source_keys") or (f"cash.{s}" for s in reserve.get("sources") or [])),
+               run.sit["spending"].get("key") or "ledger"]
     if target is None:
         run.missing("reserve_low", "reserve.target_months")
     elif months < target:
@@ -615,6 +645,191 @@ def _reserve(run: _Run) -> None:
             data={"months": num(months, 1), "threshold_months": num(drag_at, 1), "excess": num(excess),
                   "currency": run.currency, "keep_basis": basis, "keep_amount": num(keep)},
             sources=sources, trigger=["drag", str(drag_at), basis]))
+
+
+def _reference_rate(run: _Run, currency: str) -> tuple[dict | None, str | None]:
+    """The rate idle ``currency`` cash could earn: a stored ``cash_reference_rate`` in that currency, else
+    (MXN, Mexico residents) the dated CETES 28-day constant.  ``(None, why)`` when neither is known."""
+    stored = run.fact_value("cash_reference_rate")
+    if isinstance(stored, dict) and str(stored.get("currency") or currency).upper() == currency:
+        low, high = D(stored.get("low", stored.get("rate"))), D(stored.get("high", stored.get("low", stored.get("rate"))))
+        unit = str(stored.get("unit") or "decimal")
+        scale = Decimal(100) if unit == "percent" else Decimal(10000) if unit == "bps" else Decimal(1)
+        fact = next((f for f in run.snapshot.get("facts") or [] if isinstance(f, dict)
+                     and f.get("key") == "cash_reference_rate" and f.get("status", "active") == "active"), {})
+        when = _date(stored.get("as_of")) or _date((fact.get("source") or {}).get("observed_on"))
+        if low is not None and high is not None and stored.get("source") and when is not None:
+            # A range is read at its low end: the gap is never overstated.
+            return {"rate": min(low, high) / scale, "as_of": when.isoformat(), "source": str(stored["source"]),
+                    "name": str(stored.get("name") or stored["source"]), "origin": "stored cash_reference_rate",
+                    "evidence": "cash_reference_rate"}, None
+        return None, "cash_reference_rate needs low (or rate), unit, source and a date"
+    if currency == "MXN" and _mx_resident(run):
+        ref = CETES_28D_REFERENCE
+        return {"rate": D(ref["rate"]), "as_of": ref["as_of"], "source": ref["source"], "name": ref["name"],
+                "origin": "Wealth dated constant (checked " + ref["checked_on"] + ")", "evidence": None}, None
+    return None, f"a reference rate for {currency} cash (save cash_reference_rate {{low, high, unit, source, currency}})"
+
+
+def _cash_yield(run: _Run) -> Decimal | None:
+    """What the idle cash earns now, from a stored ``cash_yield`` (decimal, or {value|rate, unit}); None if unsaid."""
+    value = run.fact_value("cash_yield")
+    if isinstance(value, dict):
+        rate = D(value.get("value", value.get("rate")))
+        unit = str(value.get("unit") or "decimal")
+        if rate is None:
+            return None
+        return rate / 100 if unit == "percent" else rate / 10000 if unit == "bps" else rate
+    return D(value)
+
+
+def _idle_yield(run: _Run) -> None:
+    """Cash above the reserve target and goal money that earns less than the reference rate (CETES 28 days in MX).
+
+    Idle cash = liquid cash in the reference currency (stated cash and bank statements, the same pool the
+    reserve reads) that is not earmarked for a goal, less the reserve target and less protected goal targets.
+    Silent when the reference rate or any balance is unknown (listed under ``unknown``).
+    """
+    from .situation.model import kind_family
+    currency = "MXN" if _mx_resident(run) else run.currency
+    if not currency:
+        return
+    reference, why = _reference_rate(run, currency)
+    if reference is None:
+        run.missing("idle_yield", why)
+        return
+    reserve = run.sit["reserve"]
+    keep = D(reserve.get("target_amount"))
+    if keep is None:
+        run.missing("idle_yield", "reserve.target_months (how much cash to keep)")
+        return
+    keep = run.rates.convert(keep, run.currency, currency)
+    pool, earmarked, unknown = Decimal(0), Decimal(0), []
+    for row in run.sit.get("cash") or []:
+        if not row.get("counted") or not row.get("liquid"):
+            continue
+        if row.get("balance_unknown"):
+            unknown.append(row["key"])
+            continue
+        if (row.get("currency") or currency) != currency:
+            continue
+        amount = D(row.get("amount"))
+        if amount is None:
+            continue
+        if str(row.get("purpose") or "").startswith("goal:"):
+            earmarked += amount
+        else:
+            pool += amount
+    for account in run.sit.get("accounts") or []:
+        if (account.get("source") == "ledger" or account.get("stale") or account.get("superseded_by")
+                or account.get("duplicate_of") or not account.get("liquid") or kind_family(account.get("type")) != "cash"):
+            continue
+        native = D((account.get("native") or {}).get(currency))
+        if native is not None:
+            pool += native
+    if unknown:
+        run.missing("idle_yield", *(f"the balance of {k}" for k in unknown))
+        return
+    protected = Decimal(0)
+    for goal in run.sit.get("goals") or []:
+        if goal.get("status") == "active" and goal.get("protect_now") and D(goal.get("target_amount")) is not None:
+            converted = run.rates.convert(D(goal["target_amount"]), goal.get("currency") or run.currency, currency)
+            if converted is None:
+                run.missing("idle_yield", f"FX to {currency} for goal {goal.get('id')}")
+                return
+            protected += converted
+    if keep is None:
+        run.missing("idle_yield", f"FX {run.currency}/{currency} for the reserve target")
+        return
+    # The reserve is filled by cash-like instruments first (CETES, money-market funds): only the rest of the
+    # target has to sit in low-yield cash, and money already in those instruments is never called idle.
+    in_instruments = sum((D(p.get("value")) or Decimal(0) for p in reserve.get("parts") or []
+                          if p.get("kind") == "instrument"), Decimal(0))
+    in_instruments = run.rates.convert(in_instruments, run.currency, currency) or Decimal(0)
+    idle = pool - max(keep - in_instruments, Decimal(0)) - protected
+    earned = _cash_yield(run)
+    gap_rate = reference["rate"] - (earned or Decimal(0))
+    if idle <= 0 or gap_rate <= 0:
+        return
+    lost = idle * gap_rate
+    if lost < IDLE_YIELD_MIN_LOST.get(currency, Decimal(0)):
+        return
+    # The same excess cash, priced: this replaces the vaguer cash_drag nudge.
+    run.items = [i for i in run.items if i["kind"] != "cash_drag"]
+    as_of_rate = date.fromisoformat(reference["as_of"])
+    age = (run.as_of - as_of_rate).days
+    stale = age > REFERENCE_RATE_STALE_DAYS
+    lost_text, idle_text = _money_text(lost, currency, run.currency), _money_text(idle, currency, run.currency)
+    pct = f"{reference['rate'] * 100:.2f}%"
+    bound = "at_most" if earned is None else "estimate"
+    stale_en = f" The rate is from {reference['as_of']} ({age} days old); check today's rate." if stale else ""
+    stale_es = f" La tasa es del {reference['as_of']} ({age} días); revisa la de hoy." if stale else ""
+    earned_en = ("You haven't said what this cash earns, so this assumes nothing; it is the most it could cost."
+                 if earned is None else f"It earns {earned * 100:.2f}% now.")
+    earned_es = ("No sé cuánto te paga ese efectivo; supongo cero, así que es lo más que te cuesta."
+                 if earned is None else f"Hoy gana {earned * 100:.2f}%.")
+    rungs = _cetes_ladder(run, idle, reference, currency) if currency == "MXN" else None
+    run.items.append(_item(
+        "idle_yield", currency, severity="consider", priority="opportunity",
+        title=(f"{'Up to ' if earned is None else ''}{lost_text}/yr lost on idle cash",
+               f"{'Hasta ' if earned is None else ''}{lost_text} al año sin rendir"),
+        why=(f"{idle_text} sits above your reserve and goals; {reference['name']} pays {pct}. {earned_en}{stale_en}",
+             f"Tienes {idle_text} arriba de tu reserva y metas; {reference['name']} paga {pct}. {earned_es}{stale_es}"),
+        next_step=((f"Should I ladder {idle_text} in CETES?", f"¿Me conviene escalonar {idle_text} en CETES?")
+                   if currency == "MXN" else
+                   (f"Where could {idle_text} earn {pct}?", f"¿Dónde pueden ganar {pct} mis {idle_text}?")),
+        data={"idle": num(idle), "currency": currency, "lost_per_year": num(lost), "bound": bound,
+              "reference_rate": num(reference["rate"], 4), "reference_name": reference["name"],
+              "reference_as_of": reference["as_of"], "reference_source": reference["source"],
+              "reference_origin": reference["origin"], "reference_stale": stale,
+              "cash_yield": num(earned, 4) if earned is not None else None,
+              "cash_yield_reason": None if earned is not None else "unknown: save cash_yield to make this exact",
+              "kept": {"reserve_target": num(keep), "reserve_in_instruments": num(in_instruments),
+                       "protected_goals": num(protected), "goal_earmarked_cash": num(earmarked)},
+              "assumptions": ["Rates are gross annual, before the provisional ISR retention on capital that applies to "
+                              "bank interest and CETES alike.",
+                              "A one-year figure at today's rate; CETES 28 days reprice every week."],
+              "offer": rungs},
+        sources=["reserve", *(reserve.get("source_keys") or (f"cash.{s}" for s in reserve.get("sources") or [])),
+                 *([reference["evidence"]] if reference["evidence"] else []),
+                 *(["cash_yield"] if earned is not None else [])],
+        trigger=[currency, _sig2(idle), str(reference["rate"]), reference["as_of"], earned is None]))
+
+
+def _cetes_ladder(run: _Run, idle: Decimal, reference: dict, currency: str) -> dict:
+    """Four 28-day CETES rungs bought a week apart (weekly liquidity once rolling), as ``ladder`` task inputs.
+
+    Maturity values use the 28-day reference yield on the CETES convention (simple, actual/360); the dated goals
+    ahead are the liabilities the ladder is checked against.  Without a dated goal the ladder cannot run.
+    """
+    share = idle / 4
+    rate = reference["rate"]
+    assets = []
+    for i in range(4):
+        buy = run.as_of + timedelta(days=7 * i + 1)
+        matures = buy + timedelta(days=28)
+        assets.append({"id": f"cetes28_rung{i + 1}", "currency": currency, "buy_on": buy.isoformat(),
+                       "principal": num(share),
+                       "cashflows": [{"date": matures.isoformat(),
+                                      "amount": num(share * (1 + rate * 28 / 360))}]})
+    liabilities = []
+    for goal in run.sit.get("goals") or []:
+        due = _date(goal.get("target_date"))
+        amount = D(goal.get("target_amount"))
+        if goal.get("status") == "active" and due and due > run.as_of and amount is not None \
+                and (goal.get("currency") or run.currency) == currency:
+            liabilities.append({"id": str(goal.get("id")), "date": due.isoformat(), "amount": num(amount),
+                                "currency": currency})
+    reserve_amount = D(run.sit["reserve"].get("amount"))
+    inputs = {"currency": currency, "as_of": run.as_of.isoformat(),
+              "reserve": {"currency": currency, "amount": num(reserve_amount) if reserve_amount is not None else None},
+              "liabilities": sorted(liabilities, key=lambda l: l["date"]),
+              "assets": [{k: v for k, v in a.items() if k in ("id", "currency", "cashflows")} for a in assets]}
+    missing = ([] if liabilities else ["a dated goal (target_date and target_amount) for the ladder to match"]) \
+        + ([] if reserve_amount is not None else ["reserve amount"])
+    return {"task": "ladder", "ready": not missing, "missing": missing, "inputs": inputs, "rungs": assets,
+            "note": "Illustrative: four equal 28-day rungs bought a week apart; maturity values use the dated "
+                    "28-day yield. Buying is the person's step at their platform (Cetesdirecto or a broker)."}
 
 
 _WINDFALL_NAMES = {"aguinaldo": ("aguinaldo", "aguinaldo"), "ptu": ("profit share (PTU)", "PTU"),
@@ -1297,7 +1512,7 @@ def _cohere(run: _Run) -> None:
             "es": surplus["why"]["es"] + f" A ese ritmo completas tu fondo de emergencia en unos {num(months, 1)} meses."}
 
 
-TRIGGERS = (_scam, _high_interest, _reserve, _concentration, _harvest, _ppr, _windfall, _drift, _surplus, _dca, _fee_creep,
+TRIGGERS = (_scam, _high_interest, _reserve, _idle_yield, _concentration, _harvest, _ppr, _windfall, _drift, _surplus, _dca, _fee_creep,
             _threads, _guilt_free, _statements, _stale)
 
 

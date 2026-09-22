@@ -28,7 +28,7 @@ Then message your claw: *hola, quiero ordenar mis finanzas*.
 The installer:
 
 1. checks for `uv` (and warns when `openclaw` is not on PATH);
-2. runs `uv sync --inexact --extra images` (Pillow, for PNG views), the only
+2. runs `uv sync --locked --inexact --extra images` (Pillow, for PNG views), the only
    network step, and checks Python ≥ 3.11;
 3. creates a private data directory (mode 0700) at
    `${WEALTH_DATA_DIR:-~/.local/share/wealth-harness}` with the database
@@ -187,6 +187,15 @@ The claw never says it bought, sold or moved anything, and asks "¿Lo guardo?"
 - Deleting a profile is interactive only:
   `uv run wealth forget --client me` in a terminal. `install.sh --uninstall`
   keeps the data.
+- Each turn fetches prices for held symbols from Yahoo Finance (symbols only,
+  no amounts or identity); `WEALTH_OFFLINE=1` turns that off. The local web
+  page loads fonts from Google Fonts, which sees the IP and the font request
+  but no financial data.
+- OpenClaw is a host without the Wealth launcher, so it gets `needs_person`
+  plus a `confirmation_code`; the claw must show the summary and code, and
+  send the second call (`confirm: true` plus the code) only on the person's
+  yes. `WEALTH_HOST_HANDLES_CONSENT=1` is only for hosts that confirm
+  natively.
 
 ## Permissions
 

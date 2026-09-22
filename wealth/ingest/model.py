@@ -42,6 +42,7 @@ from typing import Any, Iterable, TypedDict
 from .classify import CASH_LABEL, classify_instrument, listing
 from .common import decimals, digest, envelope, fold as fold_text, out, parse_amount, parse_percent, slug
 from .redact import mask_account, redact, redact_text
+from .safety import INSTRUCTION_REASON, flag_instructions, mark_untrusted, text_leaves
 from .transactions import normalize as normalize_transactions
 
 
@@ -138,6 +139,9 @@ def build_proposal(
     comma = statement.get("decimal_comma")
     warnings, missing, assumptions = list(warnings), list(missing), list(assumptions)
     reasons = list(review_reasons)
+    # Text in the file that addresses an assistant is a risk flag the person must see: never ready_to_confirm.
+    if flag_instructions(provenance, [*text_leaves(statement), *text_leaves(transactions or [])]):
+        reasons.append(INSTRUCTION_REASON)
     field_confidence = dict(confidence or {})
     institution_key = slug(statement.get("institution_key") or statement.get("institution") or "statement", 16)
     as_of = statement.get("as_of")
@@ -500,8 +504,9 @@ def build_proposal(
                         + ("" if status == "ready_to_confirm" else " Unresolved discrepancies also need acknowledge_discrepancies=True."),
     }
     sources = [provenance.get("ref")] if provenance.get("ref") else []
-    return envelope(status, result, missing=redact(missing), warnings=[redact_text(w) for w in warnings],
-                    sources=sources, assumptions=assumptions)  # type: ignore[return-value]
+    report = envelope(status, result, missing=redact(missing), warnings=[redact_text(w) for w in warnings],
+                      sources=sources, assumptions=assumptions)
+    return mark_untrusted(report) if kind != "user" else report  # type: ignore[return-value]
 
 
 def _reconcile_account(account_id, currency, raw, items, positions_value, cash_total, rows_seen, rates, comma,

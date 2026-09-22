@@ -117,6 +117,8 @@ if [ "$UNINSTALL" -eq 1 ]; then
         backup_config
         openclaw mcp unset wealth >/dev/null 2>&1 || true
         openclaw config unset skills.entries.wealth >/dev/null 2>&1 || true
+        # The CLI can leave "mcp": {"servers": {}} behind; tidy it when the file is strict JSON.
+        [ -f "$CONFIG" ] && config_tool remove --config "$CONFIG" --no-backup >/dev/null 2>&1 || true
         say "removed mcp.servers.wealth and skills.entries.wealth from the OpenClaw config"
     elif [ -f "$CONFIG" ]; then
         if [ "$DRY_RUN" -eq 1 ]; then
@@ -151,8 +153,9 @@ say "Private data:     $DATA_DIR"
 
 # ------------------------------------------------------------------ dependencies (the only network step)
 
-# --extra images adds Pillow so views arrive as PNG; --inexact keeps packages a developer installed.
-run uv --directory "$WEALTH_HOME" sync --quiet --inexact --extra images
+# --locked installs the pinned uv.lock; --extra images adds Pillow so views arrive as PNG; --inexact keeps
+# packages a developer installed.
+run uv --directory "$WEALTH_HOME" sync --quiet --locked --inexact --extra images
 if [ "$DRY_RUN" -eq 0 ]; then
     uv --directory "$WEALTH_HOME" run --quiet python -c \
         'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \

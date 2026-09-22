@@ -587,7 +587,7 @@ def _fetch_yfinance(symbol: str, entity_type: str, retrieved_on: date) -> dict[s
     try:
         import yfinance as yf  # type: ignore
     except ImportError as exc:
-        raise RuntimeError("live_fetch requires the optional analytics dependency: install wealth-harness[analytics]") from exc
+        raise RuntimeError("live_fetch needs yfinance, a core dependency of wealth-harness; reinstall it (uv sync)") from exc
 
     ticker = yf.Ticker(symbol)
     info = dict(ticker.get_info() or {})
@@ -675,6 +675,95 @@ def _fetch_yfinance(symbol: str, entity_type: str, retrieved_on: date) -> dict[s
             statements.append({"period_end": period_date.isoformat(), "period_type": "FY", "currency": currency, "source_ids": [source_id], "metrics": metrics})
     result["statements"] = statements
     return result
+
+
+# -- fund holdings for automatic look-through (wealth.household exposure) ---------------------------
+
+_LIVE_FUND_CACHE: dict[tuple[str, str], dict[str, Any] | None] = {}  # (symbol, retrieval date) -> fetched record
+_ASSET_CLASS_KEYS = {"stockPosition": "equity", "bondPosition": "fixed_income", "cashPosition": "cash"}
+_ASSET_CLASS_DOMINANT = Decimal("0.9")
+
+
+def fund_asset_class(fund_facts: Any) -> str | None:
+    """The fund's asset class from a dated fund fact: an explicit ``asset_class`` label, or an ``asset_classes``
+    breakdown (Yahoo's ``stockPosition``/``bondPosition``/``cashPosition``) with one class at 90% or more."""
+    for fact in fund_facts if isinstance(fund_facts, list) else []:
+        if not isinstance(fact, dict):
+            continue
+        if fact.get("label") == "asset_class" and isinstance(fact.get("value"), str) and fact["value"].strip():
+            return fact["value"].strip().lower()
+        if fact.get("label") == "asset_classes" and isinstance(fact.get("value"), dict):
+            for key, name in _ASSET_CLASS_KEYS.items():
+                try:
+                    share = Decimal(str(fact["value"].get(key)))
+                except (InvalidOperation, TypeError, ValueError):
+                    continue
+                if share.is_finite() and share >= _ASSET_CLASS_DOMINANT:
+                    return name
+    return None
+
+
+def _holdings_record(symbol: str, holdings: Any, fund_facts: Any, *, as_of: str | None, source: str,
+                     origin: str, note: str | None = None) -> dict[str, Any] | None:
+    rows = []
+    for item in holdings if isinstance(holdings, list) else []:
+        if not isinstance(item, dict) or not isinstance(item.get("symbol"), str):
+            continue
+        try:
+            weight = Decimal(str(item.get("weight")))
+        except (InvalidOperation, TypeError, ValueError):
+            continue
+        if not weight.is_finite() or weight <= 0 or weight > 1:
+            continue
+        child = normalize_symbol(item["symbol"]) or item["symbol"].upper()
+        row = {"instrument_id": child, "symbol": child, "weight": format(weight, "f")}
+        if isinstance(item.get("name"), str):
+            row["issuer"] = item["name"][:80]
+        rows.append(row)
+    if not rows or sum(Decimal(r["weight"]) for r in rows) > 1:
+        return None
+    return {"instrument_id": symbol, "as_of": as_of, "source": source, "origin": origin, "holdings": rows,
+            "asset_class": fund_asset_class(fund_facts), "note": note}
+
+
+def fund_holdings_for(symbol: str, context: dict[str, Any] | None, *, live: bool = False,
+                      today: date | None = None) -> tuple[dict[str, Any] | None, str]:
+    """Holdings of fund ``symbol`` for look-through when the household supplies none.
+
+    Order: a saved ``research.<SYMBOL>`` fund packet (offline, the cache), then, only when ``live`` (market data
+    online), one Yahoo/yfinance pull per symbol per day, kept in memory.  Returns ``(record, why)``: a record
+    ``{instrument_id, as_of, source, origin, holdings, asset_class, note}`` or ``None`` with the reason.  Yahoo
+    exposes only the top holdings and no holdings date, so a live record's ``as_of`` is ``None`` (retrieval date in
+    ``note``) and the rest of the fund stays an explicit unknown residual.
+    """
+    key = normalize_symbol(symbol) or str(symbol).upper()
+    saved = (context or {}).get(f"research.{key}")
+    result = saved.get("result") if isinstance(saved, dict) else None
+    if isinstance(result, dict) and result.get("entity_type") == "fund" and result.get("fund_holdings"):
+        packet_sources = [s for s in (saved.get("sources") or []) if isinstance(s, dict)]
+        used = {sid for h in result["fund_holdings"] if isinstance(h, dict) for sid in h.get("source_ids") or []}
+        dated = sorted(s["as_of"] for s in packet_sources if s.get("id") in used and s.get("as_of"))
+        titles = sorted({s.get("title") for s in packet_sources if s.get("id") in used and s.get("title")})
+        record = _holdings_record(key, result["fund_holdings"], result.get("fund_facts"),
+                                  as_of=dated[0] if dated else result.get("as_of"),
+                                  source="; ".join(titles) or f"saved research.{key}", origin="saved_research",
+                                  note=None if dated else "holdings date unknown; the research packet date is used")
+        if record is not None:
+            return record, "saved research"
+    if not live:
+        return None, "no saved fund research and market data is offline"
+    day = (today or _today()).isoformat()
+    if (key, day) not in _LIVE_FUND_CACHE:
+        try:
+            fetched = _fetch_yfinance(key, "fund", date.fromisoformat(day))
+        except Exception:  # noqa: BLE001 - provider trouble means unknown, never a crash
+            fetched = None
+        _LIVE_FUND_CACHE[(key, day)] = None if fetched is None else _holdings_record(
+            key, fetched.get("fund_holdings"), fetched.get("fund_facts"), as_of=None,
+            source=f"Yahoo Finance via yfinance, top holdings retrieved {day}", origin="live_yahoo",
+            note=f"retrieved {day}; Yahoo gives no holdings date and only the top holdings")
+    record = _LIVE_FUND_CACHE[(key, day)]
+    return (record, "live") if record is not None else (None, "the provider returned no holdings")
 
 
 def _merge_live(inputs: dict[str, Any], packet: dict[str, Any], symbol: str, entity_type: str, as_of: date) -> dict[str, Any]:

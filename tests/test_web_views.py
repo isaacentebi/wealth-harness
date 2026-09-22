@@ -212,7 +212,7 @@ def test_page_view_styles_follow_dot():
     css = PAGE[PAGE.index("/* Engine-drawn views"):PAGE.index("/* Multi-column tables stay typographic")]
     # Cobalt only marks a live/current point; everything else is ink and hairline.
     assert [line.strip().split("{")[0].strip() for line in css.splitlines() if "var(--cobalt)" in line] == \
-        [".view .series-plot .mark.live"]
+        [".view .series-plot .mark.live", ".view .pnl-plot .spot"]  # the live point, and today's price on a P&L
     assert "var(--vermilion)" not in css and "gradient" not in css and "box-shadow: 0 0 0 2px var(--surface)" in css
     assert re.search(r"@media \(max-width: 600px\) \{\s*\.view \.compare-table \{ display: none; \}", css)
     # Markdown tables of three or more columns stack on a phone instead of being cut off.
@@ -229,16 +229,32 @@ def test_page_view_strings_exist_in_both_languages():
         assert used <= set(re.findall(r"(\w+):", block)), used - set(re.findall(r"(\w+):", block))
 
 
-def test_series_reference_is_drawn_as_the_dashed_rule_the_legend_names():
+def test_series_reference_is_named_on_its_own_rule_and_the_chrome_is_minimal():
     series = PAGE[PAGE.index("function seriesView("):PAGE.index("function comparisonView(")]
-    # The legend and the rule share one condition, so neither appears without the other.
-    assert series.count("if (ref !== null) {") == 1 and "el('span', 'ref')" in series
-    assert "if (data.reference && ref !== null) body.append(el('p', 'series-legend'" in series
+    # The rule and its name share one condition, so neither appears without the other; there is no legend.
+    assert series.count("if (ref !== null) {") == 1 and "el('span', 'ref')" in series and "el('span', 'ref-label'" in series
+    assert "series-legend" not in PAGE
+    # The reference belongs to the y-domain; the start value sits at the line's left end; the right margin is measured.
+    assert "Math.min(...ys, ...(ref === null ? [] : [ref]))" in series
+    assert "tag quiet num start" in series and "plot.style.marginRight = width; axis.style.marginRight = width;" in series
     css = PAGE[PAGE.index("/* Engine-drawn views"):PAGE.index("/* Multi-column tables stay typographic")]
     assert ".view .series-plot .ref { position: absolute; left: 0; right: 0; border-top: 1px dashed var(--muted); }" in css
-    assert "border-top: 1px dashed var(--muted); }" in css.split(".view .series-legend::before")[1].split("\n")[0]
-    # No other view carries a legend without a plot behind it.
-    for name in ("allocationView", "ticketView", "comparisonView", "payoffView"):
+    # The source line is one quiet sentence-case line, not an uppercase kicker.
+    assert "text-transform: uppercase" not in css.split(".view .view-source")[1].split("\n")[0]
+    # No view carries a legend.
+    for name in ("allocationView", "ticketView", "comparisonView", "payoffView", "pnlView"):
         body = PAGE[PAGE.index(f"function {name}("):]
         body = body[:body.index("\n    }\n")]
         assert "legend" not in body
+
+
+def test_allocation_skips_the_bar_for_a_lone_row_at_100_percent():
+    body = PAGE[PAGE.index("function allocationView("):PAGE.index("function seriesView(")]
+    assert "if (spec.data.rows.length > 1) {" in body and "el('div', 'alloc-track')" in body
+
+
+def test_pnl_view_draws_price_across_and_the_loss_side_in_blush():
+    body = PAGE[PAGE.index("function pnlView("):PAGE.index("const VIEW_KINDS")]
+    assert "fill: 'var(--blush)'" in body and "stroke: 'var(--ink)'" in body and "el('span', 'mark live')" in body
+    assert "S.breakeven" in body and "S.noFloor" in body and "S.noCeiling" in body and "S.maxLoss" in body
+    assert "pnl: pnlView" in PAGE and views.KINDS[-1] == "pnl"

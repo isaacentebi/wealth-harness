@@ -293,6 +293,66 @@ def test_withdrawals_include_rmds_and_capital_gains():
     assert year["realized_gain"] == pytest.approx(year["from_taxable"] * 0.5)
 
 
+def test_social_security_taxation_follows_irc_86_tiers():
+    # Single, benefit 20,000: provisional = other + 10,000.
+    assert R.taxable_social_security(20000, 10000, 25000, 34000) == 0  # PI 20,000 <= 25,000
+    assert R.taxable_social_security(20000, 20000, 25000, 34000) == pytest.approx(2500)  # half of (30,000 - 25,000)
+    # PI 50,000: 85% x 16,000 + min(10,000, 4,500) = 18,100, capped at 85% x 20,000 = 17,000.
+    assert R.taxable_social_security(20000, 40000, 25000, 34000) == pytest.approx(17000)
+    # Joint, benefit 30,000, other 30,000: PI 45,000 -> 0.85 x 1,000 + min(15,000, 6,000) = 6,850.
+    assert R.taxable_social_security(30000, 30000, 32000, 44000) == pytest.approx(6850)
+
+
+def test_irmaa_brackets_2026():
+    table = R.PARAMETERS["us_irmaa"][2026]["value"]
+    assert R.irmaa_annual(109000, table, "single", 1) == 0
+    assert R.irmaa_annual(109001, table, "single", 1) == pytest.approx(12 * (81.20 + 14.50))
+    assert R.irmaa_annual(800000, table, "married_filing_jointly", 2) == pytest.approx(24 * (487.00 + 91.00))
+    assert R.irmaa_annual(200000, table, "married_filing_separately", 1) == pytest.approx(12 * (446.30 + 83.30))
+
+
+def test_withdrawals_tax_social_security_and_charge_irmaa():
+    out = _withdrawals(balances={"taxable": 0, "taxable_basis": 0, "tax_deferred": 3000000, "roth": 0},
+                       start_age=66, years=2, annual_spending_usd=150000,
+                       social_security_annual_benefit_usd=40000, social_security_start_age=66,
+                       magi_prior_two_years_usd=[300000, 300000])
+    year = out["strategies"]["taxable_first"]["years"][0]
+    assert year["social_security"] == 40000 and year["taxable_social_security"] == pytest.approx(34000)  # 85% cap
+    # 2024-style lookback MAGI 300,000 (single, 205,000-500,000 tier): Part B 446.30 + Part D 83.30 a month.
+    assert year["irmaa"] == pytest.approx(12 * (446.30 + 83.30))
+    assert out["strategies"]["taxable_first"]["total_irmaa_usd"] == pytest.approx(2 * 12 * (446.30 + 83.30))
+    assert out["irmaa"]["table_year"] == 2026
+    young = _withdrawals(social_security_annual_benefit_usd=20000, social_security_start_age=67)
+    assert all(y["irmaa"] == 0 and y["social_security"] == 0 for y in young["strategies"]["proportional"]["years"])
+
+
+def test_conversion_ceiling_sweep_reports_tax_wealth_and_the_best_strategy():
+    out = _withdrawals(balances={"taxable": 300000, "taxable_basis": 200000, "tax_deferred": 1500000, "roth": 50000},
+                       annual_spending_usd=90000, start_age=63, years=30, real_return=0.03, birth_year=1963,
+                       filing_status="married_filing_jointly", social_security_annual_benefit_usd=48000,
+                       social_security_start_age=67)
+    sweep = out["conversion_sweep"]
+    assert list(sweep) == ["0.1", "0.12", "0.22", "0.24"]
+    assert sweep["0.12"]["conversion_ceiling_taxable_income_usd"] == out["conversion_ceiling_taxable_income_usd"]
+    ceilings = [sweep[k]["conversion_ceiling_taxable_income_usd"] for k in sweep]
+    assert ceilings == sorted(ceilings)
+    for row in sweep.values():
+        assert row["lifetime_tax_and_irmaa_usd"] == pytest.approx(row["lifetime_federal_tax_usd"] + row["lifetime_irmaa_usd"])
+    assert sweep["0.24"]["lifetime_irmaa_usd"] > sweep["0.1"]["lifetime_irmaa_usd"]  # big conversions trip IRMAA
+    best = out["best_strategy"]
+    wealth = {**{f"roth_conversions_to_{int(float(k) * 100)}pct": v["ending_after_tax_wealth_usd"] for k, v in sweep.items()},
+              "taxable_first": out["comparison"]["taxable_first"]["ending_after_tax_wealth_usd"],
+              "proportional": out["comparison"]["proportional"]["ending_after_tax_wealth_usd"]}
+    assert best["name"] == max(wealth, key=wealth.get) and best["years_with_shortfall"] == 0
+
+
+def test_irmaa_falls_back_to_the_latest_table_with_a_dated_warning():
+    params, warnings, assumptions = R._Params({}), [], []
+    config = R._irmaa_config({}, "single", 2027, params, assumptions, warnings)
+    assert config["table_year"] == 2026 and any("No IRMAA table for 2027" in w for w in warnings)
+    assert R._irmaa_config({"irmaa": False}, "single", 2026, params, [], []) is None
+
+
 # --- readiness --------------------------------------------------------------
 
 def test_readiness_formulas():

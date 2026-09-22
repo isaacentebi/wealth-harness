@@ -104,6 +104,7 @@ ILLIQUID_ASSET_CLASSES = frozenset({
     "art", "farmland", "timberland", "private_infrastructure",
 })
 _FUND_ASSET_CLASSES = frozenset({"fund", "etf", "mutual_fund"})
+CONCENTRATION_WARNING = Decimal("0.10")  # employer stock above 10% of known assets (with look-through) is flagged
 _REDEMPTION_PERIOD_DAYS = {"daily": 1, "weekly": 7, "monthly": 30, "quarterly": 91, "semiannual": 182, "annual": 365}
 
 # Ownership forms.  For forms in ``_EQUAL_PRESUMPTION_FORMS`` equal economic
@@ -495,7 +496,7 @@ def validate_household(household: Any) -> dict[str, Any]:
     for index, item in enumerate(data["income_exposures"]):
         _text(item.get("description"), f"income_exposures[{index}].description")
         _currency(item.get("currency"), f"income_exposures[{index}].currency")
-        for field in ("sector", "country"):
+        for field in ("sector", "country", "employer_instrument_id"):
             if field in item:
                 _text(item[field], f"income_exposures[{index}].{field}")
         if "annual_amount" in item:
@@ -826,13 +827,18 @@ def lookthrough(
         return [Leaf(Decimal(1), instrument_id, metadata, path, kind)]
     leaves: list[Leaf] = []
     total = Decimal(0)
+    # A fund whose own asset class is known (e.g. an all-equity ETF) labels holdings that carry none, and its
+    # unreported residual: the names are unknown, the asset class is not.
+    fund_class = fund.get("asset_class") if isinstance(fund.get("asset_class"), str) else None
     for holding in fund["holdings"]:
         weight = _number(holding["weight"], "holding.weight")
         total += weight
-        for child in lookthrough(holding["instrument_id"], holding, funds, opaque=opaque, stop=stop, _path=path):
+        child_meta = holding if holding.get("asset_class") or not fund_class else {**holding, "asset_class": fund_class}
+        for child in lookthrough(holding["instrument_id"], child_meta, funds, opaque=opaque, stop=stop, _path=path):
             leaves.append(Leaf(weight * child.weight, child.instrument_id, child.metadata, child.path, child.kind))
     if total < 1:
-        leaves.append(Leaf(Decimal(1) - total, f"unknown:residual:{instrument_id}", {"asset_class": "unknown"}, path, "residual"))
+        leaves.append(Leaf(Decimal(1) - total, f"unknown:residual:{instrument_id}",
+                           {"asset_class": fund_class or "unknown"}, path, "residual"))
     return leaves
 
 
@@ -915,7 +921,65 @@ def _position_liquidity(position: dict[str, Any], account: dict[str, Any], as_of
     return Decimal(0), "account_type_not_liquid" if canonical else "unknown_account_type"
 
 
-def _exposure(household: dict[str, Any], inputs: dict[str, Any], base_warnings: list[str]) -> dict[str, Any]:
+def _auto_lookthrough(household: dict[str, Any], fresh: dict[str, dict[str, Any]], stale: set[str],
+                      inputs: dict[str, Any], context: dict[str, Any] | None, as_of: date, max_age: int,
+                      warnings: list[str], assumptions: list[str]) -> list[dict[str, Any]]:
+    """Fill fund holdings the household did not supply from :func:`wealth.research.fund_holdings_for`.
+
+    Saved ``research.<SYMBOL>`` fund packets are read offline; a live Yahoo pull happens only for positions
+    classed as funds, when market data is online (``WEALTH_OFFLINE`` unset) and ``live_lookthrough`` is not
+    false.  Holding symbols that match a household position are mapped to its instrument id so direct and
+    indirect exposure to the same company add up.  Returns one row per fund tried.
+    """
+    from . import research
+    from .prices import offline_mode
+
+    allow_live = inputs.get("live_lookthrough", True) is not False and not offline_mode()
+    by_symbol: dict[str, str] = {}
+    for position in household["positions"]:
+        symbol = normalize_symbol(position.get("symbol") or position["instrument_id"])
+        if symbol:
+            by_symbol.setdefault(symbol, position["instrument_id"])
+    rows: list[dict[str, Any]] = []
+    tried: set[str] = set()
+    for position in household["positions"]:
+        instrument = position["instrument_id"]
+        if instrument in fresh or instrument in tried:
+            continue
+        symbol = normalize_symbol(position.get("symbol") or instrument) or instrument
+        fundlike = is_fund(position)
+        saved = isinstance((context or {}).get(f"research.{symbol}"), dict)
+        if not fundlike and not saved:
+            continue
+        tried.add(instrument)
+        record, why = research.fund_holdings_for(symbol, context, live=allow_live and fundlike, today=as_of)
+        if record is None:
+            rows.append({"instrument_id": instrument, "symbol": symbol, "status": "unavailable", "reason": why})
+            continue
+        record_as_of = _date(record["as_of"], "fund holdings as_of") if record.get("as_of") else None
+        if record_as_of is not None and (as_of - record_as_of).days > max_age:
+            warnings.append(f"Researched holdings for {symbol} are stale ({record['as_of']}); look-through excluded.")
+            rows.append({"instrument_id": instrument, "symbol": symbol, "status": "stale", "as_of": record["as_of"],
+                         "source": record["source"]})
+            continue
+        holdings = [{**h, "instrument_id": by_symbol.get(h["symbol"], h["instrument_id"])} for h in record["holdings"]]
+        fresh[instrument] = {"instrument_id": instrument, "as_of": record["as_of"], "source": record["source"],
+                             "holdings": holdings, "asset_class": record.get("asset_class")}
+        stale.discard(instrument)
+        reported = sum((Decimal(h["weight"]) for h in holdings), Decimal(0))
+        rows.append({"instrument_id": instrument, "symbol": symbol, "status": "used", "origin": record["origin"],
+                     "as_of": record["as_of"], "source": record["source"], "holdings": len(holdings),
+                     "reported_weight": _out(reported), "asset_class": record.get("asset_class"),
+                     "note": record.get("note")})
+    if any(r["status"] == "used" for r in rows):
+        assumptions.append("Fund holdings not supplied in the household came from research (saved research packets, or "
+                           "a live Yahoo pull only when market data is online); unreported fund weight stays an "
+                           "explicit unknown residual, labelled with the fund's asset class when that is known.")
+    return rows
+
+
+def _exposure(household: dict[str, Any], inputs: dict[str, Any], base_warnings: list[str],
+              context: dict[str, Any] | None = None) -> dict[str, Any]:
     warnings = list(base_warnings)
     assumptions: list[str] = []
     reporting = household["currency"]
@@ -936,6 +1000,9 @@ def _exposure(household: dict[str, Any], inputs: dict[str, Any], base_warnings: 
         )
     fx = fx_converter(household, as_of, max_fx_age, warnings)
     fresh_funds, stale_funds = current_funds(household, as_of, max_fund_age, warnings)
+    supplied_funds = set(fresh_funds)
+    auto_rows = _auto_lookthrough(household, fresh_funds, stale_funds, inputs, context, as_of, max_fund_age,
+                                  warnings, assumptions) if inputs.get("auto_lookthrough", True) is not False else []
 
     accounts = {account["id"]: account for account in household["accounts"]}
     exposure: dict[str, dict[str, Decimal]] = {
@@ -948,6 +1015,8 @@ def _exposure(household: dict[str, Any], inputs: dict[str, Any], base_warnings: 
     liquidity_by_reason: dict[str, Decimal] = {}
     nonliquid_position_records = 0
     leaves_by_position: dict[str, dict[str, Decimal]] = {}
+    direct_value: dict[str, Decimal] = {}
+    via_value: dict[str, dict[str, Decimal]] = {}
     incomplete_lookthrough = False
     excluded_value_records = 0
     unattributed_value_records = 0
@@ -991,6 +1060,11 @@ def _exposure(household: dict[str, Any], inputs: dict[str, Any], base_warnings: 
                     warnings.append(f"No current fund holdings supplied for {leaf.instrument_id}; kept as a direct fund exposure.")
             leaf_value = value * leaf.weight
             leaf_map[leaf.instrument_id] = leaf_map.get(leaf.instrument_id, Decimal(0)) + leaf.weight
+            if len(leaf.path) == 1:
+                direct_value[leaf.instrument_id] = direct_value.get(leaf.instrument_id, Decimal(0)) + leaf_value
+            else:
+                via = via_value.setdefault(leaf.instrument_id, {})
+                via[leaf.path[0]] = via.get(leaf.path[0], Decimal(0)) + leaf_value
             add("instrument", leaf.instrument_id, leaf_value)
             for dimension in ("asset_class", "issuer", "sector", "country", "economic_currency"):
                 add(dimension, leaf.metadata.get(dimension), leaf_value)
@@ -1108,6 +1182,75 @@ def _exposure(household: dict[str, Any], inputs: dict[str, Any], base_warnings: 
                     "overlap_weight": _out(overlap), "shared_instruments": shared,
                 })
 
+    top_underlying = []
+    for name in sorted(set(direct_value) | set(via_value),
+                       key=lambda k: (-(direct_value.get(k, Decimal(0)) + sum(via_value.get(k, {}).values())), k)):
+        if name.startswith("unknown:"):
+            continue
+        via = via_value.get(name, {})
+        total = direct_value.get(name, Decimal(0)) + sum(via.values(), Decimal(0))
+        top_underlying.append({
+            "instrument_id": name, "total_value": _out(total), "direct_value": _out(direct_value.get(name, Decimal(0))),
+            "via_funds_value": _out(sum(via.values(), Decimal(0))),
+            "via_funds": [{"fund": fund, "value": _out(v)} for fund, v in sorted(via.items(), key=lambda i: (-i[1], i[0]))],
+            "weight_of_known_assets": _out(total / denominator) if denominator else None,
+        })
+        if len(top_underlying) >= 15:
+            break
+    looked = [p for p in position_list if len(leaves_by_position[p["id"]]) > 1
+              or any(k != p["instrument_id"] for k in leaves_by_position[p["id"]])]
+    overlap_matrix = None
+    if len(looked) >= 2:
+        labels = [p["id"] for p in looked]
+        rows_m = []
+        for left in looked:
+            row = []
+            for right in looked:
+                if left is right:
+                    row.append("1")
+                    continue
+                lm, rm = leaves_by_position[left["id"]], leaves_by_position[right["id"]]
+                shared = [k for k in set(lm) & set(rm) if not k.startswith("unknown:")]
+                row.append(_out(sum((min(lm[k], rm[k]) for k in shared), Decimal(0))))
+            rows_m.append(row)
+        overlap_matrix = {"positions": labels, "instruments": [p["instrument_id"] for p in looked], "matrix": rows_m,
+                          "measure": "sum over shared holdings of the smaller weight (0 = no overlap, 1 = identical); "
+                                     "unreported residual weight is not counted, so overlap is a lower bound"}
+    employer_rows = []
+    for item in household["income_exposures"]:
+        employer = item.get("employer_instrument_id")
+        if not employer:
+            continue
+        key = next((iid for iid in set(direct_value) | set(via_value)
+                    if iid == employer or normalize_symbol(iid) == normalize_symbol(employer)), employer)
+        direct = direct_value.get(key, Decimal(0))
+        via = sum(via_value.get(key, {}).values(), Decimal(0))
+        stock = direct + via
+        salary = None
+        salary_reporting = None
+        if item.get("annual_amount") not in (None, ""):
+            salary = _number(item["annual_amount"], "income_exposure.annual_amount")
+            salary_reporting = fx.convert(salary, item["currency"], reporting, f"income exposure {item['id']}")
+        row = {
+            "income_exposure_id": item["id"], "employer_instrument_id": employer,
+            "direct_value": _out(direct), "via_funds_value": _out(via), "stock_value": _out(stock),
+            "stock_weight_of_known_assets": _out(stock / denominator) if denominator else None,
+            "annual_income": {"amount": _out(salary), "currency": item["currency"]} if salary is not None else None,
+            "annual_income_in_reporting_currency": _out(salary_reporting) if salary_reporting is not None else None,
+            "at_risk_if_employer_fails": _out(stock + salary_reporting) if salary_reporting is not None else None,
+            "stock_to_income_years": _out((stock / salary_reporting).quantize(Decimal("0.01")))
+            if salary_reporting else None,
+            "lookthrough_complete": not incomplete_lookthrough,
+            "reason": None if salary_reporting is not None else (
+                "annual_amount is unknown" if salary is None else f"no FX {item['currency']}->{reporting}"),
+            "interpretation": "The same employer pays the salary and issues the stock: a failure hits both at once. "
+                              "at_risk adds one year of income to the stock value; it is a scale, not a forecast.",
+        }
+        if denominator and stock / denominator > CONCENTRATION_WARNING:
+            warnings.append(f"{employer} (your employer) is {_out((stock / denominator * 100).quantize(Decimal('0.1')))}% "
+                            "of known assets including fund look-through, on top of your salary.")
+        employer_rows.append(row)
+
     target_rows = []
     unknown_asset_sections = sorted(set(household["unknown_sections"]) & {"positions", "external_assets"})
     unbounded_missing_assets = not household["complete"] or bool(unknown_asset_sections) or excluded_value_records > 0
@@ -1200,6 +1343,12 @@ def _exposure(household: dict[str, Any], inputs: dict[str, Any], base_warnings: 
             },
             "exposures": dimensions, "income_exposures": income_rows,
             "economic_links": economic_links, "overlap": overlaps, "targets": target_rows,
+            "top_underlying": top_underlying, "overlap_matrix": overlap_matrix,
+            "employer_concentration": employer_rows,
+            "lookthrough_sources": [
+                *({"instrument_id": iid, "status": "used", "origin": "household", "as_of": fresh_funds[iid]["as_of"],
+                   "source": fresh_funds[iid]["source"]} for iid in sorted(supplied_funds)),
+                *auto_rows],
         },
         "missing": [], "warnings": list(dict.fromkeys(warnings)),
         "sources": ["household", *sorted({fund["source"] for fund in fresh_funds.values()})],
@@ -1237,7 +1386,7 @@ def run(task: str, inputs: dict[str, Any], context: dict[str, Any] | None = None
             "warnings": [], "sources": [], "assumptions": [],
         }
     checked = validate_household(raw)
-    result = _exposure(checked["household"], inputs, checked["warnings"])
+    result = _exposure(checked["household"], inputs, checked["warnings"], context)
     if "household" in inputs:
         result["assumptions"].append("Used inputs.household in preference to context.household.")
     return result

@@ -26,14 +26,28 @@ uv run wealth-mcp                         # speaks MCP on stdin/stdout
 
 The two assistants need a signed-in Codex CLI; `wealth` and `wealth-mcp` need
 no model at all. `WEALTH_MCP_TOOLS=wealth_context,wealth_run` limits the MCP
-server to the named tools, and `WEALTH_BEHAVIOR_IN_HOST=1` leaves the
-conversation policy out of its instructions when the host already has it.
+server to the named tools. The server's instructions carry the tool rules and
+a compact conversation contract (about 2,400 characters); set
+`WEALTH_BEHAVIOR_IN_SERVER=1` to append the full policy
+([wealth/instructions.md](../wealth/instructions.md), about 21,000 characters)
+for a host that has no other copy of it. `WEALTH_BEHAVIOR_IN_HOST=1`, which the
+Wealth launcher sets because it gives the model the policy directly, always
+leaves the full policy out.
 
 ## MCP tools
 
 Nine tools. `wealth_context`, `wealth_recall` and `wealth_inspect` are
-read-only; none is destructive. Arguments are strict: unknown fields are
-rejected, and errors name the field and the expected inputs.
+read-only; none is destructive. `wealth_run` and `wealth_ingest` are marked
+open-world: they may fetch public market, fund and SEC data or read a
+connected broker. `wealth_run` is not read-only even without `save_as`,
+because some tasks keep state (monitor rules, dismissed nudges, prepared order
+tickets). Arguments are strict: unknown fields are rejected, and errors name
+the field and the expected inputs.
+
+Discovery is sized for a model's context: `wealth_context` with no arguments
+lists every task with its purpose and required inputs; `{"intent": "<task>"}`
+returns one task's full schema and a runnable example; `{"detail": "full"}`
+returns every schema at once (large).
 
 | Tool | What it does | Example arguments |
 | --- | --- | --- |
@@ -47,11 +61,32 @@ rejected, and errors name the field and the expected inputs.
 | `wealth_ingest` | Uploads, extractions, stated balances and connector syncs into a held proposal; `confirm` saves it after the person's yes | `{"client_id": "ana", "action": "connector_status", "inputs": {}}` |
 | `wealth_decision` | Propose, accept or dismiss an evidence-bound decision; acceptance is not execution | `{"action": "propose", "client_id": "ana", "inputs": {"title": "Pay the card first", "rationale": "42% costs more than any safe return", "expected_revision": 1, "evidence_ids": ["<fact id>"]}}` |
 
+## Tasks
+
+`wealth_run` (CLI `run`) takes one of these task names. `printf '{}' | uv run
+wealth context` prints every task with its inputs and a runnable example.
+
+| Life area | What Wealth does (tasks) |
+| --- | --- |
+| Money in and out | Where money goes and what is investable, cash calendars, projections, withdrawal and liability matching, debt payoff, reserves and goals (`spending`, `calendar`, `income`, `project`, `ladder`, `debt_payoff`, `plan`) |
+| What you own | Holdings, lots, gains and income from a transaction ledger, returns, exposure and overlap, household import, SIC premium (`ledger`, `performance`, `exposure`, `import`, `sic_premium`) |
+| Investing | Investment policy, tax-aware rebalancing, asset location, recurring investing, portfolio analysis and construction, company and fund research (`policy_draft`, `policy_check`, `rebalance`, `asset_location`, `dca`, `compare`, `construct`, `analyze`, `factors`, `stress`, `research`, `value`) |
+| Tax | US federal lots, wash sales and harvesting; Mexico Art. 129, real interest, deductions and PPR, foreign securities, tax calendar; US estate exposure for non-residents (`tax`, `mx_holdings`, `mx_interest`, `mx_deductions`, `mx_foreign`, `mx_calendar`, `estate`) |
+| Retirement | IMSS Ley 73/97, AFORE and Modalidad 40; Social Security, contribution limits and withdrawal order; a readiness range (`retirement_mx`, `retirement_us`, `retirement_readiness`) |
+| Protection | Insurance and estate gaps, life events, and guardrails for speculation, panic selling and scams (`protection_review`, `life_event`, `speculation_check`, `panic_check`, `scam_check`) |
+| Reviews and nudges | What needs attention today, a weekly letter, a quarterly review, a fee audit, opt-in monitor rules (`today`, `weekly`, `quarterly_review`, `fee_audit`, `monitor`) |
+| Following managers | Find a fund manager's SEC 13F filings, read and profile them, compare managers, size a mirror within your policy (`manager_search`, `manager_holdings`, `manager_profile`, `manager_compare`, `manager_mirror`) |
+| Connections | Statement uploads, plus read-only syncs from Interactive Brokers, Alpaca and Cuenca, each saved only after you say yes (`wealth_ingest`: `ibkr_flex`, `alpaca`, `cuenca`) |
+| Execution | An order ticket with pre-trade checks for Alpaca that you place yourself by tapping its card (`order_ticket`) |
+
 ## CLI commands
 
 Every command reads one JSON object from stdin or `--input request.json` and
 prints JSON; `--db` overrides `WEALTH_DB`. Errors go to stderr as
-`{"error", "error_type"}` with exit code 2.
+`{"error", "error_type"}` with exit code 2. Operations that save on the
+person's yes (`ingest` confirm/confirm_duplicates, `decision` accept,
+`resolve_contradiction`) need an interactive terminal or `--yes`, passed only
+after the person has agreed; piped stdin alone is refused.
 
 | Command | MCP equivalent | What it does |
 | --- | --- | --- |
@@ -60,11 +95,11 @@ prints JSON; `--db` overrides `WEALTH_DB`. Errors go to stderr as
 | `remember` | `wealth_remember` | Save facts |
 | `recall` | `wealth_recall` | Search facts |
 | `run` | `wealth_run` | Run a task |
-| `decision` | `wealth_decision` | Propose, accept, dismiss |
-| `ingest` | `wealth_ingest` | Proposals and confirmation |
+| `decision` | `wealth_decision` | Propose, accept, dismiss; accept needs a terminal or `--yes` |
+| `ingest` | `wealth_ingest` | Proposals and confirmation; confirm needs a terminal or `--yes` |
 | `history` | `wealth_inspect` `detail=history` | One key's timeline |
 | `contradictions` | `wealth_inspect` `detail=contradictions` | Pending contradictions |
-| `resolve_contradiction` | `wealth_resolve_contradiction` | The person's answer |
+| `resolve_contradiction` | `wealth_resolve_contradiction` | The person's answer; needs a terminal or `--yes` |
 | `execution_status` | none | Trading mode, whether keys exist, limits, today's usage |
 | `order_status` | none | Order tickets and line states; `refresh` reads the broker |
 | `prices` | none | Market-data cache: `status`, or `refresh` now |
@@ -109,6 +144,43 @@ direct inputs override them for that call. `save_as` (`analysis.<name>`,
 printf '%s' '{"task":"debt_payoff","client_id":"ana","inputs":{"monthly_amount":3000}}' | uv run wealth run
 ```
 
+**Risk tasks.** `speculation_check` reads a `sell` of an option as writing it
+(sell to open) unless `position_effect` is `close`, and sizes it by the capital
+it puts at risk: an uncovered put risks strike x 100 x contracts less the
+premium, an uncovered call has no ceiling. With `proposal.legs` (calls, puts,
+stock, crypto, leveraged), or strike, contracts and premium, `result.payoff`
+gives P&L at expiry over a price grid, max loss and max gain (`null` with
+`*_unbounded`), breakevens, capital at risk and its share of net worth and of
+the play-money budget, with an en/es explanation; the chat draws it as two
+tickets. `action` `explain` returns the payoff without a verdict:
+
+```sh
+printf '%s' '{"task":"speculation_check","client_id":"ana","inputs":{"proposal":{"action":"explain",
+  "instrument":"options","symbol":"SPY","spot":650,"legs":[
+  {"type":"call","side":"long","strike":650,"premium":12,"contracts":1},
+  {"type":"call","side":"short","strike":670,"premium":5,"contracts":1}]}}}' | uv run wealth run
+```
+
+`stress` accepts partial shocks: holdings without one move by their beta to the
+scenario's `factor` (default: the first shocked symbol), estimated from price
+history (supplied `prices`/`beta_prices`, or the price cache), else from
+explicit `betas`, else from a stated asset-class default when the factor is an
+equity index. `fx_shocks` (`{"USDMXN": 0.15}` = 15% more pesos per dollar)
+convert each holding's own-currency return into the reporting currency; the
+holding's currency comes from `positions[].native_currency` or
+`asset_currencies`, and stays unknown otherwise. A return nobody can work out
+is `null` with a reason, and the scenario total with it.
+
+```sh
+printf '%s' '{"task":"stress","client_id":"ana","inputs":{"scenarios":[
+  {"name":"US selloff, peso weaker","shocks":{"SPY":-0.25},"fx_shocks":{"USDMXN":0.15}}]}}' | uv run wealth run
+```
+
+`analyze` adds `result.tail_risk`: historical 1-day and 1-month 95% VaR and
+CVaR of today's weights (at least 250 and 500 daily returns), parametric
+normal VaR/CVaR as the fallback, and each position's contribution (historical
+CVaR and Euler parametric VaR, both adding up to the total).
+
 **client inspect / export** read facts, and **decision** cites them. A proposal
 needs the current revision and eligible evidence:
 
@@ -123,16 +195,21 @@ printf '%s' "{\"action\":\"propose\",\"client_id\":\"ana\",\"inputs\":{\"title\"
 printf '%s' '{"action":"export","client_id":"ana"}' | uv run wealth client > /tmp/wealth-demo/ana-export.json
 ```
 
-Accept or dismiss later with `{"action":"accept","client_id":"ana","inputs":{"decision_id":"..."}}`.
+Accept or dismiss later, after the person agreed, with `--yes`:
+
+```sh
+printf '%s' '{"action":"accept","client_id":"ana","inputs":{"decision_id":"..."}}' \
+  | uv run wealth decision --yes
+```
 
 **ingest** turns a statement or stated balances into a held proposal; confirm
-only after the person's yes:
+only after the person's yes, with `--yes`:
 
 ```sh
 PID=$(printf '%s' '{"client_id":"ana","action":"chat","inputs":{"currency":"MXN","as_of":"2026-09-21",
   "items":[{"kind":"cash","label":"Nu","amount":40000,"quote":"tengo unos 40 mil en Nu"}]}}' \
   | uv run wealth ingest | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["proposal_id"])')
-printf '%s' "{\"client_id\":\"ana\",\"action\":\"confirm\",\"inputs\":{\"proposal_id\":\"$PID\"}}" | uv run wealth ingest
+printf '%s' "{\"client_id\":\"ana\",\"action\":\"confirm\",\"inputs\":{\"proposal_id\":\"$PID\"}}" | uv run wealth ingest --yes
 ```
 
 **history** prints one key's timeline in words and entries:
@@ -151,7 +228,7 @@ printf '%s' '{"client_id":"ana","facts":[{"key":"liability.card","merge":true,"v
   "source":{"kind":"web","ref":"https://www.example.com/tarjetas/tasas","observed_on":"2026-09-21"}}]}' | uv run wealth remember
 CID=$(printf '%s' '{"client_id":"ana"}' | uv run wealth contradictions \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["contradictions"][0]["id"])')
-printf '%s' "{\"client_id\":\"ana\",\"contradiction_id\":\"$CID\",\"choice\":\"keep\"}" | uv run wealth resolve_contradiction
+printf '%s' "{\"client_id\":\"ana\",\"contradiction_id\":\"$CID\",\"choice\":\"keep\"}" | uv run wealth resolve_contradiction --yes
 ```
 
 **client index** attaches a host-computed embedding to a fact (Wealth creates
@@ -181,7 +258,8 @@ the latest closes now, for `symbols` or for what a client's ledger holds plus
 the FX into the reporting currency. Prices come from Yahoo Finance through
 yfinance and are cached in the Wealth database: 15 minutes for a latest price
 while markets are open (weekdays 13:30-21:00 UTC), 12 hours otherwise; a past
-day fetched after it closed is final. `WEALTH_OFFLINE=1`, or a failed fetch,
+day fetched after it closed is final. Price lookups happen per turn, for the
+symbols a client currently holds. `WEALTH_OFFLINE=1`, or a failed fetch,
 serves the cache labelled `cache_fallback`, or leaves the price missing; a
 price is never zero or guessed. A price more than five days older than the
 date it values is listed in `stale_prices`.
@@ -450,6 +528,55 @@ Market Value, Cost Basis) and/or activity (Date, Type, Description, Symbol,
 Quantity, Price, Amount, Fees) using `"preset": "vest"`. The preset is a
 generic US-broker layout (USD, month-first dates) and says so in the proposal's
 assumptions.
+
+## Harvest tickets, idle cash, look-through and Roth conversions
+
+**Harvest to ticket.** `tax` with `mode: harvest_report` returns
+`order_tickets`, one per account: `inputs` go to `order_ticket` unchanged.
+Each sell line lists `lots` (`lot_id`, `quantity`, `estimated_tax_saving`,
+`repurchase_not_before`). A lot's saving is its marginal current-year federal
+reduction in plan order. It is `null` when return facts are missing. Lots a wash
+sale would disallow, or that only add to carryforwards, are listed in
+`order_ticket_exclusions`. The ticket is a proposal. The person confirms it on
+the card and asks the broker for specific-lot relief.
+
+```sh
+printf '%s' '{"task":"order_ticket","client_id":"ana","inputs":{"source":"user_request",
+  "rationale":"Tax-loss harvest ...","orders":[{"symbol":"VTI","side":"sell","qty":100,
+  "lots":[{"lot_id":"vti-1","quantity":100,"estimated_tax_saving":"660.00","repurchase_not_before":"2026-04-20"}]}]}}' \
+  | uv run wealth run
+```
+
+**Idle cash.** `today` adds an `idle_yield` item: cash above the reserve
+target, earmarked goal cash and `protect_now` goals, priced at a reference
+rate. The rate is a saved `cash_reference_rate` fact
+(`{low, high, unit, source, as_of?, currency?}`). Mexico residents without one
+get the dated CETES 28-day constant (Banxico auction of 2026-09-15, 6.25%). The
+item says when the rate is more than 30 days old. A saved `cash_yield` (what the
+cash earns) makes the loss exact. Without it the figure is `bound: at_most`.
+`data.offer` holds `ladder` inputs for four weekly CETES rungs. Nothing fires
+when the rate, the reserve target or a balance is unknown.
+
+**Look-through.** `exposure` fills fund holdings the household lacks from
+saved `research.<SYMBOL>` fund packets. Yahoo is used only when market data is
+online (`WEALTH_OFFLINE` unset; `live_lookthrough: false` turns it off). The
+result adds `top_underlying`, `overlap_matrix`, `lookthrough_sources` and
+`employer_concentration` (from `income_exposures[].employer_instrument_id`,
+with the salary). A fund with a known asset class labels its unreported
+residual with that class.
+
+**Mexico mortgage.** `mx_deductions` takes `mortgage` (LISR Art. 151 fr. IV).
+It needs real interest from the lender's constancia, the credit in UDIs, and
+confirmation that the loan is for the home and from the financial system. It
+counts inside the global cap after `general_mxn`. A credit above 750,000 UDIs
+keeps the proportional share.
+
+**Roth conversions.** `retirement_us` `withdrawals` sweeps conversion
+ceilings (`conversion_sweep`, 10/12/22/24%) and names a `best_strategy`. It
+taxes `social_security_annual_benefit_usd` under IRC 86 (25k/34k single,
+32k/44k joint; fixed nominal thresholds deflated at `threshold_inflation`). It
+charges IRMAA from the 2026 CMS table on MAGI from two years earlier. Other
+years use the latest table with a dated warning.
 
 ## Facts
 

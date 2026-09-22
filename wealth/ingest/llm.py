@@ -16,6 +16,7 @@ from typing import Any
 
 from .common import envelope, find_dates, fold, number_tokens, parse_amount
 from .redact import redact_text
+from .safety import UNTRUSTED_NOTE, flag_instructions
 from .transactions import TYPES
 
 
@@ -86,10 +87,13 @@ def extraction_request(pages: list[tuple[int, str]], *, provenance: dict[str, An
         if budget <= 0:
             truncated = True
             break
+    flag_instructions(provenance, [page["text"] for page in texts])
     return {
         "kind": "extraction_request", "reason": reason, "instructions": INSTRUCTIONS,
+        "untrusted": True, "untrusted_note": UNTRUSTED_NOTE,
         "schema": EXTRACTION_SCHEMA, "pages": texts, "truncated": truncated,
-        "source": {k: provenance.get(k) for k in ("ref", "sha256", "filename", "media_type", "pages")},
+        "source": {k: provenance.get(k) for k in ("ref", "sha256", "filename", "media_type", "pages", "risk_flags")
+                   if k != "risk_flags" or provenance.get(k)},
         "next_step": "Call validate_llm_extraction(payload, source_text=<this request>) with the filled JSON.",
     }
 
