@@ -58,6 +58,16 @@ SERVICE_TIERS = ("fast",)
 _service_tier: str | None = None
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+
+class _Isolated:
+    """``cwd`` for ``_stream_process``: run Codex with Wealth's private CODEX_HOME in a fresh empty directory."""
+
+    def __repr__(self) -> str:
+        return "ISOLATED"
+
+
+ISOLATED = _Isolated()
+
 # Codex features that are on by default but have no place in a financial
 # assistant whose only tools are Wealth MCP and (optionally) web search. They
 # are disabled with ``-c features.<name>=false`` rather than ``--disable`` so an
@@ -213,6 +223,8 @@ def _config_overrides(db_path: str | Path, *, web_search: bool, reasoning: str,
         *([f"service_tier={_toml(service_tier())}"] if service_tier() else []),
         f"model_instructions_file={_toml(str(instructions or codex_instructions()))}",
         "project_doc_max_bytes=0",
+        # The project is the (empty, scratch) working directory itself: no parent's .codex is searched.
+        "project_root_markers=[]",
         'sandbox_mode="read-only"',
         *(f"features.{name}=false" for name in DISABLED_FEATURES),
         "features.skip_host_skill_discovery=true",
@@ -251,8 +263,9 @@ def build_command(
 
     With ``resume_thread`` the turn continues a recorded Codex session so earlier
     tool results stay in the model's context. ``codex exec resume`` has no
-    ``--sandbox``/``-C`` flags; the sandbox comes from ``sandbox_mode`` and the
-    working directory from the process cwd.
+    ``--sandbox``/``-C`` flags; the sandbox comes from ``sandbox_mode``. Neither
+    form names a working directory: run it with ``_stream_process(..., ISOLATED)``,
+    which uses a fresh empty one and Wealth's private CODEX_HOME.
     """
 
     if reasoning not in REASONING_LEVELS:
@@ -281,7 +294,6 @@ def build_command(
         "--model", resolve_model(model),
         "--json",
         *overrides,
-        "-C", str(PROJECT_ROOT),
         "-",
     ]
 
@@ -826,13 +838,57 @@ def _conclude(result: EventResult, return_code: int, stderr: str) -> str:
 # --------------------------------------------------------------------------- process
 
 
+def _descendants(pid: int, limit: int = 256) -> list[int]:
+    """Every live descendant of ``pid`` (``pgrep -P``, recursively), whatever process group it is in."""
+
+    found: list[int] = []
+    frontier = [pid]
+    while frontier and len(found) < limit:
+        parent = frontier.pop()
+        try:
+            out = subprocess.run(["pgrep", "-P", str(parent)], capture_output=True, text=True, timeout=2).stdout
+        except (OSError, subprocess.SubprocessError):
+            continue
+        for token in out.split():
+            if token.isdigit() and int(token) not in found and int(token) not in (pid, os.getpid()):
+                found.append(int(token))
+                frontier.append(int(token))
+    return found
+
+
+def _signal_all(pids: Iterable[int], sig: int) -> None:
+    for pid in pids:
+        try:
+            os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def _terminate(process: subprocess.Popen[str]) -> None:
+    """End the process, its process group and every descendant.
+
+    Codex starts each MCP server in a process group of its own, so ``killpg`` alone
+    misses the Wealth MCP server. The descendants are listed before anything is
+    signalled (once their parent dies they are reparented and no longer found).
+    """
     if process.poll() is not None:
         return
+    descendants = _descendants(process.pid) if os.name == "posix" else []
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError):
         process.terminate()
+    _signal_all(descendants, signal.SIGTERM)
     try:
         process.wait(timeout=2)
     except subprocess.TimeoutExpired:
@@ -841,6 +897,12 @@ def _terminate(process: subprocess.Popen[str]) -> None:
         except (ProcessLookupError, PermissionError):
             process.kill()
         process.wait()
+    deadline = time.monotonic() + 1.0
+    while descendants and time.monotonic() < deadline:
+        descendants = [pid for pid in descendants if _alive(pid)]
+        if descendants:
+            time.sleep(0.05)
+    _signal_all(descendants, signal.SIGKILL)
 
 
 # Environment the Codex child keeps whatever its name looks like (it needs these to find itself, sign in and
@@ -880,14 +942,28 @@ def _stream_process(
     prompt: str,
     timeout: float,
     control: TurnControl | None = None,
-    cwd: str | Path | None = None,
+    cwd: str | Path | _Isolated | None = None,
 ) -> Iterator[tuple]:
     """Yield ``("line", text)`` per stdout line, then ``("exit", code, stderr)``.
 
     The process runs in its own process group so a timeout, cancellation or an
     abandoned generator kills Codex and its MCP children together.
+
+    With ``cwd=ISOLATED`` (every ``codex exec`` turn) it runs like app-server:
+    with Wealth's private CODEX_HOME (``appserver.codex_home``), so the user's
+    ``~/.codex`` AGENTS.md, skills, hooks and rules never load, in a fresh
+    empty working directory removed afterwards, so no project ``.codex`` does.
     """
 
+    env = child_env()
+    scratch: Path | None = None
+    if cwd is ISOLATED:
+        try:
+            env["CODEX_HOME"] = str(_appserver.codex_home(require_login="CODEX_API_KEY" not in env))
+        except _appserver.RuntimeUnavailable as exc:
+            kind = "not_logged_in" if "auth.json" in str(exc) else "other"
+            raise AgentError(None, kind, safe_diagnostic(str(exc))) from exc
+        cwd = scratch = _appserver.scratch_dir()
     try:
         process = subprocess.Popen(
             list(command),
@@ -898,12 +974,14 @@ def _stream_process(
             encoding="utf-8",
             errors="replace",
             cwd=str(cwd) if cwd else None,
-            env=child_env(),
+            env=env,
             start_new_session=True,
         )
     except FileNotFoundError as exc:
+        _appserver.remove_scratch(scratch)
         raise AgentError(None, "not_installed") from exc
     except OSError as exc:
+        _appserver.remove_scratch(scratch)
         raise AgentError(None, "other", safe_diagnostic(str(exc))) from exc
     if control is not None:
         control.attach(process)
@@ -969,14 +1047,20 @@ def _stream_process(
             raise AgentError(None, "cancelled")
         yield ("exit", process.returncode, "".join(stderr_parts))
     finally:
-        _terminate(process)
+        try:
+            _terminate(process)
+        finally:
+            _appserver.remove_scratch(scratch)
 
 
 def _stream_appserver(command: Sequence[str], prompt: str, timeout: float, control: TurnControl | None = None,
-                     cwd: str | Path | None = None, **thread: Any) -> Iterator[tuple]:
-    """One turn over ``codex app-server``: ``_stream_process``'s items plus ``("delta", text, item_id)``."""
+                      **thread: Any) -> Iterator[tuple]:
+    """One turn over ``codex app-server``: ``_stream_process``'s items plus ``("delta", text, item_id)``.
 
-    return _appserver.stream(command, prompt, timeout, control, cwd, **thread)
+    Always isolated like ``_stream_process(..., ISOLATED)``: private CODEX_HOME, empty scratch cwd.
+    """
+
+    return _appserver.stream(command, prompt, timeout, control, **thread)
 
 
 # --------------------------------------------------------------------------- deferred memory
@@ -1244,7 +1328,7 @@ def remember_exchange(
                                 instructions=memory_instructions(), tools=MEMORY_TOOLS, turn_env=evidence.env)
         prompt = build_memory_prompt(user_prompt, answer, client_id, brief=brief,
                                      saved=saved_facts_block(db_path, client_id))
-        stream = _stream_process(command, prompt, timeout, control, PROJECT_ROOT)
+        stream = _stream_process(command, prompt, timeout, control, ISOLATED)
         try:
             for kind, *rest in stream:
                 if kind == "line":
@@ -1347,10 +1431,10 @@ def stream_turn(
                 _await_reaper(resume)  # the previous turn's process has finished writing this session
             if streaming:
                 stream = _stream_appserver(_appserver.build_command(model, db_path, **options), prompt, timeout,
-                                           control, PROJECT_ROOT, resume_thread=resume, ephemeral=ephemeral)
+                                           control, resume_thread=resume, ephemeral=ephemeral)
             else:
                 command = build_command(model, db_path, resume_thread=resume, ephemeral=ephemeral, **options)
-                stream = _stream_process(command, prompt, timeout, control, PROJECT_ROOT)
+                stream = _stream_process(command, prompt, timeout, control, ISOLATED)
             early = False
             try:
                 first = next(stream, None)
