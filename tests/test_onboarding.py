@@ -9,6 +9,7 @@ from urllib.request import Request, urlopen
 
 import pytest
 
+from tests._pages import page_text
 from wealth import onboarding as ob
 from wealth import situation, web
 from wealth.service import WealthService
@@ -376,8 +377,7 @@ def test_returning_profile_gets_a_single_continue_row(tmp_path):
 
 
 def test_page_renders_cards_safely_and_in_both_languages():
-    from pathlib import Path
-    page = Path(web.__file__).with_name("chat.html").read_text(encoding="utf-8")
+    page = page_text("chat")
     assert "'/api/onboarding'" in page and "Continuar configuración" in page and "Continue setup" in page
     assert "No estoy seguro" in page and "Omitir" in page and "Subir un estado de cuenta" in page
     assert "aria-pressed" in page and "min-height: 44px" in page

@@ -12,11 +12,12 @@ from urllib.request import Request, urlopen
 
 import pytest
 
+from tests._pages import page_text
 from wealth import agent, views, web
 from wealth.agent import TurnEvent
 
 FIXTURES = json.loads((Path(__file__).parent / "fixtures" / "views_envelopes.json").read_text(encoding="utf-8"))
-PAGE = Path(web.__file__).with_name("chat.html").read_text(encoding="utf-8")
+PAGE = page_text("chat")
 
 
 def _specs(name):

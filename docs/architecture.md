@@ -66,7 +66,7 @@ Surfaces
 | `server.py` | Stdio MCP server exposing nine tools over the service |
 | `cli.py` | JSON CLI: one JSON object in, JSON out; `forget` needs an interactive terminal; `watch` |
 | `cli_text.py` | Text-channel commands for hosts like OpenClaw: `onboarding`, `today`, `view` |
-| `web.py`, `chat.html`, `profile.html` | Loopback browser chat, the You page, uploads, onboarding cards, order cards |
+| `web.py`, `chat.html`, `profile.html`, `review.html`, `static/` | Loopback browser chat, the You page, the quarterly review, uploads, onboarding cards, order cards; each page is a markup shell whose CSS and JS are `static/<page>.css` and `static/<page>.js`, served by exact name, so the pages run no inline script |
 | `agent.py` | Codex launcher: command, prompt, streaming events, deferred memory step, demo profile |
 | `behavior.py`, `instructions.md` | The shared conversation policy, and the compact contract the MCP server gives other hosts |
 | `catalog.py` | Task catalog: purpose, inputs and a runnable example per task; connectors |

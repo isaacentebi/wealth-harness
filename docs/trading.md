@@ -407,7 +407,7 @@ fills.
   change).
 - `wealth/web.py`: `GET /api/orders`, `POST /api/orders/<ticket_id>/confirm`,
   `POST /api/orders/<ticket_id or order_id>/cancel`.
-- `wealth/chat.html`: the order card.
+- `wealth/static/chat.js` and `wealth/static/chat.css`: the order card.
 - `tests/test_execution.py`, `tests/test_execution_web.py`: all against an
   in-memory fake Alpaca, with no network.
 - `tests/test_execution_brokers.py`: the IBKR gateway (a fake transport: the

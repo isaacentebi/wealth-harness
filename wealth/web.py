@@ -337,6 +337,17 @@ def _log_failure(turn: Turn, kind: str, summary: str, detail: str) -> None:
 # A vermilion dot on the canvas (Dot), served for /favicon.ico and /favicon.svg so no page load 404s.
 FAVICON_SVG = (b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
                b'<rect width="32" height="32" rx="7" fill="#FBF8F2"/><circle cx="16" cy="16" r="7" fill="#C84335"/></svg>')
+# The pages' own CSS and JS under /static/<name>, by exact name only: the request path never reaches the filesystem.
+# The type must be right: nosniff makes a browser drop a stylesheet or script served under any other type.
+STATIC_DIR = Path(__file__).with_name("static")
+STATIC_FILES = {
+    "chat.css": "text/css",
+    "chat.js": "text/javascript",
+    "profile.css": "text/css",
+    "profile.js": "text/javascript",
+    "review.css": "text/css",
+    "review.js": "text/javascript",
+}
 
 
 def _public_attachment(item: dict[str, Any]) -> dict[str, Any]:
@@ -766,15 +777,23 @@ class Chat:
 # --------------------------------------------------------------------------- HTTP
 
 
-SECURITY_HEADERS = (
-    ("Cache-Control", "no-store"),
-    ("X-Content-Type-Options", "nosniff"),
-    ("Referrer-Policy", "no-referrer"),
-    ("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; "
-     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; "
-     "img-src 'self' data:; connect-src 'self'; "
-     "frame-ancestors 'none'; base-uri 'none'; form-action 'self'"),
-)
+def _security_headers(script_src: str) -> tuple[tuple[str, str], ...]:
+    return (
+        ("Cache-Control", "no-store"),
+        ("X-Content-Type-Options", "nosniff"),
+        ("Referrer-Policy", "no-referrer"),
+        ("Content-Security-Policy", f"default-src 'self'; script-src {script_src}; "
+         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; "
+         "img-src 'self' data:; connect-src 'self'; "
+         "frame-ancestors 'none'; base-uri 'none'; form-action 'self'"),
+    )
+
+
+# The pages run only their /static scripts: no inline script anywhere they are served.
+SECURITY_HEADERS = _security_headers("'self'")
+# The tax pack's printable page is one self-contained file, opened from disk, so its print button and language
+# toggle are inline; its download alone keeps inline script allowed.
+PRINTABLE_SECURITY_HEADERS = _security_headers("'self' 'unsafe-inline'")
 
 
 def _error_payload(kind: str, message: str | None = None, detail: str = "") -> dict[str, Any]:
@@ -884,6 +903,11 @@ def create_server(chat, port=8765, host="127.0.0.1"):
                 return self.respond(403, {"error": "Local origin required.", "kind": "forbidden"})
             url = urlsplit(self.path)
             try:
+                if url.path.startswith("/static/"):
+                    name = url.path[len("/static/"):]
+                    if name not in STATIC_FILES:
+                        return self.respond(404, {"error": "Not found."})
+                    return self.respond(200, (STATIC_DIR / name).read_bytes(), STATIC_FILES[name])
                 if url.path == "/":
                     return self.respond(200, Path(__file__).with_name("chat.html").read_bytes(), "text/html")
                 if url.path in ("/favicon.ico", "/favicon.svg"):
@@ -1129,7 +1153,7 @@ def create_server(chat, port=8765, host="127.0.0.1"):
             self.send_header("Content-Type", kind + "; charset=utf-8")
             self.send_header("Content-Disposition", f'attachment; filename="{name}"')
             self.send_header("Content-Length", str(len(data)))
-            for header, value in SECURITY_HEADERS:
+            for header, value in PRINTABLE_SECURITY_HEADERS if fmt == "html" else SECURITY_HEADERS:
                 self.send_header(header, value)
             self.end_headers()
             self.wfile.write(data)
