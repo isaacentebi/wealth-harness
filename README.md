@@ -23,7 +23,7 @@ sales. It runs on your computer, and your data stays in a local SQLite file.
 
 - **Wealth-first.** It starts with income, spending, savings, debts, goals and
   retirement, and treats investing as one part of that picture.
-- **Numbers come from code, not the model.** Fifty-two deterministic tasks
+- **Numbers come from code, not the model.** Fifty-three deterministic tasks
   (tax lots, Mexican real interest, IMSS pensions, rebalancing, 13F
   look-through) return each figure with its sources and assumptions. The model
   chooses what matters and says it plainly.
@@ -124,8 +124,9 @@ charts and order cards drawn by the engine, not the model.
   FBAR/8938 flags) as JSON, CSV and a printable page.
 - **Retirement:** IMSS Ley 73 and 97, AFORE and Modalidad 40; Social Security,
   contribution limits and withdrawal order.
-- **Protection and guardrails:** insurance and estate gaps, life events,
-  speculation, panic selling and scam checks.
+- **Protection and guardrails:** insurance and estate gaps, an estate and
+  beneficiary register (who receives each account at death and the gaps by
+  amount at risk), life events, speculation, panic selling and scam checks.
 - **Reviews:** what needs attention today, a weekly letter, a quarterly review,
   a fee audit.
 - **Following managers:** SEC 13F holdings, profiles and comparisons, and a

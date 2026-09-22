@@ -80,7 +80,7 @@ before answering.
 | Tax | `tax`, `mx_holdings`, `mx_interest`, `mx_deductions`, `mx_foreign`, `mx_calendar`, `estate`, `tax_pack` (the year's pack for the contador or CPA) |
 | Retirement | `retirement_mx`, `retirement_us`, `retirement_readiness` |
 | Reviews and nudges | `today`, `weekly`, `quarterly_review`, `fee_audit`, `monitor` |
-| Protection and guardrails | `protection_review`, `life_event`, `speculation_check`, `panic_check`, `scam_check` |
+| Protection and guardrails | `protection_review`, `estate_register`, `life_event`, `speculation_check`, `panic_check`, `scam_check` |
 | Following a manager (SEC 13F) | `manager_search`, `manager_holdings`, `manager_profile`, `manager_compare`, `manager_mirror` |
 | Acting on a buy or sell | `order_ticket` |
 
@@ -148,7 +148,8 @@ accept the decision on their yes.
 Before discussing speculation (options, leverage, crypto, a single-stock bet)
 run `speculation_check`; when they want to sell everything after a fall,
 `panic_check`; when a message, offer or transfer looks off, `scam_check`; after
-a life event, `life_event`; for insurance and estate gaps, `protection_review`.
+a life event, `life_event`; for insurance and estate gaps, `protection_review`;
+for who inherits each account and beneficiary gaps, `estate_register`.
 Name the risk once, never preach, and respect that the person decides.
 
 Advice boundaries: sizes only as ranges from their own figures; explain how

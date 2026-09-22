@@ -1433,6 +1433,91 @@ CATALOG: dict[str, dict[str, Any]] = {
                      "lists both)", "client_id"],
         "example": {"kind": "birth_or_adoption", "date": "2026-09-21", "jurisdiction": "MX"},
     },
+    "estate_register": {
+        "purpose": "Estate and beneficiary register: for each account, policy and property, what happens at the "
+                   "person's death (beneficiary designation that skips the juicio sucesorio or probate, trust, "
+                   "survivorship on a US joint account, will, or intestate succession), who receives it and an "
+                   "estimated amount per heir; gaps ranked by amount at risk (no beneficiary, shares not 100%, a "
+                   "minor named directly without guardian or trust, predeceased or ex-spouse beneficiary, old "
+                   "designation or one before a marriage or child, AFORE beneficiaries, ERISA spousal consent, "
+                   "US-situs over US$60,000 for a non-resident alien, no will or a will older than a marriage or "
+                   "child, no guardian), questions for what is unknown, a 0-100 completeness score and two views. "
+                   "Mexico: LIC Art. 56 bank beneficiaries, LMV Art. 201, AFORE designacion (LSS Art. 193), "
+                   "mancomunada vs beneficiary, Mes del Testamento; US: TOD/POD, SECURE Act 10-year rule, ERISA. "
+                   "An estimate, not legal advice.",
+        "required": ["client_id (or facts [{key, value}]: cash.<id>, investment.<id>, insurance.<id>, "
+                     "property.<id>, estate.designation.<slug> {account, beneficiaries, designation_date, titling, "
+                     "...}, estate.will, estate.guardianship, estate.family {marital_regime, spouse_assets, ...})"],
+        "optional": ["review_years (default 5)", "us_situs: estate-task inputs (else US-domiciled holdings)",
+                     "as_of"],
+        "example": {"as_of": "2026-09-22", "facts": [
+            {"key": "client.profile", "value": {"residence": {"country": "MX"}, "birth_year": 1986, "dependents": 2,
+                                                "dependent_ages": [5, 9], "us_person": False, "language": "es"}},
+            {"key": "cash.bbva", "value": {"amount": 85000, "currency": "MXN", "institution": "BBVA",
+                                           "purpose": "reserve"}},
+            {"key": "estate.designation.cash-bbva", "value": {
+                "account": "cash.bbva", "designation_date": "2023-03-10",
+                "beneficiaries": [{"name": "Laura", "relationship": "spouse", "share": 1}]}},
+            {"key": "investment.gbm", "value": {"amount": 217000, "currency": "MXN", "institution": "GBM",
+                                                "kind": "brokerage"}},
+            {"key": "estate.designation.investment-gbm", "value": {"account": "investment.gbm", "beneficiaries": []}},
+            {"key": "investment.afore", "value": {"amount": 410000, "currency": "MXN",
+                                                  "institution": "Afore XXI Banorte", "kind": "afore"}},
+            {"key": "investment.cetes", "value": {"amount": 120000, "currency": "MXN", "institution": "Cetesdirecto"}},
+            {"key": "estate.designation.investment-cetes", "value": {
+                "account": "investment.cetes",
+                "beneficiaries": [{"name": "Laura", "share": 0.6}, {"name": "Sofía", "relationship": "child",
+                                                                    "share": 0.3}]}},
+            {"key": "insurance.vida", "value": {"kind": "life", "coverage": 1500000, "currency": "MXN",
+                                                "insurer": "GNP"}},
+            {"key": "estate.designation.insurance-vida", "value": {
+                "account": "insurance.vida", "designation_date": "2014-05-01",
+                "beneficiaries": [{"name": "Laura", "relationship": "spouse"}]}},
+            {"key": "property.depa", "value": {"kind": "home", "value": 3200000, "currency": "MXN"}},
+            {"key": "estate.will", "value": {"exists": False}},
+            {"key": "estate.family", "value": {"marital_status": "married", "marriage_date": "2015-06-20",
+                                               "spouse": "Laura", "marital_regime": "separacion_de_bienes",
+                                               "children": [{"name": "Sofía", "birth_year": 2017},
+                                                            {"name": "Mateo", "birth_year": 2021}],
+                                               "parents_living": 2}}]},
+        "variants": {
+            "us_401k_consent_and_ira": {"as_of": "2026-09-22", "facts": [
+                {"key": "client.profile", "value": {"residence": {"country": "US"}, "birth_year": 1980,
+                                                    "us_person": True, "dependents": 0}},
+                {"key": "investment.k401", "value": {"amount": 380000, "currency": "USD", "institution": "Fidelity",
+                                                     "kind": "retirement", "plan_type": "401k"}},
+                {"key": "estate.designation.investment-k401", "value": {
+                    "account": "investment.k401", "designation_date": "2012-02-01",
+                    "beneficiaries": [{"name": "Tom", "relationship": "sibling", "share": 1}]}},
+                {"key": "investment.ira", "value": {"amount": 95000, "currency": "USD", "institution": "Vanguard",
+                                                    "kind": "retirement", "plan_type": "roth_ira"}},
+                {"key": "estate.designation.investment-ira", "value": {
+                    "account": "investment.ira", "designation_date": "2024-01-15",
+                    "beneficiaries": [{"name": "Dana", "relationship": "spouse", "share": 0.5},
+                                      {"name": "Tom", "relationship": "sibling", "share": 0.5}]}},
+                {"key": "investment.brokerage", "value": {"amount": 60000, "currency": "USD",
+                                                          "institution": "Schwab", "kind": "brokerage"}},
+                {"key": "estate.designation.investment-brokerage", "value": {
+                    "account": "investment.brokerage", "titling": "joint", "co_owners": ["Dana"]}},
+                {"key": "estate.will", "value": {"exists": True, "date": "2019-05-01",
+                                                 "heirs": [{"name": "Dana", "relationship": "spouse"}]}},
+                {"key": "estate.family", "value": {"marital_status": "married", "marriage_date": "2020-10-10",
+                                                   "spouse": "Dana", "children": [],
+                                                   "marital_regime": "separate_property"}}]},
+            "mx_resident_us_etfs": {"as_of": "2026-09-22", "facts": [
+                {"key": "client.profile", "value": {"residence": {"country": "MX"}, "us_person": False,
+                                                    "reporting_currency": "USD"}},
+                {"key": "investment.ibkr", "value": {"amount": 150000, "currency": "USD", "institution": "IBKR",
+                                                     "kind": "brokerage"}},
+                {"key": "estate.designation.investment-ibkr", "value": {
+                    "account": "investment.ibkr", "country": "US",
+                    "beneficiaries": [{"name": "Andrés", "relationship": "child", "share": 1}]}},
+                {"key": "estate.will", "value": {"exists": True, "date": "2024-09-15"}}],
+                "us_situs": {"year": 2026, "decedent": {"us_citizen": False, "green_card": False,
+                                                        "us_domiciled": False},
+                             "assets": [{"id": "voo", "type": "us_domiciled_fund", "value_usd": 150000}]}},
+        },
+    },
     "manager_search": {
         "purpose": "Find a fund manager's SEC filer (CIK) by firm or person name, with its latest 13F filing. "
                    "Says so when a match does not file 13F or its latest 13F is a notice pointing to another filer.",

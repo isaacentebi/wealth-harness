@@ -44,7 +44,7 @@ TASK_MODULES = {
 # Tasks answered by the service itself rather than one module.
 SERVICE_TASKS = ("plan", "calendar", "monitor", "debt_payoff", "debt", "policy_draft", "policy_check", "today", "weekly",
                  "quarterly_review", "fee_audit", "speculation_check", "panic_check", "scam_check",
-                 "protection_review", "life_event", "order_ticket", "tax_pack")
+                 "protection_review", "life_event", "estate_register", "order_ticket", "tax_pack")
 # Investment policy tasks (wealth/policy.py) read the canonical picture, so the service runs them.
 POLICY_TASKS = frozenset({"policy_draft", "policy_check"})
 # Proactive tasks (wealth/proactive.py) read the whole picture and keep dismissals in the monitor namespace.
@@ -53,7 +53,8 @@ PROACTIVE_STATE = "_proactive"  # key inside the ``monitor`` auxiliary namespace
 # The quarterly review and fee audit (wealth/review.py) read the picture, ledger, decisions and fact history.
 REVIEW_TASKS = frozenset({"quarterly_review", "fee_audit"})
 # Guardrail and protection tasks (wealth/guardrails.py, wealth/protection.py) also read the picture.
-GUARDRAIL_TASKS = frozenset({"speculation_check", "panic_check", "scam_check", "protection_review", "life_event"})
+GUARDRAIL_TASKS = frozenset({"speculation_check", "panic_check", "scam_check", "protection_review", "life_event",
+                             "estate_register"})
 # order_ticket (wealth/execution) only PROPOSES orders: it stores a ticket the person confirms on its card in
 # the app.  Nothing in this service submits orders; the only submit path is the local web confirmation route.
 EXECUTION_TASKS = frozenset({"order_ticket"})
@@ -323,7 +324,9 @@ def fact_contract() -> dict:
         "confidence": "confirmed: the person explicitly confirmed it | reported (default): the person stated it "
                       "or a document shows it | inferred: an interpretation. Only a user source may be confirmed.",
         "keys": ["client.profile", "income.<id>", "spending.monthly", "cash.<id>", "liability.<id>",
-                 "investment.<id>", "goals", "reserve", "thread.<id>", "preference.*", "constraint.*", "onboarding",
+                 "investment.<id>", "insurance.<id>", "property.<id>", "estate.designation.<slug>", "estate.will",
+                 "estate.guardianship",
+                 "estate.family", "goals", "reserve", "thread.<id>", "preference.*", "constraint.*", "onboarding",
                  "policy.ips (written by accepting an IPS decision)",
                  "thesis.*", "research.<SYMBOL>", "planning.project", "planning.income", "planning.ladder",
                  "planning.dca", "tax.profile", "monitor.rules", "account.<id> (statements, via wealth_ingest)",
@@ -558,6 +561,7 @@ class WealthService:
             "speculation_check": "reserve liability policy preference constraint", "panic_check": "goals reserve preference",
             "scam_check": "account payee", "protection_review": "client.profile insurance estate goals",
             "life_event": "client.profile goals",
+            "estate_register": "estate beneficiaries insurance property investment cash client.profile",
             "rebalance": "household account tax goals reserve constraint", "asset_location": "household account tax",
             "today": "reserve goals income spending policy thread", "weekly": "reserve goals income spending",
             "retirement_mx": "client.profile income account goals retire afore",
@@ -755,8 +759,10 @@ class WealthService:
             keys_read = POLICY_FACT_KEYS + (("planning.dca", "thread.") if task == "quarterly_review" else ())
             relevant = {f["key"] for f in snapshot["facts"] if f["key"].startswith(keys_read)}
         elif task in GUARDRAIL_TASKS:
+            from .estate_register import FACT_PREFIXES
             from .guardrails import GUARDRAIL_FACT_KEYS
-            relevant = {f["key"] for f in snapshot["facts"] if f["key"].startswith(GUARDRAIL_FACT_KEYS)}
+            keys_read = FACT_PREFIXES if task == "estate_register" else GUARDRAIL_FACT_KEYS
+            relevant = {f["key"] for f in snapshot["facts"] if f["key"].startswith(keys_read)}
         elif task in TAX_PACK_TASKS:
             relevant = {f["key"] for f in snapshot["facts"] if f["key"].startswith(TAX_PACK_FACT_KEYS)}
         elif task in {"plan", "calendar"}:
@@ -1188,13 +1194,15 @@ class WealthService:
 
     def _guardrail(self, task: str, inputs: dict, snapshot: dict, ledger, today: str) -> dict:
         """Guardrail and protection tasks read the canonical picture (or inline ``facts``) and never write."""
-        from . import guardrails, policy, protection
+        from . import estate_register, guardrails, policy, protection
         inputs = dict(inputs)
         as_of = inputs.pop("as_of", None) or today
         if "facts" in inputs:
             snapshot = policy.snapshot_from_facts(inputs.pop("facts"), as_of)
         sit = situation_module.build(snapshot, ledger, as_of)
-        if task in protection.TASKS:
+        if task in estate_register.TASKS:
+            report = estate_register.run_task(task, inputs, sit, snapshot)
+        elif task in protection.TASKS:
             report = protection.run_task(task, inputs, sit)
         else:
             ips = policy.current(snapshot, as_of)
@@ -1205,7 +1213,9 @@ class WealthService:
         read = set(sit["evidence"].values())
         read |= {f["id"] for f in snapshot.get("facts") or []
                  if f.get("key") == "client.profile"
-                 or (task == "speculation_check" and f.get("key") in ("preference.speculation", "policy.ips"))}
+                 or (task == "speculation_check" and f.get("key") in ("preference.speculation", "policy.ips"))
+                 or (task == "estate_register" and str(f.get("key")).startswith(estate_register.FACT_PREFIXES)
+                     and f.get("status", "active") == "active")}
         report["_evidence"] = sorted(i for i in read if i and not str(i).startswith("request:"))
         return report
 

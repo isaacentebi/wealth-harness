@@ -87,7 +87,7 @@ TAXABLE_TYPES = frozenset({"brokerage", "taxable"})
 RETIREMENT_SAVINGS_TYPES = frozenset({"ppr", "afore"})
 FIBRA_TICKERS = frozenset({"FUNO11", "FMTY14", "FIBRAPL14", "DANHOS13", "TERRA13", "FIHO12", "FIBRAMQ12", "FSHOP13"})
 KIND_ORDER = ("scam", "high_interest_debt", "reserve_low", "concentration", "tax_deadline", "harvest", "ppr_headroom", "windfall",
-              "drift", "surplus", "follow_through", "idle_yield", "cash_drag", "dca_slipped", "fee_creep", "thread_ready", "life_calendar",
+              "drift", "surplus", "follow_through", "idle_yield", "cash_drag", "dca_slipped", "fee_creep", "thread_ready", "estate_gap", "life_calendar",
               "guilt_free", "statement_overdue", "stale_facts")
 
 _MONTHS_ES = ("ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic")
@@ -1630,8 +1630,55 @@ def _cohere(run: _Run) -> None:
             "es": surplus["why"]["es"] + f" A ese ritmo completas tu fondo de emergencia en unos {num(months, 1)} meses."}
 
 
+ESTATE_NUDGES = 3  # the top estate gaps by amount at risk; one reaches today, the rest wait in upcoming
+
+
+def _estate_facts(snapshot: Mapping[str, Any]) -> bool:
+    """Whether the person has told us anything about their estate (so the register has something to say)."""
+    for fact in (snapshot or {}).get("facts") or []:
+        if not isinstance(fact, dict) or fact.get("status", "active") != "active":
+            continue
+        key, value = str(fact.get("key") or ""), fact.get("value")
+        if key.startswith(("estate.", "insurance.", "property.")):
+            return True
+        if key.startswith(("cash.", "investment.")) and isinstance(value, dict) and (
+                "beneficiaries" in value or "titling" in value):
+            return True
+    return False
+
+
+def _estate(run: _Run) -> None:
+    """The estate register's top gaps, ranked by the amount at risk (wealth/estate_register.py)."""
+    if not _estate_facts(run.snapshot):
+        return
+    from .estate_register import register
+    report = register(run.sit, run.snapshot, {}, run.as_of)
+    result = report["result"]
+    for question in result["questions"]:
+        if question["code"] == "beneficiaries_unknown":
+            run.missing("estate_gap", question["field"])
+    for rank, gap in enumerate(g for g in result["gaps"] if g["amount_at_risk"] is not None):
+        if rank >= ESTATE_NUDGES:
+            break
+        subject = f"{gap['code']}:{gap['key']}" if gap["key"] else gap["code"]
+        amount = D(gap["amount_at_risk"])
+        run.items.append(_item(
+            "estate_gap", subject, severity="consider" if rank == 0 else "fyi", priority="opportunity",
+            title=(gap["en"], gap["es"]),
+            why=("A beneficiary designation or a will decides who receives this, and how fast; "
+                 f"{run.money(amount)} depends on it.",
+                 "Una designación de beneficiarios o un testamento decide quién recibe esto y qué tan rápido; "
+                 f"dependen de ello {run.money(amount)}."),
+            next_step=("Who inherits each of my accounts?", "¿Quién hereda cada una de mis cuentas?"),
+            data={"code": gap["code"], "key": gap["key"], "amount_at_risk": gap["amount_at_risk"],
+                  "currency": gap["currency"], "task": "estate_register",
+                  "completeness": result["completeness"]["score"]},
+            sources=[gap["key"]] if gap["key"] else ["estate.will"],
+            trigger=[gap["code"], gap["key"], _sig2(amount)]))
+
+
 TRIGGERS = (_scam, _high_interest, _reserve, _idle_yield, _concentration, _harvest, _ppr, _windfall, _drift, _surplus, _dca, _fee_creep,
-            _threads, _guilt_free, _statements, _stale)
+            _threads, _guilt_free, _statements, _stale, _estate)
 
 
 # ------------------------------------------------------------------ calendar
@@ -1981,6 +2028,10 @@ def evaluate(situation: Mapping[str, Any], ledger: Mapping[str, Any] | None, sna
             continue  # the headroom nudge carries the same deadline with numbers
         if "harvest" in triggered_kinds and entry["id"].startswith("us_year_end"):
             continue
+        if entry["id"].startswith("mx_testamento") and any(
+                i["kind"] == "estate_gap" and i["data"]["code"] in ("no_will", "will_before_event", "will_old")
+                for i in run.items):
+            continue  # the will nudge carries Mes del Testamento with the person's own numbers
         (active if entry["start"] <= day else future).append(_calendar_item(entry, day))
     unknown: dict[str, list[str]] = {}
     for row in run.unknown:

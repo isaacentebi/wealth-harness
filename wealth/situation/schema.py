@@ -32,6 +32,27 @@ ONBOARDING_STEPS = ("name", "language", "residence", "tax_residence", "birth_yea
 STEP_STATUSES = ("done", "skipped", "pending", "unsure")
 IPS_PROFILES = ("conservative", "balanced", "growth")
 IPS_CADENCES = ("annual", "semiannual", "quarterly")  # unsure: answered "not sure"; stays unknown
+TITLINGS = ("individual", "joint", "mancomunada", "fideicomiso", "trust")
+RELATIONSHIPS = ("spouse", "partner", "child", "grandchild", "parent", "sibling", "other_relative", "friend",
+                 "ex_spouse", "trust", "estate", "charity", "other")
+PLAN_TYPES = ("401k", "403b", "457b", "ira", "roth_ira", "sep_ira", "simple_ira", "afore", "ppr", "hsa", "529", "other")
+INSURANCE_KINDS = ("life", "accident", "disability", "other")
+PROPERTY_KINDS = ("home", "land", "rental", "commercial", "other")
+WILL_KINDS = ("publico_abierto", "publico_cerrado", "olografo", "simplificado", "us_will", "other")
+MARITAL_STATUSES = ("single", "married", "free_union", "divorced", "widowed")
+MARITAL_REGIMES = ("sociedad_conyugal", "separacion_de_bienes", "community_property", "separate_property")
+GUARDIAN_DOCUMENTS = ("will", "separate", "none")
+_BENEFICIARY_DOC = ("list of {name, relationship?: " + "|".join(RELATIONSHIPS) + ", share?: 0-1, contingent?: "
+                    "true for a backup, minor?, birth_year?, deceased?, via_trust?: paid to a trust or custodian "
+                    "for them}; [] means they said there are none; leave it out when unknown")
+DESIGNATION_DOC = {
+    "beneficiaries?": _BENEFICIARY_DOC,
+    "designation_date?": "YYYY-MM-DD the beneficiaries were last named or changed",
+    "titling?": "|".join(TITLINGS) + " (mancomunada is a Mexican joint account: not a beneficiary)",
+    "co_owners?": "names of the other holders of a joint or mancomunada account",
+    "owner_share?": "0-1 of the balance that is the person's (default: split equally with co_owners)",
+    "country?": "ISO-2 where the account or asset is (MX, US)",
+}
 
 SCHEMA: dict[str, dict[str, str]] = {
     "client.profile": {
@@ -87,6 +108,48 @@ SCHEMA: dict[str, dict[str, str]] = {
         "purpose?": "reserve|general|goal:<goal id> (only as the person stated it)",
         "liquidity_days?": "days to get the money out (1 daily, 28 CETES at 28 days); counts toward the reserve "
                            "when 31 or less",
+        "plan_type?": "|".join(PLAN_TYPES) + " for retirement accounts (a 401(k) has spousal-consent rules)",
+    },
+    "insurance.<id>": {
+        "kind": "|".join(INSURANCE_KINDS), "coverage?": "number paid at death (suma asegurada)",
+        "currency?": "ISO 4217 (required with coverage)", "insurer?": "name",
+        "employer_group?": "true for a work policy (it usually ends with the job)", "name?": "their words",
+        "approximate?": "true|false", "country?": "ISO-2",
+    },
+    "property.<id>": {
+        "kind": "|".join(PROPERTY_KINDS), "value?": "number they think it is worth",
+        "currency?": "ISO 4217 (required with value)", "name?": "their words", "approximate?": "true|false",
+        "country?": "ISO-2",
+    },
+    "estate.designation.<slug>": {
+        "note": "who receives one account, policy or property at death, kept apart from its balance so saving a "
+                "beneficiary never refreshes a figure; <slug> is the account key with '.' as '-' "
+                "(investment.gbm -> estate.designation.investment-gbm)",
+        "account": "the key it applies to: cash.<id>, investment.<id>, insurance.<id>, property.<id> or "
+                   "account.<id> (a statement)",
+        **DESIGNATION_DOC,
+        "plan_type?": "|".join(PLAN_TYPES) + " when the account itself does not say",
+        "spousal_consent?": "true when the spouse signed consent to another 401(k) beneficiary (ERISA)",
+        "marital_property?": "false when it was theirs before the marriage, inherited or a gift (not gananciales)",
+    },
+    "estate.will": {
+        "exists": "true|false (leave the fact out when they do not know)", "date?": "YYYY-MM-DD signed",
+        "notaria?": "notaría or attorney (number and city, no address)", "jurisdiction?": "state or country",
+        "kind?": "|".join(WILL_KINDS), "heirs?": "list of {name, relationship?, share?} as they told you",
+        "executor?": "albacea or executor name", "guardian_named?": "true when the will names a tutor for minors",
+    },
+    "estate.guardianship": {
+        "guardian?": "name of the tutor/guardian for minor children", "alternate?": "name",
+        "documented?": "|".join(GUARDIAN_DOCUMENTS) + " (where the choice is written)",
+    },
+    "estate.family": {
+        "marital_status?": "|".join(MARITAL_STATUSES), "marriage_date?": "YYYY-MM-DD",
+        "marital_regime?": "|".join(MARITAL_REGIMES) + " (sociedad conyugal: half of what was acquired in the "
+                           "marriage is already the spouse's)",
+        "spouse?": "name", "divorce_date?": "YYYY-MM-DD",
+        "spouse_assets?": "{amount, currency}: what the spouse owns in their own name (CCF Art. 1624); 0 when none",
+        "ex_spouses?": "list of names", "children?": "list of {name, birth_date? | birth_year?}",
+        "parents_living?": "0-2", "deceased?": "list of names of people who died (to catch stale beneficiaries)",
     },
     "goals": {
         "[]": "list; merge by id",
@@ -370,7 +433,8 @@ def _spending(value: dict, key: str) -> None:
 
 def _cash(value: dict, key: str) -> None:
     _object(value, key, {"amount", "currency", "institution", "purpose", "liquid", "name", "approximate", "note",
-                         "balance_unknown", "annual_rate"})
+                         "balance_unknown", "annual_rate", *DESIGNATION_FIELDS})
+    _designation(value, key)
     _rate(value.get("annual_rate"), f"{key}.annual_rate")
     _bool(value.get("balance_unknown"), f"{key}.balance_unknown")
     _number(value.get("amount"), f"{key}.amount", required=value.get("balance_unknown") is not True)
@@ -442,7 +506,11 @@ def _purpose(value: Any, path: str) -> None:
 
 def _investment(value: dict, key: str) -> None:
     _object(value, key, {"amount", "currency", "institution", "kind", "name", "approximate", "note",
-                         "balance_unknown", "purpose", "liquidity_days", "annual_rate"})
+                         "balance_unknown", "purpose", "liquidity_days", "annual_rate", "plan_type", "spousal_consent",
+                         *DESIGNATION_FIELDS})
+    _designation(value, key)
+    _enum(value.get("plan_type"), f"{key}.plan_type", PLAN_TYPES)
+    _bool(value.get("spousal_consent"), f"{key}.spousal_consent")
     _rate(value.get("annual_rate"), f"{key}.annual_rate")
     _purpose(value.get("purpose"), f"{key}.purpose")
     days = value.get("liquidity_days")
@@ -456,6 +524,170 @@ def _investment(value: dict, key: str) -> None:
     _text(value.get("name"), f"{key}.name")
     _bool(value.get("approximate"), f"{key}.approximate")
     _text(value.get("note"), f"{key}.note")
+
+
+# ------------------------------------------------------------------ estate: designations, wills, family
+
+DESIGNATION_FIELDS = ("beneficiaries", "designation_date", "titling", "co_owners", "owner_share", "country")
+_BENEFICIARY_FIELDS = {"name", "person", "relationship", "share", "contingent", "minor", "birth_year", "deceased",
+                       "via_trust", "note"}
+
+
+def _names(value: Any, path: str) -> None:
+    if value is not None and (not isinstance(value, list) or not all(
+            isinstance(v, str) and v.strip() and len(v) <= 80 for v in value)):
+        _fail(path, "must be a list of names")
+
+
+def _year_of_birth(value: Any, path: str) -> None:
+    if value is not None and (isinstance(value, bool) or not isinstance(value, int) or not 1900 <= value <= 2100):
+        _fail(path, "must be a four-digit year")
+
+
+def _designation(value: dict, key: str) -> None:
+    """Beneficiary designation fields shared by accounts, policies and property."""
+    beneficiaries = value.get("beneficiaries")
+    if beneficiaries is not None:
+        if not isinstance(beneficiaries, list):
+            _fail(f"{key}.beneficiaries", "must be a list ([] when they said there are none)")
+        for index, person in enumerate(beneficiaries):
+            path = f"{key}.beneficiaries[{index}]"
+            _object(person, path, _BENEFICIARY_FIELDS)
+            if person.get("name") is None and person.get("person") is None:
+                _fail(f"{path}.name", "is required (the name they used, e.g. 'Ana' or 'mi esposa')")
+            _text(person.get("name"), f"{path}.name", limit=80)
+            _text(person.get("person"), f"{path}.person", limit=64)
+            _enum(person.get("relationship"), f"{path}.relationship", RELATIONSHIPS)
+            if person.get("share") is not None:
+                _share(person["share"], f"{path}.share")
+            for flag in ("contingent", "minor", "deceased", "via_trust"):
+                _bool(person.get(flag), f"{path}.{flag}")
+            _year_of_birth(person.get("birth_year"), f"{path}.birth_year")
+            _text(person.get("note"), f"{path}.note")
+    _iso_date(value.get("designation_date"), f"{key}.designation_date")
+    _enum(value.get("titling"), f"{key}.titling", TITLINGS)
+    _names(value.get("co_owners"), f"{key}.co_owners")
+    if value.get("owner_share") is not None:
+        _share(value["owner_share"], f"{key}.owner_share")
+    country = value.get("country")
+    if country is not None and country_code(country) is None:
+        _fail(f"{key}.country", "must be an ISO-2 country code such as MX or US")
+
+
+_DESIGNATION_TARGET = re.compile(r"^(cash|investment|insurance|property|account)\.[A-Za-z0-9][A-Za-z0-9_.-]{0,119}$")
+
+
+def designation_key(account: str) -> str:
+    """``estate.designation.<slug>`` for an account key (``investment.gbm`` -> ``estate.designation.investment-gbm``)."""
+    return "estate.designation." + account.replace(".", "-")
+
+
+def _estate_designation(value: dict, key: str) -> None:
+    _object(value, key, {"account", *DESIGNATION_FIELDS, "plan_type", "spousal_consent", "marital_property", "note"})
+    account = value.get("account")
+    if not isinstance(account, str) or not _DESIGNATION_TARGET.match(account):
+        _fail(f"{key}.account", "is required: the key it applies to, such as investment.gbm or account.gbm-1")
+    if key != designation_key(account):
+        _fail(key, f"must be {designation_key(account)!r} for account {account!r}")
+    _designation(value, key)
+    _enum(value.get("plan_type"), f"{key}.plan_type", PLAN_TYPES)
+    _bool(value.get("spousal_consent"), f"{key}.spousal_consent")
+    _bool(value.get("marital_property"), f"{key}.marital_property")
+    _text(value.get("note"), f"{key}.note")
+
+
+def _insurance(value: dict, key: str) -> None:
+    _object(value, key, {"kind", "coverage", "currency", "insurer", "employer_group", "name", "approximate", "note",
+                         "beneficiaries", "designation_date", "country"})
+    _enum(value.get("kind"), f"{key}.kind", INSURANCE_KINDS, required=True)
+    _number(value.get("coverage"), f"{key}.coverage", required=False)
+    _currency(value.get("currency"), f"{key}.currency", required=value.get("coverage") is not None)
+    _text(value.get("insurer"), f"{key}.insurer", limit=80)
+    _bool(value.get("employer_group"), f"{key}.employer_group")
+    _text(value.get("name"), f"{key}.name")
+    _bool(value.get("approximate"), f"{key}.approximate")
+    _text(value.get("note"), f"{key}.note")
+    _designation(value, key)
+
+
+def _property(value: dict, key: str) -> None:
+    _object(value, key, {"kind", "value", "currency", "name", "approximate", "note", *DESIGNATION_FIELDS})
+    _enum(value.get("kind"), f"{key}.kind", PROPERTY_KINDS, required=True)
+    _number(value.get("value"), f"{key}.value", required=False)
+    _currency(value.get("currency"), f"{key}.currency", required=value.get("value") is not None)
+    _text(value.get("name"), f"{key}.name")
+    _bool(value.get("approximate"), f"{key}.approximate")
+    _text(value.get("note"), f"{key}.note")
+    _designation(value, key)
+
+
+def _will(value: dict, key: str) -> None:
+    _object(value, key, {"exists", "date", "notaria", "jurisdiction", "kind", "heirs", "executor", "guardian_named",
+                         "note"})
+    if not isinstance(value.get("exists"), bool):
+        _fail(f"{key}.exists", "is required: true or false (leave the fact out when they do not know)")
+    _iso_date(value.get("date"), f"{key}.date")
+    _text(value.get("notaria"), f"{key}.notaria", limit=120)
+    _text(value.get("jurisdiction"), f"{key}.jurisdiction", limit=80)
+    _enum(value.get("kind"), f"{key}.kind", WILL_KINDS)
+    _text(value.get("executor"), f"{key}.executor", limit=80)
+    _bool(value.get("guardian_named"), f"{key}.guardian_named")
+    _text(value.get("note"), f"{key}.note")
+    heirs = value.get("heirs")
+    if heirs is not None:
+        if not isinstance(heirs, list):
+            _fail(f"{key}.heirs", "must be a list of {name, relationship?, share?}")
+        for index, heir in enumerate(heirs):
+            path = f"{key}.heirs[{index}]"
+            _object(heir, path, {"name", "relationship", "share", "note"})
+            _text(heir.get("name"), f"{path}.name", required=True, limit=80)
+            _enum(heir.get("relationship"), f"{path}.relationship", RELATIONSHIPS)
+            if heir.get("share") is not None:
+                _share(heir["share"], f"{path}.share")
+
+
+def _guardianship(value: dict, key: str) -> None:
+    _object(value, key, {"guardian", "alternate", "documented", "note"})
+    _text(value.get("guardian"), f"{key}.guardian", limit=80)
+    _text(value.get("alternate"), f"{key}.alternate", limit=80)
+    _enum(value.get("documented"), f"{key}.documented", GUARDIAN_DOCUMENTS)
+    _text(value.get("note"), f"{key}.note")
+
+
+def _family(value: dict, key: str) -> None:
+    _object(value, key, {"marital_status", "marriage_date", "marital_regime", "spouse", "divorce_date", "ex_spouses",
+                         "children", "parents_living", "deceased", "note", "spouse_assets"})
+    assets = value.get("spouse_assets")
+    if assets is not None:
+        _object(assets, f"{key}.spouse_assets", {"amount", "currency", "approximate"})
+        _number(assets.get("amount"), f"{key}.spouse_assets.amount")
+        _currency(assets.get("currency"), f"{key}.spouse_assets.currency")
+        _bool(assets.get("approximate"), f"{key}.spouse_assets.approximate")
+    _enum(value.get("marital_status"), f"{key}.marital_status", MARITAL_STATUSES)
+    _enum(value.get("marital_regime"), f"{key}.marital_regime", MARITAL_REGIMES)
+    _iso_date(value.get("marriage_date"), f"{key}.marriage_date")
+    _iso_date(value.get("divorce_date"), f"{key}.divorce_date")
+    _text(value.get("spouse"), f"{key}.spouse", limit=80)
+    _names(value.get("ex_spouses"), f"{key}.ex_spouses")
+    _names(value.get("deceased"), f"{key}.deceased")
+    _text(value.get("note"), f"{key}.note")
+    parents = value.get("parents_living")
+    if parents is not None and (isinstance(parents, bool) or not isinstance(parents, int) or not 0 <= parents <= 2):
+        _fail(f"{key}.parents_living", "must be 0, 1 or 2")
+    children = value.get("children")
+    if children is not None:
+        if not isinstance(children, list):
+            _fail(f"{key}.children", "must be a list of {name, birth_date? | birth_year?}")
+        for index, child in enumerate(children):
+            path = f"{key}.children[{index}]"
+            _object(child, path, {"name", "birth_date", "birth_year"})
+            _text(child.get("name"), f"{path}.name", required=True, limit=80)
+            _iso_date(child.get("birth_date"), f"{path}.birth_date")
+            _year_of_birth(child.get("birth_year"), f"{path}.birth_year")
+
+
+ESTATE_VALIDATORS: dict[str, Callable[[Any, str], None]] = {
+    "estate.will": _will, "estate.guardianship": _guardianship, "estate.family": _family}
 
 
 def _goals(value: Any, key: str) -> None:
@@ -717,6 +949,10 @@ def _validator(key: str) -> Callable[[Any, str], None] | None:
         return _onboarding
     if key == "preference.risk":
         return _risk
+    if key in ESTATE_VALIDATORS:
+        return ESTATE_VALIDATORS[key]
+    if key.startswith("estate.designation."):
+        return _estate_designation
     head, _, rest = key.partition(".")
     if not rest or "." in rest:
         return None
@@ -725,7 +961,8 @@ def _validator(key: str) -> Callable[[Any, str], None] | None:
     if head == "income" and key not in LEGACY_KEYS:
         return _income
     return {"cash": _cash, "liability": _liability, "investment": _investment, "thread": _thread,
-            "follow": _follow, "constraint": _constraint, "constancia": _constancia}.get(head)
+            "follow": _follow, "constraint": _constraint, "constancia": _constancia, "insurance": _insurance,
+            "property": _property}.get(head)
 
 
 def out_of_range(value: Any, path: str = "value") -> str | None:
@@ -784,4 +1021,4 @@ def validate(key: str, value: Any) -> list[str]:
 
 
 __all__ = ["SCHEMA", "SchemaError", "validate", "MAX_AMOUNT", "out_of_range", "country_code", "COUNTRIES", "ONBOARDING_STEPS", "LANGUAGES", "FREQUENCIES", "INCOME_KINDS",
-           "LIABILITY_KINDS", "GOAL_ACTIONS", "THREAD_KINDS", "THREAD_STATUSES", "DROP_REACTIONS", "EXPERIENCE"]
+           "LIABILITY_KINDS", "GOAL_ACTIONS", "TITLINGS", "RELATIONSHIPS", "PLAN_TYPES", "DESIGNATION_FIELDS", "designation_key", "THREAD_KINDS", "THREAD_STATUSES", "DROP_REACTIONS", "EXPERIENCE"]

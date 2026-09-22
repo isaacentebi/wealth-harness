@@ -494,6 +494,7 @@
         g_money_in: 'Money coming in', g_money_out: 'What you spend', g_own: 'What you own', g_owe: 'What you owe',
         g_goals: 'Goals', g_invest: 'How you invest', g_about: 'About you',
         unknownHead: 'Not known yet', monthsShort: '{n} months of transactions', leftLine: '{x} left unallocated', shortLine: 'Short by {x}', avgLine: 'avg {x} a month',
+        estate: 'Estate', estateScore: '{n}% complete', estateClear: 'No gaps in what you have told me.',
         monthDetail: 'Your month in detail', inAssetsShort: 'in assets', accountsSum: '{n} accounts', accountsSumUnknown: '{n} accounts · {u} without a figure',
         sincePeriod: 'since {d}', paidBy: 'paid off by {d}', fundedUnknown: 'No account is tied to this goal yet, so the progress is not known.', st_next: 'Next',
         connsSum: '{n} connected · {m} not connected', connsNone: 'Nothing connected yet · statements by upload', staleN: '{n} to refresh',
@@ -570,6 +571,7 @@
         g_money_in: 'Dinero que entra', g_money_out: 'Lo que gastas', g_own: 'Lo que tienes', g_owe: 'Lo que debes',
         g_goals: 'Metas', g_invest: 'Cómo inviertes', g_about: 'Sobre ti',
         unknownHead: 'Aún no sé…', monthsShort: '{n} meses de movimientos', leftLine: 'Quedan {x} sin asignar', shortLine: 'Te faltan {x}', avgLine: 'prom. {x} al mes',
+        estate: 'Herencia', estateScore: '{n}% completo', estateClear: 'Sin pendientes en lo que me has contado.',
         monthDetail: 'Tu mes en detalle', inAssetsShort: 'en activos', accountsSum: '{n} cuentas', accountsSumUnknown: '{n} cuentas · {u} sin cifra',
         sincePeriod: 'desde el {d}', paidBy: 'liquidas en {d}', fundedUnknown: 'Aún no hay una cuenta ligada a esta meta; por eso no sé el avance.', st_next: 'Próxima',
         connsSum: '{n} conectadas · {m} sin conectar', connsNone: 'Nada conectado aún · estados de cuenta por archivo', staleN: '{n} por actualizar',
@@ -1010,7 +1012,7 @@
       const tiles = [renderMonthTile(p), renderGoalsTile(p), renderReserveTile(p)].filter(Boolean);
       const unknowns = renderUnknowns(p);
       const left = [renderMonthDetail(p), renderHave(p)].filter(Boolean);
-      const right = [renderOwe(p), renderReturns(p)].filter(Boolean);
+      const right = [renderOwe(p), renderReturns(p), renderEstate()].filter(Boolean);
       fill(root,
         h('h1', {}, t('you'), h('span', { class: 'dot', text: '.' })),
         h('div', { class: 'board' },
@@ -1494,6 +1496,13 @@
     }
 
     // ---- Lo que sé de ti: one sentence per group; the facts behind each open on tap, and a sentence is edited by tapping it
+    // Herencia / Estate: one collapsed line with the completeness score; the top gap opens under it.
+    function renderEstate() {
+      const e = data.estate;
+      if (!e || !isNum(e.score)) return null;
+      const line = (e.top_gap && e.top_gap[lang]) || (e.question && e.question[lang]) || t('estateClear');
+      return disc('estate', t('estate'), t('estateScore', { n: num(e.score) }), h('p', { class: 'note', text: line }));
+    }
     function renderMemory(mem) {
       const groups = mem.groups.map(g => ({ ...g, facts: g.facts.filter(f => !hidden.has(f.text)) })).filter(g => g.facts.length);
       const facts = groups.reduce((a, g) => a + g.facts.length, 0) + (mem.review || []).length;

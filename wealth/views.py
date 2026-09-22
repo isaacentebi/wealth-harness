@@ -138,6 +138,7 @@ TASK_LABELS = {
     "manager_compare": L("Manager comparison", "Comparación de administradores"),
     "manager_mirror": L("Mirror a manager", "Replicar a un administrador"),
     "speculation_check": L("Play-money check", "Revisión de dinero de juego"),
+    "estate_register": L("Estate register", "Registro de herencia"),
 }
 
 
@@ -1088,12 +1089,63 @@ def _manager_mirror(result: Mapping, envelope: Mapping, task: str) -> list[dict]
     return out
 
 
+def _clip(text: str, limit: int = 120) -> str:
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _amount_or_range(value: Any, bounds: Any, cur: Any) -> dict[str, Any]:
+    """An exact amount, or the range the engine gave when unknown facts leave it open."""
+    if value is None and isinstance(bounds, Mapping):
+        return span(bounds.get("low"), bounds.get("high"), cur)
+    return money(value, cur)
+
+
+def _estate_register(result: Mapping, envelope: Mapping, task: str) -> list[dict]:
+    """Accounts to heirs (mechanism and who), with the completeness score; then the estimated amount per heir."""
+    rows = [r for r in result.get("rows") or [] if isinstance(r, Mapping)]
+    if not rows:
+        return []
+    cur = result.get("currency")
+    unknown = L("not recorded", "sin registrar")
+    out_rows = []
+    ordered = sorted(rows, key=lambda r: -(_dec(r.get("estate_value") if r.get("estate_value") is not None
+                                                else (r.get("estate_value_range") or {}).get("high")) or Decimal(-1)))
+    for row in ordered[:MAX_ROWS]:
+        names = [h.get("name") for h in row.get("heirs") or [] if isinstance(h, Mapping) and h.get("name")]
+        who_en = ", ".join(_name(n) for n in names[:3]) or unknown["en"]
+        who_es = ", ".join(_name(n) for n in names[:3]) or unknown["es"]
+        how = row.get("mechanism_label") if isinstance(row.get("mechanism_label"), Mapping) else L("—", "—")
+        mark = " ⚠" if row.get("gaps") else ""
+        out_rows.append({"label": L(_clip(f"{_name(row.get('label'))}{mark} · {how['en']} → {who_en}"),
+                                    _clip(f"{_name(row.get('label'))}{mark} · {how['es']} → {who_es}")),
+                         "value": _amount_or_range(row.get("estate_value"), row.get("estate_value_range"), cur)})
+    score = (result.get("completeness") or {}).get("score")
+    specs = [_spec(task, "ticket", L("What happens to each account", "Qué pasa con cada cuenta"),
+                   {"rows": out_rows, "total": {"label": L("Estate plan completeness", "Avance de tu plan de herencia"),
+                                                "value": percent(score)}},
+                   envelope, result, L("Estimate for planning, not legal advice", "Estimación para planear, no asesoría legal"))]
+    heirs = [h for h in result.get("heirs") or [] if isinstance(h, Mapping)]
+    if heirs:
+        heir_rows = []
+        for heir in heirs[:MAX_ROWS]:
+            name = heir.get("name")
+            label = name if isinstance(name, Mapping) and set(name) == {"en", "es"} else _name(name)
+            heir_rows.append({"label": label, "value": _amount_or_range(heir.get("amount"), heir.get("amount_range"),
+                                                                        cur)})
+        specs.append(_spec(task, "ticket", L("Estimated amount per heir", "Monto estimado por heredero"),
+                           {"rows": heir_rows, "total": {"label": L("Estate", "Patrimonio"),
+                                                         "value": _amount_or_range(result.get("total"),
+                                                                                   result.get("total_range"), cur)}},
+                           envelope, result))
+    return specs
+
+
 BUILDERS: dict[str, Callable[[Mapping, Mapping, str], list[dict]]] = {
     "spending": _spending, "dca": _dca, "performance": _performance, "project": _project, "income": _income,
     "stress": _stress, "debt_payoff": _debt_payoff, "debt": _debt, "tax": _tax, "rebalance": _rebalance,
     "asset_location": _asset_location,
     "manager_holdings": _manager_holdings, "manager_profile": _manager_profile, "manager_compare": _manager_compare,
-    "manager_mirror": _manager_mirror, "speculation_check": _speculation,
+    "manager_mirror": _manager_mirror, "speculation_check": _speculation, "estate_register": _estate_register,
 }
 
 
