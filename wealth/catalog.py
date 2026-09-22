@@ -748,7 +748,8 @@ CATALOG: dict[str, dict[str, Any]] = {
                      "financial_system_lender, credit_udis | credit_amount_mxn + udi_value_at_origination + udi_source, "
                      "within_global_cap} (LISR Art. 151 fr. IV, as mx_deductions), inflation (MX real interest, default 4%), "
                      "expected_return {conservative, base, source}, risk_free {rate, source} (default: a saved "
-                     "cash_reference_rate, else the dated CETES 28-day (MXN) or 13-week T-bill (USD) auction rate), investment (a name), "
+                     "cash_reference_rate, else the latest CETES 28-day (MXN) or 13-week T-bill (USD) auction rate, "
+                     "dated and sourced; see reference_rates), investment (a name), "
                      "reserve {months, target_months} (default: the saved picture)",
                      "refinance: offer {kind refinance|balance_transfer|consolidation, annual_rate (after any promo; with a promo and "
                      "no rate given, the current rate is assumed and said), "
@@ -1127,8 +1128,9 @@ CATALOG: dict[str, dict[str, Any]] = {
                      "snooze: [{id, until: YYYY-MM-DD} | {id, days}]", "restore: [item id]"],
         "example": {"as_of": "2026-12-18", "facts": _PROACTIVE_FACTS, "ledger": _PROACTIVE_LEDGER},
         "notes": "The idle_yield item prices cash above the reserve target and goals at a reference rate: a saved "
-                 "cash_reference_rate {low, high, unit, source, as_of?, currency?} fact, else for Mexico residents the "
-                 "dated CETES 28-day constant (marked stale after 30 days). A saved cash_yield (what the cash earns) "
+                 "cash_reference_rate {low, high, unit, source, as_of?, currency?} fact, else the latest CETES 28-day "
+                 "auction rate for Mexico residents (13-week T-bill for US filers' USD cash), with its date and source "
+                 "(marked stale after 30 days; see reference_rates). A saved cash_yield (what the cash earns) "
                  "makes it exact; without it the figure is an upper bound. data.offer holds ladder task inputs for a "
                  "four-rung CETES ladder.",
         "variants": {"us_person_in_mexico": {"as_of": "2026-09-08", "jurisdiction": "MX,US", "facts": _PROACTIVE_FACTS}},
@@ -1140,8 +1142,19 @@ CATALOG: dict[str, dict[str, Any]] = {
         "optional": ["as_of", "jurisdiction", "timezone"],
         "example": {"as_of": "2026-12-18", "facts": _PROACTIVE_FACTS, "ledger": _PROACTIVE_LEDGER},
     },
+    "reference_rates": {
+        "purpose": "Today's cash reference rates, dated and sourced: CETES 28 days (Banxico weekly primary auction) "
+                   "and the 13-week US Treasury bill (high investment rate at auction), plus other CETES and bill "
+                   "tenors when cached. With client_id a saved cash_reference_rate in that currency comes first.",
+        "required": ["nothing (client_id optional)"],
+        "optional": ["currency: MXN|USD (default both)", "as_of (default today)"],
+        "notes": "Each rate has rate (decimal), percent, as_of (auction date), source, origin "
+                 "saved_fact|fetched|builtin and stale (older than 30 days). Fetches refresh at most daily in the "
+                 "background; a turn never waits for the network, and builtin is Wealth's dated fallback.",
+        "example": {"currency": "MXN"},
+    },
     "quarterly_review": {
-        "purpose": "The quarterly report a private bank sends: net worth start to end decomposed into contributions "
+        "purpose":"The quarterly report a private bank sends: net worth start to end decomposed into contributions "
                    "and growth, TWR and XIRR per account against the IPS benchmark and a global 60/40, allocation and "
                    "drift against the IPS bands, cash flow and savings rate vs the prior quarter, goal progress and "
                    "pace, the decision journal with what happened since, DCA adherence, realised gains and estimated "

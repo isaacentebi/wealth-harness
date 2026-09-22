@@ -937,7 +937,14 @@ def prepay_vs_invest(debt: dict, inputs: Mapping[str, Any], today: date, *, juri
                                   + " {rate, source}; save cash_reference_rate for the currency"})
     else:
         sources.append(SOURCES["cetes_tax" if jurisdiction == "MX" else "tbill_tax"])
-    federal = _ratio(inputs.get("federal_marginal_rate"), "federal_marginal_rate", high=ONE)
+        if risk_free.get("stale"):
+            from .rates import REFERENCE_RATE_STALE_DAYS
+            warnings.append(f"The risk-free rate ({risk_free.get('name')}) is from {risk_free.get('as_of')}, more than "
+                            f"{REFERENCE_RATE_STALE_DAYS} days ago; check today's rate before acting on the comparison.")
+        if risk_free.get("origin") == "builtin":
+            assumptions.append(f"The risk-free rate is Wealth's built-in dated value ({risk_free.get('name')}, "
+                               f"{risk_free.get('as_of')}): no fetched rate was available.")
+    federal =_ratio(inputs.get("federal_marginal_rate"), "federal_marginal_rate", high=ONE)
 
     cases = []
     for m in marginals:
@@ -1038,7 +1045,9 @@ def prepay_vs_invest(debt: dict, inputs: Mapping[str, Any], today: date, *, juri
         "after_tax": {"risk_free": num(central["risk_free_after_tax"], 4), "conservative": num(central["conservative_after_tax"], 4),
                       "base": num(central["base_after_tax"], 4)},
         "risk_free": ({"rate": num(rf_rate, 4), "name": risk_free.get("name"), "source": risk_free.get("source"),
-                       "as_of": risk_free.get("as_of")} if rf_rate is not None else None),
+                       "as_of": risk_free.get("as_of"),
+                       **{k: risk_free[k] for k in ("origin", "stale") if k in risk_free}}
+                      if rf_rate is not None else None),
         "gains_tax": num(central["_gains_tax"], 4), "account": account,
         "gains_tax_basis": ("none" if account == "tax_free" else
                             "real gain (cost updated by inflation)" if jurisdiction == "MX" else "nominal gain"),

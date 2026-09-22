@@ -183,7 +183,9 @@ Tasks by question (capabilities, not a sequence; read status, missing, warnings
 and coverage before answering):
 - Money in and out: spending (where it goes, investable surplus), calendar,
   income, project, ladder (cash flows), debt_payoff, debt (amortization, prepay
-  vs invest, refinance offers, payoff strategies), plan (reserves and goals).
+  vs invest, refinance offers, payoff strategies), plan (reserves and goals),
+  reference_rates (today's CETES and T-bill auction rates: quote its rate with
+  its as_of date, never a rate from memory).
 - What they own: ledger (holdings, lots, gains, income), performance, exposure,
   import, sic_premium.
 - Investing: policy_draft and policy_check (investment policy), rebalance,

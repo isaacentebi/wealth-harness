@@ -62,6 +62,8 @@ DEFAULT_BUDGET_SECONDS = 1.5
 LATEST_LOOKBACK_DAYS = 10
 YAHOO = "Yahoo Finance via yfinance"
 FX_CARRY_DAYS = 4
+# Reference rates (wealth/rates.py) share the cache under this symbol prefix; they are not Yahoo symbols.
+RATE_PREFIX = "rate:"
 
 # Mexican fixed income that Yahoo does not quote.
 _MX_FIXED_INCOME = ("CETES", "CETE", "UDIBONO", "UDIBONOS", "BONDES", "BONDE", "BONOS", "BONO", "MBONO")
@@ -535,7 +537,8 @@ class PriceProvider:
         today = self._now().date()
         if symbols is None:
             with self._store() as store:
-                providers = sorted({r["symbol"] for r in store.market_summary() if r["kind"] == "close"})
+                providers = sorted({r["symbol"] for r in store.market_summary()
+                                    if r["kind"] == "close" and not r["symbol"].startswith(RATE_PREFIX)})
         else:
             providers = []
             for raw in symbols:
@@ -555,7 +558,7 @@ class PriceProvider:
         """What is cached: one row per provider symbol and kind, with its age."""
         now = self._now()
         with self._store() as store:
-            rows = store.market_summary()
+            rows = [r for r in store.market_summary() if not r["symbol"].startswith(RATE_PREFIX)]
         for row in rows:
             row["age_days"] = (now.date() - date.fromisoformat(row["last"])).days
             row["stale"] = row["age_days"] > self.stale_after_days

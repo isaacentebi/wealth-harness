@@ -74,7 +74,7 @@ before answering.
 
 | Question | Tasks |
 | --- | --- |
-| Money in and out | `spending`, `calendar`, `income`, `project`, `ladder`, `debt_payoff`, `debt`, `plan` |
+| Money in and out | `spending`, `calendar`, `income`, `project`, `ladder`, `debt_payoff`, `debt`, `plan`, `reference_rates` (today's CETES and T-bill rates, dated) |
 | What they own | `ledger`, `performance`, `exposure`, `import`, `sic_premium` |
 | Investing | `policy_draft`, `policy_check`, `rebalance`, `asset_location`, `dca`, `compare`, `construct`, `analyze`, `factors`, `stress`, `research`, `value` |
 | Tax | `tax`, `mx_holdings`, `mx_interest`, `mx_deductions`, `mx_foreign`, `mx_calendar`, `estate`, `tax_pack` (the year's pack for the contador or CPA) |

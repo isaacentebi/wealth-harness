@@ -1,0 +1,162 @@
+[
+ {
+  "cusip": "912797UM7",
+  "securityType": "Bill",
+  "securityTerm": "6-Week",
+  "auctionDate": "2026-09-22T00:00:00",
+  "issueDate": "2026-09-24T00:00:00",
+  "highInvestmentRate": "3.942000",
+  "highDiscountRate": "3.870000",
+  "cashManagementBillCMB": "No"
+ },
+ {
+  "cusip": "912797TC1",
+  "securityType": "Bill",
+  "securityTerm": "13-Week",
+  "auctionDate": "2026-09-21T00:00:00",
+  "issueDate": "2026-09-24T00:00:00",
+  "highInvestmentRate": "4.113000",
+  "highDiscountRate": "4.015000",
+  "cashManagementBillCMB": "No"
+ },
+ {
+  "cusip": "912797WL7",
+  "securityType": "Bill",
+  "securityTerm": "26-Week",
+  "auctionDate": "2026-09-21T00:00:00",
+  "issueDate": "2026-09-24T00:00:00",
+  "highInvestmentRate": "4.303000",
+  "highDiscountRate": "4.155000",
+  "cashManagementBillCMB": "No"
+ },
+ {
+  "cusip": "912797VM6",
+  "securityType": "Bill",
+  "securityTerm": "4-Week",
+  "auctionDate": "2026-09-17T00:00:00",
+  "issueDate": "2026-09-22T00:00:00",
+  "highInvestmentRate": "3.885000",
+  "highDiscountRate": "3.820000",
+  "cashManagementBillCMB": "No"
+ },
+ {
+  "cusip": "912797VX2",
+  "securityType": "Bill",
+  "securityTerm": "8-Week",
+  "auctionDate": "2026-09-17T00:00:00",
+  "issueDate": "2026-09-22T00:00:00",
+  "highInvestmentRate": "3.999000",
+  "highDiscountRate": "3.920000",
+  "cashManagementBillCMB": "No"
+ },
+ {
+  "cusip": "912797WQ6",
+  "securityType": "Bill",
+  "securityTerm": "17-Week",
+  "auctionDate": "2026-09-16T00:00:00",
+  "issueDate": "2026-09-22T00:00:00",
+  "highInvestmentRate": "4.141000",
+  "highDiscountRate": "4.030000",
+  "cashManagementBillCMB": "No"
+ },
+ {
+  "cusip": "912797SK4",
+  "securityType": "Bill",
+  "securityTerm": "6-Week",
+  "auctionDate": "2026-09-15T00:00:00",
+  "issueDate": "2026-09-17T00:00:00",
+  "highInvestmentRate": "3.921000",
+  "highDiscountRate": "3.850000",
+  "cashManagementBillCMB": "No"
+ },
+ {
+  "cusip": "912797VH7",
+  "securityType": "Bill",
+  "securityTerm": "13-Week",
+  "auctionDate": "2026-09-14T00:00:00",
+  "issueDate": "2026-09-17T00:00:00",
+  "highInvestmentRate": "4.066000",
+  "highDiscountRate": "3.970000",
+  "cashManagementBillCMB": "No"
+ },
+ {
+  "cusip": "912797UD7",
+  "securityType": "Bill",
+  "securityTerm": "26-Week",
+  "auctionDate": "2026-09-14T00:00:00",
+  "issueDate": "2026-09-17T00:00:00",
+  "highInvestmentRate": "4.203000",
+  "highDiscountRate": "4.060000",
+  "cashManagementBillCMB": "No"
+ },
+ {
+  "cusip": "912797VL8",
+  "securityType": "Bill",
+  "securityTerm": "4-Week",
+  "auctionDate": "2026-09-10T00:00:00",
+  "issueDate": "2026-09-15T00:00:00",
+  "highInvestmentRate": "3.839000",
+  "highDiscountRate": "3.775000",
+  "cashManagementBillCMB": "No"
+ },
+ {
+  "cusip": "912797VW4",
+  "securityType": "Bill",
+  "securityTerm": "8-Week",
+  "auctionDate": "2026-09-10T00:00:00",
+  "issueDate": "2026-09-15T00:00:00",
+  "highInvestmentRate": "3.922000",
+  "highDiscountRate": "3.845000",
+  "cashManagementBillCMB": "No"
+ },
+ {
+  "cusip": "912797WP8",
+  "securityType": "Bill",
+  "securityTerm": "17-Week",
+  "auctionDate": "2026-09-09T00:00:00",
+  "issueDate": "2026-09-15T00:00:00",
+  "highInvestmentRate": "4.001000",
+  "highDiscountRate": "3.895000",
+  "cashManagementBillCMB": "No"
+ },
+ {
+  "cusip": "912797UL9",
+  "securityType": "Bill",
+  "securityTerm": "6-Week",
+  "auctionDate": "2026-09-08T00:00:00",
+  "issueDate": "2026-09-10T00:00:00",
+  "highInvestmentRate": "3.809000",
+  "highDiscountRate": "3.740000",
+  "cashManagementBillCMB": "No"
+ },
+ {
+  "cusip": "912797VG9",
+  "securityType": "Bill",
+  "securityTerm": "13-Week",
+  "auctionDate": "2026-09-08T00:00:00",
+  "issueDate": "2026-09-10T00:00:00",
+  "highInvestmentRate": "3.890000",
+  "highDiscountRate": "3.800000",
+  "cashManagementBillCMB": "No"
+ },
+ {
+  "cusip": "912797WK9",
+  "securityType": "Bill",
+  "securityTerm": "26-Week",
+  "auctionDate": "2026-09-08T00:00:00",
+  "issueDate": "2026-09-10T00:00:00",
+  "highInvestmentRate": "4.023000",
+  "highDiscountRate": "3.890000",
+  "cashManagementBillCMB": "No"
+ },
+ {
+  "cusip": "912797VK0",
+  "securityType": "Bill",
+  "securityTerm": "4-Week",
+  "auctionDate": "2026-09-03T00:00:00",
+  "issueDate": "2026-09-08T00:00:00",
+  "highInvestmentRate": "3.762000",
+  "highDiscountRate": "3.700000",
+  "cashManagementBillCMB": "No"
+ }
+]

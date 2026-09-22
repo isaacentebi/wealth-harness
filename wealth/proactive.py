@@ -19,7 +19,9 @@ Contract (docs/notes/scope.md sections 2 and 3):
   plain JSON the caller stores (the service keeps it in the ``monitor``
   auxiliary namespace under ``_proactive``).
 
-Nothing here sends messages, moves money or writes to the store.
+Nothing here sends messages, moves money or writes client data.  Given ``rates_db``, the idle-cash
+rate is read from the shared reference-rate cache (:mod:`wealth.rates`), which may refresh itself in the
+background.
 """
 from __future__ import annotations
 
@@ -32,6 +34,8 @@ from statistics import median
 from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from . import rates as rates_module
+from .rates import CETES_28D_REFERENCE, REFERENCE_RATE_STALE_DAYS, TBILL_13W_REFERENCE  # noqa: F401 - re-exported
 from .situation.model import D, add_months, num, ticker_of
 
 TODAY_LIMIT = 3
@@ -69,22 +73,9 @@ STATEMENT_OVERDUE_DAYS = 35
 GUILT_FREE_MONTHS = 3
 GUILT_FREE_UNSPENT = Decimal("0.20")
 MEDICARE_AGE = 64
-# Idle-cash yield gap: the reference rate for MXN cash when none is stored.  Banxico weekly primary auction
-# (subasta de valores gubernamentales) of 2026-09-15: CETES 28 days at 6.25% (91d 6.66%, 182d 6.90%, 364d
-# 7.24%), as published by Banxico and reported the same week.  Past REFERENCE_RATE_STALE_DAYS the item says so.
-CETES_28D_REFERENCE = {
-    "rate": "0.0625", "as_of": "2026-09-15", "checked_on": "2026-09-21", "name": "CETES 28 days",
-    "source": "Banxico, subasta primaria de valores gubernamentales del 2026-09-15 (CETES 28 dias 6.25%); "
-              "https://www.banxico.org.mx/mercados/resultados-subastas-valores-g.html",
-}
-# The USD counterpart: the 13-week Treasury bill auction of 2026-09-21 (reopening, issued 2026-09-24), high
-# investment rate (bond-equivalent yield) 4.113% (discount rate 4.015%), from Treasury Fiscal Data.
-TBILL_13W_REFERENCE = {
-    "rate": "0.04113", "as_of": "2026-09-21", "checked_on": "2026-09-22", "name": "US Treasury bill 13 weeks",
-    "source": "U.S. Treasury, 13-week bill auction of 2026-09-21 (high investment rate 4.113%); "
-              "https://fiscaldata.treasury.gov/datasets/treasury-securities-auctions-data/",
-}
-REFERENCE_RATE_STALE_DAYS = 30
+# Idle-cash yield gap: the rate is wealth.rates.reference (a saved cash_reference_rate, else the fetched CETES
+# 28-day or 13-week T-bill auction rate, else the dated constants there).  Past REFERENCE_RATE_STALE_DAYS the
+# item says so.
 IDLE_YIELD_MIN_LOST = {"MXN": Decimal(1000), "USD": Decimal(50)}  # below this a year, not worth a nudge
 STALE_KEYS_THAT_MATTER = ("client.profile", "income.", "spending.monthly", "cash.", "liability.", "investment.",
                           "goals", "reserve", "policy.ips", "planning.dca", "tax.profile", "cash_reference_rate",
@@ -273,9 +264,10 @@ def _item(kind: str, subject: str | None, *, severity: str, priority: str, title
 class _Run:
     """Shared inputs for the triggers; collects items and unknowns."""
 
-    def __init__(self, situation, ledger, snapshot, as_of: date, jurisdictions: set[str]):
+    def __init__(self, situation, ledger, snapshot, as_of: date, jurisdictions: set[str], rates_db: Any = None):
         self.sit, self.ledger, self.snapshot, self.as_of = situation, ledger, snapshot or {}, as_of
         self.jurisdictions = jurisdictions
+        self.rates_db = rates_db  # the Wealth database holding the reference-rate cache (None: built-in values)
         self.currency = situation.get("currency")
         self.items: list[dict] = []
         self.unknown: list[dict] = []
@@ -749,27 +741,22 @@ def _reserve(run: _Run) -> None:
 
 
 def _reference_rate(run: _Run, currency: str) -> tuple[dict | None, str | None]:
-    """The rate idle ``currency`` cash could earn: a stored ``cash_reference_rate`` in that currency, else
-    (MXN, Mexico residents) the dated CETES 28-day constant.  ``(None, why)`` when neither is known."""
-    stored = run.fact_value("cash_reference_rate")
-    if isinstance(stored, dict) and str(stored.get("currency") or currency).upper() == currency:
-        low, high = D(stored.get("low", stored.get("rate"))), D(stored.get("high", stored.get("low", stored.get("rate"))))
-        unit = str(stored.get("unit") or "decimal")
-        scale = Decimal(100) if unit == "percent" else Decimal(10000) if unit == "bps" else Decimal(1)
+    """The rate idle ``currency`` cash could earn (:func:`wealth.rates.reference`): a stored
+    ``cash_reference_rate`` in that currency (a range at its low end, so the gap is never overstated), else
+    CETES 28 days for a Mexico resident's MXN or the 13-week T-bill for a US filer's USD, fetched or the
+    dated constant.  ``(None, why)`` when none applies."""
+    fact = None
+    if run.fact_value("cash_reference_rate") is not None:  # not stale, not inferred
         fact = next((f for f in run.snapshot.get("facts") or [] if isinstance(f, dict)
-                     and f.get("key") == "cash_reference_rate" and f.get("status", "active") == "active"), {})
-        when = _date(stored.get("as_of")) or _date((fact.get("source") or {}).get("observed_on"))
-        if low is not None and high is not None and stored.get("source") and when is not None:
-            # A range is read at its low end: the gap is never overstated.
-            return {"rate": min(low, high) / scale, "as_of": when.isoformat(), "source": str(stored["source"]),
-                    "name": str(stored.get("name") or stored["source"]), "origin": "stored cash_reference_rate",
-                    "evidence": "cash_reference_rate"}, None
-        return None, "cash_reference_rate needs low (or rate), unit, source and a date"
-    if currency == "MXN" and _mx_resident(run):
-        ref = CETES_28D_REFERENCE
-        return {"rate": D(ref["rate"]), "as_of": ref["as_of"], "source": ref["source"], "name": ref["name"],
-                "origin": "Wealth dated constant (checked " + ref["checked_on"] + ")", "evidence": None}, None
-    return None, f"a reference rate for {currency} cash (save cash_reference_rate {{low, high, unit, source, currency}})"
+                     and f.get("key") == "cash_reference_rate" and f.get("status", "active") == "active"), None)
+    market = (currency == "MXN" and _mx_resident(run)) or (currency == "USD" and _us_filer(run))
+    saved, why = rates_module.from_fact(fact, currency, run.as_of) if fact is not None else (None, None)
+    ref = saved or (rates_module.reference(currency, db_path=run.rates_db, on=run.as_of) if market else None)
+    if ref is None:
+        return None, why or (f"a reference rate for {currency} cash "
+                             "(save cash_reference_rate {low, high, unit, source, currency})")
+    return {**ref, "rate": D(ref["rate"]), "origin": rates_module.origin_text(ref),
+            "evidence": "cash_reference_rate" if ref["origin"] == "saved_fact" else None}, None
 
 
 def _cash_yield(run: _Run) -> Decimal | None:
@@ -857,9 +844,7 @@ def _idle_yield(run: _Run) -> None:
         return
     # The same excess cash, priced: this replaces the vaguer cash_drag nudge.
     run.items = [i for i in run.items if i["kind"] != "cash_drag"]
-    as_of_rate = date.fromisoformat(reference["as_of"])
-    age = (run.as_of - as_of_rate).days
-    stale = age > REFERENCE_RATE_STALE_DAYS
+    age, stale = reference["age_days"], reference["stale"]
     lost_text, idle_text = _money_text(lost, currency, run.currency), _money_text(idle, currency, run.currency)
     pct = f"{reference['rate'] * 100:.2f}%"
     bound = "at_most" if earned is None else "estimate"
@@ -874,8 +859,10 @@ def _idle_yield(run: _Run) -> None:
         "idle_yield", currency, severity="consider", priority="opportunity",
         title=(f"{'Up to ' if earned is None else ''}{lost_text}/yr lost on idle cash",
                f"{'Hasta ' if earned is None else ''}{lost_text} al año sin rendir"),
-        why=(f"{idle_text} sits above your reserve and goals; {reference['name']} pays {pct}. {earned_en}{stale_en}",
-             f"Tienes {idle_text} arriba de tu reserva y metas; {reference['name']} paga {pct}. {earned_es}{stale_es}"),
+        why=(f"{idle_text} sits above your reserve and goals; {reference['name']} pays {pct} "
+             f"(as of {reference['as_of']}). {earned_en}{stale_en}",
+             f"Tienes {idle_text} arriba de tu reserva y metas; {reference['name']} paga {pct} "
+             f"(al {reference['as_of']}). {earned_es}{stale_es}"),
         next_step=((f"Should I ladder {idle_text} in CETES?", f"¿Me conviene escalonar {idle_text} en CETES?")
                    if currency == "MXN" else
                    (f"Where could {idle_text} earn {pct}?", f"¿Dónde pueden ganar {pct} mis {idle_text}?")),
@@ -887,14 +874,19 @@ def _idle_yield(run: _Run) -> None:
               "cash_yield_reason": None if earned is not None else "unknown: save cash_yield to make this exact",
               "kept": {"reserve_target": num(keep), "reserve_in_instruments": num(in_instruments),
                        "protected_goals": num(protected), "goal_earmarked_cash": num(earmarked)},
-              "assumptions": ["Rates are gross annual, before the provisional ISR retention on capital that applies to "
-                              "bank interest and CETES alike.",
-                              "A one-year figure at today's rate; CETES 28 days reprice every week."],
+              "assumptions": (["Rates are gross annual, before the provisional ISR retention on capital that applies "
+                               "to bank interest and CETES alike.",
+                               "A one-year figure at today's rate; CETES 28 days reprice every week."]
+                              if currency == "MXN" else
+                              ["Rates are gross annual, before federal income tax (Treasury bill interest is exempt "
+                               "from state and local income tax).",
+                               "A one-year figure at today's rate; 13-week bills reprice every week."]),
               "offer": rungs},
         sources=["reserve", *(reserve.get("source_keys") or (f"cash.{s}" for s in reserve.get("sources") or [])),
                  *([reference["evidence"]] if reference["evidence"] else []),
                  *(["cash_yield"] if earned is not None else [])],
-        trigger=[currency, _sig2(idle), str(reference["rate"]), reference["as_of"], earned is None]))
+        # The weekly auction moves the rate a little: only a half-point move re-shows a dismissed item.
+        trigger=[currency, _sig2(idle), str((reference["rate"] * 200).to_integral_value()), earned is None]))
 
 
 def _cetes_ladder(run: _Run, idle: Decimal, reference: dict, currency: str) -> dict:
@@ -2018,11 +2010,13 @@ def acknowledge(state: Mapping[str, Any] | None, candidates: Iterable[Mapping[st
 
 
 def evaluate(situation: Mapping[str, Any], ledger: Mapping[str, Any] | None, snapshot: Mapping[str, Any] | None,
-             as_of: Any = None, *, jurisdiction: Any = None, timezone: str | None = None) -> dict:
-    """Every triggered item and every calendar item, before taste and acknowledgement."""
+             as_of: Any = None, *, jurisdiction: Any = None, timezone: str | None = None, rates_db: Any = None) -> dict:
+    """Every triggered item and every calendar item, before taste and acknowledgement.
+
+    ``rates_db`` is the Wealth database whose reference-rate cache prices idle cash (None: built-in values)."""
     day = resolve_as_of(as_of, timezone, situation)
     codes = jurisdictions(situation, jurisdiction)
-    run = _Run(situation, ledger, snapshot, day, codes)
+    run = _Run(situation, ledger, snapshot, day, codes, rates_db)
     for trigger in TRIGGERS:
         trigger(run)
     _cohere(run)  # before ranking, so no ranking can show two items that contradict each other
@@ -2050,13 +2044,14 @@ def evaluate(situation: Mapping[str, Any], ledger: Mapping[str, Any] | None, sna
 
 def today(situation: Mapping[str, Any], ledger: Mapping[str, Any] | None, snapshot: Mapping[str, Any] | None,
           as_of: Any = None, *, jurisdiction: Any = None, timezone: str | None = None,
-          state: Mapping[str, Any] | None = None) -> dict:
+          state: Mapping[str, Any] | None = None, rates_db: Any = None) -> dict:
     """At most three ranked items for today, plus ``upcoming`` (overflow and dated items ahead).
 
     ``state`` is the acknowledgement state from :func:`acknowledge`.  The payload is
     JSON-safe; see ``docs`` in the module docstring for the item fields.
     """
-    found = evaluate(situation, ledger, snapshot, as_of, jurisdiction=jurisdiction, timezone=timezone)
+    found = evaluate(situation, ledger, snapshot, as_of, jurisdiction=jurisdiction, timezone=timezone,
+                     rates_db=rates_db)
     day = found["as_of"]
     hidden, visible = [], []
     for item in found["candidates"]:
@@ -2096,9 +2091,10 @@ def today(situation: Mapping[str, Any], ledger: Mapping[str, Any] | None, snapsh
 
 def weekly(situation: Mapping[str, Any], ledger: Mapping[str, Any] | None, snapshot: Mapping[str, Any] | None,
            as_of: Any = None, *, jurisdiction: Any = None, timezone: str | None = None,
-           state: Mapping[str, Any] | None = None) -> dict:
+           state: Mapping[str, Any] | None = None, rates_db: Any = None) -> dict:
     """The week in at most five lines of data (the model phrases them), newest first by importance."""
-    report = today(situation, ledger, snapshot, as_of, jurisdiction=jurisdiction, timezone=timezone, state=state)
+    report = today(situation, ledger, snapshot, as_of, jurisdiction=jurisdiction, timezone=timezone, state=state,
+                   rates_db=rates_db)
     day = date.fromisoformat(report["as_of"])
     start = day - timedelta(days=6)
     currency = situation.get("currency")

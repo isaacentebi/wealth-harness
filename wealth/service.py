@@ -11,6 +11,7 @@ from inspect import signature
 import uuid
 
 from . import prices as prices_module
+from . import rates as rates_module
 from . import situation as situation_module
 from . import views as views_module
 from .situation.schema import SCHEMA, out_of_range
@@ -44,7 +45,7 @@ TASK_MODULES = {
 # Tasks answered by the service itself rather than one module.
 SERVICE_TASKS = ("plan", "calendar", "monitor", "debt_payoff", "debt", "policy_draft", "policy_check", "today", "weekly",
                  "quarterly_review", "fee_audit", "speculation_check", "panic_check", "scam_check",
-                 "protection_review", "life_event", "estate_register", "order_ticket", "tax_pack")
+                 "protection_review", "life_event", "estate_register", "order_ticket", "tax_pack", "reference_rates")
 # Investment policy tasks (wealth/policy.py) read the canonical picture, so the service runs them.
 POLICY_TASKS = frozenset({"policy_draft", "policy_check"})
 # Proactive tasks (wealth/proactive.py) read the whole picture and keep dismissals in the monitor namespace.
@@ -257,23 +258,14 @@ def _published_rate(reference) -> dict | None:
     return {"rate": rate, "source": reference["source"]}
 
 
-def _risk_free(stored: dict, currency: str | None) -> tuple[dict | None, str | None]:
-    """The risk-free alternative for ``currency``: a saved cash_reference_rate (its low end), else CETES 28 days
-    for MXN (the dated constant); None for another currency with nothing saved (the T-bill rate is then asked)."""
-    fact = stored.get("cash_reference_rate")
-    value = fact.get("value") if fact else None
-    if isinstance(value, dict) and value.get("source") and str(value.get("currency") or currency).upper() == str(currency).upper():
-        low = prices_module._dec(value.get("low", value.get("rate")))
-        if low is not None:
-            unit = str(value.get("unit") or "decimal")
-            rate = low / 100 if unit == "percent" else low / 10000 if unit == "bps" else low
-            return {"rate": str(rate), "source": value["source"], "name": value.get("name") or value["source"],
-                    "as_of": value.get("as_of") or (fact.get("source") or {}).get("observed_on")}, fact["id"]
-    if currency in ("MXN", "USD"):
-        from .proactive import CETES_28D_REFERENCE, TBILL_13W_REFERENCE
-        ref = CETES_28D_REFERENCE if currency == "MXN" else TBILL_13W_REFERENCE
-        return {"rate": ref["rate"], "source": ref["source"], "name": ref["name"], "as_of": ref["as_of"]}, None
-    return None, None
+def _risk_free(stored: dict, currency: str | None, db_path, on=None) -> tuple[dict | None, str | None]:
+    """The risk-free alternative for ``currency`` (:func:`wealth.rates.reference`): a saved cash_reference_rate
+    (its low end), else CETES 28 days (MXN) or the 13-week T-bill (USD), fetched or the dated constant; None for
+    another currency with nothing saved (the rate is then asked)."""
+    ref = rates_module.reference(currency, fact=stored.get("cash_reference_rate"), db_path=db_path, on=on)
+    if ref is None:
+        return None, None
+    return {k: ref[k] for k in ("rate", "source", "name", "as_of", "origin", "stale", "note")}, ref["fact_id"]
 
 
 def _price_sources(rows) -> list[dict]:
@@ -612,6 +604,45 @@ class WealthService:
         result["status"] = provider.status()
         return result
 
+    def rates(self, action: str = "status", currency: str | None = None) -> dict:
+        """Reference-rate cache (wealth/rates.py): ``status`` (every series with its auction date, source and
+        age) or ``refresh`` (fetch now, ``currency`` MXN or USD, default both)."""
+        if action == "status":
+            return rates_module.status(self.db_path, refresh=False)
+        if action != "refresh":
+            raise ValueError("rates action must be status or refresh")
+        result = rates_module.refresh(self.db_path, currency)
+        result["status"] = rates_module.status(self.db_path, refresh=False)
+        return result
+
+    def _reference_rates(self, inputs: dict, snapshot: dict, today: str) -> dict:
+        """reference_rates: the cash reference rate per currency (saved fact, else fetched, else built-in)."""
+        unknown = sorted(set(inputs) - {"currency", "as_of"})
+        if unknown:
+            raise ValueError(f"reference_rates inputs: unknown {unknown}; expected {{currency?, as_of?}}")
+        currency = str(inputs.get("currency") or "").upper() or None
+        if currency is not None and currency not in rates_module.DEFAULT_SERIES:
+            raise ValueError("currency must be MXN or USD")
+        on = datetime.fromisoformat(str(inputs.get("as_of") or today)[:10]).date().isoformat()
+        wanted = [currency] if currency else sorted(rates_module.DEFAULT_SERIES)
+        saved = next((f for f in snapshot["facts"] if f["key"] == "cash_reference_rate"), None)
+        refs = [ref for ref in (rates_module.reference(c, fact=saved, db_path=self.db_path, on=on) for c in wanted)
+                if ref is not None]
+        shown = {r["series"] for r in refs}
+        tenors = [{k: r[k] for k in ("series", "name", "rate", "percent", "as_of", "source", "stale")}
+                  for r in rates_module.status(self.db_path, on, refresh=False)["rates"]
+                  if r.get("origin") == "fetched" and r["currency"] in wanted and r["series"] not in shown]
+        return {"status": "ready", "result": {"as_of": on, "offline": prices_module.offline_mode(), "rates": refs,
+                                              "other_tenors": tenors},
+                "missing": [], "warnings": [f"{r['name']}: {r['note']}" for r in refs if r.get("note")],
+                "sources": [{"title": r["name"], "ref": r["source"], "date": r["as_of"]} for r in refs + tenors],
+                "assumptions": ["CETES: the weekly primary-auction yield (tasa de rendimiento) Banxico publishes; "
+                                "T-bills: the high investment rate (bond-equivalent yield) of the latest auction. "
+                                "Both are gross annual rates before tax.",
+                                "A saved cash_reference_rate in that currency comes first; otherwise the latest "
+                                "fetched auction, else Wealth's built-in dated value (origin says which)."],
+                "_evidence": [r["fact_id"] for r in refs if r.get("fact_id")]}
+
     def create(self, client_id: str, display_name: str) -> dict:
         with WealthStore(self.db_path) as store:
             return store.create_client(client_id, display_name)
@@ -829,6 +860,9 @@ class WealthService:
             from . import taxpack
             report = taxpack.run_task(inputs, snapshot, ledger, today)
             derived_evidence = report.pop("_evidence", [])
+        elif task == "reference_rates":
+            report = self._reference_rates(inputs, snapshot, today)
+            derived_evidence = report.pop("_evidence", [])
         elif task in {"plan", "calendar"}:
             # Direct inputs may supply the same canonical facts without requiring a profile.
             keys = ("plan.resources", "goals") if task == "plan" else ("income.schedule",)
@@ -890,8 +924,8 @@ class WealthService:
                     report["sources"] = report["sources"] + _price_sources(market.get("prices") or [])
         if holdings_note is not None:
             report.setdefault("assumptions", []).append(holdings_note)
-        if task in {"plan", "calendar", "debt_payoff", "debt"} or task in POLICY_TASKS or task in PROACTIVE_TASKS \
-                or task in REVIEW_TASKS or task in GUARDRAIL_TASKS or task in TAX_PACK_TASKS:
+        if task in {"plan", "calendar", "debt_payoff", "debt", "reference_rates"} or task in POLICY_TASKS \
+                or task in PROACTIVE_TASKS or task in REVIEW_TASKS or task in GUARDRAIL_TASKS or task in TAX_PACK_TASKS:
             used_ids = set(packet["evidence_ids"] if task in {"plan", "calendar"} else []) | set(derived_evidence)
             consumed = [f for f in eligible if f["id"] in used_ids and f["key"] not in inputs]
         elif task == "monitor":
@@ -1203,7 +1237,7 @@ class WealthService:
                 jurisdiction = next(iter(codes)) if len(codes) == 1 else None
         if inputs.get("mode") == "prepay_vs_invest" and risk_free is None:
             currency = next((r.get("currency") for r in rows if isinstance(r, dict) and r.get("currency")), None)
-            risk_free, fact_id = _risk_free(stored, currency)
+            risk_free, fact_id = _risk_free(stored, currency, self.db_path, day)
             if fact_id:
                 evidence.append(fact_id)
         report = debt_module.run(inputs, rows, day, jurisdiction=jurisdiction, reserve=reserve, risk_free=risk_free)
@@ -1258,7 +1292,8 @@ class WealthService:
             # Ledger-only accounts valued at provider prices, so harvest, drift and concentration see them.
             sit = situation_module.build(snapshot, ledger, as_of, market=market)
             snapshot, sit = prices_module.repriced_snapshot(snapshot, sit)
-        options = {"jurisdiction": inputs.get("jurisdiction"), "timezone": inputs.get("timezone")}
+        options = {"jurisdiction": inputs.get("jurisdiction"), "timezone": inputs.get("timezone"),
+                   "rates_db": self.db_path}
         run = proactive.today if task == "today" else proactive.weekly
         state: dict = {}
         if client_id and any(acks.values()):
@@ -1362,7 +1397,11 @@ class WealthService:
         market = None
         if ledger is not None and "ledger" not in inputs and "facts" not in inputs:
             inputs, ledger, market = self._review_market(task, inputs, snapshot, ledger, today)
-        report = review.run_task(task, inputs, snapshot, ledger, today, fact_history=history)
+        saved = next((f for f in snapshot["facts"] if f["key"] == "cash_reference_rate"), None)
+        on = str(inputs.get("as_of") or today)[:10]
+        report = review.run_task(task, inputs, snapshot, ledger, today, fact_history=history,
+                                 reference_rate=lambda ccy: rates_module.reference(ccy, fact=saved, db_path=self.db_path,
+                                                                                   on=on))
         if market is not None and isinstance(report.get("result"), dict) and report["result"]:
             report["result"]["market_data"] = market
             report["sources"] = (list(report.get("sources") or []) + _price_sources(market["prices"])
@@ -2089,7 +2128,8 @@ def _ledger_summary(receipt: dict | None, mapping: dict) -> dict:
 
 # No operation here submits, confirms or cancels an order: that happens only on the web confirmation route.
 OPERATIONS = ("context", "run", "remember", "recall", "decision", "ingest", "client", "forget",
-              "history", "contradictions", "resolve_contradiction", "execution_status", "order_status", "prices")
+              "history", "contradictions", "resolve_contradiction", "execution_status", "order_status", "prices",
+              "rates")
 
 
 def dispatch(operation: str, arguments: dict, db_path: str | Path | None = None) -> dict:

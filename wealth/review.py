@@ -30,7 +30,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from decimal import Decimal
 import json
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from . import cashflow, dca as dca_module, policy
 from .ledger.derive import FxTable, active_entries, price_table, realized_gains, replay
@@ -1104,6 +1104,7 @@ def audit(holdings: Sequence[Mapping[str, Any]], instruments: Mapping[str, Mappi
 
     # cash drag
     drag_low = drag_high = None
+    rate_warnings: list[str] = []
     if idle_cash > 0:
         if cash_reference_rate is None:
             missing.append(_miss("cash_reference_rate", "A reference rate {low, high, source} (e.g. CETES 28 days) is "
@@ -1118,7 +1119,13 @@ def audit(holdings: Sequence[Mapping[str, Any]], instruments: Mapping[str, Mappi
             if p1 or p2:
                 missing += [p for p in (p1, p2) if p]
             else:
-                sources.append({"title": "Cash reference rate", "ref": cash_reference_rate.get("source")})
+                sources.append({"title": "Cash reference rate", "ref": cash_reference_rate.get("source"),
+                                **({"date": cash_reference_rate["as_of"]} if cash_reference_rate.get("as_of") else {})})
+                if cash_reference_rate.get("stale"):
+                    from .rates import REFERENCE_RATE_STALE_DAYS
+                    rate_warnings.append(f"The cash reference rate is from {cash_reference_rate.get('as_of')}, over "
+                                         f"{REFERENCE_RATE_STALE_DAYS} days old; the idle-cash cost uses it until a "
+                                         "newer rate is known.")
                 if earned is None:
                     drag_low, drag_high = ZERO, idle_cash * max(low, high)
                 else:
@@ -1221,7 +1228,7 @@ def audit(holdings: Sequence[Mapping[str, Any]], instruments: Mapping[str, Mappi
     }
     missing = _unique(missing)
     status = "partial" if missing else "ready"
-    return {"status": status, "result": result, "missing": missing, "warnings": [],
+    return {"status": status, "result": result, "missing": missing, "warnings": rate_warnings,
             "sources": sources, "assumptions": [
                 "Annual cost = value x rate for expense ratios, AFORE and advisory rates (advisory on the investment "
                 "accounts it names, else all of them); commissions and IVA are the investment accounts' ledger fee "
@@ -1588,9 +1595,23 @@ _AUDIT_KEYS = {"as_of", "currency", "ledger", "prices", "holdings", "instruments
                "max_price_age_days", "max_fx_age_days", "facts"}
 
 
+def _reference_input(ref: Mapping[str, Any] | None) -> dict | None:
+    """A :func:`wealth.rates.reference` result as the fee audit's ``cash_reference_rate`` input."""
+    if not ref:
+        return None
+    from .rates import origin_text
+    return {"low": ref.get("low", ref["rate"]), "high": ref.get("high", ref["rate"]), "unit": "decimal",
+            "source": f"{ref['name']} {ref['percent']}% as of {ref['as_of']} ({origin_text(ref)}): {ref['source']}",
+            "as_of": ref["as_of"], "stale": ref["stale"]}
+
+
 def run_task(task: str, inputs: Mapping[str, Any], snapshot: Mapping[str, Any], ledger: Any, today: str,
-             fact_history: Mapping[str, list] | None = None) -> dict:
-    """Service entry for ``quarterly_review`` and ``fee_audit``."""
+             fact_history: Mapping[str, list] | None = None,
+             reference_rate: Callable[[str], Mapping[str, Any] | None] | None = None) -> dict:
+    """Service entry for ``quarterly_review`` and ``fee_audit``.
+
+    ``reference_rate(currency)`` (:func:`wealth.rates.reference`) prices idle cash in the fee audit when the
+    inputs carry no ``cash_reference_rate``."""
     if task not in TASKS:
         raise ValueError(f"review tasks are {', '.join(TASKS)}")
     inputs = dict(inputs)
@@ -1631,9 +1652,12 @@ def run_task(task: str, inputs: Mapping[str, Any], snapshot: Mapping[str, Any], 
         instruments, accounts = _instrument_meta(book, instruments), _account_meta(book, accounts)
     if not isinstance(holdings, list):
         raise ValueError("holdings must be a list of {account_id, instrument_id, value}")
+    cash_reference = inputs.get("cash_reference_rate")
+    if cash_reference is None and reference_rate is not None:
+        cash_reference = _reference_input(reference_rate(currency))
     report = audit(holdings, instruments, accounts, ledger if isinstance(ledger, Mapping) else None,
                    currency=currency, as_of=as_of, window_start=inputs.get("window_start"), residence=residence,
-                   advisory=inputs.get("advisory") or (), cash_reference_rate=inputs.get("cash_reference_rate"),
+                   advisory=inputs.get("advisory") or (), cash_reference_rate=cash_reference,
                    cash_yield=inputs.get("cash_yield"), alternatives=inputs.get("alternatives") or (),
                    return_range=inputs.get("return_range") or ("0.04", "0.07"), afore=inputs.get("afore") or ())
     if extra_missing:
