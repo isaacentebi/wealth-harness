@@ -249,15 +249,20 @@ def _position_row(position: Mapping[str, Any], account_id: Any, account_type: An
 
 def _item(kind: str, subject: str | None, *, severity: str, priority: str, title: tuple[str, str],
           why: tuple[str, str], next_step: tuple[str, str], data: Mapping[str, Any], sources: Iterable[str],
-          trigger: Any, due: date | None = None, start: date | None = None) -> dict:
-    """One nudge.  ``title``/``why``/``next_step`` are (en, es)."""
+          trigger: Any, due: date | None = None, start: date | None = None,
+          hold: Mapping[str, tuple[Decimal, Decimal]] | None = None) -> dict:
+    """One nudge.  ``title``/``why``/``next_step`` are (en, es).
+
+    ``hold`` names values left out of the trigger that re-show a dismissed item only when they move further
+    than a tolerance from where they stood when it was dismissed: ``{name: (value, tolerance)}``."""
     assert severity in SEVERITIES and priority in PRIORITIES
+    extra = {"hold": {k: {"value": str(v), "within": str(t)} for k, (v, t) in hold.items()}} if hold else {}
     return {
         "id": f"{kind}:{subject}" if subject else kind, "kind": kind, "severity": severity, "priority": priority,
         "title": {"en": title[0], "es": title[1]}, "why": {"en": why[0], "es": why[1]},
         "due": due.isoformat() if due else None, "starts": start.isoformat() if start else None,
         "data": dict(data), "next_step": {"en": next_step[0], "es": next_step[1]},
-        "sources": sorted(set(sources)), "fingerprint": _fingerprint([kind, subject, trigger]),
+        "sources": sorted(set(sources)), "fingerprint": _fingerprint([kind, subject, trigger]), **extra,
     }
 
 
@@ -887,8 +892,9 @@ def _idle_yield(run: _Run) -> None:
         sources=["reserve", *(reserve.get("source_keys") or (f"cash.{s}" for s in reserve.get("sources") or [])),
                  *([reference["evidence"]] if reference["evidence"] else []),
                  *(["cash_yield"] if earned is not None else [])],
-        # The weekly auction moves the rate a little: only a half-point move re-shows a dismissed item.
-        trigger=[currency, _sig2(idle), str((reference["rate"] * 200).to_integral_value()), earned is None]))
+        # The weekly auction moves the rate a little: only a half-point move from the dismissed rate re-shows it.
+        trigger=[currency, _sig2(idle), earned is None],
+        hold={"reference_rate": (reference["rate"], Decimal("0.005"))}))
 
 
 def _cetes_ladder(run: _Run, idle: Decimal, reference: dict, currency: str) -> dict:
@@ -1961,9 +1967,27 @@ def _rank(item: Mapping[str, Any]) -> tuple:
     return (PRIORITIES.index(item["priority"]), item["due"] or "9999-12-31", SEVERITIES.index(item["severity"]), kind, item["id"])
 
 
+def _still_acknowledged(item: Mapping[str, Any], ack: Mapping[str, Any]) -> bool:
+    """The acknowledgement still covers ``item``: same trigger, and no held value moved past its tolerance."""
+    if ack.get("fingerprint") != item["fingerprint"]:
+        return False
+    held = ack.get("hold") if isinstance(ack.get("hold"), Mapping) else {}
+    for name, spec in (item.get("hold") or {}).items():
+        try:
+            if abs(Decimal(spec["value"]) - Decimal(str(held[name]))) > Decimal(spec["within"]):
+                return False
+        except (KeyError, ArithmeticError, ValueError):
+            continue  # acknowledged before the value was held: the trigger alone decides
+    return True
+
+
+def _held(item: Mapping[str, Any]) -> dict:
+    return {"hold": {k: v["value"] for k, v in item["hold"].items()}} if item.get("hold") else {}
+
+
 def _hidden(item: Mapping[str, Any], state: Mapping[str, Any], as_of: date) -> dict | None:
     ack = ((state or {}).get("acknowledged") or {}).get(item["id"])
-    if not isinstance(ack, dict) or ack.get("fingerprint") != item["fingerprint"]:
+    if not isinstance(ack, dict) or not _still_acknowledged(item, ack):
         return None
     if ack.get("action") == "dismiss":
         return {"id": item["id"], "kind": item["kind"], "reason": "dismissed", "on": ack.get("on")}
@@ -1985,13 +2009,14 @@ def acknowledge(state: Mapping[str, Any] | None, candidates: Iterable[Mapping[st
     """
     current = {c["id"]: c for c in candidates}
     acks = {k: dict(v) for k, v in ((state or {}).get("acknowledged") or {}).items()
-            if isinstance(v, dict) and (k not in current or current[k]["fingerprint"] == v.get("fingerprint"))}
+            if isinstance(v, dict) and (k not in current or _still_acknowledged(current[k], v))}
     for item_id in restore:
         acks.pop(item_id, None)
     for item_id in dismiss:
         if item_id not in current:
             raise ValueError(f"cannot dismiss {item_id!r}: not a current item")
-        acks[item_id] = {"action": "dismiss", "fingerprint": current[item_id]["fingerprint"], "on": as_of.isoformat()}
+        acks[item_id] = {"action": "dismiss", "fingerprint": current[item_id]["fingerprint"], "on": as_of.isoformat(),
+                         **_held(current[item_id])}
     for entry in snooze:
         if not isinstance(entry, Mapping) or entry.get("id") not in current:
             raise ValueError("snooze entries are {id, until} or {id, days} for a current item")
@@ -2004,7 +2029,7 @@ def acknowledge(state: Mapping[str, Any] | None, candidates: Iterable[Mapping[st
         if until <= as_of:
             raise ValueError("snooze until must be after as_of")
         acks[entry["id"]] = {"action": "snooze", "fingerprint": current[entry["id"]]["fingerprint"],
-                             "until": until.isoformat(), "on": as_of.isoformat()}
+                             "until": until.isoformat(), "on": as_of.isoformat(), **_held(current[entry["id"]])}
     return {"version": 1, "acknowledged": acks}
 
 

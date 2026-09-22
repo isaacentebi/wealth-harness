@@ -658,3 +658,28 @@ def test_a_saved_rate_is_used_only_with_a_known_unit_or_an_unambiguous_number():
     for bad in ({"low": 7, "unit": "percnt"}, {"low": 0.2}, {"low": 7, "unit": "decimal"}):
         saved, why = ref(**bad)
         assert saved is None and "not used" in why
+
+
+def _put_rate(db, day, value):
+    stamp = f"{day}T18:00:00+00:00"
+    with WealthStore(db) as store:
+        store.put_market([{"symbol": "rate:mx_cetes_28d", "kind": "close", "date": day, "value": value,
+                           "currency": "MXN", "source": "Banxico test", "retrieved_at": stamp}],
+                         {"symbol": "rate:mx_cetes_28d", "kind": "close", "start": day, "end": day,
+                          "retrieved_at": stamp, "status": "ok"})
+
+
+def test_a_dismissed_idle_cash_nudge_returns_only_after_a_half_point_move_from_where_it_was_dismissed(db):
+    facts = [("client.profile", MX), ("spending.monthly", {"essential": 20000, "currency": "MXN"}),
+             ("cash.nu", {"amount": 400000, "currency": "MXN", "purpose": "reserve"}), ("reserve", {"target_months": 6})]
+    _put_rate(db, "2026-09-22", "0.0624")  # just under a quarter-point bucket edge: 6.24% x 200 = 12.48
+    item = _idle(facts, db)
+    state = proactive.acknowledge(None, [item], TODAY, dismiss=[item["id"]])
+    assert state["acknowledged"][item["id"]]["hold"] == {"reference_rate": "0.0624"}
+    for day, value, hidden in (("2026-09-29", "0.0626", True),   # 0.02 points: still dismissed
+                               ("2026-10-06", "0.0670", True),   # 0.46 points: still dismissed
+                               ("2026-10-13", "0.0680", False)):  # 0.56 points: shown again
+        _put_rate(db, day, value)
+        moved = _idle(facts, db, day)
+        assert (proactive._hidden(moved, state, date.fromisoformat(day)) is not None) is hidden, (day, value)
+        assert (item["id"] in proactive.acknowledge(state, [moved], date.fromisoformat(day))["acknowledged"]) is hidden
