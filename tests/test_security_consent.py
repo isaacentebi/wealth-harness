@@ -456,3 +456,20 @@ def test_the_real_stdio_server_reads_the_turn_from_its_environment(service):
     failed, text = asyncio.run(attempt("sí"))
     assert not failed
     assert [f for f in service.inspect("ana")["facts"] if f["key"].startswith("account.")]
+
+
+@pytest.mark.parametrize("value, said", [
+    (100000, "gano 1.2 millones al año"),
+    ({"amount": 7083.33, "currency": "USD"}, "I make 85k a year"),
+    (1992, "tengo 34 años"),
+    (150000, "tengo 100k en GBM y 50 mil en Nu"),
+    (0.3, "ahorro el 30%"),
+])
+def test_a_figure_restated_from_what_the_person_said_is_still_theirs(value, said):
+    from wealth.consent import supported
+    assert supported(value, [said]) == []
+
+
+def test_a_figure_the_person_never_said_is_not_theirs():
+    from wealth.consent import supported
+    assert supported(777777, ["gano 85 mil al mes"]) == [777777.0]

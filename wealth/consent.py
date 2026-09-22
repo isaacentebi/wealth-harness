@@ -248,10 +248,37 @@ def supported(value: Any, texts: Iterable[str]) -> list[float]:
     said: set[float] = set()
     for text in texts:
         said |= numbers_in(text)
+    restated = _restatements(said)
     missing = []
     for number in value_numbers(value):
         n = abs(number)
-        if any(_close(n, s) or _close(n * 100, s) or _close(n, s * 100) for s in said):
+        if any(_close(n, s) for s in restated):
             continue
         missing.append(number)
     return missing
+
+
+# What people say in chat is memory, and the model restates it: "1.2 millones al año" is saved as a
+# monthly 100,000, "tengo 34" as a birth year, "80k en GBM y 20k en Nu" as a 100,000 total. Those are
+# still the person's figures. A number they never said, or cannot be read from what they said, stays
+# an inference.
+_PERIODS = (2, 4, 12, 24, 26, 52, 365)
+_MAX_SUMMED = 12
+
+
+def _restatements(said: set[float]) -> set[float]:
+    import datetime as _dt
+    year = _dt.date.today().year
+    base = {abs(s) for s in said}
+    out = set(base)
+    for s in base:
+        out.update({s * 100, s / 100})  # a share written either way: 30 (%) and 0.3
+        for k in _PERIODS:
+            out.update({s * k, s / k})
+        if 0 < s < 120 and float(s).is_integer():  # an age gives a birth year
+            out.update({year - s, year - s - 1})
+    figures = sorted((s for s in base if s >= 100), reverse=True)[:_MAX_SUMMED]
+    for i, a in enumerate(figures):
+        for b in figures[i + 1:]:
+            out.update({a + b, a - b})
+    return out
