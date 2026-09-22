@@ -463,6 +463,25 @@ def fact_currency(value: Mapping[str, Any], household: str | None = None) -> str
     return None if mx and us else (str(household).upper() if household else None)
 
 
+_UNITS = {"decimal": Decimal(1), "percent": Decimal(100), "%": Decimal(100), "pct": Decimal(100),
+          "bps": Decimal(10000), "bp": Decimal(10000)}
+
+
+def _unit_scale(unit: Any, low: Decimal | None, high: Decimal | None) -> Decimal | None:
+    """What a saved rate is divided by to be a decimal; None when the unit is unknown or the number ambiguous.
+
+    Without a unit, a rate under 0.1 is a decimal (6.15% saved as 0.0615) and one from 1 to 30 a percent
+    (6.15); anything between could be either (0.2 is 0.2% or 20%) and is not guessed."""
+    if unit is not None and str(unit).strip():
+        return _UNITS.get(str(unit).strip().lower())
+    values = [v for v in (low, high) if v is not None]
+    if values and all(v < Decimal("0.1") for v in values):
+        return Decimal(1)
+    if values and all(Decimal(1) <= v <= Decimal(30) for v in values):
+        return Decimal(100)
+    return None
+
+
 def from_fact(fact: Mapping[str, Any] | None, currency: str, on: date | None = None, *,
               household: str | None = None) -> tuple[dict | None, str | None]:
     """A saved ``cash_reference_rate`` fact in ``currency`` as a reference (a range is read at its low end).
@@ -480,9 +499,12 @@ def from_fact(fact: Mapping[str, Any] | None, currency: str, on: date | None = N
     if owner != currency:
         return None, None
     day = on or datetime.now(timezone.utc).date()
-    scale = {"percent": Decimal(100), "bps": Decimal(10000)}.get(str(value.get("unit") or "decimal"), Decimal(1))
     low = _dec(value.get("low", value.get("rate")))
     high = _dec(value.get("high", value.get("low", value.get("rate"))))
+    scale = _unit_scale(value.get("unit"), low, high)
+    if scale is None:
+        return None, (f"the saved cash_reference_rate has unit {value.get('unit')!r} and {low} could be a decimal or "
+                      "a percent; it was not used (save unit decimal, percent or bps)")
     meta = fact.get("source") if isinstance(fact.get("source"), Mapping) else {}
     when = (_as_date(value.get("as_of")) or _as_date(meta.get("observed_on")) or _as_date(fact.get("valid_from"))
             or _as_date(fact.get("recorded_at")))
@@ -491,6 +513,8 @@ def from_fact(fact: Mapping[str, Any] | None, currency: str, on: date | None = N
     if when > day:
         return None, f"the saved cash_reference_rate is dated {when}, after {day}; it was not used"
     low, high = min(low, high) / scale, max(low, high) / scale
+    if high >= 1:
+        return None, f"the saved cash_reference_rate reads as {_text(high * 100)}% a year; it was not used (check its unit)"
     source = str(value["source"])
     return _result(currency, None, str(value.get("name") or source), low, when.isoformat(), source, "saved_fact",
                    day, fact_id=fact.get("id"), low=_text(low), high=_text(high)), None

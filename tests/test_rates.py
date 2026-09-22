@@ -644,3 +644,17 @@ def test_a_refresh_writes_all_its_series_in_one_transaction(db, monkeypatch):
     with WealthStore(db) as store:
         assert store.market_rows("rate:us_tbill_13w", "close") == []
         assert store.market_fetches("rate:us_tbill_13w", "close") == []
+
+
+def test_a_saved_rate_is_used_only_with_a_known_unit_or_an_unambiguous_number():
+    def ref(**value):
+        fact = {"id": "f1", "value": {"currency": "MXN", "source": "CETES 28 days, Banxico", "as_of": "2026-09-15",
+                                      **value}}
+        return rates.from_fact(fact, "MXN", TODAY)
+    assert ref(low=7, unit="percent")[0]["rate"] == "0.07"
+    assert ref(low=700, unit="bps")[0]["rate"] == "0.07"
+    assert ref(low="0.0615")[0]["rate"] == "0.0615"  # no unit, clearly a decimal
+    assert ref(low=6.15)[0]["rate"] == "0.0615"  # no unit, clearly a percent
+    for bad in ({"low": 7, "unit": "percnt"}, {"low": 0.2}, {"low": 7, "unit": "decimal"}):
+        saved, why = ref(**bad)
+        assert saved is None and "not used" in why
