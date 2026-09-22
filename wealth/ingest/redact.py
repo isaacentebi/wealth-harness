@@ -24,6 +24,9 @@ _LABELED = re.compile(
 _CARD = re.compile(r"(?<![\d.,])\d{4}(?:[ -]\d{4}){3}(?![\d.,]*\d)")
 _LONG = re.compile(r"(?<![\w.,\-/])\d{10,}(?![\w]|[.,]\d)")
 _DASHED = re.compile(r"(?<![\d.,])\d{2,6}(?:-\d{2,8}){2,}(?![\d.,]*\d)")
+# 12 to 19 digits in space- or dash-separated groups ("SERV 542 110 870 012"): the store refuses to keep these
+# (store._SENSITIVE_PATTERNS), so a statement line carrying one must be masked here or it could never be saved.
+_GROUPED = re.compile(r"(?<!\w)\d(?:[ -]?\d){11,18}(?!\w)")  # the same word boundaries as the store
 
 
 def last4(number: Any) -> str | None:
@@ -110,6 +113,7 @@ def redact_text(text: str) -> str:
     value = _LABELED.sub(_mask_labeled, value)
     value = _CARD.sub(_mask_match, value)
     value = _DASHED.sub(lambda m: _mask_match(m) if len(re.sub(r"\D", "", m.group(0))) >= 9 else m.group(0), value)
+    value = _GROUPED.sub(_mask_match, value)
     return _LONG.sub(_mask_match, value)
 
 
@@ -117,7 +121,7 @@ _NUMERIC_KEYS = frozenset({
     "quantity", "value", "price", "cost_basis", "amount", "computed", "reported", "difference",
     "tolerance", "rate", "annual_amount", "monthly_payment", "interest_rate", "market_value",
     "expected", "opening", "deposits", "withdrawals", "closing", "positions_value", "cash",
-    "computed_total", "reported_total", "positions_subtotal",
+    "computed_total", "reported_total", "positions_subtotal", "no_interest_payment", "credit_limit", "cat",
 })
 
 

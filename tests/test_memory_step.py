@@ -118,7 +118,11 @@ def test_an_unknown_intent_names_it_and_where_the_fact_contract_is(tmp_path):
 
     server = server_module.build_server(str(tmp_path / "w.sqlite3"))
     with pytest.raises(ToolError) as caught:
-        asyncio.run(server.call_tool("wealth_context", {"intent": "fact_contract"}))
+        asyncio.run(server.call_tool("wealth_context", {"intent": "fact_schema"}))
     message = str(caught.value)
-    assert "unknown task 'fact_contract'" in message and ";;" not in message
+    assert "unknown task 'fact_schema'" in message and ";;" not in message
     assert "fact contract" in message
+    # The contract itself needs no client: intent=remember (or fact_contract) returns it without one.
+    for intent in ("remember", "fact_contract"):
+        contract = asyncio.run(server.call_tool("wealth_context", {"intent": intent})).structured_content
+        assert contract["fact_contract"]["schema"]["estate.family"]

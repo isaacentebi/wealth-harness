@@ -680,6 +680,10 @@ class WealthService:
                     # The fact contract is for writing facts: wealth_remember's description carries the
                     # compact form, wealth_context(client_id, intent=<task>) the full one.
                     "views": views_module.summaries(views_module.views_for("situation", sit))}
+        if client_id is None and intent in ("remember", "fact_contract"):
+            # How to write facts does not depend on who they are about.
+            return {"fact_contract": fact_contract(),
+                    "next_step": "Save facts with wealth_remember(client_id, facts); every key's fields are above."}
         if client_id is None:
             catalog = capabilities()
             if intent != "overview":

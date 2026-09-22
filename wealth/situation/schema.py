@@ -1083,6 +1083,8 @@ def validate(key: str, value: Any) -> list[str]:
 
 ALIASES: dict[str, dict[str, str]] = {"spending.monthly": {"amount": "total"}}
 """Field names a model writes naturally, read as the canonical field (only when that field is absent)."""
+PREFIX_ALIASES: dict[str, dict[str, str]] = {"thread.": {"summary": "text", "note": "text", "description": "text"}}
+"""The same for every key under a prefix (a thread's words are its text, whatever the model called them)."""
 
 
 def normalize(key: str, value: Any) -> tuple[Any, list[str]]:
@@ -1099,7 +1101,7 @@ def normalize(key: str, value: Any) -> tuple[Any, list[str]]:
         children = [{k: v for k, v in c.items() if k != "relationship"} if isinstance(c, dict) else c
                     for c in value["children"]]
         return {**value, "children": children}, []
-    aliases = ALIASES.get(key)
+    aliases = ALIASES.get(key) or next((a for prefix, a in PREFIX_ALIASES.items() if key.startswith(prefix)), None)
     if not aliases or not isinstance(value, dict):
         return value, []
     out, notes = dict(value), []

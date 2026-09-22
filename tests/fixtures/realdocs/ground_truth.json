@@ -1,0 +1,203 @@
+{
+  "gbm_estado_de_cuenta_2026-08.pdf": {
+    "institution": "GBM",
+    "contract_last4": "7832",
+    "period": [
+      "2026-08-01",
+      "2026-08-31"
+    ],
+    "currency": "MXN",
+    "total": "398365.82",
+    "cash": "18432.15",
+    "opening_cash": "23002.38",
+    "positions": {
+      "SIC:AAPL": {
+        "quantity": 30,
+        "price": "4212.50",
+        "value": "126375.00",
+        "cost_basis": "109500.00"
+      },
+      "SIC:VOO": {
+        "quantity": 12,
+        "price": "10265.80",
+        "value": "123189.60",
+        "cost_basis": "113760.00"
+      },
+      "BMV:FUNO 11": {
+        "quantity": 1500,
+        "price": "23.40",
+        "value": "35100.00",
+        "cost_basis": "32775.00"
+      },
+      "BMV:WALMEX": {
+        "quantity": 600,
+        "price": "58.73",
+        "value": "35238.00",
+        "cost_basis": "38520.00"
+      },
+      "CETES 261015": {
+        "quantity": 5000,
+        "price": "9.932140",
+        "value": "49660.70"
+      },
+      "GBMF2 BO": {
+        "quantity": 3000,
+        "price": "3.456789",
+        "value": "10370.37"
+      }
+    },
+    "dividends": "957.04",
+    "isr_withheld": "258.06",
+    "fx_usd_mxn": "18.6235",
+    "commission": "50.53",
+    "commission_iva": "8.08"
+  },
+  "bbva_estado_de_cuenta_2026-08.pdf": {
+    "institution": "BBVA México",
+    "account_last4": "7365",
+    "period": [
+      "2026-08-01",
+      "2026-08-31"
+    ],
+    "currency": "MXN",
+    "opening": "45245.67",
+    "deposits": "90000.00",
+    "withdrawals": "58663.80",
+    "closing": "76581.87",
+    "payroll_monthly": "85000.00",
+    "transactions": 21,
+    "spending_outflows_excl_transfers": "30663.80"
+  },
+  "banorte_tdc_2026-08.pdf": {
+    "institution": "Banorte",
+    "card_last4": "3847",
+    "cut_date": "2026-08-25",
+    "due_date": "2026-09-14",
+    "previous": "22310.55",
+    "payments": "10000.00",
+    "purchases": "5820.45",
+    "interest": "845.20",
+    "iva_on_interest": "135.23",
+    "saldo_al_corte": "19111.43",
+    "pago_no_intereses": "20611.43",
+    "pago_minimo": "1850.00",
+    "msi_pending_incl_current": "13500.00",
+    "saldo_deudor_total": "32611.43",
+    "credit_limit": "80000.00",
+    "annual_rate": "0.528",
+    "cat": "0.684"
+  },
+  "gbm_constancia_2025.pdf": {
+    "institution": "GBM",
+    "tax_year": 2025,
+    "issued_on": "2026-02-15",
+    "contract_last4": "7832",
+    "currency": "MXN",
+    "intereses": {
+      "nominal": "3842.17",
+      "inflation_adjustment": "2015.40",
+      "real": "1826.77",
+      "real_loss": "0.00",
+      "isr_withheld": "612.40"
+    },
+    "dividendos": {
+      "domestic_gross": "1245.60",
+      "foreign_gross": "1580.34",
+      "total": "2825.94",
+      "isr_withheld": "282.59",
+      "isr_creditable": "533.83"
+    },
+    "enajenacion": {
+      "gain": "14820.55",
+      "loss": "3112.40",
+      "net": "11708.15",
+      "isr_withheld": "0.00"
+    }
+  },
+  "schwab_1099_2025.pdf": {
+    "institution": "Charles Schwab",
+    "tax_year": 2025,
+    "account_last4": "4321",
+    "issued_on": "2026-02-06",
+    "div": {
+      "ordinary": "1284.56",
+      "qualified": "1102.33",
+      "capital_gain_distributions": "86.20",
+      "foreign_tax_paid": "12.45",
+      "federal_tax_withheld": "0.00",
+      "section_199a": "45.10"
+    },
+    "int": {
+      "interest": "412.87",
+      "us_treasury_interest": "215.30",
+      "federal_tax_withheld": "0.00"
+    },
+    "b_by_box": {
+      "short_A": {
+        "proceeds": "15283.30",
+        "cost_basis": "15486.90",
+        "wash": "1292.75",
+        "gain": "1089.15"
+      },
+      "long_D": {
+        "proceeds": "22535.45",
+        "cost_basis": "14413.50",
+        "wash": "0",
+        "gain": "8121.95"
+      },
+      "long_E": {
+        "proceeds": "6980.00",
+        "cost_basis": "2450.00",
+        "wash": "0",
+        "gain": "4530.00"
+      }
+    },
+    "b_lots": 6,
+    "b_short_term_gain": "1089.15",
+    "b_long_term_gain": "12651.95",
+    "b_proceeds": "44798.75",
+    "b_cost_basis": "32350.40",
+    "b_wash": "1292.75"
+  },
+  "fidelity_5498_2025.pdf": {
+    "institution": "Fidelity",
+    "tax_year": 2025,
+    "account_last4": "1926",
+    "roth_contributions": "7000.00",
+    "fair_market_value": "48215.62",
+    "ira_contributions": "0.00",
+    "late_contribution_note": "3500.00"
+  },
+  "ibkr_activity_2026-08.csv": {
+    "institution": "Interactive Brokers",
+    "account_last4": "2345",
+    "currency": "USD",
+    "stocks": "37799.50",
+    "cash_usd": "2318.44",
+    "cash_mxn": "25000.00",
+    "cash_total_usd": "3660.79",
+    "nav_excluding_accruals": "41460.29",
+    "nav": "41465.31",
+    "positions": {
+      "VT": {
+        "quantity": "120",
+        "value": "14214.00",
+        "cost_basis": "12504.60"
+      },
+      "SGOV": {
+        "quantity": "200",
+        "value": "20104.00",
+        "cost_basis": "20062.00"
+      },
+      "AMZN": {
+        "quantity": "15",
+        "value": "3481.50",
+        "cost_basis": "2826.00"
+      }
+    },
+    "dividends": "31.20",
+    "withholding": "-3.12",
+    "interest": "7.05",
+    "deposit": "1500"
+  }
+}

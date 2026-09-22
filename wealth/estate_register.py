@@ -43,7 +43,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Mapping
 
-from .situation.model import D, humanize, num
+from .situation.model import D, humanize, institution_key, num, same_institution
 from .situation.schema import SchemaError, designation_key, validate
 
 LIC_URL = "https://www.diputados.gob.mx/LeyesBiblio/pdf/LIC.pdf"
@@ -281,6 +281,9 @@ class _Family:
 # ------------------------------------------------------------------ rows
 
 
+_US_CUSTODIANS = frozenset({"schwab", "ibkr", "fidelity", "vanguard"})  # situation.model institution aliases
+
+
 def _country(value: Mapping[str, Any], row: Mapping[str, Any], residence: str | None) -> tuple[str | None, str | None]:
     """Where the account is and why we think so."""
     stated = value.get("country")
@@ -396,6 +399,16 @@ def _accounts(sit: Mapping[str, Any], facts: dict[str, dict], convert: _Converte
         if found:
             entry["designation_key"] = found[0]
             entry["value"] = {**entry["value"], **found[1]}
+    for account, (key, value) in list(designations.items()):
+        # "investment.gbm" said in conversation, while GBM's statement is saved as account.gbm-7832: the one
+        # statement account at that institution is the account the person named.
+        named = account.split(".", 1)[-1].replace("-", " ").replace("_", " ")
+        matches = [e for e in out if e.get("statement_only") and not e.get("designation_key")
+                   and same_institution(named, (e.get("row") or {}).get("institution"))]
+        if len(matches) == 1:
+            designations.pop(account)
+            matches[0]["designation_key"] = key
+            matches[0]["value"] = {**matches[0]["value"], **value}
     for account, (key, value) in designations.items():
         notes.append(f"{key} names {account}, which is not in the picture (forgotten, or a typo); it is listed "
                      "without an amount.")
@@ -766,6 +779,18 @@ def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mappin
                                  "es": "Saldo por reconfirmar: aquí el monto es desconocido."})
         if country_note:
             row["country_basis"] = country_note
+        custodian = next((n for n in (srow.get("institution"), value.get("institution"), label)
+                          if institution_key(n)[0] in _US_CUSTODIANS), None)
+        if custodian and country != "US":
+            # The succession law follows where the person lived; the paperwork follows where the account is.
+            row["custody_country"] = "US"
+            row["notes"].append({
+                "en": f"{label} is held by a US custodian: even when Mexican law decides the heirs, it usually "
+                      "releases the account only against US estate papers (probate or a small-estate affidavit), "
+                      "unless a TOD beneficiary is on file.",
+                "es": f"{label} está en un custodio de EE. UU.: aunque la ley mexicana decida los herederos, "
+                      "normalmente sólo entrega la cuenta con trámites sucesorios de EE. UU. (probate o affidavit "
+                      "de herencia menor), salvo que tenga beneficiario TOD registrado."})
         primary = [b for b in beneficiaries or [] if isinstance(b, dict) and not b.get("contingent")]
         backup = [b for b in beneficiaries or [] if isinstance(b, dict) and b.get("contingent")]
         heirs: list[dict] = []

@@ -1110,18 +1110,20 @@ def _verdict_text(verdict: str, debt_rate: Any, after: Mapping[str, Any], breake
     pct = lambda v: "—" if v is None else f"{num(Decimal(str(v)) * 100, 2)}%"  # noqa: E731
     d, base, cons = pct(debt_rate), pct(after.get("base")), pct(after.get("conservative"))
     be = pct(breakeven)
+    # The default is named in each language; a name the caller gave is kept as given.
+    investment_es = "un fondo indexado de acciones" if investment == "an equity index fund" else investment
     texts = {
         "prepay": (f"Pay the debt down: it returns a guaranteed {d} after tax, more than {investment} is expected to "
                    f"earn after tax even in the base case ({base}).",
                    f"Paga la deuda: te da un {d} garantizado después de impuestos, más de lo que se espera de "
-                   f"{investment} después de impuestos incluso en el caso base ({base})."),
+                   f"{investment_es} después de impuestos incluso en el caso base ({base})."),
         "close_call": (f"A close call: the debt's guaranteed {d} beats the conservative case ({cons}) but not the base "
                        f"case ({base}); investing wins only if returns beat {be} before tax. Splitting the extra is reasonable.",
                        f"Es una decisión cerrada: el {d} garantizado de la deuda supera el caso conservador ({cons}) pero "
                        f"no el base ({base}); invertir gana sólo si rinde más de {be} antes de impuestos. Dividir el extra es razonable."),
         "invest": (f"Invest the extra: {investment} is expected to earn {cons}–{base} after tax, above the debt's "
                    f"guaranteed {d}; that edge is expected, not guaranteed.",
-                   f"Invierte el extra: se espera que {investment} rinda {cons}–{base} después de impuestos, más que el "
+                   f"Invierte el extra: se espera que {investment_es} rinda {cons}–{base} después de impuestos, más que el "
                    f"{d} garantizado de la deuda; esa ventaja es esperada, no garantizada."),
         "depends": ("The answer depends on your taxes: see decided_by for what settles it.",
                     "La respuesta depende de tus impuestos: decided_by dice qué la define."),
@@ -1469,10 +1471,18 @@ def run(inputs: Mapping[str, Any], rows: list[Mapping[str, Any]], today: date, *
     elif mode == "refinance":
         report = refinance(ready, inputs.get("offer"), today)
     else:
+        charging = [d for d in ready if d["rate"] is not None and d["rate"] > 0]
+        if len(ready) > 1 and len(charging) == 1 and inputs.get("debt") is None:
+            # A card with its meses-sin-intereses plans: only the revolving balance costs anything to keep.
+            assumptions.append(f"ASSUMED: compared {charging[0]['id']}, the only debt that charges interest; "
+                               + ", ".join(d["id"] for d in ready if d is not charging[0]) + " charge none.")
+            ready = charging
         if len(ready) != 1:
             if missing:
                 return {**empty, "missing": missing}
-            raise ValueError("prepay_vs_invest compares one debt: pass debt (an id or an object)")
+            listed = "; ".join(f"{d['id']} ({num(d['balance'])} at {num(d['rate'], 4) if d['rate'] is not None else '?'})"
+                               for d in ready[:8])
+            raise ValueError(f"prepay_vs_invest compares one debt: pass debt (an id or an object), one of: {listed}")
         chosen = ready[0]
         if inputs.get("extra_monthly") is None and inputs.get("lump_sum") is None:
             if chosen["kind"] == "card":

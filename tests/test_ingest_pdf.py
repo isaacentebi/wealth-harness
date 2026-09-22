@@ -88,7 +88,8 @@ def test_spanish_bank_statement_transactions_and_balance_assertions():
     rows = result["transactions"]
     assert [(t["date"], t["amount"], t["type"]) for t in rows] == [
         ("2026-08-01", "20000", "transfer"), ("2026-08-05", "-5000", "loan_payment"),
-        ("2026-08-15", "5000", "income"), ("2026-08-20", "-3000", "withdrawal"), ("2026-08-31", "-500", "fee"),
+        # Cash taken at an ATM is spent: spending files it under cash_withdrawal.
+        ("2026-08-15", "5000", "income"), ("2026-08-20", "-3000", "expense"), ("2026-08-31", "-500", "fee"),
     ]
     assert rows[3]["settlement_date"] == "2026-08-21" and rows[0]["balance"] == "30000"
     assert len({t["dedupe_hash"] for t in rows}) == 5

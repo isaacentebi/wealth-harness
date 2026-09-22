@@ -54,6 +54,12 @@ TX_ALIASES: dict[str, tuple[str, ...]] = {
     "price": ("price", "precio", "unit price", "precio unitario", "tradeprice", "share price"),
     "fees": ("fees", "fee", "fees comm", "fees and comm", "commission", "comision", "comisiones", "ibcommission",
              "commissions and fees", "commission fees"),
+    # IVA on the commission: part of what a trade costs, printed in its own column on Mexican statements.
+    "fees_tax": ("iva", "iva comision", "iva de comision", "iva comisiones", "i v a"),
+    # Printed but not money: a numeric reference must not be read into the amount columns beside it.
+    "reference": ("referencia", "reference", "ref", "no de referencia", "referencia numerica", "folio",
+                  "clave de rastreo", "numero de referencia", "no referencia"),
+    "code": ("cod", "codigo", "cod mov", "cod operacion", "clave de movimiento"),
     "type": ("type", "tipo", "action", "activity", "transaction type", "tipo de operacion", "tipo de movimiento",
              "operacion", "activity type"),
     "original_amount": ("monto original", "importe original", "original amount", "monto de la compra"),
@@ -73,13 +79,14 @@ _INSTALLMENT = re.compile(r"(?i)\b(\d{1,2})\s*(?:de|of|/)\s*(\d{1,2})\b")
 
 _RULES: tuple[tuple[str, re.Pattern[str]], ...] = tuple((kind, re.compile(pattern, re.IGNORECASE)) for kind, pattern in (
     ("tax_withheld", r"\b(isr|retenci[oó]n|withholding|tax withheld|foreign tax|impuesto retenido)\b"),
-    ("dividend", r"\b(dividend|dividendo|div\b|qualified div|cash div)"),
+    ("dividend", r"\b(dividend|dividendo|div\b|qualified div|cash div|distribuci[oó]n fibra|distribuci[oó]n de "
+                 r"(dividendos|efectivo|rendimientos))"),
     ("interest", r"\b(inter[eé]s(es)?|interest|rendimientos?|intereses ganados|bank int)\b"),
     ("fee", r"\b(comisi[oó]n|commission|fee|cuota|anualidad|iva comisi|service charge|monthly maintenance)\b"),
     ("split", r"\b(split|reverse split|canje)\b"),
     ("fx", r"\b(fx|forex|cambio de divisa|currency exchange|conversion de divisas|compra de d[oó]lares|venta de d[oó]lares)\b"),
     ("sell", r"\b(sell|sold|venta|vta)\b"),
-    ("buy", r"\b(buy|bought|reinvest|compra de valores|cpa|compra acciones|purchase of securit)"),
+    ("buy", r"\b(buy|bought|reinvest|compra de valores|cpa|compra acciones|purchase of securit|compra\b)"),
     ("income", r"\b(n[oó]mina|payroll|salary|sueldo|direct dep|honorarios|pago de n[oó]mina)\b"),
     ("loan_payment", r"\b(pago (a )?(tarjeta|tdc|cr[eé]dito|hipoteca|pr[eé]stamo)|mortgage|loan payment|payment thank you|"
                      r"pago recibido|su pago|gracias por su pago|autopay|credit card payment)\b"),
@@ -87,6 +94,9 @@ _RULES: tuple[tuple[str, re.Pattern[str]], ...] = tuple((kind, re.compile(patter
     ("withdrawal", r"\b(retiro|withdrawal|atm|cajero|disposici[oó]n)\b"),
     ("deposit", r"\b(dep[oó]sito|deposit|abono en cuenta)\b"),
 ))
+
+
+_PAID_TO_OTHERS = re.compile(r"\b(renta|arrendamiento|alquiler|rent|colegiatura|tuition|mantenimiento|predial)\b")
 
 
 def match_tx_header(cells: Iterable[str]) -> list[str | None] | None:
@@ -144,6 +154,7 @@ def classify(description: str, amount: Decimal | None, *, account_kind: str, pri
              has_security: bool = False) -> str:
     text = f"{printed_type or ''} {description or ''}"
     folded = fold(text)
+    spending_account = account_kind not in ("brokerage", "credit_card")
     for kind, pattern in _RULES:
         if pattern.search(text) or pattern.search(folded):
             if kind in {"buy", "sell"} and not has_security and account_kind != "brokerage":
@@ -152,6 +163,12 @@ def classify(description: str, amount: Decimal | None, *, account_kind: str, pri
                 continue
             if kind == "interest" and account_kind == "credit_card" and amount is not None and amount < 0:
                 return "fee"
+            if kind == "transfer" and account_kind == "credit_card" and amount is not None and amount > 0:
+                return "loan_payment"  # "PAGO SPEI RECIBIDO": money into a card is a payment on it
+            if kind == "transfer" and spending_account and amount is not None and amount < 0 and _PAID_TO_OTHERS.search(folded):
+                return "expense"  # rent or school fees sent by SPEI are spending, not a move between own accounts
+            if kind == "withdrawal" and spending_account and amount is not None and amount < 0:
+                return "expense"  # cash taken at an ATM is spent (spending files it under cash_withdrawal)
             return kind
     if account_kind == "credit_card":
         return "expense" if amount is None or amount < 0 else "loan_payment"
@@ -159,6 +176,10 @@ def classify(description: str, amount: Decimal | None, *, account_kind: str, pri
         return "transfer"
     if amount > 0:
         return "deposit"
+    if spending_account:
+        # A bank-account outflow that is not a transfer, ATM withdrawal, fee or loan payment is a purchase
+        # ("OXXO", "AMAZON MX", "UBER *TRIP"): spending.
+        return "expense"
     return "expense" if re.search(r"(?i)\b(compra|purchase|pos|pago de servicio|domiciliaci[oó]n)\b", text) else "withdrawal"
 
 
@@ -187,7 +208,10 @@ def normalize(rows: list[Mapping[str, Any]], *, account_id: str, currency: str, 
         quantity = parse_amount(row.get("quantity"), decimal_comma=comma)
         price = parse_amount(row.get("price"), decimal_comma=comma)
         fees = parse_amount(row.get("fees"), decimal_comma=comma)
-        symbol = (str(row.get("symbol") or "").strip() or None)
+        fees_tax = parse_amount(row.get("fees_tax"), decimal_comma=comma)
+        if fees_tax is not None:  # commission plus its IVA is what the trade cost
+            fees = abs(fees or Decimal(0)) + abs(fees_tax)
+        symbol =(str(row.get("symbol") or "").strip() or None)
         kind = row.get("type_override") or classify(description, amount, account_kind=account_kind,
                                                     printed_type=row.get("type"), has_security=bool(symbol or quantity))
         amount_text = out(amount)

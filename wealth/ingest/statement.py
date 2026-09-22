@@ -12,12 +12,13 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date
+from decimal import Decimal
 import re
 from typing import Any
 
 from .classify import CASH_LABEL, account_type, detect_institution
 from .columns import build_alias_index, match_header
-from .common import find_dates, fold, parse_amount
+from .common import _DATE_PATTERNS, find_dates, fold, parse_amount
 from .redact import last4
 from .transactions import installment, match_tx_header, resolve_date
 
@@ -29,6 +30,13 @@ _ACCOUNT = re.compile(
     r"contrato(?:\s+(?:no\.?|n[uú]m(?:ero)?\.?))?|(?:n[uú]mero\s+de\s+)?tarjeta(?:\s+(?:no\.?|n[uú]m(?:ero)?\.?))?|"
     r"card(?:\s+(?:number|no\.?|ending\s+in))?)\s*[:#]\s*(?P<num>[A-Z]{0,3}[\dXx*•\-]{2,}(?: [\dXx*•\-]+)*\d)"
 )
+# Mexican bank statements print the number in its own column, without a colon ("No. de Cuenta   0482917365").
+# Only these explicit labels are read that way: "cuenta 0012..." inside a transaction description is not an account.
+_ACCOUNT_SPACED = re.compile(
+    r"(?i)(?:^|\s)(?P<label>(?:no\.?|n[uú]m(?:ero)?\.?)\s+de\s+(?:cuenta|contrato|tarjeta)|account\s+(?:number|no\.?))"
+    r"\s{2,}(?P<num>[A-Z]{0,3}[\dXx*•\-]{4,}(?: [\dXx*•\-]+)*\d)\b"
+)
+_COLUMN_GAP = re.compile(r"\s{8,}")  # layout text separates side-by-side columns with a run of spaces
 _ACCOUNT_TYPE = re.compile(r"(?i)\b(?:account\s+type|tipo\s+de\s+(?:cuenta|contrato)|registration|producto)\s*[:\-]\s*(?P<t>.+)$")
 _CURRENCY_DECL = re.compile(
     r"(?i)\b(?:base\s+currency|reporting\s+currency|currency|moneda|divisa|cifras\s+en|amounts\s+in|"
@@ -50,6 +58,7 @@ _FX = re.compile(
     r"(?i)\b(?:tipo\s+de\s+cambio|exchange\s+rate|fx\s+rate)\b[^0-9A-Z]*(?:(?P<a>[A-Z]{3})\s*/\s*(?P<b>[A-Z]{3}))?"
     r"[^0-9]*?(?P<r>\d{1,3}(?:[.,]\d{2,6}))"
 )
+_ANY_DATE = tuple(pattern for _, pattern in _DATE_PATTERNS)
 _FX_EQ = re.compile(r"\b1\s*(?P<a>USD|EUR|CAD|GBP)\s*=\s*(?P<r>\d{1,3}(?:[.,]\d{2,6}))\s*(?P<b>MXN|USD)\b")
 _UDI = re.compile(r"(?i)\b(?:valor\s+de\s+la\s+udi|valor\s+udi|udi\s+value|precio\s+de\s+la\s+udi)\b[^0-9]*(?P<r>\d{1,2}[.,]\d{4,6})")
 _PERIOD = re.compile(r"(?i)\b(statement\s+period|period|periodo|per[ií]odo|for\s+the\s+period|del|from)\b")
@@ -74,8 +83,16 @@ _OPENING = re.compile(r"^(saldo anterior|saldo inicial|beginning balance|opening
 _DEPOSITS = re.compile(r"^(depositos|abonos|total (de )?(depositos|abonos)|deposits|total deposits|credits|deposits and (other )?(additions|credits))\b")
 _WITHDRAWALS = re.compile(r"^(retiros|cargos|total (de )?(retiros|cargos)|withdrawals|total withdrawals|debits|checks paid|withdrawals and (other )?(subtractions|debits))\b")
 _CLOSING = re.compile(r"^(saldo final|saldo al corte|saldo actual|saldo al cierre|ending balance|closing balance|new balance|saldo final del periodo|saldo total)\b")
-_MIN_PAYMENT = re.compile(r"^(minimum payment( due)?|pago minimo( a pagar)?)\b")
+# Exact labels: "Pago mínimo + compras y cargos diferidos a meses" is a different, larger figure.
+_MIN_PAYMENT = re.compile(r"^(minimum payment( due)?|pago minimo( a pagar| requerido| del periodo)?)$")
+_NO_INTEREST = re.compile(r"^(pago para no generar intereses|pago sin intereses|payment to avoid interest( charges)?)$")
+_TOTAL_DEBT = re.compile(r"^(saldo deudor total|adeudo total|deuda total|total balance owed)$")
+_CREDIT_LIMIT = re.compile(r"^(limite de credito|credit limit|linea de credito)$")
+_DUE_DATE = re.compile(r"(?i)\b(fecha\s+l[ií]mite\s+de\s+pago|payment\s+due\s+date)\b")
 _RATE = re.compile(r"(?i)\b(apr|annual percentage rate|tasa de inter[eé]s(?: anual)?|tasa anual|tasa ordinaria)\b[^0-9]*(?P<r>\d{1,2}(?:[.,]\d+)?)\s*%")
+_RATE_OTHER = re.compile(r"(?i)\b(mensual|monthly|moratori[ao]|penalty|promedio|cat|bruta)\b")
+_CAT = re.compile(r"(?i)\bCAT\b(?:\s+promedio)?\s*:?\s*(?P<r>\d{1,3}(?:[.,]\d+)?)\s*%")
+_PAIR_AMOUNT = re.compile(r"(?<![\w.,/$])(?:\(\s*)?[-−–]?\$?\s?\d{1,3}(?:,\d{3})*\.\d{2}(?:\s*\))?(?![\w/%]|[.,]\d)")
 _TICKER_IN_DESC = re.compile(r"\(([A-Z][A-Z0-9.]{0,6})\)\s*$")
 _ES_WORDS = ("saldo", "cuenta", "periodo", "emisora", "titulos", "fecha", "corte", "efectivo", "cartera", "moneda",
              "inversion", "rendimiento", "contrato", "estado de cuenta", "valor de mercado", "plusvalia")
@@ -93,10 +110,13 @@ class _Account:
     positions: list[dict[str, Any]] = field(default_factory=list)
     cash: list[dict[str, Any]] = field(default_factory=list)
     totals: list[dict[str, Any]] = field(default_factory=list)
-    subtotal: dict[str, Any] | None = None
+    subtotals: list[dict[str, Any]] = field(default_factory=list)
+    section_start: int = 0  # first position row the next printed subtotal covers
     flows: dict[str, Any] = field(default_factory=dict)
     min_payment: str | None = None
     interest_rate: str | None = None
+    rate_rank: int = -1
+    card: dict[str, Any] = field(default_factory=dict)  # pago para no generar intereses, CAT, límite, fecha límite
     transactions: list[dict[str, Any]] = field(default_factory=list)
 
     def has_content(self) -> bool:
@@ -108,7 +128,59 @@ def _cells(line: str) -> list[tuple[str, int, int]]:
 
 
 def _is_amount(text: str) -> bool:
-    return parse_amount(text) is not None
+    return parse_amount(text) is not None and not _is_reference(text)
+
+
+def _is_reference(text: str, *, long_numbers: bool = False) -> bool:
+    """A bare digit string with a leading zero ("0150826") is a reference or folio, never money.
+
+    With ``long_numbers`` (transaction rows) so is a bare run of seven or more digits: statements print
+    money with thousands separators and decimals, and reading a SPEI reference as an amount turned a
+    42,500.00 payroll deposit into a 108,326 withdrawal.
+    """
+    return re.fullmatch(r"0\d{3,}" + (r"|\d{7,}" if long_numbers else ""), text.strip()) is not None
+
+
+def _adjacent(before: str, after: str) -> str:
+    """The text touching an inline match: a neighbouring column (a name or address) is not its label."""
+    left = "" if re.search(r"\s{8,}$", before) else _COLUMN_GAP.split(before.strip())[-1] if before.strip() else ""
+    right = "" if re.match(r"\s{8,}", after) else _COLUMN_GAP.split(after.strip())[0] if after.strip() else ""
+    return f"{left} {right}"
+
+
+def _without_dates(line: str) -> str:
+    for pattern in _ANY_DATE:
+        line = pattern.sub(" ", line)
+    return line
+
+
+_SUMMARY = (("opening", _OPENING), ("deposits", _DEPOSITS), ("withdrawals", _WITHDRAWALS), ("closing", _CLOSING),
+            ("total_debt", _TOTAL_DEBT), ("minimum_payment", _MIN_PAYMENT), ("no_interest_payment", _NO_INTEREST),
+            ("credit_limit", _CREDIT_LIMIT))
+
+
+def _summary_figures(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """The balance-summary figures among a line's (label, amount) pairs."""
+    found = []
+    for label, amount in pairs:
+        label = re.sub(r"^(?:\d+\s+)+", "", label)  # a leftover row number
+        name = next((name for name, pattern in _SUMMARY if pattern.match(label)), None)
+        if name:
+            found.append((name, amount))
+    return found
+
+
+def _pairs(line: str) -> list[tuple[str, str]]:
+    """(folded label, printed amount) for every amount on a line, labelled by the text since the previous one.
+
+    Summary boxes print two columns side by side ("Saldo Promedio 38,214.77   Saldo Anterior 31,245.67");
+    each figure keeps its own label instead of the line's first words.
+    """
+    result, start = [], 0
+    for match in _PAIR_AMOUNT.finditer(line):
+        result.append((fold(line[start:match.start()]), match.group(0).strip()))
+        start = match.end()
+    return result
 
 
 def _currency_word(text: str) -> str | None:
@@ -181,7 +253,7 @@ def _statement_currency(text: str, language: str | None) -> tuple[str | None, st
 
 
 _HOLDING_NUMERIC = frozenset({"quantity", "price", "value", "cost_basis", "avg_cost", "gain", "rate"})
-_TX_NUMERIC = frozenset({"debit", "credit", "amount", "balance", "quantity", "price", "fees", "original_amount",
+_TX_NUMERIC = frozenset({"debit", "credit", "amount", "balance", "quantity", "price", "fees", "fees_tax", "original_amount",
                          "remaining_balance", "installment_payment"})
 _IN_SECTION = re.compile(r"^(deposits|depositos|abonos|credits|payments (and|&) (other )?credits|pagos y abonos|additions|entradas)")
 _OUT_SECTION = re.compile(r"^(withdrawals|retiros|cargos|debits|checks|purchases|compras|electronic withdrawals|atm|card purchases|"
@@ -215,6 +287,10 @@ def _tx_header(line: str) -> list[dict[str, Any]] | None:
     fields = match_tx_header([c[0] for c in cells])
     if not fields:
         return None
+    if fields.count("date") > 1 and "settlement_date" not in fields:
+        # "Fecha | Fecha" over "operación | liquidación": the second date column is the settlement date.
+        second = [i for i, f in enumerate(fields) if f == "date"][1]
+        fields = [*fields[:second], "settlement_date", *fields[second + 1:]]
     return [{"field": f, "start": c[1], "end": c[2], "currency": None} for f, c in zip(fields, cells) if f]
 
 
@@ -242,7 +318,11 @@ def _assign(cells: list[tuple[str, int, int]], columns: list[dict[str, Any]], nu
     row: dict[str, str] = {}
     distance: dict[str, int] = {}
     for text, start, end in cells:
-        if _is_amount(text) or re.fullmatch(r"[-(]?\$?\s?[\d.,]+%?\)?", text):
+        if _is_reference(text, long_numbers=numeric_fields is _TX_NUMERIC):
+            numeric_like = False
+        else:
+            numeric_like = _is_amount(text) or re.fullmatch(r"[-(]?\$?\s?[\d.,]+%?\)?", text) is not None
+        if numeric_like:
             pool = numeric or columns
             target = min(pool, key=lambda c: abs(c["end"] - end))
             gap = abs(target["end"] - end)
@@ -330,6 +410,8 @@ def parse_statement_text(pages: list[tuple[int, str]], *, aliases: dict[str, lis
             cells = _cells(line)
             has_amount = any(_is_amount(c[0]) for c in cells)
             match = _ACCOUNT.search(line)
+            if match is None and not (cells and resolve_date(cells[0][0], period_end, day_first=day_first)):
+                match = _ACCOUNT_SPACED.search(line)
             if match and "clabe" not in fold(match.group("label")):
                 tail = last4(match.group("num"))
                 if tail and tail != current.number_last4:
@@ -342,7 +424,11 @@ def parse_statement_text(pages: list[tuple[int, str]], *, aliases: dict[str, lis
                     declared = _CURRENCY_DECL.search(rest)
                     if declared and _currency_word(declared.group("c")) not in (None, "UDI"):
                         current.currency = _currency_word(declared.group("c"))
-                        rest = rest[: declared.start()] + rest[declared.end():]
+                    # Only text touching the number names the account; a column beside it is usually the
+                    # holder's name or address, which must not become the account's name.
+                    rest = _adjacent(line[: match.start()], line[match.end():])
+                    if declared:
+                        rest = rest.replace(declared.group(0).strip(), " ")
                     label = " ".join(rest.strip(" -:|").split()) or None
                     kind, confidence = account_type(f"{label or ''} {match.group('label')}")
                     if label and not _is_amount(label):
@@ -361,7 +447,7 @@ def parse_statement_text(pages: list[tuple[int, str]], *, aliases: dict[str, lis
             if udi:
                 fx.append({"from": "UDI", "to": "MXN", "rate": udi.group("r").replace(",", "."), "page": page})
                 continue
-            fx_match = _FX_EQ.search(line) or _FX.search(line)
+            fx_match = _FX_EQ.search(line) or _FX.search(_without_dates(line))
             if fx_match:
                 source = fx_match.groupdict().get("a") or "USD"
                 target = fx_match.groupdict().get("b") or ("MXN" if language == "es" or currency == "MXN" else None)
@@ -391,19 +477,54 @@ def parse_statement_text(pages: list[tuple[int, str]], *, aliases: dict[str, lis
                 continue
             if header:
                 columns, tx_columns, last_row, last_tx = header, None, None, None
+                current.section_start = len(current.positions)
                 continue
 
             first = fold(cells[0][0]) if cells else ""
             amount = _line_amount(cells, columns)
             if amount is not None and _ACCOUNT_TOTAL.match(first):
+                printed = [d.isoformat() for d, _ in find_dates(line, day_first=day_first)]
+                if printed and as_of and as_of not in printed:
+                    continue  # "Valor del portafolio al 31/07/2026": the opening value, not this statement's total
                 current.totals.append({"amount": amount, "currency": _row_currency(line, None, None),
                                        "label": cells[0][0][:60], "page": page})
                 columns = tx_columns = None
                 continue
             if amount is not None and _POSITIONS_SUBTOTAL.match(first):
-                current.subtotal = {"amount": amount, "label": cells[0][0][:60], "page": page}
+                # A statement prints one subtotal per section (SIC, BMV, ...): each covers the rows since the
+                # section's header or the previous subtotal.
+                current.subtotals.append({"amount": amount, "label": cells[0][0][:60], "page": page,
+                                          "rows": [current.section_start, len(current.positions)]})
+                current.section_start = len(current.positions)
                 continue
-            if amount is not None:
+            dated_row = tx_columns is not None and bool(cells) and resolve_date(
+                cells[0][0], period_end, day_first=day_first) is not None
+            if _DUE_DATE.search(line) and not dated_row:
+                due = [d for d, _ in find_dates(line, day_first=day_first)]
+                if due:
+                    current.card.setdefault("due_date", due[-1].isoformat())
+            cat = _CAT.search(line)
+            if cat:
+                current.card.setdefault("cat", cat.group("r").replace(",", ".") + "%")
+            rate = _RATE.search(line)
+            if rate:
+                # The ordinary annual rate; a monthly, penalty (moratoria) or average rate printed nearby is not it.
+                rank = -1 if _RATE_OTHER.search(line[rate.start():rate.end()]) else (
+                    1 if re.search(r"(?i)\b(anual|annual|apr|ordinaria)\b", line) else 0)
+                if rank > current.rate_rank:
+                    current.interest_rate, current.rate_rank = rate.group("r") + "%", rank
+            summary = [] if dated_row else _summary_figures(_pairs(line))
+            if summary:
+                for name, value in summary:
+                    if name in ("opening", "deposits", "withdrawals", "closing", "total_debt"):
+                        current.flows.setdefault(name, value)
+                        current.flows.setdefault("page", page)
+                    elif name == "minimum_payment":
+                        current.min_payment = current.min_payment or value
+                    else:
+                        current.card.setdefault(name, value)
+                continue
+            if amount is not None and not dated_row:  # amounts _pairs does not read (1.234,56; no decimals)
                 flow = next((key for key, pattern in (("opening", _OPENING), ("deposits", _DEPOSITS),
                              ("withdrawals", _WITHDRAWALS), ("closing", _CLOSING)) if pattern.match(first)), None)
                 if flow:
@@ -411,11 +532,8 @@ def parse_statement_text(pages: list[tuple[int, str]], *, aliases: dict[str, lis
                     current.flows.setdefault("page", page)
                     continue
                 if _MIN_PAYMENT.match(first):
-                    current.min_payment = amount
+                    current.min_payment = current.min_payment or amount
                     continue
-            rate = _RATE.search(line)
-            if rate:
-                current.interest_rate = rate.group("r") + "%"
             if amount is not None and _TOTAL_ANY.match(first):
                 continue
 
@@ -424,7 +542,7 @@ def parse_statement_text(pages: list[tuple[int, str]], *, aliases: dict[str, lis
                 if when:
                     rest = cells[1:]
                     settlement = None
-                    if rest and any(c["field"] == "settlement_date" for c in tx_columns):
+                    if rest:  # a second leading date is the posting (liquidación) date, never the description
                         settlement = resolve_date(rest[0][0], period_end, day_first=day_first)
                         if settlement:
                             rest = rest[1:]
@@ -448,6 +566,8 @@ def parse_statement_text(pages: list[tuple[int, str]], *, aliases: dict[str, lis
                         "price": row.get("price"), "fees": row.get("fees"), "type": row.get("type"), "page": page,
                         "currency": _row_currency(line, section_currency or current.currency, None),
                     }
+                    if row.get("fees_tax"):
+                        tx["fees_tax"] = row["fees_tax"]
                     section_key = fold(section)
                     if _IN_SECTION.match(section_key):
                         tx["direction"] = "in"
@@ -528,20 +648,27 @@ def parse_statement_text(pages: list[tuple[int, str]], *, aliases: dict[str, lis
             reported = account.totals[-1]
             if len(values) > 1:
                 notes.append(f"Account ending {account.number_last4 or '?'} prints different totals {sorted(values)}; the last one was used.")
+        if account.type not in {"credit_card", "mortgage"}:
+            _orient_transactions(account, comma, notes)
         entry: dict[str, Any] = {
             "label": account.label, "number_last4": account.number_last4, "type": account.type,
             "currency": account.currency, "page": account.page, "positions": account.positions,
-            "cash": _dedupe_cash(account), "reported_total": reported, "positions_subtotal": account.subtotal,
-            "flows": dict(account.flows) if account.flows else None, "liabilities": [],
+            "cash": _dedupe_cash(account), "reported_total": reported, "positions_subtotals": account.subtotals,
+            "flows": {k: v for k, v in account.flows.items() if k != "total_debt"} or None, "liabilities": [],
             "transactions": account.transactions, "period_start": period_start, "period_end": as_of,
         }
         if account.type in {"credit_card", "mortgage"}:
             balance = account.flows.get("closing") or (reported or {}).get("amount")
-            entry.update(positions=[], cash=[], reported_total=None, positions_subtotal=None, flows=None,
-                         debt_flows=dict(account.flows) if account.flows else None)
-            entry["liabilities"] = [{"label": account.label or account.type.replace("_", " "), "balance": balance,
-                                     "currency": account.currency, "minimum_payment": account.min_payment,
-                                     "interest_rate": account.interest_rate, "page": account.page}]
+            debt_flows = {k: v for k, v in account.flows.items() if k != "total_debt"}
+            entry.update(positions=[], cash=[], reported_total=None, positions_subtotals=[], flows=None,
+                         debt_flows=debt_flows or None)
+            main = {"label": account.label or account.type.replace("_", " "), "balance": balance,
+                    "currency": account.currency, "minimum_payment": account.min_payment,
+                    "interest_rate": account.interest_rate, "page": account.page,
+                    **{k: v for k, v in account.card.items() if k in ("no_interest_payment", "cat", "credit_limit",
+                                                                      "due_date")}}
+            entry["liabilities"] = [main, *_deferred_installments(account, balance, notes,
+                                                                  account.currency or currency)]
         elif account.interest_rate:
             entry["interest_rate"] = account.interest_rate
         statement_accounts.append(entry)
@@ -557,6 +684,117 @@ def parse_statement_text(pages: list[tuple[int, str]], *, aliases: dict[str, lis
         },
         "confidence": confidence, "notes": notes, "parsed": parsed,
     }
+
+
+_OUT_WORDS = re.compile(r"(?i)\b(compra|cpa|retenci[oó]n|isr|comisi[oó]n|iva|retiro|cargo|buy|bought|purchase|"
+                        r"withdrawal|fee|tax)\b")
+_IN_WORDS = re.compile(r"(?i)\b(venta|vta|dividendo|distribuci[oó]n|inter[eé]s(es)?|dep[oó]sito|abono|sell|sold|sale|"
+                       r"dividend|interest|deposit|rendimiento)\b")
+_MAX_UNSIGNED_RUN = 4  # rows between two printed balances whose signs are solved together
+
+
+def _signed_options(tx: dict[str, Any], comma: bool | None) -> list[Decimal]:
+    """What an unsigned "Importe" can mean for cash: in or out, and with commission and IVA added or netted."""
+    amount = parse_amount(tx.get("amount"), decimal_comma=comma)
+    fees = sum((abs(v) for v in (parse_amount(tx.get(k), decimal_comma=comma) for k in ("fees", "fees_tax"))
+                if v is not None), Decimal(0))
+    options = [amount, -amount]
+    if fees:
+        options += [-(amount + fees), amount - fees]
+    return options
+
+
+def _orient_transactions(account: _Account, comma: bool | None, notes: list[str]) -> None:
+    """Sign an unsigned amount column ("Importe" printed without +/-) from the printed running balance.
+
+    A brokerage "Importe" is printed unsigned: a purchase, a retention and a deposit all look positive.
+    Consecutive printed balances fix each line's direction (and whether commission and IVA were added);
+    lines the balances cannot settle take the direction their concept names (compra, retención ... out;
+    depósito, dividendo, venta ... in).  A column that prints any negative amount is already signed.
+    """
+    rows = [t for t in account.transactions if not t.get("installment")]
+    unsigned = [t for t in rows if t.get("amount") not in (None, "") and not t.get("debit") and not t.get("credit")
+                and not t.get("direction")]
+    values = [parse_amount(t["amount"], decimal_comma=comma) for t in unsigned]
+    if not unsigned or any(v is None or v < 0 or str(t["amount"]).strip().startswith(("(", "-"))
+                           for v, t in zip(values, unsigned)):
+        return
+    targets = {id(t) for t in unsigned}
+    previous = parse_amount(account.flows.get("opening"), decimal_comma=comma)
+    pending: list[dict[str, Any]] = []
+    solved = 0
+    for tx in rows:
+        if id(tx) not in targets:
+            previous, pending = None, []
+            continue
+        pending.append(tx)
+        balance = parse_amount(tx.get("balance"), decimal_comma=comma)
+        if balance is None:
+            continue
+        if previous is not None and len(pending) <= _MAX_UNSIGNED_RUN:
+            options = [_signed_options(t, comma) for t in pending]
+            matches = {combo for combo in _combos(options) if abs(previous + sum(combo) - balance) <= Decimal("0.01")}
+            if len(matches) == 1:
+                for t, value in zip(pending, matches.pop()):
+                    t["amount"], t["signed_by"] = format(value, "f"), "balance"
+                    solved += 1
+        previous, pending = balance, []
+    guessed = 0
+    for tx in unsigned:
+        if tx.get("signed_by"):
+            continue
+        text = f"{tx.get('type') or ''} {tx.get('description') or ''}"
+        out_hit, in_hit = bool(_OUT_WORDS.search(text)), bool(_IN_WORDS.search(text))
+        if re.search(r"(?i)\b(retenci[oó]n|isr|withholding|tax withheld)\b", text):
+            out_hit, in_hit = True, False  # "Retención ISR dividendos" is money out, whatever it names
+        if out_hit == in_hit:
+            continue
+        amount = parse_amount(tx["amount"], decimal_comma=comma)
+        fees = sum((abs(v) for v in (parse_amount(tx.get(k), decimal_comma=comma) for k in ("fees", "fees_tax"))
+                    if v is not None), Decimal(0))
+        value = -(amount + fees) if out_hit else amount - fees
+        tx["amount"], tx["signed_by"] = format(value, "f"), "concept"
+        guessed += 1
+    if solved:
+        notes.append(f"{solved} unsigned amount(s) were signed from the printed running balance.")
+    if guessed:
+        notes.append(f"{guessed} unsigned amount(s) were signed from their concept (no running balance settled them).")
+
+
+def _combos(options: list[list[Decimal]]):
+    if not options:
+        yield ()
+        return
+    for head in dict.fromkeys(options[0]):
+        for tail in _combos(options[1:]):
+            yield (head, *tail)
+
+
+def _deferred_installments(account: _Account, balance: Any, notes: list[str],
+                           currency: str | None) -> list[dict[str, Any]]:
+    """Purchases at meses sin intereses owed beyond the revolving balance, as their own 0% debt.
+
+    "Saldo al corte" leaves out the installments still to be charged; "saldo deudor total" includes them.
+    Their difference is what the person still owes on the plans (else the printed pending balances).
+    """
+    plans = [t for t in account.transactions if t.get("installment")]
+    total = parse_amount(account.flows.get("total_debt"))
+    closing = parse_amount(balance)
+    payments = [parse_amount(t.get("amount")) for t in plans]
+    deferred = None
+    if total is not None and closing is not None and total - closing > Decimal("0.005"):
+        deferred = total - closing
+    elif plans and all(parse_amount((t["installment"] or {}).get("remaining_balance")) is not None for t in plans):
+        deferred = sum(abs(parse_amount(t["installment"]["remaining_balance"])) for t in plans)
+        notes.append("The installment-plan debt is the sum of the printed pending balances; check whether this "
+                     "month's installment is included.")
+    if deferred is None:
+        return []
+    return [{"label": "Compras a meses sin intereses" if currency == "MXN" else "Installment plans",
+             "balance": format(deferred, "f"), "currency": account.currency or currency,
+             "minimum_payment": format(sum((abs(p) for p in payments if p is not None), Decimal(0)), "f")
+             if any(p is not None for p in payments) else None,
+             "interest_rate": "0%", "page": account.page, "kind": "installments"}]
 
 
 def _dedupe_cash(account: _Account) -> list[dict[str, Any]]:

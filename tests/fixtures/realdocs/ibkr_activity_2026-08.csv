@@ -1,0 +1,67 @@
+﻿Statement,Header,Field Name,Field Value
+Statement,Data,BrokerName,Interactive Brokers LLC
+Statement,Data,BrokerAddress,"Two Pickwick Plaza, Greenwich, CT 06830"
+Statement,Data,Title,Activity Statement
+Statement,Data,Period,"August 1, 2026 - August 31, 2026"
+Statement,Data,WhenGenerated,"2026-09-02, 04:17:09 EDT"
+Account Information,Header,Field Name,Field Value
+Account Information,Data,Name,Mariana Robles Trevino
+Account Information,Data,Account,U8812345
+Account Information,Data,Account Type,Individual
+Account Information,Data,Customer Type,Individual
+Account Information,Data,Account Capabilities,Cash
+Account Information,Data,Base Currency,USD
+Net Asset Value,Header,Asset Class,Prior Total,Current Long,Current Short,Current Total,Change
+Net Asset Value,Data,Cash ,1905.12,3660.79,0,3660.79,1755.67
+Net Asset Value,Data,Stock,37011.20,37799.50,0,37799.50,788.30
+Net Asset Value,Data,Interest Accruals,4.10,5.02,0,5.02,0.92
+Net Asset Value,Data,Total,38920.42,41465.31,0,41465.31,2544.89
+Net Asset Value,Header,Time Weighted Rate of Return
+Net Asset Value,Data,1.37%
+Change in NAV,Header,Field Name,Field Value
+Change in NAV,Data,Starting Value,38920.42
+Change in NAV,Data,Mark-to-Market,512.66
+Change in NAV,Data,Deposits & Withdrawals,1500
+Change in NAV,Data,Dividends,31.20
+Change in NAV,Data,Withholding Tax,-3.12
+Change in NAV,Data,Interest,7.05
+Change in NAV,Data,Commissions,-1.00
+Change in NAV,Data,Other FX Translations,-164.77
+Change in NAV,Data,Ending Value,41465.31
+Cash Report,Header,Currency Summary,Currency,Total,Securities,Futures,Month to Date,Year to Date
+Cash Report,Data,Starting Cash,Base Currency Summary,1905.12,1905.12,0,,
+Cash Report,Data,Ending Cash,Base Currency Summary,3660.79,3660.79,0,,
+Cash Report,Data,Ending Cash,MXN,25000.00,25000.00,0,,
+Cash Report,Data,Ending Cash,USD,2318.44,2318.44,0,,
+Open Positions,Header,DataDiscriminator,Asset Category,Currency,Symbol,Quantity,Mult,Cost Price,Cost Basis,Close Price,Value,Unrealized P/L,Code
+Open Positions,Data,Summary,Stocks,USD,VT,120,1,104.2050,12504.60,118.45,14214.00,1709.40,
+Open Positions,Data,Summary,Stocks,USD,SGOV,200,1,100.3100,20062.00,100.52,20104.00,42.00,
+Open Positions,Data,Summary,Stocks,USD,AMZN,15,1,188.4000,2826.00,232.10,3481.50,655.50,
+Open Positions,Total,,Stocks,USD,,,,,35392.60,,37799.50,2406.90,
+Open Positions,Total,,Total,,,,,,,,37799.50,,
+Forex Balances,Header,Asset Category,Currency,Description,Quantity,Cost Price,Cost Basis in USD,Close Price,Value in USD,Unrealized P/L in USD,Code
+Forex Balances,Data,Forex,USD,MXN,25000.00,0.054120,-1353.00,0.053694,1342.35,-10.65,
+Trades,Header,DataDiscriminator,Asset Category,Currency,Symbol,Date/Time,Quantity,T. Price,C. Price,Proceeds,Comm/Fee,Basis,Realized P/L,MTM P/L,Code
+Trades,Data,Order,Stocks,USD,VT,"2026-08-06, 09:41:22",10,116.80,118.45,-1168,-1,1169,0,16.50,O
+Trades,SubTotal,,Stocks,USD,VT,,10,,,-1168,-1,1169,0,16.50,
+Trades,Total,,Stocks,USD,,,,,,-1168,-1,1169,0,16.50,
+Deposits & Withdrawals,Header,Currency,Settle Date,Description,Amount
+Deposits & Withdrawals,Data,USD,2026-08-04,Electronic Fund Transfer,1500
+Deposits & Withdrawals,Data,Total,,,1500
+Dividends,Header,Currency,Date,Description,Amount
+Dividends,Data,USD,2026-08-07,SGOV(US46436E7186) Cash Dividend USD 0.156 per Share (Ordinary Dividend),31.20
+Dividends,Data,Total,,,31.20
+Withholding Tax,Header,Currency,Date,Description,Amount,Code
+Withholding Tax,Data,USD,2026-08-07,SGOV(US46436E7186) Cash Dividend USD 0.156 per Share - US Tax,-3.12,
+Withholding Tax,Data,Total,,,-3.12,
+Interest,Header,Currency,Date,Description,Amount
+Interest,Data,USD,2026-08-05,USD Credit Interest for Jul-2026,7.05
+Interest,Data,Total,,,7.05
+Financial Instrument Information,Header,Asset Category,Symbol,Description,Conid,Security ID,Listing Exch,Multiplier,Type,Code
+Financial Instrument Information,Data,Stocks,AMZN,AMAZON.COM INC,3691937,US0231351067,NASDAQ,1,COMMON,
+Financial Instrument Information,Data,Stocks,SGOV,ISHARES 0-3 MONTH TREASURY BOND ETF,475245066,US46436E7186,ARCA,1,ETF,
+Financial Instrument Information,Data,Stocks,VT,VANGUARD TOT WORLD STK ETF,52197301,US9220427424,ARCA,1,ETF,
+Codes,Header,Code,Meaning
+Codes,Data,O,Opening Trade
+Notes/Legal Notes,Header,Type,Note
+Notes/Legal Notes,Data,Notes,"Cash dividends are presented net of any applicable fees. Withholding tax on dividends paid to U.S. persons is not withheld unless backup withholding applies."

@@ -43,7 +43,7 @@ def test_fidelity_export_without_totals_needs_review_and_excludes_pending():
     assert result["as_of"] == "2026-08-31"
     held = by_instrument(proposal)
     assert held[("fidelity-5678", "SPAXX")]["asset_class"] == "cash"
-    assert "asset_class" not in held[("fidelity-6789", "QQQ")]
+    assert held[("fidelity-6789", "QQQ")]["asset_class"] == "fund"  # a listed US ETF ticker, though "TR UNIT" says nothing
     assert any("Pending activity" in w for w in proposal["warnings"])
     assert {a["status"] for a in result["reconciliation"]["accounts"]} == {"unverifiable", "single_value"}
 

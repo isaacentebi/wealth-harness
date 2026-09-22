@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import csv
 from datetime import date, datetime
+from decimal import Decimal
 import io
 import re
 from typing import Any
@@ -52,7 +53,9 @@ VEST_NOTE = ("Vest preset: a generic US-broker layout, not a documented Vest exp
 _ACCOUNT_LINE = re.compile(r"(?i)^(?:positions for account\s+)?(?P<label>[A-Za-z][A-Za-z &'\-]{1,40}?)\s*(?:\.\.\.|…|[Xx*]{2,})\s*(?P<tail>\d{3,4})\b")
 _PENDING = re.compile(r"(?i)^pending activity\b")
 _IBKR_SECTIONS = {"Statement", "Account Information", "Net Asset Value", "Open Positions", "Trades", "Dividends",
-                  "Withholding Tax", "Deposits & Withdrawals", "Interest", "Fees", "Base Currency Exchange Rate"}
+                  "Withholding Tax", "Deposits & Withdrawals", "Interest", "Fees", "Base Currency Exchange Rate",
+                  "Cash Report", "Forex Balances", "Financial Instrument Information"}
+_IBKR_ACCRUALS = frozenset({"interest accruals", "dividend accruals"})
 
 
 def _cell(value: Any) -> str:
@@ -307,29 +310,61 @@ def _parse_ibkr(rows: list[list[str]], *, currency: str | None, as_of: str | Non
         "number_last4": last4(info.get("Account")), "type": "brokerage", "currency": base,
         "positions": [], "cash": [], "reported_total": None, "transactions": [], "flows": None, "liabilities": [],
     }
+    fx = [{"from": r.get("Currency"), "to": base, "rate": r.get("Rate"), "page": None}
+          for kind, r in sections.get("Base Currency Exchange Rate", []) if kind == "Data" and base and r.get("Currency") != base]
+    known = {item["from"] for item in fx}
+    for kind, r in sections.get("Forex Balances", []):  # the close price of a cash balance is its rate to base
+        pair = r.get("Description")
+        if kind == "Data" and base and r.get("Currency") == base and pair and pair != base and pair not in known \
+                and parse_amount(r.get("Close Price")):
+            fx.append({"from": pair, "to": base, "rate": r["Close Price"], "page": None})
+            known.add(pair)
+    # Cash by currency (Cash Report "Ending Cash" rows): 25,000 MXN stays pesos, not their dollar value.
+    cash_rows = [(r["Currency"], r["Total"]) for kind, r in sections.get("Cash Report", [])
+                 if kind == "Data" and fold(r.get("Currency Summary")) == "ending cash" and r.get("Currency")
+                 and fold(r["Currency"]) != "base currency summary" and parse_amount(r.get("Total")) is not None]
+    use_report = bool(cash_rows) and all(ccy == base or ccy in known for ccy, _ in cash_rows)
+    if use_report:
+        for ccy, amount in cash_rows:
+            account["cash"].append({"amount": amount, "currency": ccy, "label": f"Cash {ccy}", "page": None})
+    accruals = []
     for kind, record in sections.get("Net Asset Value", []):
         label = fold(record.get("Asset Class"))
-        if label == "cash" and record.get("Current Total"):
+        if label == "cash" and record.get("Current Total") and not use_report:
             account["cash"].append({"amount": record["Current Total"], "currency": base, "label": "Cash", "page": None})
+        elif label in _IBKR_ACCRUALS and parse_amount(record.get("Current Total")):
+            accruals.append((label, parse_amount(record["Current Total"])))
         elif label == "total" and record.get("Current Total"):
             account["reported_total"] = {"amount": record["Current Total"], "currency": base, "label": "Net Asset Value", "page": None}
+    if accruals and account["reported_total"] and parse_amount(account["reported_total"]["amount"]) is not None:
+        # Net Asset Value counts interest and dividends earned but not yet paid; they are not a holding yet.
+        owed = sum((amount for _, amount in accruals), Decimal(0))
+        account["reported_total"]["amount"] = str(parse_amount(account["reported_total"]["amount"]) - owed)
+        account["reported_total"]["label"] = "Net Asset Value less accruals"
+        notes.append("Reconciled to Net Asset Value less " + " and ".join(
+            f"{label} {amount}" for label, amount in accruals) + " (earned, not yet paid).")
+    described = {r.get("Symbol"): r for kind, r in sections.get("Financial Instrument Information", []) if kind == "Data"}
     for kind, record in sections.get("Open Positions", []):
         if kind != "Data" or record.get("DataDiscriminator", "Summary") != "Summary":
             continue
+        info = described.get(record.get("Symbol")) or {}
         account["positions"].append({
-            "symbol": record.get("Symbol"), "description": record.get("Description"), "quantity": record.get("Quantity"),
+            "symbol": record.get("Symbol"), "description": record.get("Description") or info.get("Description"),
+            "quantity": record.get("Quantity"),
             "price": record.get("Close Price"), "market_value": record.get("Value"), "cost_basis": record.get("Cost Basis"),
-            "currency": record.get("Currency"), "asset_type": record.get("Asset Category"), "page": None,
+            "currency": record.get("Currency"), "asset_type": " ".join(
+                filter(None, [info.get("Type"), record.get("Asset Category")])) or None, "page": None,
         })
-    fx = [{"from": r.get("Currency"), "to": base, "rate": r.get("Rate"), "page": None}
-          for kind, r in sections.get("Base Currency Exchange Rate", []) if kind == "Data" and base and r.get("Currency") != base]
     typed = {"Dividends": "dividend", "Withholding Tax": "tax_withheld", "Interest": "interest", "Fees": "fee"}
     for name, kind_name in typed.items():
         for kind, record in sections.get(name, []):
             if kind != "Data" or not record.get("Date") or fold(record.get("Currency")).startswith("total"):
                 continue
+            # "SGOV(US46436E7186) Cash Dividend ...": the security it came from, so the ledger can post it.
+            paid_by = re.match(r"\s*([A-Z][A-Z0-9.]{0,9})\s*\((?:[A-Z]{2}[A-Z0-9]{9}\d)\)", record.get("Description") or "")
             account["transactions"].append({"date": resolve_date(record["Date"], None, day_first=False),
                                             "description": record.get("Description", name), "amount": record.get("Amount"),
+                                            "symbol": paid_by.group(1) if paid_by else None,
                                             "currency": record.get("Currency"), "type_override": kind_name, "page": None})
     for kind, record in sections.get("Deposits & Withdrawals", []):
         if kind != "Data" or not record.get("Settle Date"):

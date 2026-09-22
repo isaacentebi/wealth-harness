@@ -16,6 +16,7 @@ Item shape (unknown fields are omitted, never zero)::
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import re
 from typing import Any
 
 from .classify import account_type as infer_type
@@ -24,6 +25,46 @@ from .model import build_proposal
 
 
 _KINDS = ("cash", "account", "position", "liability", "income")
+# The words a model naturally writes for each kind, and the account type they imply.
+_KIND_ALIASES = {
+    "investment": ("account", "brokerage"), "investments": ("account", "brokerage"),
+    "brokerage": ("account", "brokerage"), "retirement": ("account", None), "afore": ("account", "afore"),
+    "savings": ("cash", "savings"), "checking": ("cash", "checking"), "bank": ("cash", "checking"),
+    "deposit": ("cash", "savings"), "debt": ("liability", None), "loan": ("liability", None),
+    "card": ("liability", None), "credit_card": ("liability", None), "mortgage": ("liability", None),
+    "salary": ("income", None), "wage": ("income", None), "holding": ("position", None),
+}
+_PERIODS = {"monthly": 12, "month": 12, "mensual": 12, "biweekly": 26, "quincenal": 24, "weekly": 52,
+            "annual": 1, "yearly": 1, "anual": 1}
+_MONTHLY_WORDS = re.compile(r"(?i)\b(al mes|mensual(es)?|por mes|cada mes|a month|per month|monthly|/mes|/mo)\b")
+
+
+def _canonical(item: dict[str, Any]) -> dict[str, Any]:
+    kind = str(item.get("kind") or "").strip().lower()
+    if kind in _KINDS:
+        return item
+    alias = _KIND_ALIASES.get(kind)
+    if alias is None:
+        return item
+    canonical, implied = alias
+    out = {**item, "kind": canonical}
+    if implied and not out.get("account_type") and canonical in ("account", "cash"):
+        out["account_type"] = implied
+    return out
+
+
+def _annual(item: dict[str, Any]) -> tuple[Any, str | None]:
+    """An income amount per year: "gano 85 mil al mes" is 1,020,000 a year, never 85,000."""
+    amount = parse_amount(item.get("amount"))
+    if amount is None:
+        return item.get("amount"), None
+    period = str(item.get("frequency") or item.get("period") or "").strip().lower()
+    factor = _PERIODS.get(period)
+    if factor is None and _MONTHLY_WORDS.search(str(item.get("quote") or "")):
+        factor, period = 12, "monthly"
+    if factor is None or factor == 1:
+        return item.get("amount"), None
+    return str(amount * factor), f"{item.get('label') or 'Income'}: {amount} {period} was saved as {amount * factor} a year."
 
 
 def _verify(item: dict[str, Any], index: int) -> list[dict[str, Any]]:
@@ -59,15 +100,21 @@ def proposal_from_chat(items: list[dict[str, Any]], *, as_of: str | None = None,
     loose_liabilities: list[dict[str, Any]] = []
     unverified: list[dict[str, Any]] = []
     checked = 0
+    notes: list[str] = []
     for index, item in enumerate(items):
+        item = _canonical(item) if isinstance(item, dict) else item
         if not isinstance(item, dict) or item.get("kind") not in _KINDS:
-            raise ValueError(f"items[{index}].kind must be one of {_KINDS}")
+            raise ValueError(f"items[{index}].kind must be one of {_KINDS} (or investment, savings, debt, card, "
+                             "loan, salary)")
         checked += sum(1 for f in ("amount", "quantity", "rate", "monthly_payment") if item.get(f) not in (None, ""))
         unverified.extend(_verify(item, index))
         kind = item["kind"]
         ccy = item.get("currency") or currency
         if kind == "income":
-            income.append({"label": item.get("label") or "Income", "annual_amount": item.get("amount"), "currency": ccy})
+            annual, note = _annual(item)
+            if note:
+                notes.append(note)
+            income.append({"label": item.get("label") or "Income", "annual_amount": annual, "currency": ccy})
             if item.get("amount") in (None, ""):
                 missing.append({"key": f"items[{index}].amount", "reason": "missing", "detail": "Annual amount was not stated."})
             continue
@@ -115,4 +162,5 @@ def proposal_from_chat(items: list[dict[str, Any]], *, as_of: str | None = None,
     return build_proposal(statement, kind="user", provenance=provenance, owner_id=owner_id,
                           verification={"source_text": True, "checked": checked, "unverified": unverified},
                           missing=missing, confidence={"as_of": "high"},
-                          assumptions=["Values are as the person stated them in conversation; they are reported, not statement-verified."])
+                          assumptions=["Values are as the person stated them in conversation; they are reported, not statement-verified.",
+                                       *notes])

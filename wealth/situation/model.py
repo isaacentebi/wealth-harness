@@ -343,7 +343,9 @@ def _profile(facts: _Facts) -> dict:
         "tax_residence": tax_list or None,
         "tax_residence_assumed": None if tax_list else country,
         "citizenship": raw.get("citizenship") if isinstance(raw.get("citizenship"), list) else None,
-        "us_person": raw.get("us_person") if isinstance(raw.get("us_person"), bool) else None,
+        # A US citizen is a US person (taxed on worldwide income) whether or not anyone said "us_person".
+        "us_person": raw.get("us_person") if isinstance(raw.get("us_person"), bool)
+        else True if _us_citizen(raw.get("citizenship")) else None,
         "dependents": raw.get("dependents") if isinstance(raw.get("dependents"), int) else None,
         "dependent_ages": raw.get("dependent_ages") if isinstance(raw.get("dependent_ages"), list) else None,
         "currencies": raw.get("currencies") if isinstance(raw.get("currencies"), list) else None,
@@ -559,6 +561,11 @@ _DEBT_ACCOUNT_KINDS = {"credit card", "card", "loan", "mortgage", "line of credi
                        "credito", "prestamo", "hipoteca"}
 
 
+def _us_citizen(citizenship: Any) -> bool:
+    values = citizenship if isinstance(citizenship, list) else [citizenship] if isinstance(citizenship, str) else []
+    return any(str(v).strip().upper() in {"US", "USA", "UNITED STATES"} for v in values)
+
+
 def kind_family(kind: Any) -> str | None:
     """'cash', 'retirement', 'investment', 'debt' or None (unknown) for a stated kind or an account type."""
     if not isinstance(kind, str) or not kind.strip():
@@ -659,7 +666,11 @@ def _liabilities(facts: _Facts, statement_accounts: list[dict]) -> tuple[list[di
                           "payment": raw.get("monthly_payment"),
                           "payment_frequency": "monthly" if raw.get("monthly_payment") is not None else None,
                           "annual_rate": raw.get("interest_rate"), "lender": account.get("institution"),
-                          "source": "statement", "as_of": account.get("as_of")})
+                          "source": "statement", "as_of": account.get("as_of"),
+                          # What a card statement prints beside the balance (the pago-mínimo trap is between them).
+                          **{f: raw[f] for f in ("no_interest_payment", "due_date", "cat", "credit_limit")
+                             if raw.get(f) is not None},
+                          **({"installments": True} if raw.get("kind") == "installments" else {})})
     household = facts.value("household", use=False)
     if isinstance(household, dict):
         for raw in household.get("liabilities") or []:
@@ -837,6 +848,8 @@ def _liability_view(item: dict, fx: _FX, currency: str | None, today: date) -> d
         "approximate": bool(item.get("approximate")), "legacy": bool(item.get("legacy")),
         "payment_from": item.get("payment_from"),
         "payment_frequency_assumed": bool(item.get("payment_frequency_assumed")),
+        **{f: item[f] for f in ("no_interest_payment", "due_date", "cat", "credit_limit", "installments")
+           if item.get(f) is not None},
     }
 
 

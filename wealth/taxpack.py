@@ -1180,7 +1180,10 @@ def _mx_intereses(book: _Book, debt_sales: list[dict]) -> dict:
         sid, "Intereses", "Interest", "MX", currency="MXN",
         summary={"real_interest_mxn": _m(total_real), "retention_mxn": _m(total_ret),
                  "real_interest_loss_mxn": _m(_sum(_d(r["declared_real_loss_mxn"]) for r in rows) if rows else ZERO),
-                 "nominal_interest_mxn": _m(_sum(_d(r["nominal_mxn"]) for r in rows) if rows else ZERO),
+                 # What is declared: the constancia's nominal where there is one (the ledger rarely has a year).
+                 "nominal_interest_mxn": _m(_sum(_d(r["constancia_nominal_mxn"]) if r["basis"] == "constancia"
+                                                 and r.get("constancia_nominal_mxn") is not None
+                                                 else _d(r["nominal_mxn"]) for r in rows) if rows else ZERO),
                  "inflation_factor": None if inflation is None else format(inflation.quantize(Decimal("0.000001")), "f")},
         columns=_cols(("institution", "Institución", "Institution"), ("nominal_mxn", "Interés nominal", "Nominal"),
                       ("real_mxn", "Interés real (cálculo)", "Real (ours)"),
@@ -1236,10 +1239,25 @@ def _mx_dividendos(book: _Book) -> dict:
         bucket["withheld"] += withheld or ZERO
         # Tax withheld abroad on a foreign (SIC) dividend is not on the Mexican constancia's ISR line.
         bucket["withheld_foreign" if origin == "foreign" else "withheld_domestic"] += withheld or ZERO
+    # A constancia's dividends count even when the ledger holds none of that year's payments (a statement
+    # uploaded for another year, or none at all): the constancia is what the broker reported to SAT.
+    for doc in book.constancias:
+        name = doc.get("institution")
+        if isinstance(doc.get("dividendos"), dict) and name and \
+                not any(_same_institution(name, broker) for broker in totals):
+            totals[name] = {"accounts": book.accounts_for(doc), "domestic": ZERO, "foreign": ZERO, "withheld": ZERO,
+                            "withheld_domestic": ZERO, "withheld_foreign": ZERO, "known": True, "ledger": False}
     summary = []
     for broker, bucket in sorted(totals.items()):
         doc = book.constancia_for(bucket["accounts"], broker, "dividendos")
         block = doc["dividendos"] if doc else None
+        if block and bucket.get("ledger") is False:
+            # Only the constancia: its figures are the year's, not zeros from a ledger that has no payments.
+            bucket.update(domestic=_d(block.get("domestic_gross")) or ZERO,
+                          foreign=_d(block.get("foreign_gross")) or ZERO,
+                          withheld=_d(block.get("isr_withheld")) or ZERO,
+                          withheld_domestic=_d(block.get("isr_withheld")) or ZERO,
+                          withheld_foreign=_d(block.get("foreign_tax_withheld")) or ZERO)
         domestic = bucket["domestic"] if bucket["known"] else None
         # LISR Art. 140: the corporate ISR is (dividend x 1.4286) x 30%; the person accumulates the dividend plus
         # that ISR (piramidación) and credits it, when the dividend comes from CUFIN (the constancia says).
@@ -1258,8 +1276,9 @@ def _mx_dividendos(book: _Book) -> dict:
                             "computed_credit_mxn": _m(credit),
                             "accumulable_mxn": _m(base + (stated_credit if stated_credit is not None else credit)),
                             "basis": "constancia" if stated_credit is not None else "computed (assumes CUFIN)"},
-                        "constancia": None if not block else {k: _m(_d(v)) for k, v in block.items()}})
-        if block:
+                        "constancia": None if not block else {k: _m(_d(v)) for k, v in block.items()},
+                        "basis": "constancia" if bucket.get("ledger") is False else "ledger"})
+        if block and bucket.get("ledger") is not False:
             for label, ours, key in (("dividendos nacionales / domestic dividends", bucket["domestic"], "domestic_gross"),
                                      ("dividendos extranjeros / foreign dividends", bucket["foreign"], "foreign_gross"),
                                      ("ISR retenido (sin retenciones del extranjero) / Mexican ISR withheld",
@@ -1280,7 +1299,8 @@ def _mx_dividendos(book: _Book) -> dict:
                       ("date", "Fecha", "Date"), ("origin", "Origen", "Origin"),
                       ("gross_mxn", "Dividendo bruto", "Gross"), ("withheld_mxn", "Retenido", "Withheld"),
                       ("additional_10pct_mxn", "10% adicional esperado", "Expected additional 10%")),
-        rows=rows, reconciliation=recon, missing=missing, status="not_applicable" if not rows and not missing else None,
+        rows=rows, reconciliation=recon, missing=missing,
+        status="not_applicable" if not rows and not missing and not summary else None,
         sources=[SRC_ART140, SRC_ART142V, SRC_ART5],
         assumptions=["Domestic dividends accumulate with a credit for the corporate ISR shown on the constancia "
                      "(Art. 140): the dividend times 1.4286 times 30%, added to income (piramidación) and credited; "
@@ -1847,7 +1867,13 @@ def _us_1099(book: _Book, scope: set[str]) -> tuple[dict, dict, Decimal | None]:
                                  "the 61-day holding period."))
     totals = {"dividends_usd": _m(_sum(_d(r["dividends_usd"]) for r in rows)) if rows else _m(ZERO),
               "qualified_dividends_usd": _m(_sum(_d(r["qualified_dividends_usd"]) for r in rows)) if rows else _m(ZERO),
-              "interest_usd": _m(_sum(_d(r["interest_usd"]) for r in rows)) if rows else _m(ZERO)}
+              "interest_usd": _m(_sum(_d(r["interest_usd"]) for r in rows)) if rows else _m(ZERO),
+              # What goes on the return: each account's 1099 figure where there is one, else the ledger's.
+              "ordinary_dividends_to_report_usd": _m(_sum(_d(r["form_ordinary_dividends_usd"])
+                                                          if r["form_ordinary_dividends_usd"] is not None
+                                                          else _d(r["dividends_usd"]) for r in rows)) if rows else _m(ZERO),
+              "interest_to_report_usd": _m(_sum(_d(r["form_interest_usd"]) if r["form_interest_usd"] is not None
+                                                else _d(r["interest_usd"]) for r in rows)) if rows else _m(ZERO)}
     section = _section(
         sid, "Resumen 1099-DIV / 1099-INT", "1099-DIV / 1099-INT summary", "US", currency="USD", summary=totals,
         columns=_cols(("account", "Cuenta", "Account"), ("dividends_usd", "Dividendos (ledger)", "Dividends (ledger)"),
@@ -2453,7 +2479,10 @@ def _jurisdictions(inputs: Mapping[str, Any], book: _Book) -> tuple[list[str], s
         if isinstance(country, str) and country.upper() in {"MX", "US"}:
             country = country.upper()
             codes, basis = [country], "country of residence (tax residence assumed there)"
-    if profile.get("us_person") is True and "US" not in codes:
+    citizenship = profile.get("citizenship")
+    # A US citizen is a US person whether or not anyone wrote us_person.
+    citizen = isinstance(citizenship, list) and any(str(c).strip().upper() in {"US", "USA"} for c in citizenship)
+    if (profile.get("us_person") is True or (citizen and profile.get("us_person") is not False)) and "US" not in codes:
         codes.append("US")
         basis += "; US person (citizen or green card): US tax on worldwide income"
     return sorted(set(codes)), basis if codes else "unknown"
@@ -2686,6 +2715,8 @@ _SUMMARY_LABELS = {
     "loss_limit_usd": ("Límite de pérdida deducible", "Deductible loss limit"),
     "dividends_usd": ("Dividendos", "Dividends"), "qualified_dividends_usd": ("Dividendos calificados", "Qualified"),
     "interest_usd": ("Intereses", "Interest"), "total_usd": ("Total", "Total"),
+    "ordinary_dividends_to_report_usd": ("Dividendos ordinarios a declarar", "Ordinary dividends to report"),
+    "interest_to_report_usd": ("Intereses a declarar", "Interest to report"),
     "uma_daily_mxn": ("UMA diaria", "Daily UMA"), "ppr_from_ledger_mxn": ("Aportaciones PPR (ledger)", "PPR deposits (ledger)"),
 }
 
