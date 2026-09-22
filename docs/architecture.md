@@ -132,7 +132,7 @@ Financial engines
 | `protection.py` | Life, disability, health and estate checklist; life-event router |
 | `guardrails.py` | Play-money cap, panic circuit breaker, cool-off flags, scam screen |
 | `review.py` | Quarterly review and fee audit |
-| `taxpack.py` | The annual tax pack (MX and US working papers), its CSV files and printable page |
+| `taxpack/` | The annual tax pack (MX and US working papers), its CSV files and printable page: `sources`, `book` (the year read once), `mx`, `us`, `deadlines`, `task` (`run_task`), `render` |
 | `proactive.py` | Today's ranked nudges, the weekly letter, the annual calendar |
 | `monitor.py` | Opt-in, caller-driven rule evaluation |
 | `managers.py` | SEC 13F search, holdings, profiles, comparison and mirror sizing |
