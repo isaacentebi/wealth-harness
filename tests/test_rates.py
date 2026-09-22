@@ -683,3 +683,12 @@ def test_a_dismissed_idle_cash_nudge_returns_only_after_a_half_point_move_from_w
         moved = _idle(facts, db, day)
         assert (proactive._hidden(moved, state, date.fromisoformat(day)) is not None) is hidden, (day, value)
         assert (item["id"] in proactive.acknowledge(state, [moved], date.fromisoformat(day))["acknowledged"]) is hidden
+
+
+def test_a_saved_rate_is_not_listed_again_as_the_fetched_default_tenor(db):
+    seed(db, token=Token("t"))
+    service, _ = _client(db, MX, {"low": 7, "unit": "percent", "source": "CETES 28 days, mi banco", "currency": "MXN"})
+    report = service.run("reference_rates", {"currency": "MXN", "as_of": "2026-09-22"}, client_id="ana")
+    assert [r["origin"] for r in report["result"]["rates"]] == ["saved_fact"]
+    others = {r["series"] for r in report["result"]["other_tenors"]}
+    assert others and "mx_cetes_28d" not in others  # the longer tenors are still listed

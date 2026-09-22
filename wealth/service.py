@@ -645,7 +645,8 @@ class WealthService:
         saved, household = _saved_reference_rate(snapshot, today)
         refs = [ref for ref in (rates_module.reference(c, fact=saved, db_path=self.db_path, on=on, household=household)
                                 for c in wanted) if ref is not None]
-        shown = {r["series"] for r in refs}
+        # A saved rate stands in for its currency's default series: that tenor is not listed again beside it.
+        shown = {r["series"] for r in refs} | {rates_module.DEFAULT_SERIES[r["currency"]] for r in refs}
         tenors = [{k: r[k] for k in ("series", "name", "rate", "percent", "as_of", "source", "stale")}
                   for r in rates_module.status(self.db_path, on, refresh=False)["rates"]
                   if r.get("origin") == "fetched" and r["currency"] in wanted and r["series"] not in shown]
