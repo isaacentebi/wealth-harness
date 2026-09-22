@@ -32,8 +32,12 @@ _EASTERN = ZoneInfo("America/New_York")
 REFERENCE_MAX_AGE_DAYS = 5
 # Estimated commission rate and the tax charged on it, per broker label.  Mexican brokerage commissions carry 16% IVA.
 # These are typical published retail rates, shown as estimates; the person's contract governs.
+# GBM+ publishes "hasta 0.25% + IVA" per trade with a minimum commission of MXN 20 per trade (before IVA); the
+# minimum is shown as part of the estimate and applies to peso trades only.
 FEE_SCHEDULES: dict[str, dict[str, Any]] = {
-    "GBM": {"rate": Decimal("0.0025"), "vat": Decimal("0.16"), "basis": "0.25% + IVA (estimate)"},
+    "GBM": {"rate": Decimal("0.0025"), "vat": Decimal("0.16"), "minimum": {"MXN": Decimal("20")},
+            "basis": "hasta 0.25% + IVA (estimado)",
+            "basis_minimum": "hasta 0.25% + IVA, mínimo MXN 20 por operación (estimado)"},
     "_MX": {"rate": Decimal("0.0025"), "vat": Decimal("0.16"), "basis": "about 0.25% + IVA (typical; check your contract)"},
     "_US": {"rate": Decimal("0"), "vat": Decimal("0"), "basis": "no commission on US stocks and ETFs online (typical)"},
 }
@@ -52,8 +56,8 @@ _MX_SYMBOL = re.compile(r"^[A-Z][A-Z0-9&\-]{0,13}$")
 
 # (symbol, listing, currency) -> {price, date, currency, source} | None
 Quote = Callable[[str, str, str], "dict[str, Any] | None"]
-# (base, quote) -> rate | None
-Fx = Callable[[str, str], "Decimal | None"]
+# (base, quote) -> rate | (rate, date) | {rate, date} | None
+Fx = Callable[[str, str], Any]
 
 
 def default_quote(db_path: Any) -> Quote:
@@ -86,7 +90,7 @@ def default_fx(db_path: Any) -> Fx:
             return None
         rates = found.get("rates") or []
         try:
-            return Decimal(str(rates[-1]["rate"])) if rates else None
+            return (Decimal(str(rates[-1]["rate"])), rates[-1].get("date")) if rates else None
         except (InvalidOperation, KeyError):
             return None
     return fx
@@ -141,6 +145,12 @@ class ManualBroker:
         self._fx = fx or default_fx(db_path)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self.audit = None
+        self.fx_as_of: str | None = None
+        # A dollar account at a Mexican broker (GBM "Trading USA") buys US listings in USD, not SIC listings in MXN.
+        self.dollar_account = self.market == "MX" and self.currency == "USD"
+
+    def use_clock(self, clock: Callable[[], datetime]) -> None:
+        self._clock = clock
 
     def __repr__(self) -> str:
         return f"ManualBroker(label={self.label!r}, market={self.market!r})"
@@ -149,7 +159,7 @@ class ManualBroker:
     def listing(self, symbol: str, hint: Any = None) -> tuple[str, bool]:
         """``(listing, assumed)``: SIC, BMV or BIVA at a Mexican broker, US at a US one."""
         wanted = LISTINGS.get(str(hint or "").strip().upper())
-        if self.market == "US":
+        if self.market == "US" or self.dollar_account:
             return "US", False
         if wanted in ("BMV", "BIVA", "SIC"):
             return wanted, False
@@ -170,17 +180,31 @@ class ManualBroker:
 
     def fee(self, amount: Decimal | None) -> tuple[Decimal | None, str]:
         schedule = FEE_SCHEDULES.get(self.label) or FEE_SCHEDULES["_MX" if self.market == "MX" else "_US"]
+        minimum = (schedule.get("minimum") or {}).get(self.currency)
+        basis = schedule.get("basis_minimum") if minimum is not None else schedule["basis"]
         if amount is None:
-            return None, schedule["basis"]
-        fee = (amount * schedule["rate"] * (1 + schedule["vat"])).quantize(Decimal("0.01"))
-        return fee, schedule["basis"]
+            return None, basis
+        commission = amount * schedule["rate"]
+        if minimum is not None and commission < minimum:
+            commission = minimum
+        fee = (commission * (1 + schedule["vat"])).quantize(Decimal("0.01"))
+        return fee, basis
 
     def fx_to_usd(self) -> Decimal | None:
         """USD per unit of the ticket currency (for the card's FX line); ``None`` when the ticket is in USD."""
         if self.currency == "USD":
             return None
-        rate = self._fx("USD", self.currency)
-        return rate if rate and rate > 0 else None
+        found = self._fx("USD", self.currency)
+        rate, day = found, None
+        if isinstance(found, tuple):
+            rate, day = (found + (None,))[:2]
+        elif isinstance(found, Mapping):
+            rate, day = _dec(found.get("rate")), found.get("date")
+        rate = _dec(rate) if rate is not None else None
+        if not rate or rate <= 0:
+            return None
+        self.fx_as_of = str(day)[:10] if day else None
+        return rate
 
     # -- OrderBroker reads
     def account_state(self) -> dict[str, Any]:
@@ -216,13 +240,16 @@ class ManualBroker:
         """A reference close (``reference: True``), never a live quote."""
         listing = listing or self.listing(symbol)[0]
         found = self._quote(symbol, listing, self.currency)
+        why = (f"Wealth has no {self.currency} close for {symbol}; a {self.label} dollar account trades it in "
+               "USD and Wealth does not convert a peso price") if self.dollar_account else None
         if not found:
-            return None
+            return {"price": None, "at": None, "reference": True, "reason": why} if why else None
         price = _dec(found.get("price"))
         if price is None or price <= 0:
-            return None
+            return {"price": None, "at": None, "reference": True, "reason": why} if why else None
         if str(found.get("currency") or self.currency).upper() != self.currency:
-            return None
+            return {"price": None, "at": None, "reference": True, "reason": why or (
+                f"the close Wealth has for {symbol} is in {found.get('currency')}, not {self.currency}")}
         return {"price": _s(price), "at": found.get("date"), "reference": True, "source": found.get("source")}
 
     def positions(self) -> list[dict[str, Any]]:

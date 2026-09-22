@@ -1278,14 +1278,20 @@ CATALOG: dict[str, dict[str, Any]] = {
                    "power, the accepted IPS, live per-order and daily limits, duplicates, market hours, a limit price "
                    "collared around the last trade, estimated tax and cost) and returns a ticket id and a summary. It "
                    "never places an order: the person confirms its card in the Wealth web app (wealth-chat). inputs {ticket_id} "
-                   "alone reads a stored ticket's state instead.",
+                   "alone reads a stored ticket's state instead. inputs {ticket_id, placed: true} records that the "
+                   "person placed a place-it-yourself ticket at their broker (only when they say so; outside the "
+                   "Wealth app it returns needs_person with a code: show it and, on their yes, call again with "
+                   "confirm: true and confirmation_code inside inputs); it never sends anything. When the person "
+                   "names a broker or account, orders[].account_id is required: with several brokerage accounts "
+                   "and none named the result is needs_input listing them.",
         "required": ["orders [{symbol, side: buy|sell, qty | notional (USD)}] (a rebalance trade's instrument_id, "
                      "quantity and estimated_amount are accepted)",
                      "rationale (one or two sentences the person reads)", "client_id (a ticket belongs to a person)"],
         "optional": ["source: rebalance|manager_mirror|user_request (default user_request)",
                      "orders[].type: limit (default) | market (paper only)", "orders[].limit_price (default: last "
                      "trade +/- half the collar)", "orders[].time_in_force: day (default) | gtc (whole shares)",
-                     "orders[].account_id (one account per ticket; it picks the broker), estimated_tax, "
+                     "orders[].account_id (one account per ticket; it picks the broker; required when the person "
+                     "names a broker), estimated_tax, "
                      "estimated_cost, asset_class, sleeve, domicile, tags",
                      "orders[].exchange: SIC | BMV | BIVA for a Mexican broker (default: SIC for foreign shares, BMV "
                      "for known Mexican issuers)",

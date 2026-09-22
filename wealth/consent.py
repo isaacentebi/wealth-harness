@@ -329,6 +329,39 @@ def matches_choice(message: str, choice: str) -> bool:
     return bool(phrases) and "?" not in raw and "¿" not in raw and _has(_fold(raw), phrases)
 
 
+# The person saying they placed a place-it-yourself order at their broker ("Ya la puse").
+_PLACED = (
+    "ya la puse", "ya lo puse", "ya las puse", "ya los puse", "la puse", "lo puse", "ya quedo puesta",
+    "ya quedo puesto", "ya esta puesta", "ya esta puesto", "ya la coloque", "ya lo coloque", "ya las coloque",
+    "ya los coloque", "la coloque", "ya la meti", "ya lo meti", "ya la mande", "ya lo mande", "ya la hice",
+    "ya compre", "ya lo compre", "ya la compre", "ya los compre", "ya las compre", "ya vendi", "ya lo vendi",
+    "ya la vendi", "ya los vendi", "ya las vendi", "ya quedo la orden", "ya puse la orden", "puse la orden",
+    "coloque la orden", "ya coloque la orden", "ya hice la compra", "ya hice la venta",
+    "i placed it", "i placed the order", "i placed them", "i placed the orders", "placed it", "i've placed it",
+    "ive placed it", "i have placed it", "i put it in", "i put the order in", "i submitted it", "order placed",
+    "it's placed", "its placed", "i bought it", "i bought them", "i sold it", "i sold them", "done, placed",
+    "just placed it", "i just placed it",
+)
+
+
+def says_placed(message: str) -> bool:
+    """Whether the person's own message says they placed the order themselves ("ya la puse", "I placed it").
+
+    Never with a question, a negation or a condition ("todavía no la pongo", "ya la puse, pero a otro precio").
+    """
+    raw = str(message or "")
+    text = _fold(raw)
+    if not text or "?" in raw or "¿" in raw or _has(text, _NEGATIONS) or _has(text, _HEDGES) \
+            or _has(text, _NOT_PLACED):
+        return False
+    return _has(text, _PLACED)
+
+
+_NOT_PLACED = ("haven't", "havent", "have not", "hasn't", "hasnt", "didn't", "didnt", "did not", "won't", "wont",
+               "will", "going to", "gonna", "voy a", "la pongo", "lo pongo", "la voy", "lo voy", "manana", "tomorrow",
+               "yet", "aun", "todavia", "falta", "pendiente")
+
+
 # --------------------------------------------------------------------------- numbers
 
 _NUMBER_WORDS = {

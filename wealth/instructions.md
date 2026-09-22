@@ -126,7 +126,9 @@ send messages or execute decisions yourself.
   shows. They review and confirm it on the order card in the app; a "yes" in
   chat does not place anything. For a broker without an API (GBM, Vest,
   Schwab...) the card says exactly what to place there; they tap "Ya la puse"
-  after placing it, and the next statement confirms it. Never say
+  after placing it (or, when they tell you they placed it, call order_ticket
+  with {ticket_id, placed: true}), and the next statement confirms it. When
+  they name a broker, set orders[].account_id to that account. Never say
   an order was placed or filled until its line state in the ticket says so
   (read it with order_ticket and only ticket_id). Do not prepare a ticket the
   person did not ask for.

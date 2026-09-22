@@ -1176,6 +1176,24 @@ class WealthService:
     def _order_ticket(self, inputs: dict, client_id: str | None, snapshot: dict) -> dict:
         """Propose an order ticket, or read one (inputs {ticket_id}).  Never submits, never refreshes."""
         from .execution import tickets
+        if "placed" in inputs:
+            # The person says they placed a place-it-yourself ticket.  The MCP tool gates this on their own words
+            # (a Wealth turn) or on a needs_person code (another host); it only marks a manual ticket, never sends.
+            extra = sorted(set(inputs) - {"ticket_id", "placed"})
+            if extra or inputs.get("placed") is not True or not isinstance(inputs.get("ticket_id"), str):
+                raise ValueError("to record a place-it-yourself order the person placed, inputs are exactly "
+                                 "{ticket_id, placed: true}" + (f"; unknown {extra}" if extra else ""))
+            if not client_id:
+                raise ValueError("recording a placed order needs client_id")
+            with WealthStore(self.db_path) as store:
+                view = tickets.mark_placed(store, client_id, inputs["ticket_id"])
+            return {"status": "ready", "result": {"ticket": view, "summary": (
+                        f"Recorded: the person placed ticket {view['id']} at {view['broker_label']} themselves "
+                        "(placed_via mcp, not yet verified). Wealth sent nothing; the next statement or sync "
+                        "confirms it.")},
+                    "missing": [], "warnings": [], "sources": [],
+                    "assumptions": ["The person's word until a statement or sync shows the trade: say it is "
+                                    "awaiting confirmation, never that it filled."]}
         if set(inputs) == {"ticket_id"}:
             if not client_id:
                 raise ValueError("reading a ticket needs client_id")
