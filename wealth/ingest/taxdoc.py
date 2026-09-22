@@ -184,7 +184,9 @@ _WORDS_US = {
                   ("ira_contributions", r"ira\s+contributions")),
 }
 _BOX = re.compile(r"^(?:box\s+)?(\d{1,2}[a-h]?)\b\s*")
-_BOX_REF = re.compile(r"\(\s*box\s+(\d{1,2}[a-h]?)\b")
+# A title ending in its box, "Total ordinary dividends (Box 1a)"; prose that only mentions a box mid-sentence
+# ("contributions reported in (Box 10) include") is not that box's value.
+_BOX_REF = re.compile(r"\(\s*box\s+(\d{1,2}[a-h]?)\s*\)\s*[:.\-]?\s*$")
 
 
 def _segments(line: str) -> list[tuple[str, str]]:
