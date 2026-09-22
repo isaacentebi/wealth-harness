@@ -60,7 +60,7 @@ def test_brief_shows_the_fixed_interest():
 def test_a_debt_payment_without_a_rate_makes_the_surplus_unknown():
     # Repro sit1: a USD car payment with no USD/MXN rate used to count as 0 (surplus 40,000, complete).
     car = {"kind": "auto", "balance": 20000, "currency": "USD", "annual_rate": 0.08, "payment": 1000,
-           "payment_frequency": "monthly"}
+           "payment_frequency": "monthly", "in_spending": False}
     flow = build(_snap({**BASE, "liability.car": car}), None, TODAY)["cash_flow"]
     assert flow["surplus"] is None and flow["complete"] is False
     assert flow["debt_payments"] is None and flow["missing_fx"] == ["USD/MXN"]

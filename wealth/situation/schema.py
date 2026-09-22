@@ -70,6 +70,9 @@ SCHEMA: dict[str, dict[str, str]] = {
     "investment.<id>": {
         "amount": "number (a stated balance; statements replace it)", "currency": "ISO 4217",
         "institution?": "name", "kind?": "brokerage|retirement|afore|fund|other", "approximate?": "true|false",
+        "purpose?": "reserve|general|goal:<goal id> (only as the person stated it)",
+        "liquidity_days?": "days to get the money out (1 daily, 28 CETES at 28 days); counts toward the reserve "
+                           "when 31 or less",
     },
     "goals": {
         "[]": "list; merge by id",
@@ -80,6 +83,8 @@ SCHEMA: dict[str, dict[str, str]] = {
         "liability?": "liability.<id> key a pay_off goal pays down",
         "priority?": "|".join(GOAL_PRIORITIES), "status?": "|".join(GOAL_STATUSES) + " (default active)",
         "protect_now?": "true to reserve the target from current capital",
+        "funded_amount?": "number already set aside for it (\"tengo 400k apartados\"), in the goal currency",
+        "accounts?": "fact keys of the money earmarked for it (cash.<id>, investment.<id>)",
     },
     "reserve": {"target_months?": "number", "target_amount?": "number", "currency?": "ISO 4217",
                 "funded_by?": "list of cash.<id> ids"},
@@ -88,6 +93,8 @@ SCHEMA: dict[str, dict[str, str]] = {
         "status": "|".join(THREAD_STATUSES), "created?": "YYYY-MM-DD (defaults to observed_on)",
         "related?": "list of fact keys", "resolution?": "how it was resolved or why it was revised",
     },
+    "constraint.<id>": {"note": "a stated limit or condition; never a payment (liability.<id>.payment), a balance "
+                                "or a set-aside amount (goals funded_amount)"},
     "preference.risk": {"drop_reaction?": "|".join(DROP_REACTIONS) + " after a 20% fall",
                         "experience?": "|".join(EXPERIENCE)},
     "onboarding": {"steps": "{" + "|".join(ONBOARDING_STEPS) + ": done|skipped|pending|unsure}",
@@ -323,10 +330,7 @@ def _cash(value: dict, key: str) -> None:
     _number(value.get("amount"), f"{key}.amount", required=value.get("balance_unknown") is not True)
     _currency(value.get("currency"), f"{key}.currency")
     _text(value.get("institution"), f"{key}.institution", limit=80)
-    purpose = value.get("purpose")
-    if purpose is not None and purpose not in ("reserve", "general") and not (
-            isinstance(purpose, str) and purpose.startswith("goal:") and _ID.match(purpose[5:])):
-        _fail(f"{key}.purpose", "must be reserve, general or goal:<goal id>")
+    _purpose(value.get("purpose"), f"{key}.purpose")
     _bool(value.get("liquid"), f"{key}.liquid")
     _text(value.get("name"), f"{key}.name")
     _bool(value.get("approximate"), f"{key}.approximate")
@@ -357,9 +361,19 @@ def _liability(value: dict, key: str) -> None:
     _text(value.get("note"), f"{key}.note")
 
 
+def _purpose(value: Any, path: str) -> None:
+    if value is not None and value not in ("reserve", "general") and not (
+            isinstance(value, str) and value.startswith("goal:") and _ID.match(value[5:])):
+        _fail(path, "must be reserve, general or goal:<goal id>")
+
+
 def _investment(value: dict, key: str) -> None:
     _object(value, key, {"amount", "currency", "institution", "kind", "name", "approximate", "note",
-                         "balance_unknown"})
+                         "balance_unknown", "purpose", "liquidity_days"})
+    _purpose(value.get("purpose"), f"{key}.purpose")
+    days = value.get("liquidity_days")
+    if days is not None and (isinstance(days, bool) or not isinstance(days, int) or not 0 <= days <= 36600):
+        _fail(f"{key}.liquidity_days", "must be a whole number of days")
     _bool(value.get("balance_unknown"), f"{key}.balance_unknown")
     _number(value.get("amount"), f"{key}.amount", required=value.get("balance_unknown") is not True)
     _currency(value.get("currency"), f"{key}.currency")
@@ -387,9 +401,9 @@ def _goals(value: Any, key: str) -> None:
         _text(goal.get("name"), f"{path}.name", required=True, limit=120)
         _enum(goal.get("action"), f"{path}.action", GOAL_ACTIONS)
         _text(goal.get("object"), f"{path}.object", limit=120)
-        for name in ("target_amount", "monthly_contribution"):
+        for name in ("target_amount", "monthly_contribution", "funded_amount"):
             _number(goal.get(name), f"{path}.{name}", required=False)
-        if (goal.get("target_amount") is not None or goal.get("monthly_contribution") is not None) \
+        if any(goal.get(n) is not None for n in ("target_amount", "monthly_contribution", "funded_amount")) \
                 and goal.get("currency") is None:
             _fail(f"{path}.currency", "is required with an amount")
         _currency(goal.get("currency"), f"{path}.currency", required=False)
@@ -402,6 +416,10 @@ def _goals(value: Any, key: str) -> None:
         if liability is not None and (not isinstance(liability, str) or not liability.startswith("liability.")
                                       or len(liability) > 120):
             _fail(f"{path}.liability", "must be the key of a debt, such as 'liability.auto'")
+        accounts = goal.get("accounts")
+        if accounts is not None and (not isinstance(accounts, list) or not all(
+                isinstance(a, str) and a.startswith(("cash.", "investment.")) and len(a) <= 120 for a in accounts)):
+            _fail(f"{path}.accounts", "must be a list of fact keys such as 'cash.nu' or 'investment.cetes'")
 
 
 def _reserve(value: dict, key: str) -> None:
@@ -544,6 +562,19 @@ def _follow(value: dict, key: str) -> None:
             _fail(f"{key}.mirror.top_n", "must be a whole number from 1")
 
 
+_PAYMENT_WORDS = re.compile(r"(^|[_-])(payment|pago|mensualidad)s?($|[_-])")
+
+
+def _constraint(value: Any, key: str) -> None:
+    """A constraint is a condition, not money: a debt payment belongs on its liability."""
+    rest = key.partition(".")[2]
+    amount = isinstance(value, dict) and (value.get("payment") is not None or value.get("amount") is not None
+                                          or re.search(r"\d", str(value.get("text") or "")))
+    if (_PAYMENT_WORDS.search(rest) and amount) or (isinstance(value, dict) and value.get("payment") is not None):
+        _fail(key, "is a debt payment: save it on the debt as liability.<id> {payment, payment_frequency} "
+                   "(merge=true), not as a constraint")
+
+
 def _validator(key: str) -> Callable[[Any, str], None] | None:
     if key == "policy.ips":
         return _policy_ips
@@ -565,7 +596,7 @@ def _validator(key: str) -> Callable[[Any, str], None] | None:
     if head == "income" and key not in LEGACY_KEYS:
         return _income
     return {"cash": _cash, "liability": _liability, "investment": _investment, "thread": _thread,
-            "follow": _follow}.get(head)
+            "follow": _follow, "constraint": _constraint}.get(head)
 
 
 def out_of_range(value: Any, path: str = "value") -> str | None:
@@ -609,7 +640,7 @@ def validate(key: str, value: Any) -> list[str]:
         return []
     check = _validator(key)
     if check is not None:
-        if check not in (_goals, _risk) and not isinstance(value, dict):
+        if check not in (_goals, _risk, _constraint) and not isinstance(value, dict):
             _fail(key, "must be an object")
         check(value, key)
         return []

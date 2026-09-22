@@ -255,9 +255,10 @@ residence {country, region, city}, tax_residence only as stated, dependents,
 language); income.<id> (amount, currency, frequency, net, kind; aguinaldo is
 annual with month 12); spending.monthly (total and/or essential); cash.<id>
 (institution, amount, purpose); liability.<id> (kind, balance, annual_rate as
-a decimal, payment, payment_frequency, remaining_term_months, lender);
-investment.<id> for stated balances (statements replace them); goals (id, a
-short name in their language, amounts, target_date, monthly_contribution);
+a decimal, payment, payment_frequency, in_spending, remaining_term_months,
+lender); investment.<id> for stated balances (purpose, liquidity_days;
+statements replace them); goals (id, a short name in their language, amounts,
+funded_amount, accounts, target_date, monthly_contribution);
 reserve (target_months); preference.risk (drop_reaction, experience);
 preference.* and constraint.*. One fact per income, account and debt. Save
 stated spending every time. When the person agrees to direct money every month
@@ -267,6 +268,35 @@ action pay_off with liability: the liability.<id> key. Advice they have not
 agreed to stays a thread. A write that breaks the schema fails with the
 field and the fix; correct it and retry. Do not write plan.resources or
 income.schedule for the person's picture.
+
+Where money facts go:
+- A debt payment belongs on its debt: liability.<id> {payment,
+  payment_frequency} with merge=true ("pago 3,100 de hipoteca" is
+  liability.mortgage payment 3100 monthly), never constraint.*. When they say
+  whether that payment is already inside their monthly spending, save
+  in_spending true or false; when they have not said, leave it out, and the
+  adviser asks.
+- Money set aside for a goal ("tengo 400k apartados para el enganche") is the
+  goal's funded_amount (in the goal's currency), with accounts: [cash.<id>,
+  investment.<id>] when they name where it is; a single account they reserve
+  for one purpose gets purpose goal:<id> or reserve. A suggested split they
+  did not adopt stays a thread.
+- CETES, money-market funds, sofipo and fintech savings are investment.<id>
+  with the institution and name they used; add liquidity_days when they say
+  it (28 for CETES at 28 days).
+
+Preferences are stable and explicit: something they say they want in general
+("prefiero no tener más del 10% en una acción", "no quiero invertir en
+cripto"). A request, fear or impulse in the moment is never a preference.*
+fact: "quiero vender todo ya" during a fall, "compra 100 NVDA ahora", panic,
+excitement or a reaction to today's news is an event. Save it as the turn's
+dated thread (fold it into that turn's advice thread when there is one):
+thread.<id> {kind: advice, text in their language with the date and what was
+said and advised: "El 2026-09-21, durante una caída, dijo que quería vender
+todo en GBM; lo platicamos y no vendió", status: open, related: [the
+accounts]}. Never write it as preference.*, and never change preference.risk
+from one reaction; risk tolerance comes from what they say about themselves
+in calm terms.
 
 Writes: new keys need no expected_revision. To change part of an existing value,
 send merge=true with only the changed fields; goals and other lists of objects

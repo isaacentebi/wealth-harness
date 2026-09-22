@@ -76,6 +76,7 @@ _B = {
            "src_stated": "declarado", "src_ledger": "movimientos {n} meses", "essential_only": ", solo esenciales; el excedente aún cubre otros gastos", "without": " (falta el pago de {x}; antes de ese pago quedan {k}; pregúntalo)",
            "commit": "Excedente comprometido {t} ({items}); sin asignar {u}", "over": " · sobrecomprometido",
            "reserve": "Reserva {a} = {m} meses de gasto {b}; meta {t}", "unset": "sin definir",
+           "r_cash": "efectivo", "inside": " (no sé si el pago de {x} ya está dentro del gasto: el excedente es {lo} si no lo está, {hi} si sí; pregúntalo)",
            "b_essential": "esencial", "b_total": "total",
            "debt": "Deuda {n}: {b} al {r}; pago {p}/mes; {when}", "paid": "liquida {d}", "missing": "falta {x}",
            "never": "no se liquida con ese pago", "interest": ", intereses {x}",
@@ -97,6 +98,7 @@ _B = {
            "src_stated": "stated", "src_ledger": "{n} months of transactions", "essential_only": ", essentials only; the surplus still covers other spending", "without": " (the {x} payment is missing; {k} before it; ask for it)",
            "commit": "Surplus committed {t} ({items}); unallocated {u}", "over": " · overcommitted",
            "reserve": "Reserve {a} = {m} months of {b} spending; target {t}", "unset": "not set",
+           "r_cash": "cash", "inside": " (unknown whether the {x} payment is already inside spending: surplus {lo} if not, {hi} if so; ask)",
            "b_essential": "essential", "b_total": "total",
            "debt": "Debt {n}: {b} at {r}; payment {p}/month; {when}", "paid": "paid off {d}", "missing": "missing {x}",
            "never": "never at this payment", "interest": ", interest {x}",
@@ -198,6 +200,10 @@ def brief(sit: Mapping[str, Any], language: str | None = None) -> str:
         if flow["debt_payments_unknown"] and before is not None:
             names = [liability_name(r, lang) for r in sit["liabilities"] if r["id"] in flow["debt_payments_unknown"]]
             line += t["without"].format(x=", ".join(names), k=fmt(before))
+        span = flow.get("surplus_range")
+        if flow.get("in_spending_unknown") and span:
+            names = [liability_name(r, lang) for r in sit["liabilities"] if r["id"] in flow["in_spending_unknown"]]
+            line += t["inside"].format(x=", ".join(names), lo=fmt(span["low"]), hi=fmt(span["high"]))
         lines.append((2, line))
     commitments = sit["commitments"]
     if commitments["items"]:
@@ -210,7 +216,13 @@ def brief(sit: Mapping[str, Any], language: str | None = None) -> str:
     if reserve["amount"] is not None:
         target = fmt(reserve["target_months"]) + (" m" if lang == "en" else " m") if reserve["target_months"] is not None \
             else fmt(reserve["target_amount"]) if reserve["target_amount"] is not None else t["unset"]
-        lines.append((4, t["reserve"].format(a=fmt(reserve["amount"]), m=fmt(reserve["months"], 1) if reserve["months"] is not None else "?",
+        parts = reserve.get("parts") or []
+        amount = fmt(reserve["amount"])
+        if len(parts) > 1 or any(p["kind"] == "instrument" for p in parts):
+            # What it is made of: "60,000 efectivo + 180,000 CETES = 240,000".
+            amount = " + ".join(f"{fmt(p['value'])} {t['r_cash'] if p['kind'] == 'cash' else p['label']}"
+                                for p in parts) + f" = {amount}"
+        lines.append((4, t["reserve"].format(a=amount, m=fmt(reserve["months"], 1) if reserve["months"] is not None else "?",
                                              b=t["b_" + (reserve["spending_basis"] or "total")], t=target)))
     for index, row in enumerate(sit["liabilities"]):
         if index == 2:

@@ -394,7 +394,7 @@ def _surplus(run: _Run) -> None:
         # The adviser already said where this money goes: never call it "sin destino". Ask whether it is
         # happening instead, and say nothing once the person committed to it.
         thread, target, committed = advised
-        if committed:
+        if committed or target is None:
             return
         run.items.append(_item(
             "follow_through", thread["id"], severity="consider", priority="opportunity",
@@ -522,10 +522,28 @@ def _near(value: Decimal | None, amount: Decimal) -> bool:
     return value is not None and amount > 0 and abs(value - amount) <= SURPLUS_ADVICE_TOLERANCE * amount
 
 
-def _advice_target(run: _Run, thread: Mapping[str, Any]) -> tuple[str, str]:
+_RESERVE_WORDS = re.compile(r"\breserv|fondo de emergencia|colch[oó]n|emergency fund", re.I)
+
+
+def _reserve_first(run: _Run) -> bool:
+    """The reserve comes before paying a debt faster: it is below its target, or open advice sends money to it."""
+    reserve = run.sit.get("reserve") or {}
+    months, target = D(reserve.get("months")), D(reserve.get("target_months"))
+    if months is not None and target is not None and months < target:
+        return True
+    return any(t.get("kind") in ("advice", "commitment") and _RESERVE_WORDS.search(t.get("text") or "")
+               for t in (run.sit.get("threads") or {}).get("open") or [])
+
+
+def _advice_target(run: _Run, thread: Mapping[str, Any]) -> tuple[str, str] | None:
+    """Where the advised surplus goes; None when that is a debt prepayment the reserve comes before."""
+    if _RESERVE_WORDS.search(thread.get("text") or ""):
+        return ("to your emergency fund", "a tu reserva")
     related = [k for k in thread.get("related") or [] if isinstance(k, str)]
     for liability in run.sit.get("liabilities") or []:
         if liability.get("key") in related:
+            if _reserve_first(run):
+                return None
             if liability.get("kind") in _TARGETS:
                 return _TARGETS[liability["kind"]]
             lender = liability.get("lender") or liability.get("name")
@@ -579,7 +597,8 @@ def _reserve(run: _Run) -> None:
         run.missing("reserve_low", *(["reserve cash"] if amount is None else []),
                     *(["essential spending"] if months is None else []))
         return
-    sources = ["reserve", *(f"cash.{s}" for s in reserve.get("sources") or []), run.sit["spending"].get("key") or "ledger"]
+    sources = ["reserve", *(reserve.get("source_keys") or (f"cash.{s}" for s in reserve.get("sources") or [])),
+               run.sit["spending"].get("key") or "ledger"]
     if target is None:
         run.missing("reserve_low", "reserve.target_months")
     elif months < target:
@@ -722,7 +741,12 @@ def _idle_yield(run: _Run) -> None:
     if keep is None:
         run.missing("idle_yield", f"FX {run.currency}/{currency} for the reserve target")
         return
-    idle = pool - keep - protected
+    # The reserve is filled by cash-like instruments first (CETES, money-market funds): only the rest of the
+    # target has to sit in low-yield cash, and money already in those instruments is never called idle.
+    in_instruments = sum((D(p.get("value")) or Decimal(0) for p in reserve.get("parts") or []
+                          if p.get("kind") == "instrument"), Decimal(0))
+    in_instruments = run.rates.convert(in_instruments, run.currency, currency) or Decimal(0)
+    idle = pool - max(keep - in_instruments, Decimal(0)) - protected
     earned = _cash_yield(run)
     gap_rate = reference["rate"] - (earned or Decimal(0))
     if idle <= 0 or gap_rate <= 0:
@@ -760,12 +784,13 @@ def _idle_yield(run: _Run) -> None:
               "reference_origin": reference["origin"], "reference_stale": stale,
               "cash_yield": num(earned, 4) if earned is not None else None,
               "cash_yield_reason": None if earned is not None else "unknown: save cash_yield to make this exact",
-              "kept": {"reserve_target": num(keep), "protected_goals": num(protected), "goal_earmarked_cash": num(earmarked)},
+              "kept": {"reserve_target": num(keep), "reserve_in_instruments": num(in_instruments),
+                       "protected_goals": num(protected), "goal_earmarked_cash": num(earmarked)},
               "assumptions": ["Rates are gross annual, before the provisional ISR retention on capital that applies to "
                               "bank interest and CETES alike.",
                               "A one-year figure at today's rate; CETES 28 days reprice every week."],
               "offer": rungs},
-        sources=["reserve", *(f"cash.{s}" for s in reserve.get("sources") or []),
+        sources=["reserve", *(reserve.get("source_keys") or (f"cash.{s}" for s in reserve.get("sources") or [])),
                  *([reference["evidence"]] if reference["evidence"] else []),
                  *(["cash_yield"] if earned is not None else [])],
         trigger=[currency, _sig2(idle), str(reference["rate"]), reference["as_of"], earned is None]))

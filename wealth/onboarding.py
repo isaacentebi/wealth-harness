@@ -17,8 +17,10 @@ writer that turns the answer into canonical facts (source ``user``, confidence
   needed.
 
 A step already known from memory (a statement, an earlier conversation) is
-shown prefilled for one-tap confirmation, never asked blank.  A step that is
-done, skipped or unsure is never asked again.
+shown prefilled for one-tap confirmation while the setup flow is running, never
+asked blank.  Outside the flow (someone who told us everything in chat) a known
+step counts as answered: completion comes from the facts, not only from the
+onboarding record.  A step that is done, skipped or unsure is never asked again.
 """
 from __future__ import annotations
 
@@ -217,7 +219,9 @@ def _country(sit: Mapping[str, Any]) -> str | None:
 def _context(sit: Mapping[str, Any]) -> dict:
     country = _country(sit)
     home = HOME_CURRENCY.get(country or "", sit.get("currency") or "MXN")
-    return {"country": country, "home": home, "currencies": ["MXN", "USD"] if home in ("MXN", "USD") else [home, "USD"]}
+    spending = (sit.get("spending") or {}).get("monthly") if (sit.get("spending") or {}).get("source") != "ledger" else None
+    return {"country": country, "home": home, "currencies": ["MXN", "USD"] if home in ("MXN", "USD") else [home, "USD"],
+            "spending": spending, "spending_currency": sit.get("currency")}
 
 
 def _amount_field(name: str, lang: str, ctx: dict, label: dict[str, str] | None = None, *,
@@ -650,9 +654,42 @@ def _debts_fields(lang: str, ctx: dict) -> list[dict]:
                 {"name": "rate", "type": "percent", "label": {"en": "Annual rate", "es": "Tasa anual"}[lang],
                  "required": False},
                 _amount_field("payment", lang, ctx, {"en": "Monthly payment", "es": "Pago mensual"}, required=False),
+                _in_spending_field(lang, ctx),
             ]
         options.append(entry)
     return [{"name": "items", "type": "chips", "options": options, "max": len(options), "required": True}]
+
+
+_IN_SPENDING = [_opt("yes", "Yes, it's included", "Sí, ya está incluido"),
+                _opt("no", "No, it's on top", "No, es aparte")]
+_YES = re.compile(r"^\s*(yes|y|yeah|yep|included|s[ií]|ya|incluido|ya est[aá])\b", re.I)
+_NO = re.compile(r"^\s*(no|nope|aparte|on top|separate|not included)\b", re.I)
+
+
+def _in_spending_field(lang: str, ctx: dict) -> dict:
+    """Asked with every payment: is it already inside the monthly spending they gave?  Unanswered stays unknown."""
+    spending = ctx.get("spending")
+    if spending is not None:
+        amount = money_text(spending, ctx.get("spending_currency") or ctx["home"], ctx["home"])
+        label = {"en": f"Is this payment already inside your {amount} of spending?",
+                 "es": f"¿Este pago ya está dentro de tus {amount} de gasto?"}[lang]
+    else:
+        label = {"en": "Is this payment already inside your monthly spending?",
+                 "es": "¿Este pago ya está dentro de tu gasto mensual?"}[lang]
+    return {"name": "in_spending", "type": "chips", "label": label, "options": _labels(_IN_SPENDING, lang), "max": 1,
+            "required": False}
+
+
+def _in_spending(value: Any) -> bool | None:
+    """yes/no (chip id, bool or a typed sí/no) -> True/False; anything else (unsure, blank) -> None: ask later."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip():
+        if _NO.search(value):
+            return False
+        if _YES.search(value):
+            return True
+    return None
 
 
 def _debts_known(sit) -> bool:
@@ -671,6 +708,8 @@ def _debts_prefill(sit, ctx) -> dict | None:
             detail["rate"] = round(row["annual_rate"] * 100, 4)
         if row.get("monthly_payment") is not None:
             detail["payment"] = {"amount": round(row["monthly_payment"]), "currency": row["currency"]}
+        if isinstance(row.get("in_spending"), bool):
+            detail["in_spending"] = "yes" if row["in_spending"] else "no"
         items[kind] = detail
     return {"items": items} if items else None
 
@@ -704,6 +743,11 @@ def _debts_writer(answer: dict, ctx: dict) -> list[tuple[str, Any]]:
             if payment["currency"] != balance["currency"]:
                 raise ValueError("Enter the payment in the same currency as the balance.")
             value["payment"], value["payment_frequency"] = payment["amount"], "monthly"
+            # Whether the payment is already inside the stated spending: only as answered.  Unknown is left
+            # out, so the picture asks instead of subtracting it twice (or not at all).
+            inside = _in_spending(detail.get("in_spending"))
+            if inside is not None:
+                value["in_spending"] = inside
         facts.append((f"liability.{option}", value))
     return facts
 
@@ -868,7 +912,7 @@ def _risk_fields(lang: str, ctx: dict) -> list[dict]:
 
 def _risk_known(sit) -> bool:
     risk = (sit.get("profile") or {}).get("risk") or {}
-    return bool(risk.get("drop_reaction")) and bool(risk.get("experience"))
+    return bool(risk.get("drop_reaction"))  # experience is optional on the card
 
 
 def _risk_prefill(sit, ctx) -> dict | None:
@@ -1017,10 +1061,37 @@ def card(sit: Mapping[str, Any], step_id: str, language: str | None = None) -> d
     }
 
 
+def in_flow(sit: Mapping[str, Any]) -> bool:
+    """The card-by-card setup is running: started and not completed."""
+    record = _record(sit)
+    return bool(record.get("started_at")) and not record.get("completed_at")
+
+
+def settled(sit: Mapping[str, Any], step: Step) -> bool:
+    """Answered on a card, skipped, or (outside the setup flow) already known from the facts.
+
+    Someone who gave their name, city, income and debts in chat has answered those questions: the setup
+    card never asks them again.  Inside the flow a known step is still shown once, prefilled, to confirm.
+    The statements offer settles with the flow, or, outside it, once every question is settled.
+    """
+    if step_status(sit, step) != "pending":
+        return True
+    if in_flow(sit):
+        return False
+    if step.id == "statements":
+        return all(settled(sit, other) for other in _visible(sit) if other.marks)
+    return step.known(sit)
+
+
+def remaining(sit: Mapping[str, Any]) -> list[str]:
+    """Card ids still to ask, in order (the statements offer included)."""
+    return [step.id for step in _visible(sit) if not settled(sit, step)]
+
+
 def next_step(sit: Mapping[str, Any], language: str | None = None) -> dict | None:
-    """The next unanswered card in order, or ``None`` when every step is done, skipped or unsure."""
+    """The next unanswered card in order, or ``None`` when every step is settled (see :func:`settled`)."""
     for step in _visible(sit):
-        if step_status(sit, step) == "pending":
+        if not settled(sit, step):
             return card(sit, step.id, language)
     return None
 
@@ -1055,16 +1126,30 @@ def picture(sit: Mapping[str, Any], language: str | None = None) -> dict:
         before = m(flow["surplus_before_unknown_debts"])
         parts.append(f"te quedan {before} al mes antes de pagar tus deudas" if lang == "es"
                      else f"{before} left each month before debt payments")
+    elif flow.get("surplus_range"):
+        # A payment that may already be inside their spending: both readings, and the question.
+        span = flow["surplus_range"]
+        parts.append(f"te quedan entre {m(span['low'])} y {m(span['high'])} al mes" if lang == "es"
+                     else f"between {m(span['low'])} and {m(span['high'])} left each month")
     if reserve.get("months") is not None and flow.get("spending") is not None:
         months = reserve["months"]
         shown = f"{months:g}"  # es-MX writes decimals with a point, like en
         parts.append(f"reserva de {shown} meses" if lang == "es" else f"{shown} months of reserve")
     line = " · ".join(parts)
+    reserve_parts = [{"kind": p["kind"], "label": p.get("label"), "value": p.get("value")}
+                     for p in reserve.get("parts") or []]
     return {
         "currency": currency, "net_worth": nw.get("total"), "unknown_balances": nw.get("unknown_balances") or [],
-        "liquid": nw.get("liquid"), "illiquid": nw.get("illiquid"),
+        # "Liquid" on the card is the reserve's money (cash and cash-like instruments such as CETES), so it
+        # always agrees with the reserve months beside it.  Everything liquid, brokerage included, is
+        # ``liquid_total`` (the net-worth split).
+        "liquid": reserve.get("amount") if reserve.get("amount") is not None else None,
+        "liquid_basis": "reserve", "liquid_total": nw.get("liquid"), "illiquid": nw.get("illiquid"),
         "debt": nw.get("liabilities"), "income": flow.get("income"), "spending": flow.get("spending"),
-        "surplus": flow.get("surplus"), "reserve_months": reserve.get("months"), "debts": debts,
+        "surplus": flow.get("surplus"), "surplus_range": flow.get("surplus_range"),
+        "payments_maybe_in_spending": flow.get("in_spending_unknown") or [],
+        "reserve_months": reserve.get("months"), "reserve_amount": reserve.get("amount"),
+        "reserve_parts": reserve_parts, "debts": debts,
         "line": line[:1].upper() + line[1:] if line else "",
     }
 
@@ -1129,6 +1214,12 @@ def build_facts(sit: Mapping[str, Any], step_id: str, answer: Mapping[str, Any] 
     onboarding: dict[str, Any] = {"steps": {name: status for name in step.marks}}
     if not record.get("started_at"):
         onboarding["started_at"] = _now()
+        # Starting the cards after telling us things in chat: what is already known stays answered, so the
+        # flow does not turn those facts back into questions.
+        for other in _visible(sit):
+            if other is not step and other.marks and step_status(sit, other) == "pending" and other.known(sit):
+                for name in other.marks:
+                    onboarding["steps"].setdefault(name, "done")
     if completes and not record.get("completed_at"):
         onboarding["completed_at"] = _now()
     validate("onboarding", {**record, **onboarding, "steps": {**(record.get("steps") or {}), **onboarding["steps"]}})
@@ -1279,6 +1370,6 @@ def brief_line(sit: Mapping[str, Any]) -> str | None:
     return head + ("; " + "; ".join(parts) if parts else "") + " (answered, unsure and skipped are not asked again)"
 
 
-__all__ = ["STEPS", "BY_ID", "apply", "brief_line", "build_facts", "card", "money_text", "next_step",
-           "parse_amount", "parse_free_text", "picture", "progress", "skip", "step_status",
+__all__ = ["STEPS", "BY_ID", "apply", "brief_line", "build_facts", "card", "in_flow", "money_text", "next_step",
+           "parse_amount", "parse_free_text", "picture", "progress", "remaining", "settled", "skip", "step_status",
            "target_chooser"]
