@@ -78,7 +78,7 @@ Memory and the picture
 
 | Module | Role |
 | --- | --- |
-| `store.py` | SQLite: client-scoped facts, revisions, history, contradictions, decisions, ledger tables, `orders` audit |
+| `store.py`, `store_schema.py` | SQLite (DDL in `store_schema.py`): client-scoped facts, revisions, history, contradictions, decisions, ledger tables, `orders` audit |
 | `recall.py` | Bounded keyword and concept retrieval; optional host-supplied vectors |
 | `situation/schema.py` | Canonical fact schema, validated on every write |
 | `situation/model.py` | `build`: one picture from facts and ledger |
