@@ -12,6 +12,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -28,6 +29,7 @@ import time
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from . import appserver as _appserver
 from . import consent as _consent
 from . import views as _views
 from .behavior import INSTRUCTIONS_PATH, ONBOARDING_WELCOME
@@ -120,7 +122,10 @@ class TurnEvent:
 
     type is ``thread`` (data.thread_id), ``progress`` (text is a human step),
     ``memory`` (data.keys were written), ``view`` (data.views: engine-drawn
-    view specs a result offered), ``notice`` or ``answer`` (text).
+    view specs a result offered), ``delta`` (text is the next chunk of the
+    message data.item being written; only the app-server runtime sends them, and
+    a new item starts the text over), ``notice`` or ``answer`` (text: the
+    finished answer, which the deltas of its item add up to).
     """
 
     type: str
@@ -966,6 +971,13 @@ def _stream_process(
         _terminate(process)
 
 
+def _stream_appserver(command: Sequence[str], prompt: str, timeout: float, control: TurnControl | None = None,
+                     cwd: str | Path | None = None, **thread: Any) -> Iterator[tuple]:
+    """One turn over ``codex app-server``: ``_stream_process``'s items plus ``("delta", text, item_id)``."""
+
+    return _appserver.stream(command, prompt, timeout, control, cwd, **thread)
+
+
 # --------------------------------------------------------------------------- deferred memory
 
 WEALTH_TOOLS = frozenset({
@@ -1218,10 +1230,13 @@ def stream_turn(
     attempts: list[str | None] = [thread_id] if thread_id and not ephemeral else []
     attempts.append(None)
     with _consent.turn_env("chat", said, [text for role, text in history if role == "user"]) as evidence:
-        for resume in attempts:
-            command = build_command(
-                model, db_path, web_search=web_search, reasoning=reasoning,
-                resume_thread=resume, ephemeral=ephemeral,
+        index = 0
+        streaming = _appserver.use_appserver()
+        while index < len(attempts):
+            resume = attempts[index]
+            index += 1
+            options = dict(
+                web_search=web_search, reasoning=reasoning,
                 instructions=conversation_instructions() if defer_memory else None,
                 tools=WEALTH_TOOLS - {"wealth_remember"} if defer_memory else None,
                 turn_env=evidence.env,
@@ -1236,10 +1251,30 @@ def stream_turn(
             marked: set[str] = set()
             if resume is not None:
                 _await_reaper(resume)  # the previous turn's process has finished writing this session
-            stream = _stream_process(command, prompt, timeout, control, PROJECT_ROOT)
+            if streaming:
+                stream = _stream_appserver(_appserver.build_command(model, db_path, **options), prompt, timeout,
+                                           control, PROJECT_ROOT, resume_thread=resume, ephemeral=ephemeral)
+            else:
+                command = build_command(model, db_path, resume_thread=resume, ephemeral=ephemeral, **options)
+                stream = _stream_process(command, prompt, timeout, control, PROJECT_ROOT)
             early = False
-            for kind, *rest in stream:
-                if kind == "line":
+            try:
+                first = next(stream, None)
+            except _appserver.RuntimeUnavailable as exc:
+                if _appserver.runtime_setting() == "appserver":
+                    raise AgentError("Codex app-server could not start this turn.", "other",
+                                     safe_diagnostic(str(exc))) from exc
+                # Not usable here (an older Codex, no shared login): this turn and the rest use exec.
+                _appserver.mark_unavailable(str(exc))
+                print(f"  ! codex app-server unavailable, using exec: {safe_diagnostic(str(exc))}", file=sys.stderr)
+                streaming = False
+                index -= 1
+                continue
+            items = stream if first is None else itertools.chain((first,), stream)
+            for kind, *rest in items:
+                if kind == "delta":
+                    yield TurnEvent("delta", rest[0], {"item": rest[1] if len(rest) > 1 else ""})
+                elif kind == "line":
                     events = parser.feed(rest[0])
                     thread = parser.thread_id or resume
                     if (tainted or parser.read_files) and thread and not ephemeral and thread not in marked:

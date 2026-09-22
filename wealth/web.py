@@ -549,6 +549,10 @@ class Chat:
                             turn.views[spec["id"]] = spec
                 elif event.type == "thread":
                     self.thread_id = str(event.data.get("thread_id") or "") or self.thread_id
+                elif event.type == "delta":
+                    # The answer as it is written; the page redraws it and the finished answer replaces it.
+                    if event.text and not turn.control.cancelled:
+                        turn.emit("delta", text=event.text, item=str(event.data.get("item") or ""))
                 elif event.type == "progress" and event.text != turn.progress:
                     turn.progress = event.text
                     turn.emit("progress", text=event.text)
