@@ -1597,9 +1597,9 @@ _AUDIT_KEYS = {"as_of", "currency", "ledger", "prices", "holdings", "instruments
 
 def _reference_input(ref: Mapping[str, Any] | None) -> dict | None:
     """A :func:`wealth.rates.reference` result as the fee audit's ``cash_reference_rate`` input."""
-    if not ref:
+    from .rates import available, origin_text
+    if not available(ref):
         return None
-    from .rates import origin_text
     return {"low": ref.get("low", ref["rate"]), "high": ref.get("high", ref["rate"]), "unit": "decimal",
             "source": f"{ref['name']} {ref['percent']}% as of {ref['as_of']} ({origin_text(ref)}): {ref['source']}",
             "as_of": ref["as_of"], "stale": ref["stale"]}

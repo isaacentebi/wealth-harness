@@ -16,12 +16,15 @@
   one row per auction date, with the source and retrieval time; ``market_fetches`` logs every
   attempt).  A series is fetched at most once a day (a failed attempt is retried after 3 hours).
 * **Never blocking.**  :func:`reference` reads the cache and, when a refresh is due, schedules it
-  on a background thread; the caller gets what is cached (or the built-in value) at once.
-  ``WEALTH_OFFLINE=1`` never touches the network.
-* **Order.**  A saved ``cash_reference_rate`` fact in that currency, else the newest fetched rate,
-  else the built-in dated constant below.  Every value says where it came from (``origin``:
-  ``saved_fact`` | ``fetched`` | ``builtin``) and is ``stale`` when its date is more than
-  ``REFERENCE_RATE_STALE_DAYS`` before the day it is used for.
+  on a daemon thread (it never delays a CLI command's exit; its writes are one SQLite
+  transaction, so a refresh cut short rolls back); the caller gets what is cached (or the
+  built-in value) at once.  ``WEALTH_OFFLINE=1`` never touches the network.
+* **Order.**  A saved ``cash_reference_rate`` fact in that currency (one naming no currency counts
+  only when its source or the household settles which), else the newest fetched rate, else the
+  built-in dated constant below.  Only values dated on or before the day asked about count (no
+  look-ahead); with none the result is ``origin`` unavailable with no rate.  Every value says where
+  it came from (``origin``: ``saved_fact`` | ``fetched`` | ``builtin`` | ``unavailable``) and is
+  ``stale`` when its date is more than ``REFERENCE_RATE_STALE_DAYS`` before the day it is used for.
 """
 from __future__ import annotations
 
@@ -326,8 +329,8 @@ def _symbol(series: str) -> str:
 
 
 def _last_row(store, series: str, on: date) -> dict | None:
-    # SIE dates by settlement, up to a few days after the auction: a week's grace keeps it visible.
-    rows = store.market_rows(_symbol(series), "close", None, (on + timedelta(days=7)).isoformat())
+    """The newest cached value dated on or before ``on`` (never one published after it)."""
+    rows = store.market_rows(_symbol(series), "close", None, on.isoformat())
     return rows[-1] if rows else None
 
 
@@ -360,7 +363,8 @@ def refresh_group(db_path, group: str, *, transport: Transport | None = None, no
         raise ValueError("rate groups are us and mx")
     retrieved = now.isoformat(timespec="seconds")
     detail = "; ".join(errors)[:300] or "not in the provider's response"
-    with _store(db_path) as store:
+    # One transaction for every series: a write cut short (a daemon thread at exit) rolls back whole.
+    with _store(db_path) as store, store.atomic():
         for series in wanted:
             obs, log = found.get(series), {"symbol": _symbol(series), "kind": "close", "retrieved_at": retrieved}
             if obs is None:
@@ -376,18 +380,32 @@ def refresh_group(db_path, group: str, *, transport: Transport | None = None, no
             "failed": [k for k in wanted if k not in found], "errors": errors}
 
 
-_POOL = futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="wealth-rates")
 _PENDING: dict[tuple[str, str], futures.Future] = {}
 _LOCK = threading.Lock()
 
 
+def _run(job: futures.Future, db_path, group: str, transport: Transport | None) -> None:
+    if not job.set_running_or_notify_cancel():
+        return
+    try:
+        job.set_result(refresh_group(db_path, group, transport=transport))
+    except BaseException as exc:  # noqa: BLE001 - kept on the future; a failed refresh is logged in the cache
+        job.set_exception(exc)
+
+
 def _schedule(db_path, group: str, transport: Transport | None = None) -> futures.Future:
-    """One background refresh per database and group at a time."""
+    """One background refresh per database and group at a time, on a daemon thread.
+
+    A daemon thread never holds up interpreter exit (a one-shot CLI command ends at once); if the process
+    ends mid-write, the refresh's single SQLite transaction rolls back and the cache is as it was.
+    """
     key = (str(db_path), group)
     with _LOCK:
         job = _PENDING.get(key)
         if job is None or job.done():
-            job = _PENDING[key] = _POOL.submit(refresh_group, db_path, group, transport=transport)
+            job = _PENDING[key] = futures.Future()
+            threading.Thread(target=_run, args=(job, db_path, group, transport), name=f"wealth-rates-{group}",
+                             daemon=True).start()
         return job
 
 
@@ -425,14 +443,40 @@ def _result(currency: str, series: str | None, name: str, rate: Decimal, as_of: 
             "note": " ".join(notes) or None, "fetched_at": None, "refreshing": False, "fact_id": None, **extra}
 
 
-def from_fact(fact: Mapping[str, Any] | None, currency: str, on: date | None = None) -> tuple[dict | None, str | None]:
+_MX_WORDS = re.compile(r"\b(cetes|banxico|mxn|pesos?)\b", re.I)
+_US_WORDS = re.compile(r"\b(t-?bills?|treasury|treasuries|usd|dollars?|d[oó]lares)\b", re.I)
+
+
+def fact_currency(value: Mapping[str, Any], household: str | None = None) -> str | None:
+    """The currency a saved ``cash_reference_rate`` is in: its own ``currency``, else what its source or name
+    names unambiguously (CETES/Banxico: MXN; T-bill/Treasury: USD), else the household's single currency.
+    None when that is ambiguous: the fact then applies to no currency."""
+    if value.get("currency"):
+        return str(value["currency"]).upper()
+    text = f"{value.get('source') or ''} {value.get('name') or ''}"
+    mx, us = bool(_MX_WORDS.search(text)), bool(_US_WORDS.search(text))
+    if mx != us:
+        return "MXN" if mx else "USD"
+    return None if mx and us else (str(household).upper() if household else None)
+
+
+def from_fact(fact: Mapping[str, Any] | None, currency: str, on: date | None = None, *,
+              household: str | None = None) -> tuple[dict | None, str | None]:
     """A saved ``cash_reference_rate`` fact in ``currency`` as a reference (a range is read at its low end).
 
-    ``(None, None)`` when there is no fact for this currency; ``(None, why)`` when it cannot be used.
+    ``household`` is the person's single currency when that is unambiguous (it dates a fact that names none).
+    ``(None, None)`` when the fact is for another currency; ``(None, why)`` when it cannot be used.
     """
     value = fact.get("value") if isinstance(fact, Mapping) else None
-    if not isinstance(value, Mapping) or str(value.get("currency") or currency).upper() != currency:
+    if not isinstance(value, Mapping):
         return None, None
+    owner = fact_currency(value, household)
+    if owner is None:
+        return None, ("the saved cash_reference_rate names no currency and its source does not say which; it was "
+                      "not used (save its currency, MXN or USD)")
+    if owner != currency:
+        return None, None
+    day = on or datetime.now(timezone.utc).date()
     scale = {"percent": Decimal(100), "bps": Decimal(10000)}.get(str(value.get("unit") or "decimal"), Decimal(1))
     low = _dec(value.get("low", value.get("rate")))
     high = _dec(value.get("high", value.get("low", value.get("rate"))))
@@ -441,28 +485,42 @@ def from_fact(fact: Mapping[str, Any] | None, currency: str, on: date | None = N
             or _as_date(fact.get("recorded_at")))
     if low is None or high is None or low < 0 or high < 0 or not value.get("source") or when is None:
         return None, "the saved cash_reference_rate needs low (or rate), unit, source and a date; it was not used"
+    if when > day:
+        return None, f"the saved cash_reference_rate is dated {when}, after {day}; it was not used"
     low, high = min(low, high) / scale, max(low, high) / scale
     source = str(value["source"])
     return _result(currency, None, str(value.get("name") or source), low, when.isoformat(), source, "saved_fact",
-                   on or datetime.now(timezone.utc).date(), fact_id=fact.get("id"), low=_text(low),
-                   high=_text(high)), None
+                   day, fact_id=fact.get("id"), low=_text(low), high=_text(high)), None
+
+
+def household_currency(jurisdictions: Iterable[str]) -> str | None:
+    """MXN for a Mexico-only household, USD for a US-only one, else None (both, or neither)."""
+    codes = {str(c).upper() for c in jurisdictions}
+    return {"MX": "MXN", "US": "USD"}.get(next(iter(codes))) if len(codes) == 1 else None
+
+
+def available(ref: Mapping[str, Any] | None) -> bool:
+    """True when ``ref`` carries a usable rate (not None, not ``origin`` unavailable)."""
+    return bool(ref) and ref.get("rate") is not None
 
 
 def reference(currency: str | None, *, fact: Mapping[str, Any] | None = None, db_path=None, on: Any = None,
               series: str | None = None, refresh: bool = True, offline: bool | None = None,
-              transport: Transport | None = None) -> dict | None:
+              transport: Transport | None = None, household: str | None = None) -> dict | None:
     """The reference rate for ``currency`` (MXN: CETES 28 days; USD: the 13-week T-bill) on ``on``.
 
-    ``fact`` is the saved ``cash_reference_rate`` fact record (it wins when it is in this currency and
-    complete).  ``db_path`` is the Wealth database holding the cache; without it only the built-in
-    value is known.  A due refresh runs in the background unless ``refresh`` is false or offline.
-    None when nothing is known for the currency.
+    ``fact`` is the saved ``cash_reference_rate`` fact record (it wins when it is for this currency and
+    complete; ``household`` settles a fact that names no currency).  ``db_path`` is the Wealth database
+    holding the cache; without it only the built-in value is known.  Only values dated on or before ``on``
+    are used (no look-ahead): with none, the result has ``origin`` unavailable and ``rate`` None.  A due
+    refresh runs in the background unless ``refresh`` is false or offline.  None for a currency with no
+    series (only a saved fact could price it).
     """
     ccy = str(currency or "").upper()
     day = _as_date(on) or datetime.now(timezone.utc).date()
     ignored = None
     if fact is not None:
-        saved, ignored = from_fact(fact, ccy, day)
+        saved, ignored = from_fact(fact, ccy, day, household=household)
         if saved is not None:
             return saved
     series = series or DEFAULT_SERIES.get(ccy)
@@ -485,16 +543,26 @@ def reference(currency: str | None, *, fact: Mapping[str, Any] | None = None, db
         except RuntimeError:  # the interpreter is shutting down: no new background work
             refreshing = False
     builtin = BUILTIN.get(series)
+    if builtin is not None and builtin["as_of"] > day.isoformat():
+        builtin = None  # published after the day asked about
     extra: dict[str, Any] = {"refreshing": refreshing}
     if ignored:
         extra["ignored"] = ignored
     if row is not None and (builtin is None or row["date"] >= builtin["as_of"]):
         return _result(ccy, series, SERIES[series]["name"], Decimal(row["value"]), row["date"], row["source"],
                        "fetched", day, fetched_at=row["retrieved_at"], **extra)
-    if builtin is None:
-        return None
-    return _result(ccy, series, builtin["name"], Decimal(builtin["rate"]), builtin["as_of"], builtin["source"],
-                   "builtin", day, checked_on=builtin["checked_on"], offline=offline, **extra)
+    if builtin is not None:
+        return _result(ccy, series, builtin["name"], Decimal(builtin["rate"]), builtin["as_of"], builtin["source"],
+                       "builtin", day, checked_on=builtin["checked_on"], offline=offline, **extra)
+    return {"currency": ccy, "series": series, "name": SERIES[series]["name"], "rate": None, "percent": None,
+            "as_of": None, "source": None, "origin": "unavailable", "age_days": None, "stale": None,
+            "note": (f"No published {SERIES[series]['name']} rate on or before {day} is known"
+                     + ("; a refresh is running." if refreshing else
+                        "; it needs a Banxico SIE token (BANXICO_TOKEN or keychain item wealth-banxico)."
+                        if group == "mx" and series != PRIMARY[group] else
+                        "; give the rate for that date." if db_path is None or day < datetime.now(timezone.utc).date()
+                        else "; it has not been fetched yet.")),
+            "fetched_at": None, "fact_id": None, **extra}
 
 
 def origin_text(ref: Mapping[str, Any]) -> str:
@@ -503,20 +571,17 @@ def origin_text(ref: Mapping[str, Any]) -> str:
         return "stored cash_reference_rate"
     if ref["origin"] == "fetched":
         return f"fetched {str(ref.get('fetched_at') or '')[:10]}".strip()
-    return f"Wealth dated constant (checked {ref.get('checked_on')})"
+    if ref["origin"] == "builtin":
+        return f"Wealth dated constant (checked {ref.get('checked_on')})"
+    return "unavailable"
 
 
 def status(db_path, on: Any = None, *, refresh: bool = True) -> dict:
     """Every series: its cached (or built-in) value, age and source, and the refresh state."""
     day = _as_date(on) or datetime.now(timezone.utc).date()
     offline = offline_mode()
-    rows = []
-    for key, meta in SERIES.items():
-        ref = reference(meta["currency"], db_path=db_path, on=day, series=key, refresh=refresh)
-        rows.append(ref or {"currency": meta["currency"], "series": key, "name": meta["name"], "rate": None,
-                            "as_of": None, "source": None, "origin": None, "stale": None,
-                            "note": ("needs a Banxico SIE token (BANXICO_TOKEN or keychain item wealth-banxico)"
-                                     if meta["group"] == "mx" else "not fetched yet")})
+    rows = [reference(meta["currency"], db_path=db_path, on=day, series=key, refresh=refresh)
+            for key, meta in SERIES.items()]
     return {"as_of": day.isoformat(), "offline": offline, "stale_after_days": REFERENCE_RATE_STALE_DAYS,
             "defaults": dict(DEFAULT_SERIES), "rates": rows}
 
@@ -534,6 +599,6 @@ def refresh(db_path, currency: str | None = None, *, transport: Transport | None
 
 
 __all__ = ["BUILTIN", "CETES_28D_REFERENCE", "DEFAULT_SERIES", "REFERENCE_RATE_STALE_DAYS", "RateError", "SERIES",
-           "TBILL_13W_REFERENCE", "banxico_token", "fetch_mx", "fetch_us", "from_fact", "origin_text",
-           "parse_banxico_indicator", "parse_fiscal_data", "parse_sie", "parse_treasurydirect", "reference",
-           "refresh", "refresh_group", "status", "wait"]
+           "TBILL_13W_REFERENCE", "available", "banxico_token", "fact_currency", "fetch_mx", "fetch_us", "from_fact",
+           "household_currency", "origin_text", "parse_banxico_indicator", "parse_fiscal_data", "parse_sie", "parse_treasurydirect",
+           "reference", "refresh", "refresh_group", "status", "wait"]

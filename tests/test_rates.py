@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import subprocess
+import sys
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -403,3 +406,163 @@ def test_reference_rates_task_and_rates_command(db):
     rows = {r["series"]: r for r in status["rates"]}
     assert rows["mx_cetes_28d"]["origin"] == "fetched" and rows["mx_cetes_91d"]["rate"] is None
     assert "SIE token" in rows["mx_cetes_91d"]["note"]
+
+
+# ------------------------------------------------------------------ review fixes: look-ahead, currency, eligibility, exit
+
+
+def _put(db, day, value):
+    at = f"{day}T18:00:00+00:00"
+    with WealthStore(db) as store:
+        store.put_market([{"symbol": "rate:mx_cetes_28d", "kind": "close", "date": day, "value": value,
+                           "currency": "MXN", "source": f"Banxico test {day}", "retrieved_at": at}],
+                         {"symbol": "rate:mx_cetes_28d", "kind": "close", "start": day, "end": day, "retrieved_at": at,
+                          "status": "ok"})
+
+
+def test_no_value_published_after_the_day_asked_about_is_used(db):
+    seed(db)  # 6.15% at the 2026-09-22 auction
+    _put(db, "2026-09-08", "0.062")
+    on = {day: rates.reference("MXN", db_path=db, on=date.fromisoformat(day), refresh=False)
+          for day in ("2026-09-10", "2026-09-21", "2026-09-22")}
+    assert (on["2026-09-10"]["origin"], on["2026-09-10"]["rate"], on["2026-09-10"]["as_of"]) == \
+        ("fetched", "0.062", "2026-09-08")  # the built-in value (2026-09-15) is after this day
+    assert (on["2026-09-21"]["origin"], on["2026-09-21"]["as_of"]) == ("builtin", "2026-09-15")  # not the 09-22 row
+    assert (on["2026-09-22"]["origin"], on["2026-09-22"]["as_of"]) == ("fetched", "2026-09-22")
+    assert all(r["age_days"] >= 0 for r in on.values())
+    early = rates.reference("MXN", on=date(2026, 9, 1))
+    assert early["origin"] == "unavailable" and early["rate"] is None and early["age_days"] is None
+    assert "on or before 2026-09-01" in early["note"] and not rates.available(early)
+    fact = {"id": "f1", "key": "cash_reference_rate", "source": {"kind": "user", "observed_on": "2026-09-20"},
+            "value": {"low": 7, "unit": "percent", "source": "CETES, mi banco", "currency": "MXN"}}
+    later = rates.reference("MXN", fact=fact, on=date(2026, 9, 1))
+    assert later["origin"] == "unavailable" and "dated 2026-09-20, after 2026-09-01" in later["ignored"]
+
+
+def test_consumers_treat_a_later_rate_as_unavailable(db):
+    inputs = {k: v for k, v in CATALOG["debt"]["variants"]["us_mortgage_prepay_vs_vti"].items() if k != "risk_free"}
+    early = WealthService(db).run("debt", {**inputs, "as_of": "2026-09-01"})
+    assert early["result"]["investing"]["risk_free"] is None and "risk_free" in [m["key"] for m in early["missing"]]
+    report = WealthService(db).run("reference_rates", {"as_of": "2026-09-01"})
+    assert report["status"] == "partial" and {r["origin"] for r in report["result"]["rates"]} == {"unavailable"}
+    assert sorted(m["key"] for m in report["missing"]) == ["reference_rates.MXN", "reference_rates.USD"]
+    assert report["sources"] == []
+    facts = [("client.profile", MX), ("spending.monthly", {"essential": 20000, "currency": "MXN"}),
+             ("cash.nu", {"amount": 400000, "currency": "MXN", "purpose": "reserve"}), ("reserve", {"target_months": 6})]
+    rows = [{"id": f"f{i}", "key": k, "value": v, "confidence": "reported", "status": "active", "revision": i,
+             "source": {"kind": "user", "ref": "test", "observed_on": "2026-08-01"}} for i, (k, v) in enumerate(facts, 1)]
+    snap = {"client": {"id": "c", "revision": len(rows)}, "facts": rows, "decisions": []}
+    found = proactive.evaluate(situation.build(snap, None, "2026-09-08"), None, snap, "2026-09-08", rates_db=db)
+    assert "idle_yield" not in {i["kind"] for i in found["candidates"]}
+    assert any("on or before 2026-09-08" in m for u in found["unknown"] if u["kind"] == "idle_yield"
+               for m in u["missing"])
+
+
+def test_a_saved_rate_without_a_currency_applies_only_where_it_is_unambiguous():
+    def fact(source):
+        return {"id": "f1", "key": "cash_reference_rate", "source": {"kind": "user", "observed_on": "2026-09-20"},
+                "value": {"low": 7, "unit": "percent", "source": source}}
+    on = date(2026, 9, 22)
+    plain = fact("mi banco")
+    for ccy in ("MXN", "USD"):
+        ref = rates.reference(ccy, fact=plain, on=on)
+        assert ref["origin"] == "builtin" and "names no currency" in ref["ignored"]
+    cetes = fact("CETES 28 dias, Banxico")
+    assert [rates.reference(c, fact=cetes, on=on)["origin"] for c in ("MXN", "USD")] == ["saved_fact", "builtin"]
+    tbill = fact("3-month T-bill, US Treasury")
+    assert [rates.reference(c, fact=tbill, on=on)["origin"] for c in ("MXN", "USD")] == ["builtin", "saved_fact"]
+    both = fact("CETES or a Treasury bill")
+    assert all(rates.reference(c, fact=both, on=on, household="MXN")["origin"] == "builtin" for c in ("MXN", "USD"))
+    assert [rates.reference(c, fact=plain, on=on, household="USD")["origin"] for c in ("MXN", "USD")] == \
+        ["builtin", "saved_fact"]
+    assert rates.household_currency({"MX"}) == "MXN" and rates.household_currency({"MX", "US"}) is None
+
+
+def _client(db, profile, rate_value, **fact_extra):
+    service = WealthService(db)
+    service.create("ana", "Ana")
+    source = {"kind": "user", "ref": "chat", "observed_on": "2026-08-01"}
+    service.remember("ana", [{"key": "client.profile", "value": profile, "source": source},
+                             {"key": "cash_reference_rate", "value": rate_value, "source": source, **fact_extra}])
+    with WealthStore(db) as store:
+        fact_id = next(f["id"] for f in store.snapshot("ana")["facts"] if f["key"] == "cash_reference_rate")
+    return service, fact_id
+
+
+def test_reference_rates_never_gives_one_saved_fact_to_both_currencies(db):
+    neutral = {"low": 7, "high": 7, "unit": "percent", "source": "mi banco"}
+    service, fact_id = _client(db, MX, neutral)
+    report = service.run("reference_rates", {"as_of": "2026-09-22"}, client_id="ana")
+    origins = {r["currency"]: r["origin"] for r in report["result"]["rates"]}
+    assert origins == {"MXN": "saved_fact", "USD": "builtin"} and report["evidence_ids"] == [fact_id]
+    both = db.parent / "both.sqlite3"
+    service, _ = _client(both, {**MX, "us_person": True}, neutral)
+    report = service.run("reference_rates", {"as_of": "2026-09-22"}, client_id="ana")
+    assert {r["origin"] for r in report["result"]["rates"]} == {"builtin"} and report["evidence_ids"] == []
+    assert any("names no currency" in w for w in report["warnings"])
+
+
+def test_an_expired_or_inferred_saved_rate_falls_through_to_the_fetched_rate(db):
+    seed(db)
+    service, fact_id = _client(db, MX, {"low": 7, "high": 7, "unit": "percent", "source": "CETES en mi banco",
+                                        "currency": "MXN"}, expires_on="2026-08-15")
+    report = service.run("reference_rates", {"currency": "MXN", "as_of": "2026-09-22"}, client_id="ana")
+    ref = report["result"]["rates"][0]
+    assert (ref["origin"], ref["as_of"]) == ("fetched", "2026-09-22")
+    assert fact_id not in report["evidence_ids"]
+    assert {"key": "cash_reference_rate", "reason": "expired"} in report["excluded_evidence"]
+    service.remember("ana", [{"key": "liability.tarjeta", "value": {"kind": "card", "balance": 25000, "currency": "MXN",
+                                                                    "annual_rate": 0.45, "payment": 3000,
+                                                                    "payment_frequency": "monthly"},
+                              "source": {"kind": "user", "ref": "chat", "observed_on": "2026-09-20"}}])
+    debt = service.run("debt", {"mode": "prepay_vs_invest", "lump_sum": 25000, "as_of": "2026-09-22"}, client_id="ana")
+    assert debt["result"]["investing"]["risk_free"]["origin"] == "fetched" and fact_id not in debt["evidence_ids"]
+    inferred = db.parent / "inferred.sqlite3"
+    seed(inferred)
+    service, fact_id = _client(inferred, MX, {"low": 7, "high": 7, "unit": "percent", "source": "CETES",
+                                              "currency": "MXN"}, confidence="inferred")
+    report = service.run("reference_rates", {"currency": "MXN", "as_of": "2026-09-22"}, client_id="ana")
+    assert report["result"]["rates"][0]["origin"] == "fetched" and fact_id not in report["evidence_ids"]
+
+
+def test_background_refresh_runs_on_a_daemon_thread(db):
+    gate = threading.Event()
+    rates.reference("MXN", db_path=db, on=TODAY, offline=False, transport=Fake(gate=gate))
+    worker = next(t for t in threading.enumerate() if t.name == "wealth-rates-mx")
+    assert worker.daemon
+    gate.set()
+    rates.wait(5)
+
+
+def test_a_one_shot_process_exits_without_waiting_for_a_refresh(tmp_path):
+    script = (
+        "import time\n"
+        "from wealth import rates\n"
+        "def slow(*a, **k):\n"
+        "    time.sleep(30)\n"
+        "    raise OSError('never answers')\n"
+        f"ref = rates.reference('MXN', db_path={str(tmp_path / 'w.sqlite3')!r}, offline=False, transport=slow)\n"
+        "assert ref['refreshing'] and ref['origin'] == 'builtin'\n"
+        "print('done')\n")
+    started = time.monotonic()
+    done = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=25,
+                          env={**os.environ, "WEALTH_OFFLINE": "0"})
+    assert done.returncode == 0 and done.stdout.strip() == "done", done.stderr
+    assert time.monotonic() - started < 15
+
+
+def test_a_refresh_writes_all_its_series_in_one_transaction(db, monkeypatch):
+    calls = []
+    original = WealthStore.put_market
+
+    def flaky(self, rows, fetch):
+        calls.append(fetch["symbol"])
+        if len(calls) == 2:
+            raise RuntimeError("cut short")
+        return original(self, rows, fetch)
+    monkeypatch.setattr(WealthStore, "put_market", flaky)
+    with pytest.raises(RuntimeError):
+        seed(db, "us")
+    with WealthStore(db) as store:
+        assert store.market_rows("rate:us_tbill_13w", "close") == []
+        assert store.market_fetches("rate:us_tbill_13w", "close") == []

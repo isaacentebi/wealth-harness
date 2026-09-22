@@ -305,7 +305,11 @@ background: a turn never waits for the network. The order is a saved
 `cash_reference_rate` in that currency, then the latest fetched auction, then
 Wealth's built-in dated value. Each rate carries `as_of` (the auction date),
 `source`, `origin` (`saved_fact`, `fetched` or `builtin`) and `stale` (more
-than 30 days old). `WEALTH_OFFLINE=1` never fetches. `status` reads the cache;
+than 30 days old). Only rates dated on or before the day asked about count;
+with none, `origin` is `unavailable` and the rate is asked for. A saved rate
+that names no currency counts only when its source (CETES, T-bill) or a
+single-country household says which. Background refreshes run on daemon
+threads, so a CLI command never waits for one to exit. `WEALTH_OFFLINE=1` never fetches. `status` reads the cache;
 `refresh` fetches now (`currency` MXN or USD, default both).
 
 ```sh

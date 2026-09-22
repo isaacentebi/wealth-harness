@@ -258,12 +258,25 @@ def _published_rate(reference) -> dict | None:
     return {"rate": rate, "source": reference["source"]}
 
 
-def _risk_free(stored: dict, currency: str | None, db_path, on=None) -> tuple[dict | None, str | None]:
+def _saved_reference_rate(snapshot: dict, today: str) -> tuple[dict | None, str | None]:
+    """The saved ``cash_reference_rate`` fact a calculation may use (not inferred, not past its review date,
+    like every other input) and, when it names no currency, the household's single currency if there is one."""
+    fact = next((f for f in snapshot["facts"] if f["key"] == "cash_reference_rate" and f["confidence"] != "inferred"
+                 and (not f.get("expires_on") or f["expires_on"] >= today)), None)
+    household = None
+    if fact is not None and isinstance(fact.get("value"), dict) and not fact["value"].get("currency"):
+        from .proactive import jurisdictions
+        household = rates_module.household_currency(jurisdictions(build_situation(snapshot, None, today)))
+    return fact, household
+
+
+def _risk_free(snapshot: dict, currency: str | None, db_path, on, today: str) -> tuple[dict | None, str | None]:
     """The risk-free alternative for ``currency`` (:func:`wealth.rates.reference`): a saved cash_reference_rate
-    (its low end), else CETES 28 days (MXN) or the 13-week T-bill (USD), fetched or the dated constant; None for
-    another currency with nothing saved (the rate is then asked)."""
-    ref = rates_module.reference(currency, fact=stored.get("cash_reference_rate"), db_path=db_path, on=on)
-    if ref is None:
+    (its low end), else CETES 28 days (MXN) or the 13-week T-bill (USD), fetched or the dated constant; None when
+    no rate dated on or before ``on`` is known (the rate is then asked)."""
+    fact, household = _saved_reference_rate(snapshot, today)
+    ref = rates_module.reference(currency, fact=fact, db_path=db_path, on=on, household=household)
+    if not rates_module.available(ref):
         return None, None
     return {k: ref[k] for k in ("rate", "source", "name", "as_of", "origin", "stale", "note")}, ref["fact_id"]
 
@@ -625,17 +638,23 @@ class WealthService:
             raise ValueError("currency must be MXN or USD")
         on = datetime.fromisoformat(str(inputs.get("as_of") or today)[:10]).date().isoformat()
         wanted = [currency] if currency else sorted(rates_module.DEFAULT_SERIES)
-        saved = next((f for f in snapshot["facts"] if f["key"] == "cash_reference_rate"), None)
-        refs = [ref for ref in (rates_module.reference(c, fact=saved, db_path=self.db_path, on=on) for c in wanted)
-                if ref is not None]
+        saved, household = _saved_reference_rate(snapshot, today)
+        refs = [ref for ref in (rates_module.reference(c, fact=saved, db_path=self.db_path, on=on, household=household)
+                                for c in wanted) if ref is not None]
         shown = {r["series"] for r in refs}
         tenors = [{k: r[k] for k in ("series", "name", "rate", "percent", "as_of", "source", "stale")}
                   for r in rates_module.status(self.db_path, on, refresh=False)["rates"]
                   if r.get("origin") == "fetched" and r["currency"] in wanted and r["series"] not in shown]
-        return {"status": "ready", "result": {"as_of": on, "offline": prices_module.offline_mode(), "rates": refs,
-                                              "other_tenors": tenors},
-                "missing": [], "warnings": [f"{r['name']}: {r['note']}" for r in refs if r.get("note")],
-                "sources": [{"title": r["name"], "ref": r["source"], "date": r["as_of"]} for r in refs + tenors],
+        missing = [{"key": f"reference_rates.{r['currency']}", "reason": "unavailable", "detail": r["note"]}
+                   for r in refs if not rates_module.available(r)]
+        ignored = sorted({r["ignored"] for r in refs if r.get("ignored")})
+        return {"status": "partial" if missing else "ready",
+                "result": {"as_of": on, "offline": prices_module.offline_mode(), "rates": refs, "other_tenors": tenors},
+                "missing": missing,
+                "warnings": [f"{r['name']}: {r['note']}" for r in refs if r.get("note") and rates_module.available(r)]
+                + ignored,
+                "sources": [{"title": r["name"], "ref": r["source"], "date": r["as_of"]} for r in refs + tenors
+                            if rates_module.available(r)],
                 "assumptions": ["CETES: the weekly primary-auction yield (tasa de rendimiento) Banxico publishes; "
                                 "T-bills: the high investment rate (bond-equivalent yield) of the latest auction. "
                                 "Both are gross annual rates before tax.",
@@ -1237,7 +1256,7 @@ class WealthService:
                 jurisdiction = next(iter(codes)) if len(codes) == 1 else None
         if inputs.get("mode") == "prepay_vs_invest" and risk_free is None:
             currency = next((r.get("currency") for r in rows if isinstance(r, dict) and r.get("currency")), None)
-            risk_free, fact_id = _risk_free(stored, currency, self.db_path, day)
+            risk_free, fact_id = _risk_free(snapshot, currency, self.db_path, day, today)
             if fact_id:
                 evidence.append(fact_id)
         report = debt_module.run(inputs, rows, day, jurisdiction=jurisdiction, reserve=reserve, risk_free=risk_free)
@@ -1397,11 +1416,13 @@ class WealthService:
         market = None
         if ledger is not None and "ledger" not in inputs and "facts" not in inputs:
             inputs, ledger, market = self._review_market(task, inputs, snapshot, ledger, today)
-        saved = next((f for f in snapshot["facts"] if f["key"] == "cash_reference_rate"), None)
         on = str(inputs.get("as_of") or today)[:10]
+
+        def reference_rate(currency: str) -> dict | None:
+            saved, household = _saved_reference_rate(snapshot, today)
+            return rates_module.reference(currency, fact=saved, db_path=self.db_path, on=on, household=household)
         report = review.run_task(task, inputs, snapshot, ledger, today, fact_history=history,
-                                 reference_rate=lambda ccy: rates_module.reference(ccy, fact=saved, db_path=self.db_path,
-                                                                                   on=on))
+                                 reference_rate=reference_rate)
         if market is not None and isinstance(report.get("result"), dict) and report["result"]:
             report["result"]["market_data"] = market
             report["sources"] = (list(report.get("sources") or []) + _price_sources(market["prices"])

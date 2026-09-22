@@ -1148,8 +1148,8 @@ CATALOG: dict[str, dict[str, Any]] = {
                    "tenors when cached. With client_id a saved cash_reference_rate in that currency comes first.",
         "required": ["nothing (client_id optional)"],
         "optional": ["currency: MXN|USD (default both)", "as_of (default today)"],
-        "notes": "Each rate has rate (decimal), percent, as_of (auction date), source, origin "
-                 "saved_fact|fetched|builtin and stale (older than 30 days). Fetches refresh at most daily in the "
+        "notes": "Each rate has rate (decimal), percent, as_of (auction date, never after the as_of asked about), "
+                 "source, origin saved_fact|fetched|builtin|unavailable and stale (older than 30 days). Fetches refresh at most daily in the "
                  "background; a turn never waits for the network, and builtin is Wealth's dated fallback.",
         "example": {"currency": "MXN"},
     },

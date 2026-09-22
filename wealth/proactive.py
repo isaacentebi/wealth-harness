@@ -750,11 +750,13 @@ def _reference_rate(run: _Run, currency: str) -> tuple[dict | None, str | None]:
         fact = next((f for f in run.snapshot.get("facts") or [] if isinstance(f, dict)
                      and f.get("key") == "cash_reference_rate" and f.get("status", "active") == "active"), None)
     market = (currency == "MXN" and _mx_resident(run)) or (currency == "USD" and _us_filer(run))
-    saved, why = rates_module.from_fact(fact, currency, run.as_of) if fact is not None else (None, None)
+    household = rates_module.household_currency(run.jurisdictions)
+    saved, why = (rates_module.from_fact(fact, currency, run.as_of, household=household) if fact is not None
+                  else (None, None))
     ref = saved or (rates_module.reference(currency, db_path=run.rates_db, on=run.as_of) if market else None)
-    if ref is None:
-        return None, why or (f"a reference rate for {currency} cash "
-                             "(save cash_reference_rate {low, high, unit, source, currency})")
+    if not rates_module.available(ref):
+        return None, why or (ref or {}).get("note") or (
+            f"a reference rate for {currency} cash (save cash_reference_rate {{low, high, unit, source, currency}})")
     return {**ref, "rate": D(ref["rate"]), "origin": rates_module.origin_text(ref),
             "evidence": "cash_reference_rate" if ref["origin"] == "saved_fact" else None}, None
 
