@@ -136,19 +136,27 @@ def stated_facts(proposal: dict[str, Any]) -> list[dict[str, Any]] | None:
             return None
         name = account.get("name") or account["id"]
         institution = detect_institution(name)[1]
-        if rows:
-            value: dict[str, Any] = {"amount": float(sum(Decimal(p["value"]) for p in rows)),
-                                     "currency": account["currency"], "name": name}
+        # Amounts are never summed across currencies: "USD 100 and MXN 1,000 in Wallet" is two balances, saved as
+        # cash.wallet-usd and cash.wallet-mxn (a cash.<id> fact holds one amount in one currency).
+        by_currency: dict[str, Decimal] = {}
+        for position in rows:
+            ccy = position.get("currency") or account["currency"]
+            by_currency[ccy] = by_currency.get(ccy, Decimal(0)) + Decimal(position["value"])
+        stated = totals.get(account["id"], [])
+        currencies = set(by_currency) | {row.get("currency") or account["currency"] for row in stated}
+        for ccy, amount in sorted(by_currency.items()):
+            value: dict[str, Any] = {"amount": float(amount), "currency": ccy, "name": name}
             if institution:
                 value["institution"] = institution
             if account.get("interest_rate") is not None:
                 value["annual_rate"] = float(account["interest_rate"])
-            add("cash", name, value)
-        for row in totals.get(account["id"], []):
-            value = {"amount": float(Decimal(row["value"])), "currency": row.get("currency") or account["currency"],
+            add("cash", f"{name} {ccy}" if len(currencies) > 1 else name, value)
+        for row in stated:
+            ccy = row.get("currency") or account["currency"]
+            value = {"amount": float(Decimal(row["value"])), "currency": ccy,
                      "institution": institution or name, "name": name,
                      "kind": _INVESTMENT_KINDS.get(account.get("type") or "", "other")}
-            add("investment", name, value)
+            add("investment", f"{name} {ccy}" if len(currencies) > 1 else name, value)
     for liability in household.get("liabilities") or []:
         if liability.get("account_id"):
             return None

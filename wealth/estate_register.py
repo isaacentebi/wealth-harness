@@ -112,9 +112,9 @@ SCORE_WEIGHTS = {"designations": 60, "will": 30, "guardian": 10}
 
 GAP_CODES = ("no_beneficiary", "afore_beneficiaries", "shares_not_100", "minor_direct", "beneficiary_predeceased",
              "beneficiary_ex_spouse", "designation_old", "designation_before_event", "erisa_spousal_consent",
-             "us_situs_nra", "no_will", "will_before_event", "will_old", "no_guardian")
+             "us_situs_nra", "no_will", "will_before_event", "will_old", "no_guardian", "designation_conflict")
 _MARITAL_PRODUCTS = frozenset({"bank", "broker", "investment", "ppr", "property"})
-REVIEW_GAPS = frozenset({"designation_old", "designation_before_event"})
+REVIEW_GAPS = frozenset({"designation_old", "designation_before_event", "designation_conflict"})
 FACT_PREFIXES = ("cash.", "investment.", "insurance.", "property.", "estate.", "client.profile", "account.")
 
 _US_PLANS = {"401k", "403b", "457b", "ira", "roth_ira", "sep_ira", "simple_ira"}
@@ -393,21 +393,20 @@ def _accounts(sit: Mapping[str, Any], facts: dict[str, dict], convert: _Converte
                 notes.append(f"{key}: no exchange rate for {value.get('currency')}; its value is unknown here.")
             out.append({"key": key, "value": value, "row": {}, "amount": amount, "statement_keys": []})
     # Designations are their own facts; they override any legacy inline fields on the account.
-    designations = {}
+    designations: dict[str, list[tuple[str, dict, dict]]] = {}
     for key, fact in sorted(facts.items()):
         value = fact.get("value")
         if key.startswith("estate.designation.") and isinstance(value, dict) and isinstance(value.get("account"), str):
-            designations[value["account"]] = (key, {k: v for k, v in value.items() if k not in ("account", "note")})
+            designations.setdefault(value["account"], []).append(
+                (key, {k: v for k, v in value.items() if k not in ("account", "note")}, fact))
     for entry in out:
-        found = designations.pop(entry["key"], None)
-        for covered in entry.get("statement_keys") or []:
-            # A stated balance its statement covers (investment.gbm valued by account.gbm-7832) is one account:
-            # a designation saved on either key belongs to it.
-            found = found or designations.pop(covered, None)
+        # A stated balance its statement covers (investment.gbm valued by account.gbm-7832) is one account:
+        # every designation saved on any of its keys belongs to it, and one of them wins.
+        found = [c for alias in (entry["key"], *(entry.get("statement_keys") or []))
+                 for c in designations.pop(alias, [])]
         if found:
-            entry["designation_key"] = found[0]
-            entry["value"] = {**entry["value"], **found[1]}
-    for account, (key, value) in list(designations.items()):
+            _apply_designations(entry, found)
+    for account, found in list(designations.items()):
         # "investment.gbm" said in conversation, while GBM's statement is saved as account.gbm-7832: the one
         # statement account at that institution is the account the person named.
         named = account.split(".", 1)[-1].replace("-", " ").replace("_", " ")
@@ -415,14 +414,44 @@ def _accounts(sit: Mapping[str, Any], facts: dict[str, dict], convert: _Converte
                    and same_institution(named, (e.get("row") or {}).get("institution"))]
         if len(matches) == 1:
             designations.pop(account)
-            matches[0]["designation_key"] = key
-            matches[0]["value"] = {**matches[0]["value"], **value}
-    for account, (key, value) in designations.items():
-        notes.append(f"{key} names {account}, which is not in the picture (forgotten, or a typo); it is listed "
-                     "without an amount.")
-        out.append({"key": account, "value": value, "row": {}, "amount": None, "statement_keys": [],
-                    "designation_key": key, "orphan": True})
+            _apply_designations(matches[0], found)
+    for account, found in designations.items():
+        orphan = {"key": account, "value": {}, "row": {}, "amount": None, "statement_keys": [], "orphan": True}
+        _apply_designations(orphan, found)
+        notes.append(f"{orphan['designation_key']} names {account}, which is not in the picture (forgotten, or a "
+                     "typo); it is listed without an amount.")
+        out.append(orphan)
     return out, notes
+
+
+def _winner(found: list[tuple[str, dict, dict]]) -> tuple[str, dict, dict]:
+    """The designation that stands: the newest (valid from, then recorded); on a tie the person's own words."""
+    def rank(item: tuple[str, dict, dict]) -> tuple:
+        fact = item[2]
+        said = (fact.get("source") or {}).get("kind") == "user"
+        return (str(fact.get("valid_from") or (fact.get("source") or {}).get("observed_on") or ""), said,
+                str(fact.get("recorded_at") or ""), item[0])
+    return max(found, key=rank)
+
+
+def _beneficiary_set(value: Mapping[str, Any]) -> tuple:
+    return tuple(sorted((_fold(b.get("name")), str(D(b.get("share"))), bool(b.get("contingent")))
+                        for b in value.get("beneficiaries") or [] if isinstance(b, dict)))
+
+
+def _conflicts(found: list[tuple[str, dict, dict]], winner: str) -> list[str]:
+    """Other designations of the same account that name different beneficiaries."""
+    chosen = next(v for k, v, _ in found if k == winner)
+    return sorted(k for k, v, _ in found if k != winner and _beneficiary_set(v) != _beneficiary_set(chosen))
+
+
+def _apply_designations(entry: dict, found: list[tuple[str, dict, dict]]) -> None:
+    key, value, _fact = _winner(found)
+    entry["designation_key"] = key
+    entry["value"] = {**entry["value"], **value}
+    conflicts = _conflicts(found, key)
+    if conflicts:
+        entry["designation_conflict"] = conflicts
 
 
 # ------------------------------------------------------------------ succession rules
@@ -769,6 +798,14 @@ def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mappin
             row["designation_key"] = "inline"  # saved on the account by an older write; still read
         if entry.get("orphan"):
             row["orphan"] = True
+        if entry.get("designation_conflict"):
+            others = ", ".join(entry["designation_conflict"])
+            gap("designation_conflict", {"key": key, "label": label}, None,
+                f"{label}: the beneficiaries you gave differ between {entry['designation_key']} and {others}; "
+                "the newest is shown. Which one is on file with the institution?",
+                f"{label}: los beneficiarios que diste no coinciden entre {entry['designation_key']} y {others}; "
+                "se muestra el más reciente. ¿Cuál tiene registrado la institución?",
+                designations=[entry["designation_key"], *entry["designation_conflict"]])
         if marital and family.common is not False:
             row["notes"].append({"en": ("Under sociedad conyugal half of this is already your spouse's and is not in "
                                         "your estate" if family.common else "If you married under sociedad conyugal, "

@@ -428,6 +428,65 @@ def test_a_designation_on_the_statement_key_reaches_the_stated_account_it_covers
     assert money(gbm["value"]) == money(TRUTH[GBM]["total"])
 
 
+def _gbm_stated_and_statement(service):
+    said = {"kind": "user", "ref": "chat", "observed_on": "2026-09-01"}
+    service.remember("mariana", [{"key": "investment.gbm", "value": {"amount": 400000, "currency": "MXN",
+                                                                     "institution": "GBM"}, "source": said}])
+    proposal = service.ingest("mariana", "file", {"path": GBM})
+    service.ingest("mariana", "confirm", {"proposal_id": proposal["result"]["proposal_id"]})
+
+
+def _designate(service, key, account, beneficiaries, observed_on):
+    service.remember("mariana", [{"key": key, "value": {"account": account, "beneficiaries": beneficiaries},
+                                  "source": {"kind": "user", "ref": "chat", "observed_on": observed_on}}])
+
+
+def test_designations_on_both_keys_of_one_account_yield_one_row_and_a_conflict_gap(service):
+    """Before: with designations on investment.gbm and on account.gbm-7832, only one was consumed and the
+    other came back as an orphan: GBM listed twice with conflicting beneficiaries."""
+    _gbm_stated_and_statement(service)
+    _designate(service, "estate.designation.investment-gbm", "investment.gbm",
+               [{"name": "Diego", "relationship": "spouse", "share": 1}], "2026-08-01")
+    _designate(service, "estate.designation.account-gbm-7832", "account.gbm-7832",
+               [{"name": "Sofía", "relationship": "child", "share": 1}], "2026-09-01")
+    report = service.run("estate_register", client_id="mariana")
+    rows = [r for r in report["result"]["rows"] if "gbm" in r["key"]]
+    assert [r["key"] for r in rows] == ["investment.gbm"] and not rows[0].get("orphan")
+    # The newer designation stands; the conflict is asked about, never silently dropped.
+    assert rows[0]["designation_key"] == "estate.designation.account-gbm-7832"
+    assert [h["name"] for h in rows[0]["heirs"]] == ["Sofía"]
+    conflict = [g for g in report["result"]["gaps"] if g["code"] == "designation_conflict"]
+    assert conflict and conflict[0]["key"] == "investment.gbm"
+    assert set(conflict[0]["designations"]) == {"estate.designation.account-gbm-7832",
+                                                 "estate.designation.investment-gbm"}
+
+
+def test_matching_designations_on_both_keys_are_not_a_conflict(service):
+    _gbm_stated_and_statement(service)
+    for key, account in (("estate.designation.investment-gbm", "investment.gbm"),
+                         ("estate.designation.account-gbm-7832", "account.gbm-7832")):
+        _designate(service, key, account, [{"name": "Diego", "relationship": "spouse", "share": 1}], "2026-09-01")
+    report = service.run("estate_register", client_id="mariana")
+    assert [r["key"] for r in report["result"]["rows"] if "gbm" in r["key"]] == ["investment.gbm"]
+    assert not any(g["code"] == "designation_conflict" for g in report["result"]["gaps"])
+
+
+def test_a_chat_wallet_in_two_currencies_is_two_balances_never_a_sum(service):
+    """Before: USD 100 and MXN 1,000 in one "Wallet" were saved as USD 1,100."""
+    chat = service.ingest("mariana", "chat", {"items": [
+        {"kind": "cash", "label": "Wallet", "amount": 100, "currency": "USD", "quote": "tengo 100 dólares en Wallet"},
+        {"kind": "cash", "label": "Wallet", "amount": 1000, "currency": "MXN", "quote": "y 1,000 pesos en Wallet"},
+        {"kind": "account", "label": "Vest", "amount": 500, "currency": "USD", "account_type": "brokerage",
+         "quote": "500 dólares en Vest"}]})
+    service.ingest("mariana", "confirm", {"proposal_id": chat["result"]["proposal_id"],
+                                          "acknowledge_discrepancies": True})
+    facts = {f["key"]: f["value"] for f in service.inspect("mariana")["facts"]}
+    assert (facts["cash.wallet-usd"]["amount"], facts["cash.wallet-usd"]["currency"]) == (100, "USD")
+    assert (facts["cash.wallet-mxn"]["amount"], facts["cash.wallet-mxn"]["currency"]) == (1000, "MXN")
+    assert (facts["investment.vest"]["amount"], facts["investment.vest"]["currency"]) == (500, "USD")
+    assert not any(v.get("amount") == 1100 for v in facts.values() if isinstance(v, dict))
+
+
 def test_estate_register_with_facts_in_inputs_keeps_ledger_accounts(service):
     """Before: facts passed in inputs left the statements' ledger accounts without a key and the task crashed
     with no message ("Error executing tool wealth_run")."""
