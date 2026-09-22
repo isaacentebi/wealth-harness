@@ -439,10 +439,14 @@ def _debt_name(row: Mapping[str, Any], lang: str) -> str:
 def _high_interest(run: _Run) -> None:
     """A card or loan at 20% a year or more: paying it down beats any investment.
 
-    Says the monthly amount that clears it in a year and the interest that saves against the current
-    payment; when the payment is unknown it still says the amount and asks for the payment.
+    Says the monthly amount that clears it in a year, the interest that saves against the current
+    payment and the interest saved for each month sooner it is gone; when the payment is unknown it
+    still says the amount and asks for the payment.  Silent while the reserve comes first (below its
+    target, or open advice sends money there): money prepaid into a debt is not there in an emergency.
     """
     from .situation.model import annuity_payment, payoff
+    if _reserve_first(run):
+        return
     for row in run.sit.get("liabilities") or []:
         balance, rate = D(row.get("balance")), D(row.get("annual_rate"))
         if balance is None or balance <= 0 or rate is None or rate < HIGH_INTEREST_RATE:
@@ -452,9 +456,11 @@ def _high_interest(run: _Run) -> None:
         fast = payoff(balance, rate, needed, run.as_of)
         payment = D(row.get("monthly_payment"))
         current = payoff(balance, rate, payment, run.as_of) if payment is not None else {"status": "unknown"}
-        saved = None
+        saved = sooner = per_month = None
         if current.get("status") == "ready" and fast.get("status") == "ready":
             saved = max(D(current["interest"]) - D(fast["interest"]), Decimal(0))
+            sooner = current["months"] - fast["months"]
+            per_month = saved / sooner if sooner > 0 else None
         rate_text = f"{num(rate * 100, 0)}%"
         name_en, name_es = _debt_name(row, "en"), _debt_name(row, "es")
         pronoun = "la" if row.get("kind") in ("card", "mortgage") else "lo"
@@ -474,10 +480,13 @@ def _high_interest(run: _Run) -> None:
                     f"¿Cómo llego a {needed_text} al mes para {name_es}?")
         else:
             saved_text = run.money(saved, currency) if saved else None
+            each_text = run.money(per_month, currency) if per_month else None
             why = (f"About {needed_text} a month clears it in {HIGH_INTEREST_PAYOFF_MONTHS} months"
-                   + (f" and saves {saved_text} in interest against your current payment." if saved_text else "."),
+                   + (f" and saves {saved_text} in interest against your current payment" if saved_text else "")
+                   + (f": {each_text} for each of the {sooner} months sooner it is gone." if each_text else "."),
                    f"Con unos {needed_text} al mes {pronoun} liquidas en {HIGH_INTEREST_PAYOFF_MONTHS} meses"
-                   + (f" y te ahorras {saved_text} de intereses frente a tu pago actual." if saved_text else "."))
+                   + (f" y te ahorras {saved_text} de intereses frente a tu pago actual" if saved_text else "")
+                   + (f": {each_text} por cada uno de los {sooner} meses que terminas antes." if each_text else "."))
             step = (f"How do I pay off my {name_en} faster?", f"¿Cómo liquido {name_es} más rápido?")
         before = D(run.sit["cash_flow"].get("surplus_before_unknown_debts"))
         if payment is None and before is not None and before > 0:
@@ -493,7 +502,8 @@ def _high_interest(run: _Run) -> None:
                   "monthly_to_clear": num(needed), "months": HIGH_INTEREST_PAYOFF_MONTHS,
                   "interest_if_cleared": fast.get("interest"), "monthly_payment": num(payment),
                   "interest_at_current_payment": current.get("interest") if current.get("status") == "ready" else None,
-                  "interest_saved": num(saved), "payment_unknown": payment is None},
+                  "interest_saved": num(saved), "months_sooner": sooner,
+                  "interest_saved_per_month_sooner": num(per_month), "payment_unknown": payment is None},
             sources=[row["key"]], trigger=[row["id"], str(num(rate, 4)), payment is None]))
         if payment is None:
             run.missing("high_interest_debt", f"liability.{row['id']}.payment")

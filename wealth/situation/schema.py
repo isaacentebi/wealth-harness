@@ -66,6 +66,14 @@ SCHEMA: dict[str, dict[str, str]] = {
         "payment_frequency?": "|".join(PAYMENT_FREQUENCIES), "remaining_term_months?": "integer",
         "maturity?": "YYYY-MM-DD", "lender?": "name", "in_spending?": "true if the payment is inside spending.monthly",
         "approximate?": "true|false",
+        "cat?": "decimal: the Banxico CAT a Mexican statement quotes (0.60), besides the tasa in annual_rate",
+        "minimum_payment?": "card rule {percent_of_balance, plus_interest?, floor? | percent_of_limit + credit_limit}",
+        "iva_on_interest?": "decimal IVA charged on interest (0.16), or false",
+        "denomination?": "VSM|UMA|MXN (an Infonavit/Fovissste credit in units; lender names the institution)",
+        "balance_units?": "number of VSM/UMA owed", "monthly_payment_units?": "VSM/UMA paid a month",
+        "unit_value_mxn?": "monthly peso value of one unit", "unit_growth_annual?": "decimal yearly update of the unit",
+        "months_paid?": "integer months already paid (30-year liberation)",
+        "original_principal?": "number first borrowed (US $750,000 mortgage-interest limit)",
     },
     "investment.<id>": {
         "amount": "number (a stated balance; statements replace it)", "currency": "ISO 4217",
@@ -341,7 +349,8 @@ def _liability(value: dict, key: str) -> None:
     if "proposal_id" in value:  # a statement record written by ingest confirm
         return
     _object(value, key, {"kind", "balance", "currency", "annual_rate", "payment", "payment_frequency",
-                         "remaining_term_months", "maturity", "lender", "name", "in_spending", "approximate", "note"})
+                         "remaining_term_months", "maturity", "lender", "name", "in_spending", "approximate", "note",
+                         *DEBT_ENGINE_FIELDS})
     _enum(value.get("kind"), f"{key}.kind", LIABILITY_KINDS, required=True)
     _number(value.get("balance"), f"{key}.balance")
     _currency(value.get("currency"), f"{key}.currency")
@@ -359,6 +368,31 @@ def _liability(value: dict, key: str) -> None:
     _bool(value.get("in_spending"), f"{key}.in_spending")
     _bool(value.get("approximate"), f"{key}.approximate")
     _text(value.get("note"), f"{key}.note")
+    _rate(value.get("cat"), f"{key}.cat")
+    _rate(value.get("unit_growth_annual"), f"{key}.unit_growth_annual")
+    for field in ("balance_units", "monthly_payment_units", "unit_value_mxn", "original_principal"):
+        _number(value.get(field), f"{key}.{field}", required=False)
+    iva = value.get("iva_on_interest")
+    if iva is not None and iva is not False:
+        _rate(iva, f"{key}.iva_on_interest")
+    _enum(value.get("denomination"), f"{key}.denomination", ("VSM", "UMA", "MXN"))
+    paid = value.get("months_paid")
+    if paid is not None and (isinstance(paid, bool) or not isinstance(paid, int) or not 0 <= paid <= MAX_MONTHS):
+        _fail(f"{key}.months_paid", "must be a whole number of months")
+    rule = value.get("minimum_payment")
+    if rule is not None:
+        _object(rule, f"{key}.minimum_payment", {"percent_of_balance", "plus_interest", "floor", "percent_of_limit",
+                                                  "credit_limit"})
+        _rate(rule.get("percent_of_balance"), f"{key}.minimum_payment.percent_of_balance")
+        _rate(rule.get("percent_of_limit"), f"{key}.minimum_payment.percent_of_limit")
+        for field in ("floor", "credit_limit"):
+            _number(rule.get(field), f"{key}.minimum_payment.{field}", required=False)
+        _bool(rule.get("plus_interest"), f"{key}.minimum_payment.plus_interest")
+
+
+# Optional liability fields only the debt engine (wealth/debt.py) reads.
+DEBT_ENGINE_FIELDS = ("cat", "minimum_payment", "iva_on_interest", "denomination", "balance_units", "monthly_payment_units",
+                      "unit_value_mxn", "unit_growth_annual", "months_paid", "original_principal")
 
 
 def _purpose(value: Any, path: str) -> None:

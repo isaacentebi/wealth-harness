@@ -563,6 +563,80 @@ CATALOG: dict[str, dict[str, Any]] = {
             {"id": "car", "balance": 60000, "annual_rate": 0.13, "monthly_payment": 3500, "currency": "MXN"},
             {"id": "card", "balance": 18000, "annual_rate": 0.42, "monthly_payment": 1200, "currency": "MXN"}]},
     },
+    "debt": {
+        "purpose": "The debt engine: full amortization (cards, loans, mortgages, Infonavit/Fovissste in VSM/UMA), prepay vs "
+                   "invest after tax, refinance / balance transfer / consolidation offers, and avalanche vs snowball vs hybrid.",
+        "required": ["mode: amortize | prepay_vs_invest | refinance | strategies",
+                     "liabilities [{id, kind, balance, annual_rate (the tasa, decimal), monthly_payment | remaining_term_months "
+                     "| minimum_payment, currency}], or debt (one id or object); default: the client's stored liability.<id> facts",
+                     "prepay_vs_invest: extra_monthly and/or lump_sum", "refinance: offer", "strategies: monthly_amount"],
+        "optional": ["debts: stored liability ids to include", "as_of", "currency",
+                     "card: cat (Banxico CAT, compared with the tasa; alone it is used as an estimate), iva_on_interest "
+                     "(default 16% for MXN cards and consumer credit, 0 for home credit), minimum_payment {percent_of_balance, "
+                     "plus_interest (true), floor | percent_of_limit + credit_limit}",
+                     "Infonavit/Fovissste: kind infonavit|fovissste, denomination VSM|UMA|MXN, balance_units (or balance in "
+                     "pesos), unit_value_mxn (monthly; UMA defaults to INEGI 2026 x 30.4), monthly_payment_units or "
+                     "monthly_payment, unit_growth_annual (default 4%, an estimate), update_month, months_paid",
+                     "amortize: monthly_rows (default 12, or \"all\")",
+                     "prepay_vs_invest: horizon_months (default: payoff at the current payment), jurisdiction MX|US, "
+                     "marginal_rate, federal_marginal_rate (T-bills are state-exempt), itemizes (US mortgage interest), "
+                     "capital_gains_rate (US, default 15%), account taxable|tax_free, mx_mortgage {casa_habitacion, "
+                     "financial_system_lender, credit_udis | credit_amount_mxn + udi_value_at_origination + udi_source, "
+                     "within_global_cap} (LISR Art. 151 fr. IV, as mx_deductions), inflation (MX real interest, default 4%), "
+                     "expected_return {conservative, base, source}, risk_free {rate, source} (default: a saved "
+                     "cash_reference_rate, else CETES 28 days for MXN; the T-bill rate is asked), investment (a name), "
+                     "reserve {months, target_months} (default: the saved picture)",
+                     "refinance: offer {kind refinance|balance_transfer|consolidation, annual_rate (after any promo), "
+                     "promo_rate + promo_months, fee, fee_percent, fees_financed, term_months | monthly_payment, "
+                     "deferred_interest}",
+                     "strategies: order (a custom order to compare), quick_win_months (hybrid, default 3)"],
+        "scope": "Fixed rates and on-time payments; interest accrues at annual_rate / 12 plus IVA where it applies. "
+                 "Anything unknown is listed in missing and shown as a range, never taken as zero. prepay_vs_invest never "
+                 "recommends prepaying while the reserve is below its target. Views: balance series, payoff tickets and "
+                 "comparisons.",
+        "example": {"mode": "amortize", "as_of": "2026-09-21", "liabilities": [
+            {"id": "tarjeta", "name": "Tarjeta BBVA", "kind": "card", "balance": 30000, "annual_rate": 0.45, "cat": 0.60,
+             "monthly_payment": 2500, "currency": "MXN",
+             "minimum_payment": {"percent_of_balance": 0.015, "plus_interest": True, "percent_of_limit": 0.0125,
+                                 "credit_limit": 60000}}]},
+        "variants": {
+            "mx_card_cat_only": {"mode": "amortize", "as_of": "2026-09-21", "liabilities": [
+                {"id": "tarjeta", "kind": "card", "balance": 30000, "cat": 0.60, "monthly_payment": 2500, "currency": "MXN"}]},
+            "us_mortgage_prepay_vs_vti": {
+                "mode": "prepay_vs_invest", "as_of": "2026-09-21",
+                "debt": {"id": "mortgage", "kind": "mortgage", "balance": 350000, "annual_rate": 0.065,
+                         "monthly_payment": 2400, "currency": "USD"},
+                "extra_monthly": 500, "jurisdiction": "US", "marginal_rate": 0.24, "itemizes": False,
+                "capital_gains_rate": 0.15, "investment": "VTI",
+                "expected_return": {"conservative": 0.04, "base": 0.065, "source": "Wealth planning range for VTI (fictional)"},
+                "risk_free": {"rate": 0.04, "source": "3-month T-bill (fictional example)"},
+                "reserve": {"months": 6, "target_months": 6}},
+            "mx_card_prepay_vs_cetes": {
+                "mode": "prepay_vs_invest", "as_of": "2026-09-21",
+                "debt": {"id": "tarjeta", "kind": "card", "balance": 30000, "annual_rate": 0.45, "monthly_payment": 2500,
+                         "currency": "MXN"},
+                "extra_monthly": 3000, "marginal_rate": 0.30, "reserve": {"months": 4, "target_months": 3}},
+            "car_loan_refinance": {
+                "mode": "refinance", "as_of": "2026-09-21",
+                "liabilities": [{"id": "car", "kind": "auto", "balance": 22000, "annual_rate": 0.089, "monthly_payment": 520,
+                                 "currency": "USD"}],
+                "offer": {"kind": "refinance", "annual_rate": 0.059, "fee": 350, "term_months": 48}},
+            "card_balance_transfer": {
+                "mode": "refinance", "as_of": "2026-09-21",
+                "liabilities": [{"id": "card", "kind": "card", "balance": 8000, "annual_rate": 0.2499, "monthly_payment": 300,
+                                 "currency": "USD"}],
+                "offer": {"kind": "balance_transfer", "annual_rate": 0.2699, "promo_rate": 0, "promo_months": 15,
+                          "fee_percent": 0.03}},
+            "infonavit_uma": {"mode": "amortize", "as_of": "2026-09-21", "liabilities": [
+                {"id": "infonavit", "kind": "infonavit", "denomination": "UMA", "balance_units": 180, "annual_rate": 0.09,
+                 "monthly_payment_units": 1.9, "months_paid": 60}]},
+            "strategies": {"mode": "strategies", "as_of": "2026-09-21", "monthly_amount": 9000, "liabilities": [
+                {"id": "tarjeta", "kind": "card", "balance": 30000, "annual_rate": 0.45, "monthly_payment": 2500, "currency": "MXN"},
+                {"id": "car", "kind": "auto", "balance": 85000, "annual_rate": 0.14, "monthly_payment": 3200, "currency": "MXN"},
+                {"id": "personal", "kind": "personal", "balance": 6000, "annual_rate": 0.32, "monthly_payment": 800,
+                 "currency": "MXN"}]},
+        },
+    },
     "project": {
         "purpose": "Project dated contributions and withdrawals under explicit returns, fees, tax drag, and inflation.",
         "required": ["currency", "as_of", "end_date", "initial_wealth", "simulations", "seed", "return_model", "annual_inflation", "annual_fee", "annual_tax_drag", "cashflows", "recurring_cashflows"],

@@ -463,6 +463,7 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = False,
         policy_check {proposal {kind: trade, action, symbol, amount}} with client_id;
         speculation_check {proposal {action, instrument, amount}};
         sic_premium {sic_symbol (.MX), fetch_missing: true}; debt_payoff {monthly_amount};
+        debt {mode: amortize|prepay_vs_invest|refinance|strategies, ...};
         estate {year, decedent {us_citizen, green_card, us_domiciled}, assets [{id, type, value_usd, custody}]};
         tax {jurisdiction: US|MX_ARTICLE_129, household, ...}. Other tasks: wealth_context overview.
 

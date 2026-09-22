@@ -42,7 +42,7 @@ TASK_MODULES = {
     "manager_profile": "managers", "manager_compare": "managers",
 }
 # Tasks answered by the service itself rather than one module.
-SERVICE_TASKS = ("plan", "calendar", "monitor", "debt_payoff", "policy_draft", "policy_check", "today", "weekly",
+SERVICE_TASKS = ("plan", "calendar", "monitor", "debt_payoff", "debt", "policy_draft", "policy_check", "today", "weekly",
                  "quarterly_review", "fee_audit", "speculation_check", "panic_check", "scam_check",
                  "protection_review", "life_event", "order_ticket")
 # Investment policy tasks (wealth/policy.py) read the canonical picture, so the service runs them.
@@ -244,6 +244,24 @@ def _published_rate(reference) -> dict | None:
     unit = str(reference.get("unit") or "decimal")
     rate = rate / 100 if unit == "percent" else rate / 10000 if unit == "bps" else rate
     return {"rate": rate, "source": reference["source"]}
+
+
+def _risk_free(stored: dict, currency: str | None) -> tuple[dict | None, str | None]:
+    """The risk-free alternative for ``currency``: a saved cash_reference_rate (its low end), else CETES 28 days
+    for MXN (the dated constant); None for another currency with nothing saved (the T-bill rate is then asked)."""
+    fact = stored.get("cash_reference_rate")
+    value = fact.get("value") if fact else None
+    if isinstance(value, dict) and value.get("source") and str(value.get("currency") or currency).upper() == str(currency).upper():
+        low = prices_module._dec(value.get("low", value.get("rate")))
+        if low is not None:
+            unit = str(value.get("unit") or "decimal")
+            rate = low / 100 if unit == "percent" else low / 10000 if unit == "bps" else low
+            return {"rate": str(rate), "source": value["source"], "name": value.get("name") or value["source"],
+                    "as_of": value.get("as_of") or (fact.get("source") or {}).get("observed_on")}, fact["id"]
+    if currency == "MXN":
+        from .proactive import CETES_28D_REFERENCE as ref
+        return {"rate": ref["rate"], "source": ref["source"], "name": ref["name"], "as_of": ref["as_of"]}, None
+    return None, None
 
 
 def _price_sources(rows) -> list[dict]:
@@ -608,7 +626,7 @@ class WealthService:
         if client_id:
             with WealthStore(self.db_path) as store:
                 snapshot = store.snapshot(client_id)
-                if (task in LEDGER_TASKS or task in {"plan", "calendar", "debt_payoff"} or task in POLICY_TASKS
+                if (task in LEDGER_TASKS or task in {"plan", "calendar", "debt_payoff", "debt"} or task in POLICY_TASKS
                         or task in PROACTIVE_TASKS or task in REVIEW_TASKS or task in GUARDRAIL_TASKS) and "ledger" not in inputs:
                     ledger = current_ledger(store.ledger(client_id))
             snapshot, invalid = usable_snapshot(snapshot)
@@ -627,6 +645,9 @@ class WealthService:
         derived_evidence: list[str] = []
         if task == "debt_payoff":
             report = self._debt_payoff(inputs, snapshot, ledger, today)
+            derived_evidence = report.pop("_evidence", [])
+        elif task == "debt":
+            report = self._debt(inputs, snapshot, ledger, today)
             derived_evidence = report.pop("_evidence", [])
         elif task in POLICY_TASKS:
             report = self._policy(task, inputs, client_id, snapshot, ledger, today)
@@ -701,7 +722,7 @@ class WealthService:
                 report["market_data"] = market
                 if isinstance(report.get("sources"), list):
                     report["sources"] = report["sources"] + _price_sources(market.get("prices") or [])
-        if task in {"plan", "calendar", "debt_payoff"} or task in POLICY_TASKS or task in PROACTIVE_TASKS or task in REVIEW_TASKS or task in GUARDRAIL_TASKS:
+        if task in {"plan", "calendar", "debt_payoff", "debt"} or task in POLICY_TASKS or task in PROACTIVE_TASKS or task in REVIEW_TASKS or task in GUARDRAIL_TASKS:
             used_ids = set(packet["evidence_ids"] if task in {"plan", "calendar"} else []) | set(derived_evidence)
             consumed = [f for f in eligible if f["id"] in used_ids and f["key"] not in inputs]
         elif task == "monitor":
@@ -716,6 +737,9 @@ class WealthService:
                                        for f in snapshot["facts"] if f not in eligible]
         if task == "debt_payoff":
             relevant = {f["key"] for f in snapshot["facts"] if f["key"].startswith("liability.")}
+        elif task == "debt":
+            relevant = {f["key"] for f in snapshot["facts"] if f["key"].startswith(
+                ("liability.", "reserve", "spending.monthly", "cash_reference_rate", "client.profile"))}
         elif task in POLICY_TASKS or task in REVIEW_TASKS:
             from .policy import POLICY_FACT_KEYS
             keys_read = POLICY_FACT_KEYS + (("planning.dca", "thread.") if task == "quarterly_review" else ())
@@ -851,6 +875,83 @@ class WealthService:
             raise ValueError("liabilities must be a list of {id, balance, annual_rate, monthly_payment, currency?}")
         report = situation_module.debt_payoff(liabilities, inputs["monthly_amount"], inputs.get("currency"),
                                               inputs.get("order"), as_of)
+        report["_evidence"] = sorted(set(evidence))
+        return report
+
+    DEBT_INPUTS = frozenset({"mode", "liabilities", "debts", "debt", "as_of", "currency", "monthly_rows", "monthly_amount",
+                             "order", "quick_win_months", "offer", "extra_monthly", "lump_sum", "horizon_months",
+                             "jurisdiction", "marginal_rate", "federal_marginal_rate", "itemizes", "capital_gains_rate",
+                             "account", "mx_mortgage", "inflation", "expected_return", "risk_free", "investment", "reserve"})
+
+    def _debt(self, inputs: dict, snapshot: dict, ledger, today: str) -> dict:
+        """The debt engine (wealth/debt.py) over inline liabilities or the client's stored ones."""
+        from . import debt as debt_module
+        unknown = sorted(set(inputs) - self.DEBT_INPUTS)
+        if unknown:
+            raise ValueError(f"debt inputs: unknown {unknown}; see wealth_context(intent='debt')")
+        as_of = str(inputs.get("as_of") or today)[:10]
+        day = datetime.fromisoformat(as_of).date()
+        chosen = inputs.get("debt")
+        if chosen is not None and not isinstance(chosen, (str, dict)):
+            raise ValueError("debt must be a liability id or a liability object")
+        wanted = inputs.get("debts")
+        if wanted is not None and (not isinstance(wanted, list) or not all(isinstance(i, str) for i in wanted)):
+            raise ValueError("debts must be a list of liability ids")
+        if isinstance(chosen, str):
+            wanted = [chosen]
+        stored = {f["key"]: f for f in snapshot["facts"]}
+        evidence: list[str] = []
+        sit = build_situation(snapshot, ledger, as_of) if stored else None
+        rows = inputs.get("liabilities")
+        if isinstance(chosen, dict):
+            rows = [chosen]
+        if rows is None:
+            rows = []
+            for r in (sit or {}).get("liabilities") or []:
+                if inputs.get("currency") is not None and r["currency"] != inputs["currency"]:
+                    continue
+                raw = (stored.get(r["key"]) or {}).get("value")
+                extras = raw if isinstance(raw, dict) and not isinstance(raw.get("liability"), dict) else {}
+                row = {**{k: v for k, v in extras.items() if k not in ("payment", "payment_frequency")},
+                       "id": r["id"], "name": r.get("name") or r["kind"], "kind": extras.get("kind") or r["kind"],
+                       "balance": r["balance"], "annual_rate": r["annual_rate"], "currency": r["currency"],
+                       "monthly_payment": r["monthly_payment"], "lender": r.get("lender")}
+                rows.append(row)
+                if r["key"] in (sit or {}).get("evidence", {}):
+                    evidence.append(sit["evidence"][r["key"]])
+        elif not isinstance(rows, list):
+            raise ValueError("liabilities must be a list of liability objects")
+        if wanted is not None:
+            known = {str(r.get("id")) for r in rows if isinstance(r, dict)}
+            absent = sorted(set(wanted) - known)
+            if absent:
+                raise ValueError(f"no liability {absent}; known: {sorted(known)}")
+            rows = [r for r in rows if str(r.get("id")) in wanted]
+        reserve = inputs.get("reserve")
+        if reserve is not None and not isinstance(reserve, dict):
+            raise ValueError("reserve must be {months, target_months}")
+        jurisdiction = inputs.get("jurisdiction")
+        risk_free = inputs.get("risk_free")
+        if risk_free is not None and (not isinstance(risk_free, dict) or risk_free.get("rate") is None
+                                      or not risk_free.get("source")):
+            raise ValueError("risk_free must be {rate (decimal), source}")
+        if sit is not None:
+            if reserve is None:
+                reserve = {k: sit["reserve"].get(k) for k in ("months", "target_months", "amount", "target_amount")}
+                evidence += [sit["evidence"][k] for k in sit["reserve"].get("source_keys") or [] if k in sit["evidence"]]
+                for key in ("reserve", "spending.monthly"):
+                    if key in stored:
+                        evidence.append(stored[key]["id"])
+            if jurisdiction is None:
+                from .proactive import jurisdictions
+                codes = jurisdictions(sit)
+                jurisdiction = next(iter(codes)) if len(codes) == 1 else None
+        if inputs.get("mode") == "prepay_vs_invest" and risk_free is None:
+            currency = next((r.get("currency") for r in rows if isinstance(r, dict) and r.get("currency")), None)
+            risk_free, fact_id = _risk_free(stored, currency)
+            if fact_id:
+                evidence.append(fact_id)
+        report = debt_module.run(inputs, rows, day, jurisdiction=jurisdiction, reserve=reserve, risk_free=risk_free)
         report["_evidence"] = sorted(set(evidence))
         return report
 

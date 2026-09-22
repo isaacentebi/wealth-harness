@@ -174,7 +174,8 @@ full structure call wealth_context with intent=situation and the client_id.
 Tasks by question (capabilities, not a sequence; read status, missing, warnings
 and coverage before answering):
 - Money in and out: spending (where it goes, investable surplus), calendar,
-  income, project, ladder (cash flows), debt_payoff, plan (reserves and goals).
+  income, project, ladder (cash flows), debt_payoff, debt (amortization, prepay
+  vs invest, refinance offers, payoff strategies), plan (reserves and goals).
 - What they own: ledger (holdings, lots, gains, income), performance, exposure,
   import, sic_premium.
 - Investing: policy_draft and policy_check (investment policy), rebalance,

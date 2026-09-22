@@ -68,7 +68,7 @@ wealth context` prints every task with its inputs and a runnable example.
 
 | Life area | What Wealth does (tasks) |
 | --- | --- |
-| Money in and out | Where money goes and what is investable, cash calendars, projections, withdrawal and liability matching, debt payoff, reserves and goals (`spending`, `calendar`, `income`, `project`, `ladder`, `debt_payoff`, `plan`) |
+| Money in and out | Where money goes and what is investable, cash calendars, projections, withdrawal and liability matching, debt payoff, the debt engine (amortization, prepay vs invest, refinance offers, payoff strategies), reserves and goals (`spending`, `calendar`, `income`, `project`, `ladder`, `debt_payoff`, `debt`, `plan`) |
 | What you own | Holdings, lots, gains and income from a transaction ledger, returns, exposure and overlap, household import, SIC premium (`ledger`, `performance`, `exposure`, `import`, `sic_premium`) |
 | Investing | Investment policy, tax-aware rebalancing, asset location, recurring investing, portfolio analysis and construction, company and fund research (`policy_draft`, `policy_check`, `rebalance`, `asset_location`, `dca`, `compare`, `construct`, `analyze`, `factors`, `stress`, `research`, `value`) |
 | Tax | US federal lots, wash sales and harvesting; Mexico Art. 129, real interest, deductions and PPR, foreign securities, tax calendar; US estate exposure for non-residents (`tax`, `mx_holdings`, `mx_interest`, `mx_deductions`, `mx_foreign`, `mx_calendar`, `estate`) |
@@ -528,6 +528,59 @@ Market Value, Cost Basis) and/or activity (Date, Type, Description, Symbol,
 Quantity, Price, Amount, Fees) using `"preset": "vest"`. The preset is a
 generic US-broker layout (USD, month-first dates) and says so in the proposal's
 assumptions.
+
+## Debt engine
+
+`debt` takes a `mode` and the client's stored `liability.<id>` facts (or
+inline `liabilities`, or one `debt`). Interest accrues monthly at the tasa
+(`annual_rate / 12`). Mexican card and consumer credit adds 16% IVA on
+interest; home credit does not. Anything unknown goes to `missing` and is shown
+as a range, never as zero. Every mode returns views: a balance series, a ticket
+or a side-by-side.
+
+- **`amortize`**: months, payoff date, interest (and IVA), total paid, and the
+  schedule. The first `monthly_rows` months are listed (default 12, or `"all"`)
+  and every year is summarised. A card on `minimum_payment` (Banxico: 1.5% of
+  the balance plus interest and IVA, floor 1.25% of the limit) also reports what
+  paying only the minimum costs. `cat` is compared with the tasa: CAT includes
+  fees and excludes IVA. A card with only a CAT accrues at its monthly
+  equivalent, marked as an estimate. Infonavit/Fovissste credits in `VSM` or
+  `UMA` run in units. The unit rises each `update_month` (UMA defaults to INEGI
+  2026 x 30.4; growth defaults to 4%). A balance left after 30 years is
+  reported as cancelled. The whole result is an estimate unless the statement
+  gives pesos.
+- **`prepay_vs_invest`**: `extra_monthly` and/or `lump_sum` against the debt or
+  invested. The debt's after-tax rate is guaranteed. US mortgage interest counts
+  only if `itemizes` (up to $750,000 of acquisition debt). The Mexican mortgage
+  deduction reuses `mx_deductions`' LISR Art. 151 fr. IV real-interest rule
+  (`mx_mortgage`). Investing uses `expected_return {conservative, base}` after
+  tax (Art. 129 10% in Mexico, `capital_gains_rate` in the US) and the risk-free
+  rate after tax. The risk-free rate is CETES 28 days for MXN and the T-bill for
+  USD, from a saved `cash_reference_rate` or `risk_free`. The result gives the
+  `breakeven` return, the net-worth difference at `horizon_months` per
+  scenario, and a `verdict` (`prepay`, `close_call`, `invest`, `depends`,
+  `build_reserve_first`) with a `confidence`. It never recommends prepaying
+  while the reserve is below target.
+- **`refinance`**: an `offer` (`refinance`, `balance_transfer` or
+  `consolidation`; rate, fees, term, promo) against the current path. It gives
+  `interest_saved` net of fees, the `breakeven_month` when fees are paid back,
+  and `risk`: the balance left when the promo ends, the payment that clears it
+  in time, interest after the promo, and deferred interest.
+- **`strategies`**: avalanche, snowball and hybrid (quick wins, then highest
+  rate) for `monthly_amount`. It gives months, interest, extra interest against
+  avalanche in money, the first debt cleared, and the total balance over time
+  for each.
+
+```sh
+printf '%s' '{"task":"debt","inputs":{"mode":"prepay_vs_invest","debt":{"id":"mortgage","kind":"mortgage",
+  "balance":350000,"annual_rate":0.065,"monthly_payment":2400,"currency":"USD"},"extra_monthly":500,
+  "marginal_rate":0.24,"itemizes":false,"investment":"VTI","risk_free":{"rate":0.04,"source":"3-month T-bill"},
+  "reserve":{"months":6,"target_months":6}}}' | uv run wealth run
+```
+
+The proactive `high_interest_debt` item (20% a year or more) now also says the
+interest saved for each month sooner the debt is gone. It stays silent while
+the reserve is below target.
 
 ## Harvest tickets, idle cash, look-through and Roth conversions
 

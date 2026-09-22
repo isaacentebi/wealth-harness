@@ -106,8 +106,9 @@ charts and order cards drawn by the engine, not the model.
 
 ## What it can do
 
-- **Money in and out:** spending, cash calendars, projections, debt payoff,
-  reserves and goals.
+- **Money in and out:** spending, cash calendars, projections, debt payoff and
+  a debt engine (amortization, prepay vs invest, refinancing, avalanche vs
+  snowball), reserves and goals.
 - **What you own:** a transaction ledger with lots, gains and income; returns,
   exposure and overlap.
 - **Investing:** an investment policy, tax-aware rebalancing, asset location,

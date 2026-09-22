@@ -518,6 +518,7 @@ _TASK_STEPS = {
     "plan": "Checking your plan",
     "calendar": "Mapping your cash calendar",
     "debt_payoff": "Working out your debt payoff",
+    "debt": "Working through your debts",
     "project": "Projecting your finances",
     "income": "Comparing income strategies",
     "ladder": "Matching cash flows",

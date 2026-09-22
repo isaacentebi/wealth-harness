@@ -131,7 +131,7 @@ TASK_LABELS = {
     "spending": L("Spending", "Gastos"), "dca": L("Recurring investing", "Inversión periódica"),
     "performance": L("Performance", "Rendimiento"), "project": L("Projection", "Proyección"),
     "income": L("Retirement income", "Ingreso para el retiro"), "stress": L("Stress test", "Prueba de estrés"),
-    "debt_payoff": L("Debt payoff", "Pago de deudas"), "tax": L("Tax", "Impuestos"),
+    "debt_payoff": L("Debt payoff", "Pago de deudas"), "debt": L("Debt", "Deudas"), "tax": L("Tax", "Impuestos"),
     "rebalance": L("Rebalance", "Rebalanceo"), "asset_location": L("Asset location", "Ubicación de activos"),
     "situation": L("Your picture", "Tu panorama"),
     "manager_holdings": L("13F holdings", "Posiciones 13F"), "manager_profile": L("Manager profile", "Perfil del administrador"),
@@ -297,13 +297,16 @@ METHOD = {
     "hifo": L("Highest cost", "Mayor costo"), "specific_id": L("Lots you chose", "Lotes elegidos"),
     "tax_min": L("Lowest tax", "Menor impuesto"), "avalanche": L("Highest rate first", "Tasa más alta primero"),
     "snowball": L("Smallest balance first", "Saldo menor primero"),
+    "hybrid": L("Quick wins, then highest rate", "Victorias rápidas, luego tasa alta"),
+    "custom": L("Your order", "Tu orden"),
     "dividend_cash": L("Live on dividends", "Vivir de dividendos"),
     "total_return_sales": L("Sell shares as needed", "Vender según se necesite"),
 }
 DEBT = {"car": L("Car loan", "Crédito automotriz"), "auto": L("Car loan", "Crédito automotriz"),
         "mortgage": L("Mortgage", "Hipoteca"), "card": L("Credit card", "Tarjeta de crédito"),
         "credit_card": L("Credit card", "Tarjeta de crédito"), "student": L("Student loan", "Crédito educativo"),
-        "personal": L("Personal loan", "Préstamo personal")}
+        "personal": L("Personal loan", "Préstamo personal"), "infonavit": L("Infonavit credit", "Crédito Infonavit"),
+        "fovissste": L("Fovissste credit", "Crédito Fovissste")}
 
 
 def _category(key: Any) -> dict | str:
@@ -597,6 +600,161 @@ def _debt_payoff(result: Mapping, envelope: Mapping, task: str) -> list[dict]:
                   envelope, result)]
 
 
+_VERDICT = {"prepay": L("Pay the debt down", "Paga la deuda"), "invest": L("Invest the extra", "Invierte el extra"),
+            "close_call": L("A close call: consider splitting", "Decisión cerrada: considera dividir"),
+            "depends": L("Depends on your taxes", "Depende de tus impuestos"),
+            "build_reserve_first": L("Build your reserve first", "Primero completa tu reserva")}
+_CONFIDENCE = {"high": L("High confidence", "Confianza alta"), "medium": L("Medium confidence", "Confianza media"),
+               "low": L("Low confidence", "Confianza baja")}
+
+
+def _debt_label(item: Mapping[str, Any]) -> dict | str:
+    name = item.get("name")
+    if isinstance(name, str) and name and name != item.get("id"):
+        return _title_name(name)
+    return DEBT.get(str(item.get("kind") or item.get("id")), _title_name(str(item.get("id")).replace("_", " ")))
+
+
+def _balance_points(points: Any) -> list[dict]:
+    return [{"x": p["x"], "y": p["y"]} for p in points or [] if isinstance(p, Mapping)
+            and _raw(p.get("y")) is not None and isinstance(p.get("x"), str) and _ISO.match(p["x"])][:MAX_POINTS]
+
+
+def _debt(result: Mapping, envelope: Mapping, task: str) -> list[dict]:
+    """The debt engine: balance over time plus a ticket or a side-by-side for each mode."""
+    mode, cur = result.get("mode"), result.get("currency")
+    if mode == "amortize":
+        return _debt_amortize(result, envelope, task, cur)
+    if mode == "prepay_vs_invest":
+        return _debt_prepay(result, envelope, task, cur)
+    if mode == "refinance":
+        return _debt_refinance(result, envelope, task, cur)
+    if mode == "strategies":
+        return _debt_strategies(result, envelope, task, cur)
+    return []
+
+
+def _debt_amortize(result: Mapping, envelope: Mapping, task: str, cur: Any) -> list[dict]:
+    debts = [d for d in result.get("debts") or [] if isinstance(d, Mapping)]
+    if not debts:
+        return []
+    out: list[dict] = []
+    first = debts[0]
+    points = _balance_points(first.get("balance_series"))
+    if len(points) >= 2:
+        caption = (L("An estimate: the unit is updated every year", "Estimación: la unidad se actualiza cada año")
+                   if first.get("estimate") else None)
+        out.append(_spec(task, "series", L("Balance until it is paid", "Saldo hasta liquidarla"),
+                         {"unit": {"t": "money", "cur": str(first.get("currency") or "")}, "points": points},
+                         envelope, result, caption))
+    rows = []
+    for d in debts[:MAX_ROWS // 2]:
+        rows.append({"label": _debt_label(d), "value": months(d.get("months"))})
+        with_iva = d.get("total_iva") is not None
+        rows.append({"label": L("Interest and IVA" if with_iva else "Interest", "Intereses e IVA" if with_iva else "Intereses"),
+                     "value": money(d.get("interest_cost"), d.get("currency")), "sub": True})
+    totals = result.get("totals")
+    total = ({"label": L("Interest, all debts", "Intereses, todas las deudas"), "value": money(totals.get("interest"), cur)}
+             if isinstance(totals, Mapping) and len(debts) > 1 else None)
+    out.append(_spec(task, "ticket", L("What each debt costs", "Lo que cuesta cada deuda"),
+                     {"rows": rows[:MAX_ROWS], "total": total}, envelope, result))
+    return out
+
+
+def _debt_prepay(result: Mapping, envelope: Mapping, task: str, cur: Any) -> list[dict]:
+    scen = result.get("scenarios") or {}
+    base, cons, safe = (scen.get(k) or {} for k in ("base", "conservative", "risk_free"))
+    guaranteed = result.get("guaranteed") or {}
+    after = (result.get("investing") or {}).get("after_tax") or {}
+    verdict = _VERDICT.get(str(result.get("verdict")))
+    rows = [{"label": L("Paying the debt (guaranteed, after tax)", "Pagar la deuda (garantizado, tras impuestos)"),
+             "value": ratio(guaranteed.get("after_tax_rate"))},
+            {"label": L("Investing, conservative (after tax)", "Invertir, conservador (tras impuestos)"),
+             "value": ratio(after.get("conservative"))},
+            {"label": L("Investing, base case (after tax)", "Invertir, caso base (tras impuestos)"),
+             "value": ratio(after.get("base"))},
+            {"label": L("Risk-free (after tax)", "Sin riesgo (tras impuestos)"), "value": ratio(after.get("risk_free"))},
+            {"label": L("Return investing must beat (before tax)", "Lo que invertir debe superar (antes de impuestos)"),
+             "value": ratio((result.get("breakeven") or {}).get("pre_tax_return"))},
+            {"label": L("Prepaying minus investing, base case", "Pagar menos invertir, caso base"),
+             "value": money(base.get("net_worth_difference"), cur)}]
+    if result.get("confidence") in _CONFIDENCE:
+        rows.append({"label": L("Confidence", "Confianza"), "value": {"t": "text", "v": _CONFIDENCE[result["confidence"]]}})
+    caption = L("The debt's return is guaranteed; investing's is expected, not promised",
+                "Lo que rinde pagar es garantizado; lo de invertir es esperado, no prometido")
+    out = [_spec(task, "ticket", L("Pay the debt or invest", "Pagar la deuda o invertir"),
+                 {"rows": rows, "total": {"label": L("Verdict", "Veredicto"), "value": {"t": "text", "v": verdict}}
+                  if verdict else None}, envelope, result, caption)]
+    metrics = [{"label": L(f"Net worth, {en}", f"Patrimonio, {es}"),
+                "values": [money(s.get("net_worth_if_prepay"), cur), money(s.get("net_worth_if_invest"), cur)],
+                "better": "higher"}
+               for s, en, es in ((base, "base case", "caso base"), (cons, "conservative", "conservador"),
+                                 (safe, "risk-free", "sin riesgo")) if s.get("net_worth_if_prepay") is not None]
+    if metrics:
+        metrics.append({"label": L("Debt gone (month)", "Deuda liquidada (mes)"),
+                        "values": [months(base.get("debt_paid_off_month_if_prepay")),
+                                   months(base.get("debt_paid_off_month_if_invest"))], "better": "lower"})
+        options = [{"label": L("Prepay the debt", "Pagar la deuda"), "best": base.get("winner") == "prepay"},
+                   {"label": L("Invest the extra", "Invertir el extra"), "best": base.get("winner") == "invest"}]
+        horizon = result.get("horizon_months")
+        out.append(_spec(task, "comparison", L(f"Where you stand after {horizon} months", f"Cómo quedas después de {horizon} meses"),
+                         {"options": options, "metrics": metrics}, envelope, result))
+    return out
+
+
+def _debt_refinance(result: Mapping, envelope: Mapping, task: str, cur: Any) -> list[dict]:
+    now, offer, risk = result.get("current") or {}, result.get("offer") or {}, result.get("risk") or {}
+    rows = [{"label": L("Interest if you keep it", "Intereses si la conservas"), "value": money(now.get("interest"), cur)},
+            {"label": L("Offer: interest plus fees", "Oferta: intereses más comisiones"), "value": money(offer.get("total_cost"), cur)},
+            {"label": L("Fees", "Comisiones"), "value": money(result.get("fees"), cur), "sub": True},
+            {"label": L("Fees paid back after", "Comisiones recuperadas en"), "value": months(result.get("breakeven_month"))}]
+    if risk.get("promo_months") is not None:
+        rows += [{"label": L("Owed when the promo ends", "Saldo al terminar la promoción"),
+                  "value": money(risk.get("balance_at_promo_end"), cur)},
+                 {"label": L("Monthly payment that clears it in the promo", "Pago mensual que la liquida en la promoción"),
+                  "value": money(risk.get("payment_to_clear_within_promo"), cur)}]
+    out = [_spec(task, "ticket", L("Is the offer worth it", "¿Conviene la oferta?"),
+                 {"rows": rows, "total": {"label": L("Interest saved", "Intereses ahorrados"),
+                                          "value": money(result.get("interest_saved"), cur)}}, envelope, result)]
+    options = [{"label": L("Keep it", "Conservarla"), "best": result.get("worth_it") is False},
+               {"label": L("Take the offer", "Tomar la oferta"), "best": result.get("worth_it") is True}]
+    metrics = [{"label": L("Monthly payment", "Pago mensual"),
+                "values": [money(now.get("monthly_payment"), cur), money(offer.get("monthly_payment"), cur)]},
+               {"label": L("Months to repay", "Meses para liquidar"),
+                "values": [months(now.get("months")), months(offer.get("months"))], "better": "lower"},
+               {"label": L("Total cost", "Costo total"),
+                "values": [money(now.get("interest"), cur), money(offer.get("total_cost"), cur)], "better": "lower"}]
+    out.append(_spec(task, "comparison", L("Now vs the offer", "Hoy contra la oferta"),
+                     {"options": options, "metrics": metrics}, envelope, result))
+    return out
+
+
+def _debt_strategies(result: Mapping, envelope: Mapping, task: str, cur: Any) -> list[dict]:
+    out: list[dict] = []
+    rows = [r for r in result.get("strategies") or [] if isinstance(r, Mapping) and r.get("status") == "ready"][:MAX_OPTIONS]
+    if len(rows) >= 2:
+        first = result.get("first_debt_cleared_months") or {}
+        options = [{"label": _method(r.get("strategy")), "best": r.get("strategy") == result.get("best")} for r in rows]
+        metrics = [{"label": L("Months to debt-free", "Meses para quedar sin deudas"),
+                    "values": [months(r.get("months")) for r in rows], "better": "lower"},
+                   {"label": L("Total interest", "Intereses totales"),
+                    "values": [money(r.get("interest"), cur) for r in rows], "better": "lower"},
+                   {"label": L("Extra interest vs highest rate first", "Intereses de más vs tasa alta primero"),
+                    "values": [money(r.get("extra_interest_vs_avalanche"), cur) for r in rows], "better": "lower"},
+                   {"label": L("First debt gone (month)", "Primera deuda liquidada (mes)"),
+                    "values": [months(first.get(r.get("strategy"))) for r in rows], "better": "lower"}]
+        out.append(_spec(task, "comparison", L("Ways to pay the debts", "Formas de pagar las deudas"),
+                         {"options": options, "metrics": metrics}, envelope, result))
+    best = result.get("best")
+    points = _balance_points((result.get("balance_series") or {}).get(best))
+    if len(points) >= 2:
+        title = (L("Total owed, highest rate first", "Total adeudado, tasa más alta primero") if best == "avalanche"
+                 else L("Total owed on the cheapest plan", "Total adeudado con el plan más barato"))
+        out.append(_spec(task, "series", title, {"unit": {"t": "money", "cur": str(cur or "")}, "points": points},
+                         envelope, result))
+    return out
+
+
 def _price_label(value: Any) -> str:
     number = _dec(value)
     return "—" if number is None else f"{number:,.2f}".rstrip("0").rstrip(".")
@@ -881,7 +1039,7 @@ def _manager_mirror(result: Mapping, envelope: Mapping, task: str) -> list[dict]
 
 BUILDERS: dict[str, Callable[[Mapping, Mapping, str], list[dict]]] = {
     "spending": _spending, "dca": _dca, "performance": _performance, "project": _project, "income": _income,
-    "stress": _stress, "debt_payoff": _debt_payoff, "tax": _tax, "rebalance": _rebalance,
+    "stress": _stress, "debt_payoff": _debt_payoff, "debt": _debt, "tax": _tax, "rebalance": _rebalance,
     "asset_location": _asset_location,
     "manager_holdings": _manager_holdings, "manager_profile": _manager_profile, "manager_compare": _manager_compare,
     "manager_mirror": _manager_mirror, "speculation_check": _speculation,
