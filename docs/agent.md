@@ -17,8 +17,8 @@ Wealth uses the model in your Codex config (`~/.codex/config.toml`), so a Codex 
 
 Open **http://127.0.0.1:8765/**. `--client` defaults to `personal`. The page streams
 progress ("Checking your saved profile", "Searching the web", "Running a stress
-test"), can stop a response, and renders headings, lists, tables and source
-links. Response depth is Fast, Balanced or Deep (Codex reasoning low, medium,
+test") and then the answer itself as it is written, can stop a response, and
+renders headings, lists, tables and source links. Response depth is Fast, Balanced or Deep (Codex reasoning low, medium,
 high); Fast is the default. Native web search is enabled by default, and stays
 off for the rest of a conversation once a file has been read; Python
 calculations run through Wealth tools, not an unrestricted shell. A small chip
@@ -100,13 +100,49 @@ Use `uv run wealth-agent --help` for one-shot prompts and other options;
 
 ## Runtime and policy
 
-The first turn of a conversation runs `codex exec`; later turns continue that
-Codex session with `codex exec resume`, so earlier tool results stay in context.
-If a session cannot be resumed, the turn starts fresh with the recent messages
-and a short summary of earlier requests. Codex keeps session files under its own
-home directory (normally `~/.codex/sessions`); pass `--ephemeral` to either
-launcher to keep nothing there, at the cost of that continuity. SQLite remains the
-durable financial memory.
+Each turn runs one Codex process. There are two runtimes with the same security
+posture; `WEALTH_RUNTIME=exec` or `WEALTH_RUNTIME=appserver` forces one, and by
+default (`auto`) Wealth uses app-server and falls back to exec when it cannot
+start a turn:
+
+- **app-server** ([wealth/appserver.py](../wealth/appserver.py)) runs `codex app-server`
+  and speaks its JSON-RPC protocol over stdio (`initialize`, `config/read`,
+  `thread/start` or `thread/resume`, `turn/start`), so the answer arrives as
+  `item/agentMessage/delta` chunks and the page shows it as it is written.
+- **exec** runs `codex exec --json` (and `codex exec resume`), which sends each
+  message whole: the answer appears at once. The memory step after each answer
+  always uses exec; nobody watches it.
+
+The first turn of a conversation starts a Codex thread; later turns resume it,
+so earlier tool results stay in context. If a thread cannot be resumed, the turn
+starts fresh with the recent messages and a short summary of earlier requests.
+SQLite remains the durable financial memory.
+
+`codex app-server` has no `--ignore-user-config`, and its `-c` overrides merge
+into your `~/.codex/config.toml` instead of replacing it: your other MCP servers,
+plugins, notify hook, model provider or base URL would reach the Wealth turn.
+So app-server turns run with a Wealth-owned Codex home,
+`$XDG_DATA_HOME/wealth-harness/codex-home` (default `~/.local/share/...`,
+`WEALTH_CODEX_HOME` overrides it). It is private (0700), its `config.toml` is
+rewritten empty every turn, and `auth.json` there is a symlink to your own
+Codex login, which Codex rewrites in place, so a token refresh reaches your real
+file. Before any thread starts, Wealth reads the effective config back
+(`config/read`) and uses exec for the rest of the server's life if anything but
+the Wealth MCP server is enabled, the sandbox is not read-only, approvals are
+not `never`, a disabled feature is on or a notify hook is set. Without a shared
+`auth.json` (signed out, or credentials in the keychain) app-server is not
+used either. Sessions of the two runtimes live in different homes: switching
+runtimes starts one fresh thread. Pass `--ephemeral` to either launcher to keep
+no session files at all, at the cost of that continuity.
+
+A new app-server process starts for every turn, rather than one kept warm per
+chat. The Wealth MCP server reads the turn's consent evidence (the private
+`WEALTH_TURN_FILE`) and whether web search is live when its thread starts, and
+Codex keeps a loaded thread's MCP servers running; a warm process would carry
+the first turn's evidence and search setting into later turns. Starting the
+process and completing the handshake (`initialize`, `config/read`) takes about
+45 ms, which is all a warm process would save; the MCP server starts per thread
+either way.
 
 Each turn's prompt carries only per-turn context: the date, the browser's time
 zone, the `<situation>` brief (the saved picture in numbers), the views of that
@@ -121,6 +157,9 @@ memories, tool suggestions and skill search. Wealth tools can write to their
 configured database. No transfers, messages or background monitors start, and
 the model cannot place an order: only the tap on an order card does. Stopping
 a response ends the whole Codex process group, including the Wealth MCP server.
+Both runtimes get the same overrides, the same scrubbed environment (broker keys,
+tokens and other secrets removed) and the same per-turn consent file and
+web-search rules; app-server approval requests are declined.
 
 [wealth/instructions.md](../wealth/instructions.md) replaces Codex's built-in
 coding instructions; inherited AGENTS files are disabled for this assistant.
@@ -144,9 +183,19 @@ a local personal interface, not a hosted multi-user service.
 Most of a turn is model steps, so the launcher keeps them few and small: the
 situation is built once per turn, discovery results are summaries by default (a
 turn that cannot save facts never receives the ~9k-character fact contract),
-and the answer is shown as soon as Codex reports `turn.completed`, while the
-process exits in the background. `codex exec --json` sends each message whole
-(no partial-text events), so the answer appears at once rather than streaming.
+and the answer is shown as soon as Codex reports the turn complete, while the
+process exits in the background. With app-server the first words show while
+the rest is written; with exec the whole answer appears at once.
+
+Measured with Codex 0.153.4 on one profile, a fresh thread per question,
+reasoning low and web search on; seconds, two runs each. With exec the first
+text is the whole answer.
+
+| Question | exec: answer | app-server: first text | app-server: answer |
+| --- | --- | --- | --- |
+| hola | 4.9, 6.0 | 3.7, 4.9 | 4.2, 5.6 |
+| ¿cómo voy? | 7.7, 8.6 | 4.5, 3.2 | 8.5, 7.1 |
+| ¿Me conviene comprar el S&P 500 por el SIC en GBM…? | 31.6, 28.4 | 8.0, 9.7 | 18.6, 19.4 |
 
 `--service-tier fast` on `wealth-chat` or `wealth-agent`, or
 `WEALTH_SERVICE_TIER=fast`, asks Codex for its fast tier (priority processing)

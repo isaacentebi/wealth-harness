@@ -52,19 +52,20 @@ _captured = threading.local()
 def _install_capture() -> None:
     """Keep each thread's raw Codex stdout so the transcript can list tools used."""
 
-    if getattr(agent._stream_process, "_eval_capture", False):
-        return
-    original = agent._stream_process
+    for name in ("_stream_process", "_stream_appserver"):  # exec, and app-server (same "line" items, in exec shape)
+        original = getattr(agent, name)
+        if getattr(original, "_eval_capture", False):
+            continue
 
-    def capturing(command, prompt, timeout, control=None, cwd=None):
-        lines = _captured.__dict__.setdefault("lines", [])
-        for item in original(command, prompt, timeout, control, cwd):
-            if item[0] == "line":
-                lines.append(item[1])
-            yield item
+        def capturing(*args, _original=original, **kwargs):
+            lines = _captured.__dict__.setdefault("lines", [])
+            for item in _original(*args, **kwargs):
+                if item[0] == "line":
+                    lines.append(item[1])
+                yield item
 
-    capturing._eval_capture = True  # type: ignore[attr-defined]
-    agent._stream_process = capturing
+        capturing._eval_capture = True  # type: ignore[attr-defined]
+        setattr(agent, name, capturing)
 
 
 def run_scenario(data: dict, scenario: dict, options: argparse.Namespace) -> dict[str, Any]:

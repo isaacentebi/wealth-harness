@@ -525,6 +525,15 @@
     .worktrace .step { color: var(--ink-soft); font-size: var(--fs-4); line-height: 24px; min-width: 0; }
     .worktrace .elapsed { color: var(--muted); font: 400 var(--fs-2)/24px var(--mono); font-variant-numeric: tabular-nums; }
     .worktrace .elapsed:empty { display: none; }
+    /* Streaming: the answer takes the working line's place as it is written (the same first-line box), and the
+       cobalt dot rides at its end until the finished answer replaces it with citations, views and the memory line. */
+    .message.pending.streaming .worktrace { display: none; }
+    .answer .stream-mark {
+      display: inline-block; width: 8px; height: 8px; margin-left: 6px; border-radius: 50%;
+      background: var(--cobalt); vertical-align: middle;
+      animation: feed 1.2s cubic-bezier(.45, 0, .25, 1) infinite alternate;
+    }
+    .message.pending.stopping .answer .stream-mark { background: var(--ink); animation: none; }
 
     /* ---------- failure: statement, cause, recovery ---------- */
 
@@ -2583,7 +2592,46 @@
     function clearPending(node) {
       if (!node) return;
       clearInterval(node._timer);
+      clearTimeout(node._streamTimer);
       node.remove();
+    }
+
+    // The answer as it is written: chunks accumulate and the same safe markdown renderer redraws the text at most
+    // every 50 ms. A new message item (the model wrote an aside first) starts the text over. Views, citations and
+    // the memory line wait for the finished answer.
+    const STREAM_MS = 50;
+    function streamDelta(node, event) {
+      if (!node || typeof event.text !== 'string') return;
+      const item = String(event.item || '');
+      if (!node._stream) {
+        node._stream = el('div', 'answer');
+        node.classList.add('streaming');
+        node.append(node._stream);
+      }
+      if (node._streamItem !== item) { node._streamItem = item; node._streamText = ''; }
+      node._streamText += event.text;
+      if (!node._streamTimer) node._streamTimer = setTimeout(() => drawStream(node), STREAM_MS);
+    }
+
+    function drawStream(node) {
+      node._streamTimer = null;
+      if (!node.isConnected || !node._stream) return;
+      const body = el('div', 'answer');
+      // A bold or code span still being written is drawn closed, so its markers never flash as text.
+      let text = node._streamText;
+      if (!/(^|\n)\s*(```|~~~)/.test(text)) {
+        if ((text.match(/\*\*/g) || []).length % 2) text += '**';
+        if ((text.match(/`/g) || []).length % 2) text += '`';
+      }
+      renderAnswer(body, text, [], node._lang);
+      let tail = body.lastElementChild;
+      while (tail && /^(UL|OL|BLOCKQUOTE)$/.test(tail.tagName) && tail.lastElementChild) tail = tail.lastElementChild;
+      const mark = el('span', 'stream-mark');
+      mark.setAttribute('aria-hidden', 'true');
+      (tail && /^(P|LI|H[2-5])$/.test(tail.tagName) ? tail : body).append(mark);
+      node._stream.replaceWith(body);
+      node._stream = body;
+      follow();
     }
 
     function showError(userNode, error, retry) {
@@ -3425,6 +3473,8 @@
       turn.after = Math.max(turn.after || 0, event.seq || 0);
       if (event.type === 'progress' && turn.pendingNode) {
         if (!turn.stopping) setStep(turn.pendingNode, event.text);
+      } else if (event.type === 'delta') {
+        if (!turn.stopping) streamDelta(turn.pendingNode, event);
       } else if (event.type === 'memory') {
         turn.memoryEvent = event;
         if (turn.answerNode) {
@@ -3547,7 +3597,11 @@
       const turn = current;
       if (!turn || !turn.id || turn.stopping) return;
       turn.stopping = true;
-      if (turn.pendingNode) { turn.pendingNode._step.textContent = STRINGS[turn.pendingNode._lang].stopping; setPresence(turn.pendingNode._mark, 'quiet'); }
+      if (turn.pendingNode) {
+        turn.pendingNode._step.textContent = STRINGS[turn.pendingNode._lang].stopping;
+        setPresence(turn.pendingNode._mark, 'quiet');
+        turn.pendingNode.classList.add('stopping');
+      }
       try { await api(`/api/turns/${turn.id}/cancel`, { method: 'POST' }); } catch (_) { /* the stream reports the outcome */ }
     }
 
