@@ -149,7 +149,8 @@ SCHEMA: dict[str, dict[str, str]] = {
         "spouse?": "name", "divorce_date?": "YYYY-MM-DD",
         "spouse_assets?": "{amount, currency}: what the spouse owns in their own name (CCF Art. 1624); 0 when none",
         "ex_spouses?": "list of names", "children?": "list of {name, birth_date? | birth_year?}",
-        "parents_living?": "0-2", "deceased?": "list of names of people who died (to catch stale beneficiaries)",
+        "parents_living?": "0-2", "siblings_living?": "number of living brothers and sisters (0 when none)",
+        "deceased?": "list of names of people who died (to catch stale beneficiaries)",
     },
     "goals": {
         "[]": "list; merge by id",
@@ -200,7 +201,9 @@ SCHEMA: dict[str, dict[str, str]] = {
                "school_transport_mxn, ppr_mxn, art185_mxn, mortgage {...}}, aguinaldo_mxn, ptu_mxn, "
                "sic_listed {instrument: true|false}, w8ben_on_file, inpc {\"YYYY-MM\": value}, inpc_source}",
         "us?": "{filing_status, capital_loss_carryover {short_term, long_term} (0 = none), ira_contributions_usd, "
-               "roth_contributions_usd, rmd_taken_usd, ira_prior_year_end_balance_usd, "
+               "roth_contributions_usd, elective_deferrals_usd (401(k)/403(b)/457(b), W-2 box 12), rmd_taken_usd, "
+               "ira_prior_year_end_balance_usd, mx_annual_isr_usd, mx_annual_isr_passive_usd, "
+               "mx_annual_isr_general_usd, foreign_residence_test bona_fide_residence|physical_presence|neither, "
                "treasury_rate_per_usd {MXN: rate, source}}",
     },
     "constancia.<id>": {
@@ -660,7 +663,8 @@ def _guardianship(value: dict, key: str) -> None:
 
 def _family(value: dict, key: str) -> None:
     _object(value, key, {"marital_status", "marriage_date", "marital_regime", "spouse", "divorce_date", "ex_spouses",
-                         "children", "parents_living", "deceased", "note", "spouse_assets"})
+                         "children", "parents_living", "siblings_living", "deceased", "note",
+                         "spouse_assets"})
     assets = value.get("spouse_assets")
     if assets is not None:
         _object(assets, f"{key}.spouse_assets", {"amount", "currency", "approximate"})
@@ -678,6 +682,10 @@ def _family(value: dict, key: str) -> None:
     parents = value.get("parents_living")
     if parents is not None and (isinstance(parents, bool) or not isinstance(parents, int) or not 0 <= parents <= 2):
         _fail(f"{key}.parents_living", "must be 0, 1 or 2")
+    siblings = value.get("siblings_living")
+    if siblings is not None and (isinstance(siblings, bool) or not isinstance(siblings, int)
+                                 or not 0 <= siblings <= 30):
+        _fail(f"{key}.siblings_living", "must be a whole number from 0 to 30")
     children = value.get("children")
     if children is not None:
         if not isinstance(children, list):

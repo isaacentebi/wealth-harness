@@ -28,7 +28,10 @@ Amounts are ranges when the facts that decide them are unknown: with an
 unknown marital regime (sociedad conyugal keeps half of the gananciales out
 of the estate) and, in a Mexican intestate succession with descendants, with
 unknown spouse's assets (CCF Arts. 1624-1625: the spouse takes a child's share
-only if they lack property, or what equals it).
+only if they lack property, or what equals it); with no descendants, with
+unknown surviving parents or siblings (CCF Arts. 1626-1629, UPC 2-102(2)); and
+for an AFORE, when survivors could draw an IMSS pension that the balance
+funds instead of a lump sum (LSS Arts. 64 and 193).
 
 Everything is an estimate of how the rules usually work, never legal advice
 or drafting: a notario (Mexico) or estate attorney (US) confirms it.  The
@@ -62,17 +65,22 @@ CHECKED_ON = "2026-09-22"
 SOURCES: dict[str, dict[str, Any]] = {
     "lic_56": {"title": "Ley de Instituciones de Crédito, Art. 56 (beneficiarios de depósitos y custodia de valores; "
                         "sin tope desde la reforma DOF 2009-03-23)", "url": LIC_URL, "status": "verified"},
-    "lmv_201": {"title": "Ley del Mercado de Valores, Art. 201 (beneficiarios en el contrato de intermediación "
-                         "bursátil)", "url": LMV_URL, "status": "needs_verification"},
-    "lss_193": {"title": "Ley del Seguro Social, Art. 193 (beneficiarios de la cuenta individual AFORE; reforma DOF "
-                         "2020-12-16) and LFT Art. 501 (orden a falta de designación)", "url": LSS_URL,
+    "lmv_201": {"title": "Ley del Mercado de Valores, Art. 201 (beneficiarios en los contratos de las casas de bolsa "
+                         "con su clientela; sin beneficiarios, legislación común; reforma DOF 2014-01-10)",
+                "url": LMV_URL, "status": "verified"},
+    "lss_193": {"title": "Ley del Seguro Social, Art. 193 (beneficiarios de la cuenta individual AFORE: reciben lo que "
+                         "puede entregarse en una sola exhibición; reforma DOF 2020-12-16), Art. 64 (el saldo integra "
+                         "el monto constitutivo de la pensión de los beneficiarios; el excedente puede retirarse) and "
+                         "LFT Art. 501 (orden a falta de designación)", "url": LSS_URL,
                 "status": "verified", "also": LFT_URL},
     "lsar": {"title": "Ley de los Sistemas de Ahorro para el Retiro (cuentas individuales; reclamaciones ante CONSAR)",
              "url": LSAR_URL, "status": "verified"},
     "lscs": {"title": "Ley sobre el Contrato de Seguro, Arts. 163-165 (beneficiarios del seguro de vida)",
              "url": LSCS_URL, "status": "needs_verification"},
     "ccf_intestate": {"title": "Código Civil Federal, Arts. 1599-1637 (sucesión legítima: descendientes, cónyuge o "
-                               "concubino, ascendientes, colaterales, Beneficencia Pública); each state has its own "
+                               "concubino, ascendientes, colaterales, Beneficencia Pública; 1626 cónyuge y ascendientes "
+                               "por mitad, 1627 cónyuge dos tercios y hermanos un tercio, 1635 concubinato) and Art. 425 "
+                               "(patria potestad: administración de los bienes del menor); each state has its own "
                                "civil code", "url": CCF_URL, "status": "verified"},
     "mes_testamento": {"title": "Colegio Nacional del Notariado Mexicano / SEGOB, Septiembre Mes del Testamento",
                        "url": MES_TESTAMENTO_URL, "status": "verified"},
@@ -86,13 +94,16 @@ SOURCES: dict[str, dict[str, Any]] = {
               "url": ERISA_URL, "status": "verified"},
     "egelhoff": {"title": "Egelhoff v. Egelhoff, 532 U.S. 141 (2001): ERISA preempts state revocation-on-divorce "
                           "for plan designations", "url": EGELHOFF_URL, "status": "verified"},
-    "upc": {"title": "Uniform Probate Code 2-102/2-103 (intestate shares; many states differ) and 2-804 "
-                     "(revocation on divorce)", "url": UPC_URL, "status": "verified"},
+    "upc": {"title": "Uniform Probate Code 2-102/2-103 (intestate shares: 2-102(2) spouse with a parent takes the "
+                     "first $300,000 plus three-fourths of the balance; many states differ) and 2-804 (revocation "
+                     "on divorce)", "url": UPC_URL, "status": "verified"},
 }
 
 DESIGNATION_REVIEW_YEARS = 5
 """A designation or will older than this is due for review (the same 5-year rule as the estate checklist)."""
 US_SITUS_THRESHOLD_USD = Decimal(60000)
+UPC_SPOUSE_FIRST_USD = Decimal(300000)
+"""UPC 2-102(2): with no descendant and a surviving parent, the spouse takes the first $300,000 plus 3/4 of the rest."""
 ADULT_AGE = 18
 SHARE_TOLERANCE = Decimal("0.005")
 
@@ -210,6 +221,8 @@ class _Family:
         # True: sociedad conyugal / community property; False: separate; None: unknown.
         self.common = {"sociedad_conyugal": True, "community_property": True, "separacion_de_bienes": False,
                        "separate_property": False}.get(self.regime)
+        if status == "free_union":
+            self.common = False
         assets = self.raw.get("spouse_assets")
         self.spouse_assets = assets if isinstance(assets, dict) else None
         self.marriage = _date(self.raw.get("marriage_date"))
@@ -217,6 +230,10 @@ class _Family:
         self.ex = {_fold(n) for n in self.raw.get("ex_spouses") or [] if isinstance(n, str)}
         self.deceased = {_fold(n) for n in self.raw.get("deceased") or [] if isinstance(n, str)}
         self.parents = self.raw.get("parents_living") if isinstance(self.raw.get("parents_living"), int) else None
+        siblings = self.raw.get("siblings_living")
+        self.siblings = siblings if isinstance(siblings, int) and not isinstance(siblings, bool) else None
+        # Concubinato (CCF Art. 1635) has no marital regime: nothing is shared by law.
+        self.free_union = status == "free_union"
         self.children: list[dict] = []
         for child in self.raw.get("children") or []:
             if isinstance(child, dict) and isinstance(child.get("name"), str):
@@ -336,7 +353,8 @@ def _accounts(sit: Mapping[str, Any], facts: dict[str, dict], convert: _Converte
         if key.startswith(("cash.", "investment.")) and key.count(".") == 1 and key not in listed \
                 and isinstance(fact.get("value"), dict):
             out.append({"key": key, "value": fact["value"], "row": {}, "amount": None, "statement_keys": [],
-                        "stale": True})
+                        "stale": True,
+                        "estimate": convert(D(fact["value"].get("amount")), fact["value"].get("currency"))})
     for account in sit.get("accounts") or []:
         if account.get("key") in used_statements or account.get("duplicate_of") or account.get("superseded_by"):
             continue
@@ -382,36 +400,62 @@ def _accounts(sit: Mapping[str, Any], facts: dict[str, dict], convert: _Converte
 # ------------------------------------------------------------------ succession rules
 
 
-def _intestate(country: str | None, family: _Family, *, lft: bool = False) -> tuple[list[dict], str | None]:
+def _intestate(country: str | None, family: _Family, *, lft: bool = False,
+               asks: list[str] | None = None) -> tuple[list[dict], str | None]:
     """Heirs by law as ``[{name, relationship, share}]`` and the rule applied, or ([], None) when unknown.
 
     In Mexico a spouse with descendants gets ``share: None`` and ``art_1624``: the share depends on the
     spouse's own property and is set per scenario (see :func:`_spouse_fraction`).  ``lft`` is the LFT
-    Art. 501 order for an AFORE without designation (spouse and children alike, approximated)."""
+    Art. 501 order for an AFORE without designation (spouse and children alike, approximated).
+
+    Unknown parents or siblings are never "none": the heirs they could displace get a ``share_range``
+    (low, high) and the field to ask is appended to ``asks``.  A US spouse next to a parent gets
+    ``upc: "spouse"`` (UPC 2-102(2): the first $300,000 plus three-fourths of the balance), settled on the
+    whole intestate mass in :func:`_settle_heirs`."""
+    asks = asks if asks is not None else []
     living_children = [c for c in family.children if _fold(c["name"]) not in family.deceased]
     spouse = family.married
     spouse_name = family.spouse or ("cónyuge" if country == "MX" else "spouse")
     if not family.known or spouse is None or not family.children_known:
         return [], None
+    parents, siblings = family.parents, family.siblings
     heirs: list[dict] = []
+
+    def ask(field: str) -> None:
+        if field not in asks:
+            asks.append(field)
+
     if country == "US":
         if spouse and living_children:
             heirs = [{"name": spouse_name, "relationship": "spouse", "share": Decimal(1)}]
             rule = "UPC 2-102(1): a spouse takes all when every descendant is also the spouse's (assumed)"
         elif spouse:
-            heirs = [{"name": spouse_name, "relationship": "spouse",
-                      "share": Decimal(1) if not family.parents else Decimal("0.75")}]
-            if family.parents:
-                heirs.append({"name": "parents", "relationship": "parent", "share": Decimal("0.25")})
-            rule = "UPC 2-102: spouse, with a parent's share when a parent survives (approximation)"
+            if parents == 0:
+                heirs = [{"name": spouse_name, "relationship": "spouse", "share": Decimal(1)}]
+                rule = "UPC 2-102(1)(A): the spouse takes all, with no descendant or parent surviving"
+            else:
+                heirs = [{"name": spouse_name, "relationship": "spouse", "share": None, "upc": "spouse",
+                          "parents_unknown": parents is None},
+                         {"name": "parents", "relationship": "parent", "share": None, "upc": "parent",
+                          "parents_unknown": parents is None}]
+                rule = ("UPC 2-102(2): the spouse takes the first $300,000 plus three-fourths of the balance; the "
+                        "parents the rest")
+                if parents is None:
+                    ask("estate.family.parents_living")
+                    rule += " (whether a parent survives is unknown: with none, the spouse takes all)"
         elif living_children:
             share = Decimal(1) / len(living_children)
             heirs = [{"name": c["name"], "relationship": "child", "share": share} for c in living_children]
-            rule = "UPC 2-103: descendants equally"
-        elif family.parents:
+            rule = "UPC 2-103(a)(1): descendants equally"
+        elif parents:
             heirs = [{"name": "parents", "relationship": "parent", "share": Decimal(1)}]
-            rule = "UPC 2-103: parents"
+            rule = "UPC 2-103(a)(2): parents"
+        elif parents == 0 and siblings:
+            heirs = [{"name": "siblings", "relationship": "sibling", "share": Decimal(1)}]
+            rule = "UPC 2-103(a)(3): descendants of the parents (siblings, by representation)"
         else:
+            if parents is None or siblings is None:
+                ask("estate.family.parents_living" if parents is None else "estate.family.siblings_living")
             return [], None
         return heirs, rule
     # Mexico (Código Civil Federal; state codes follow the same order)
@@ -428,19 +472,76 @@ def _intestate(country: str | None, family: _Family, *, lft: bool = False) -> tu
         if spouse:
             heirs.append({"name": spouse_name, "relationship": "spouse", "share": share})
         rule = "LFT Art. 501 (approximated as equal parts)" if spouse else "CCF Art. 1607: children equally"
-    elif spouse and family.parents:
+    elif spouse and lft:
+        # LFT Art. 501: dependent parents concur with the spouse; siblings take nothing from an AFORE.
+        heirs = [{"name": spouse_name, "relationship": "spouse", "share": Decimal("0.5") if parents else Decimal(1)}]
+        if parents:
+            heirs.append({"name": "padres", "relationship": "parent", "share": Decimal("0.5")})
+        rule = "LFT Art. 501 (dependent parents concur with the spouse; approximated)"
+    elif spouse and parents:
         heirs = [{"name": spouse_name, "relationship": "spouse", "share": Decimal("0.5")},
                  {"name": "padres", "relationship": "parent", "share": Decimal("0.5")}]
         rule = "CCF Arts. 1626, 1628: half to the spouse, half to the parents, whatever the spouse owns"
-    elif spouse:
+    elif spouse and parents == 0 and siblings:
+        heirs = [{"name": spouse_name, "relationship": "spouse", "share": Decimal(2) / 3},
+                 {"name": "hermanos", "relationship": "sibling", "share": Decimal(1) / 3}]
+        rule = "CCF Art. 1627: two thirds to the spouse, one third to the siblings"
+    elif spouse and parents == 0 and siblings == 0:
         heirs = [{"name": spouse_name, "relationship": "spouse", "share": Decimal(1)}]
-        rule = "CCF Art. 1629: the spouse, with no descendants or parents (siblings would take a third, Art. 1627)"
-    elif family.parents:
+        rule = "CCF Art. 1629: the spouse, with no descendants, ascendants or siblings"
+    elif spouse and parents == 0:
+        ask("estate.family.siblings_living")
+        heirs = [{"name": spouse_name, "relationship": "spouse", "share": None,
+                  "share_range": (Decimal(2) / 3, Decimal(1))},
+                 {"name": "hermanos", "relationship": "sibling", "share": None,
+                  "share_range": (Decimal(0), Decimal(1) / 3)}]
+        rule = ("CCF Arts. 1627, 1629: two thirds to the spouse and one third to the siblings, or all to the "
+                "spouse with no siblings (whether siblings survive is unknown)")
+    elif spouse:
+        # Parents unknown: half to them (Art. 1626), or, with none, siblings a third (1627) or nothing (1629).
+        ask("estate.family.parents_living")
+        heirs = [{"name": spouse_name, "relationship": "spouse", "share": None,
+                  "share_range": (Decimal("0.5"), Decimal(1))},
+                 {"name": "padres", "relationship": "parent", "share": None,
+                  "share_range": (Decimal(0), Decimal("0.5"))}]
+        if siblings != 0:
+            if siblings is None:
+                ask("estate.family.siblings_living")
+            heirs.append({"name": "hermanos", "relationship": "sibling", "share": None,
+                          "share_range": (Decimal(0), Decimal(1) / 3)})
+        rule = ("CCF Arts. 1626-1629: half to the spouse and half to the parents; with no parents, two thirds "
+                "to the spouse and a third to the siblings; with neither, all to the spouse (who survives is "
+                "unknown)")
+    elif lft:
+        return [], None
+    elif parents:
         heirs = [{"name": "padres", "relationship": "parent", "share": Decimal(1)}]
         rule = "CCF Art. 1615: the parents equally"
+    elif parents == 0 and siblings:
+        heirs = [{"name": "hermanos", "relationship": "sibling", "share": Decimal(1)}]
+        rule = "CCF Arts. 1630-1631: the siblings equally (half-siblings half a share)"
     else:
-        return [], None
+        if parents is None or siblings is None:
+            ask("estate.family.parents_living" if parents is None else "estate.family.siblings_living")
+        return [], None  # known to be neither: collaterals or the Beneficencia Pública, not modeled
     return heirs, rule
+
+
+def _pension_survivors(family: _Family) -> bool | None:
+    """Whether someone could draw an IMSS survivors' pension (LSS Arts. 84 fr. III-IX, 130-137): a spouse or
+    concubine, a child under 16 (25 if studying) or a dependent parent.  None when the family is unknown."""
+    if not family.known or family.married is None:
+        return None
+    if family.married and not (family.spouse and _fold(family.spouse) in family.deceased):
+        return True
+    ages = [c["age"] for c in family.children if _fold(c["name"]) not in family.deceased]
+    if any(a is None or a < 25 for a in ages):
+        return True
+    if family.parents:
+        return True
+    if family.children_known and family.parents == 0:
+        return False
+    return None
 
 
 def _spouse_fraction(mass: Decimal, children: int, spouse_assets: Decimal | None) -> Decimal:
@@ -476,8 +577,10 @@ def _mechanism_label(mechanism: str, product: str, country: str | None, value: M
             return {"en": "Plan beneficiaries", "es": "Beneficiarios del plan"}
         if country == "MX" and product == "bank":
             return {"en": "Bank beneficiaries (LIC Art. 56)", "es": "Beneficiarios bancarios (LIC Art. 56)"}
-        if country == "MX" and product in ("broker", "investment", "ppr"):
-            return {"en": "Account beneficiaries (LMV Art. 201)", "es": "Beneficiarios de la cuenta (LMV Art. 201)"}
+        if country == "MX" and product == "broker":
+            # LMV Art. 201 governs casas de bolsa only; funds, PPRs and others follow their own contract or law.
+            return {"en": "Brokerage beneficiaries (LMV Art. 201)",
+                    "es": "Beneficiarios de la casa de bolsa (LMV Art. 201)"}
         if country == "US" and product == "bank":
             return {"en": "Payable on death (POD)", "es": "Pago al fallecimiento (POD)"}
         if country == "US" and product == "property":
@@ -547,6 +650,11 @@ def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mappin
     events = family.events()
     # Regime scenarios: True counts only the person's half of marital property.
     regimes = [True, False] if family.married and family.common is None else [bool(family.married and family.common)]
+    if family.free_union:
+        assumptions.append("Concubinato (free union) has no marital regime: nothing is shared by law, so balances "
+                           "count whole. A concubino inherits like a spouse only if the couple lived together as "
+                           "if married for the five years before the death, or had a child together, both free of "
+                           "marriage (CCF Art. 1635); with more than one concubino, none inherits.")
     if family.married and family.common is None:
         questions.append({"code": "marital_regime_unknown", "field": "estate.family.marital_regime"})
         assumptions.append("The marital regime is unknown: amounts are a range from sociedad conyugal (half of what "
@@ -558,11 +666,16 @@ def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mappin
                            "AFORE and life insurance follow their own laws and are not halved.")
 
     def gap(code: str, row: dict | None, amount: Decimal | None, en: str, es: str, **extra: Any) -> None:
+        estimate = (row or {}).get("_est") if amount is None else None
         gaps.append({"code": code, "key": row["key"] if row else None, "label": row["label"] if row else None,
                      "amount_at_risk": _money(amount), "currency": currency, "en": en, "es": es,
+                     **({"amount_estimate": _money(estimate), "amount_basis": "last_stated_balance"}
+                        if estimate is not None else {}),
                      **{k: v for k, v in extra.items() if v is not None}})
 
     will_heirs = _will_heirs(will) if will and will.get("exists") else []
+    family_asks: list[str] = []
+    pension_survivors = _pension_survivors(family)
     for entry in accounts:
         key, value, srow = entry["key"], entry["value"], entry["row"]
         country, country_note = _country(value, srow, residence)
@@ -593,6 +706,8 @@ def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mappin
                                "currency": currency, "owner_share": _money(owner_share) if owner_share != 1 else None,
                                "designation_date": value.get("designation_date"), "notes": [], "heirs": [],
                                "bypasses_court": None, "_values": values, "_hi": mine, "_marital": marital}
+        if amount is None and entry.get("estimate") is not None:
+            row["_est"] = entry["estimate"] * owner_share
         if entry.get("designation_key"):
             row["designation_key"] = entry["designation_key"]
         elif any(value.get(f) is not None for f in ("beneficiaries", "titling", "designation_date")):
@@ -695,7 +810,8 @@ def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mappin
                     heirs.append({"name": None, "relationship": "estate", "share": orphaned, "fallback": True})
         elif product == "afore" and country == "MX":
             mechanism = "legal_beneficiaries" if beneficiaries == [] else "unknown"
-        elif product == "us_retirement" and plan_is_erisa(value):
+        elif product == "us_retirement" and (plan_is_erisa(value) or value.get("plan_type") == "457b"):
+            # ERISA plans pay the spouse by law; a governmental 457(b) follows its plan document's default.
             mechanism = "plan_default" if beneficiaries == [] else "unknown"
         elif beneficiaries == [] or (product == "property" and country != "US"):
             # Nothing designated: the will moves it, or the law when there is none.
@@ -715,14 +831,18 @@ def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mappin
                                      "es": "Herederos según el testamento (no registrados aquí)."})
         elif mechanism == "intestate":
             row["bypasses_court"] = False
-            heirs, rule = _intestate(country, family)
+            heirs, rule = _intestate(country, family, asks=family_asks)
         elif mechanism == "legal_beneficiaries":
             heirs, rule = _intestate("MX", family, lft=True)
-            rule = "LFT Art. 501 order (spouse or concubine and children, then dependent parents); approximated"
+            rule = ("LSS Art. 193: with no designated beneficiaries, the LFT Art. 501 order (spouse or concubine "
+                    "and children, then dependent parents); approximated")
         elif mechanism == "plan_default":
             heirs = ([{"name": family.spouse or "spouse", "relationship": "spouse", "share": Decimal(1)}]
                      if family.married else [{"name": None, "relationship": "estate", "share": Decimal(1)}])
             rule = "Most plans pay the spouse, then the estate, when no beneficiary is named (check the plan document)"
+            if not plan_is_erisa(value):
+                rule = ("A governmental 457(b) is outside ERISA: with no beneficiary named, the plan document's "
+                        "default applies (usually the spouse, then the estate)")
         if rule:
             row["rule"] = rule
         row["mechanism"] = mechanism
@@ -730,6 +850,24 @@ def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mappin
             if mechanism in ("beneficiary", "trust", "survivorship", "legal_beneficiaries", "plan_default", "will",
                              "intestate", "unknown") else None
         row["_heirs"] = heirs
+        row["_pension"] = False
+        if product == "afore" and country == "MX" and heirs and pension_survivors is not False:
+            # LSS Arts. 64, 84, 127-137, 193: when survivors qualify for a pension (a spouse or concubine, children
+            # under 16 or 25 if studying, dependent parents) the RCV balance funds the widow's and orphans'
+            # pension; only what can be paid in one sum (vivienda, voluntary savings, any surplus) is handed over.
+            row["_pension"] = True
+            row["pension_possible"] = True
+            row["lump_sum_range"] = {"low": 0, "high": _money(mine)} if mine is not None else None
+            row["notes"].append({"en": "If your survivors qualify for an IMSS widow's or orphans' pension, the retiro, "
+                                       "cesantía and vejez balance funds that pension instead of being paid out; the "
+                                       "beneficiaries receive only what can be paid in one sum (vivienda, voluntary "
+                                       "savings, any surplus). The amounts are a range from nothing to the whole "
+                                       "balance (LSS Arts. 64 and 193).",
+                                 "es": "Si tus deudos tienen derecho a pensión de viudez u orfandad del IMSS, el saldo "
+                                       "de retiro, cesantía y vejez paga esa pensión en lugar de entregarse; los "
+                                       "beneficiarios reciben solo lo que puede entregarse en una sola exhibición "
+                                       "(vivienda, ahorro voluntario, excedente). Los montos van de cero al saldo "
+                                       "completo (LSS Arts. 64 y 193)."})
 
         # Minors named directly
         for heir in heirs:
@@ -740,27 +878,40 @@ def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mappin
                 family.child_age(heir["name"] or "")
             minor = person.get("minor") is True or (age is not None and age < ADULT_AGE)
             if minor and not guardian_named:
+                # CCF Art. 425: a surviving parent with patria potestad represents the child and administers
+                # what the child receives, so the money is not left without an adult.
+                own_child = family.child_age(heir["name"] or "") is not None
+                parent_alive = bool(family.married) and not (family.spouse and _fold(family.spouse) in family.deceased)
+                softened = country == "MX" and own_child and parent_alive
                 gap("minor_direct", {"key": key, "label": label},
                     mine * heir["share"] if mine is not None and heir["share"] is not None else None,
                     f"{label}: {heir['name']} is a minor named directly, with no guardian or trust on record.",
                     f"{label}: se nombró directamente a {heir['name']}, menor de edad, sin tutor ni fideicomiso "
-                    "registrado.", person=heir["name"])
+                    "registrado.", person=heir["name"],
+                    severity="low" if softened else None,
+                    note=("While the other parent lives, they hold patria potestad and administer what the child "
+                          "receives (CCF Art. 425, assumed to be your spouse or partner); a tutor or trust matters "
+                          "if both parents are gone.") if softened else None)
 
         # No beneficiary, or unknown
         designable = product != "property" or country == "US"
+        shown_en = shown_es = _short(held, currency)
+        if held is None and row.get("_est") is not None:
+            shown_en = f"last stated {_short(row['_est'], currency)}"
+            shown_es = f"último saldo conocido {_short(row['_est'], currency)}"
         if designable and mechanism not in ("beneficiary", "trust", "survivorship"):
             if beneficiaries == [] and product == "afore":
                 gap("afore_beneficiaries", row, mine,
-                    f"Your AFORE ({label}, {_short(held, currency)}) has no designated beneficiaries.",
-                    f"Tu AFORE ({label}, {_short(held, currency)}) no tiene beneficiarios designados.")
+                    f"Your AFORE ({label}, {shown_en}) has no designated beneficiaries.",
+                    f"Tu AFORE ({label}, {shown_es}) no tiene beneficiarios designados.")
             elif beneficiaries == [] and product == "insurance":
                 gap("no_beneficiary", row, mine,
-                    f"Your {label} life policy ({_short(held, currency)}) has no beneficiaries.",
-                    f"Tu seguro de vida {label} ({_short(held, currency)}) no tiene beneficiarios.")
+                    f"Your {label} life policy ({shown_en}) has no beneficiaries.",
+                    f"Tu seguro de vida {label} ({shown_es}) no tiene beneficiarios.")
             elif beneficiaries == []:
                 gap("no_beneficiary", row, mine,
-                    f"Your {label} account ({_short(held, currency)}) has no beneficiaries.",
-                    f"Tu cuenta de {label} ({_short(held, currency)}) no tiene beneficiarios.")
+                    f"Your {label} account ({shown_en}) has no beneficiaries.",
+                    f"Tu cuenta de {label} ({shown_es}) no tiene beneficiarios.")
             elif beneficiaries is None:
                 questions.append({"code": "beneficiaries_unknown", "key": key, "label": label,
                                   "amount": _money(mine), "currency": currency,
@@ -818,6 +969,14 @@ def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mappin
                                        "en 10 años (SECURE Act), salvo excepciones."})
         rows.append(row)
 
+    for field in family_asks:
+        questions.append({"code": "parents_unknown" if field.endswith("parents_living") else "siblings_unknown",
+                          "field": field})
+    if family_asks:
+        assumptions.append("Who survives among parents and siblings is unknown: with no descendants they can take "
+                           "part of an intestate estate (CCF Arts. 1626-1627: half to the parents, or a third to "
+                           "the siblings; UPC 2-102(2): a parent shares above the spouse's first $300,000), so the "
+                           "spouse's share is a range, not all of it.")
     _settle_heirs(rows, family, regimes, convert, questions, assumptions)
 
     # Will
@@ -915,8 +1074,14 @@ def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mappin
                                          else (h["amount_range"] or {}).get("high")) or Decimal(0)))
     unassigned = sum((r["_hi"] or Decimal(0) for r in rows if not r["heirs"]), Decimal(0))
 
-    gaps.sort(key=lambda g: (-(D(g["amount_at_risk"]) if g["amount_at_risk"] is not None else Decimal(1)),
-                             GAP_CODES.index(g["code"]), g["key"] or ""))
+    def at_risk(item: Mapping[str, Any]) -> Decimal:
+        """Known amount, else the last stated balance, else unknown-high (ranked as the largest)."""
+        for field in ("amount_at_risk", "amount_estimate"):
+            if item.get(field) is not None:
+                return D(item[field])
+        return Decimal("Infinity")
+
+    gaps.sort(key=lambda g: (g.get("severity") == "low", -at_risk(g), GAP_CODES.index(g["code"]), g["key"] or ""))
     for index, item in enumerate(gaps):
         item["rank"] = index + 1
     by_key: dict[str, list[str]] = {}
@@ -941,7 +1106,7 @@ def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mappin
         "review_years": review_years, "trade_call": None,
     }
     for row in rows:
-        for internal in ("_values", "_hi", "_heirs", "_marital"):
+        for internal in ("_values", "_hi", "_heirs", "_marital", "_est", "_pension"):
             row.pop(internal, None)
     sources = [dict(SOURCES[k], checked_on=CHECKED_ON) for k in (
         "lic_56", "lmv_201", "lss_193", "lsar", "lscs", "ccf_intestate", "mes_testamento", "secure", "irs_rmd",
@@ -954,8 +1119,10 @@ def register(sit: Mapping[str, Any], snapshot: Mapping[str, Any], inputs: Mappin
         "prevail over the will for that account.",
         "Intestate shares follow the Código Civil Federal order (descendants; the spouse next to them only up to "
         "a child's share, net of what they own, Arts. 1624-1625; spouse and parents half each, Art. 1626; then "
-        "siblings and collaterals) or, in the US, a Uniform Probate Code approximation. Gap amounts use the upper "
-        "end of any range.",
+        "siblings a third next to the spouse, Art. 1627; then collaterals) or, in the US, the Uniform Probate Code "
+        "(2-102(2): a spouse next to a parent takes the first $300,000 plus three-fourths of the rest). Gap amounts "
+        "use the upper end of any range; a gap whose amount is unknown ranks by the last stated balance, or first "
+        "when there is none.",
         "A designation older than the review period, or older than a marriage, divorce or child, is flagged for "
         f"review ({review_years} years).",
         "Stated accounts covered by a statement take the statement's value; statement accounts nobody described "
@@ -992,6 +1159,20 @@ def _settle_heirs(rows: list[dict], family: _Family, regimes: list[bool], conver
         for own in own_options:
             fraction = _spouse_fraction(mass, children, None if own is None else own + halves) if children else None
             scenarios.append((flag, fraction))
+    # UPC 2-102(2): the spouse's part next to a parent depends on the whole intestate mass.
+    upc_rows = [r for r in rows if r["mechanism"] == "intestate" and any(h.get("upc") for h in r["_heirs"])]
+    upc_first = convert(UPC_SPOUSE_FIRST_USD, "USD")
+    upc_fraction: dict[bool, Decimal | None] = {}
+    for flag in regimes:
+        mass = sum((r["_values"][flag] or Decimal(0) for r in upc_rows), Decimal(0))
+        if not upc_rows or any(r["_values"][flag] is None for r in upc_rows):
+            upc_fraction[flag] = None
+        elif upc_first is None:
+            upc_fraction[flag] = None  # no USD rate: somewhere from three-fourths to all
+        elif mass <= 0:
+            upc_fraction[flag] = Decimal(1)
+        else:
+            upc_fraction[flag] = (min(mass, upc_first) + max(mass - upc_first, Decimal(0)) * Decimal("0.75")) / mass
     open_question = any(len({f for regime, f in scenarios if regime == flag}) > 1 for flag in regimes)
     if art_1624 and stated is None and open_question:
         questions.append({"code": "spouse_assets_unknown", "field": "estate.family.spouse_assets"})
@@ -1005,9 +1186,24 @@ def _settle_heirs(rows: list[dict], family: _Family, regimes: list[bool], conver
                 share = heir["share"]
                 if heir.get("art_1624") and fraction is not None:
                     share = fraction if heir["art_1624"] == "spouse" else (1 - fraction) / children
+                options = [share]
+                if heir.get("share_range"):
+                    options = list(heir["share_range"])
+                elif heir.get("upc"):
+                    f = upc_fraction.get(flag)
+                    spouse_side = heir["upc"] == "spouse"
+                    if f is None:
+                        options = [Decimal("0.75"), Decimal(1)] if spouse_side else [Decimal(0), Decimal("0.25")]
+                    else:
+                        options = [f if spouse_side else 1 - f]
+                    if heir.get("parents_unknown"):
+                        options.append(Decimal(1) if spouse_side else Decimal(0))
                 value = row["_values"][flag]
-                shares.append(share)
-                amounts.append(value * share if value is not None and share is not None else None)
+                for option in options:
+                    shares.append(option)
+                    amounts.append(value * option if value is not None and option is not None else None)
+                    if row.get("_pension") and value is not None:
+                        amounts.append(Decimal(0))  # the balance may fund a survivors' pension instead
             out: dict[str, Any] = {"name": heir["name"], "relationship": heir.get("relationship")}
             known_shares = [s for s in shares if s is not None]
             if known_shares and min(known_shares) != max(known_shares):

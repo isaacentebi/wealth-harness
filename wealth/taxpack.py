@@ -126,7 +126,18 @@ FORM_8938_THRESHOLDS = {
     ("abroad", False): (Decimal(200000), Decimal(300000)),
     ("abroad", True): (Decimal(400000), Decimal(600000)),
 }
+ART140_GROSS_UP = Decimal("1.4286")  # LISR Art. 140 first paragraph
+ART140_CORPORATE_RATE = Decimal("0.30")  # LISR Art. 9
 US_CAPITAL_LOSS_LIMIT = {"married_filing_separately": Decimal(1500)}  # everyone else: $3,000 (IRC 1211(b))
+# IRC 402(g)(1)(B) as indexed and 414(v)(2)(B)/(E) catch-ups (ages 60-63 from 2025, SECURE 2.0 sec. 109).
+US_DEFERRAL_LIMITS = {
+    2025: {"deferral": 23500, "catch_up_50": 7500, "catch_up_60_63": 11250,
+           "source": {"title": "IRS Notice 2024-80 (2025 limits: 402(g) $23,500; 414(v) catch-up $7,500, ages 60-63 "
+                               "$11,250)", "url": "https://www.irs.gov/pub/irs-drop/n-24-80.pdf"}},
+    2026: {"deferral": 24500, "catch_up_50": 8000, "catch_up_60_63": 11250,
+           "source": {"title": "IRS Notice 2025-67 (2026 limits: 402(g) $24,500; 414(v) catch-up $8,000, ages 60-63 "
+                               "$11,250)", "url": "https://www.irs.gov/pub/irs-drop/n-25-67.pdf"}},
+}
 
 # Institutions we can place without a stated country (checked before the currency fallback).
 _MX_INSTITUTIONS = ("gbm", "bbva", "banorte", "santander mexico", "banamex", "citibanamex", "hsbc mexico",
@@ -143,9 +154,14 @@ _US_INSTITUTIONS = ("charles schwab", "schwab", "fidelity", "vanguard", "interac
 _BANK_TYPES = frozenset({"checking", "savings", "bank", "cash", "debit"})
 _LIABILITY_TYPES = frozenset({"credit_card", "loan", "mortgage", "line_of_credit"})
 _MX_RETIREMENT_TYPES = frozenset({"afore", "ppr", "retirement"})
-_IRA_TYPES = frozenset({"ira", "traditional_ira", "rollover_ira", "sep_ira", "simple_ira", "401k", "403b", "457"})
-_ROTH_TYPES = frozenset({"roth_ira", "roth", "roth_401k"})
+_IRA_TYPES = frozenset({"ira", "traditional_ira", "rollover_ira", "sep_ira", "simple_ira"})
+_ROTH_TYPES = frozenset({"roth_ira", "roth"})
+# Employer plans: elective deferrals count against IRC 402(g) (457(b): 457(e)(15)), never the IRA limit.
+_WORKPLACE_TYPES = frozenset({"401k", "403b", "457", "457b", "roth_401k", "roth_403b", "roth_457b"})
+# IRC 219(b)(5) and 408A(c)(2): the IRA limit covers traditional and Roth IRA contributions only (SEP employer
+# contributions and SIMPLE deferrals have their own limits).
 _US_IRA_ONLY = frozenset({"ira", "traditional_ira", "rollover_ira", "roth_ira", "roth"})
+_TAX_SHELTERED = frozenset({"ira", "roth", "workplace", "hsa", "mx_retirement", "liability"})
 _DEBT_CLASSES = frozenset({"fixed_income", "bond", "money_market", "cash"})
 _FIBRA_CLASSES = frozenset({"reit", "fibra", "real_estate"})
 
@@ -356,6 +372,8 @@ class _Book:
             return "liability"
         if kind in _MX_RETIREMENT_TYPES:
             return "mx_retirement"
+        if kind in _WORKPLACE_TYPES:
+            return "workplace"
         if kind in _ROTH_TYPES:
             return "roth"
         if kind in _IRA_TYPES:
@@ -1074,25 +1092,43 @@ def _mx_dividendos(book: _Book) -> dict:
                      "origin": origin, "gross_mxn": _m(gross), "withheld_mxn": _m(withheld),
                      "additional_10pct_mxn": _m(None if gross is None else gross * Decimal("0.10"))})
         bucket = totals.setdefault(broker, {"accounts": set(), "domestic": ZERO, "foreign": ZERO, "withheld": ZERO,
-                                            "known": True})
+                                            "withheld_domestic": ZERO, "withheld_foreign": ZERO, "known": True})
         bucket["accounts"].add(entry["account_id"])
         if gross is None:
             bucket["known"] = False
         elif origin in {"domestic", "foreign"}:
             bucket[origin] += gross
         bucket["withheld"] += withheld or ZERO
+        # Tax withheld abroad on a foreign (SIC) dividend is not on the Mexican constancia's ISR line.
+        bucket["withheld_foreign" if origin == "foreign" else "withheld_domestic"] += withheld or ZERO
     summary = []
     for broker, bucket in sorted(totals.items()):
         doc = book.constancia_for(bucket["accounts"], broker)
         block = (doc or {}).get("dividendos") if isinstance((doc or {}).get("dividendos"), dict) else None
-        summary.append({"broker": broker, "domestic_gross_mxn": _m(bucket["domestic"] if bucket["known"] else None),
+        domestic = bucket["domestic"] if bucket["known"] else None
+        # LISR Art. 140: the corporate ISR is (dividend x 1.4286) x 30%; the person accumulates the dividend plus
+        # that ISR (piramidación) and credits it, when the dividend comes from CUFIN (the constancia says).
+        documented_domestic = _d((block or {}).get("domestic_gross"))
+        base = documented_domestic if documented_domestic is not None else domestic
+        credit = None if base is None else (base * ART140_GROSS_UP * ART140_CORPORATE_RATE).quantize(CENT)
+        stated_credit = _d((block or {}).get("isr_creditable"))
+        summary.append({"broker": broker, "domestic_gross_mxn": _m(domestic),
                         "foreign_gross_mxn": _m(bucket["foreign"] if bucket["known"] else None),
                         "withheld_mxn": _m(bucket["withheld"]),
+                        "withheld_domestic_mxn": _m(bucket["withheld_domestic"]),
+                        "withheld_abroad_mxn": _m(bucket["withheld_foreign"]),
+                        "art140": None if base is None or not base else {
+                            "gross_up_factor": str(ART140_GROSS_UP),
+                            "corporate_isr_credit_mxn": _m(stated_credit if stated_credit is not None else credit),
+                            "computed_credit_mxn": _m(credit),
+                            "accumulable_mxn": _m(base + (stated_credit if stated_credit is not None else credit)),
+                            "basis": "constancia" if stated_credit is not None else "computed (assumes CUFIN)"},
                         "constancia": None if not block else {k: _m(_d(v)) for k, v in block.items()}})
         if block:
             for label, ours, key in (("dividendos nacionales / domestic dividends", bucket["domestic"], "domestic_gross"),
                                      ("dividendos extranjeros / foreign dividends", bucket["foreign"], "foreign_gross"),
-                                     ("ISR retenido / withheld", bucket["withheld"], "isr_withheld")):
+                                     ("ISR retenido (sin retenciones del extranjero) / Mexican ISR withheld",
+                                      bucket["withheld_domestic"], "isr_withheld")):
                 theirs = _d(block.get(key))
                 if theirs is not None:
                     recon.append({"item": f"{broker}: {label}", "ours": _m(ours if bucket["known"] else None),
@@ -1113,7 +1149,10 @@ def _mx_dividendos(book: _Book) -> dict:
         rows=rows, reconciliation=recon, missing=missing, status="not_applicable" if not rows and not missing else None,
         sources=[SRC_ART140, SRC_ART142V, SRC_ART5],
         assumptions=["Domestic dividends accumulate with a credit for the corporate ISR shown on the constancia "
-                     "(Art. 140); the additional 10% withheld is definitive.",
+                     "(Art. 140): the dividend times 1.4286 times 30%, added to income (piramidación) and credited; "
+                     "the additional 10% withheld is definitive.",
+                     "The constancia's ISR withheld is compared with Mexican withholding only; tax withheld abroad "
+                     "on SIC dividends (for example the US 10% treaty rate) is a foreign tax credit (Art. 5).",
                      "Foreign dividends (SIC via a Mexican broker) accumulate; the additional 10% applies (Art. 142 "
                      "fr. V) and foreign tax withheld is a credit up to the Mexican ISR on that income (Art. 5).",
                      "Dividends at a foreign broker are in the foreign-securities section."])
@@ -1282,13 +1321,15 @@ def _us_rows(book: _Book) -> tuple[list[dict], list[dict], list[str]]:
         if item["date"] < window_start or item["date"] > book.end:
             continue
         account = item["account_id"]
-        if book.kind(account) in {"ira", "roth", "hsa", "mx_retirement", "liability"}:
+        if book.kind(account) in _TAX_SHELTERED:
             continue
         qty = item["quantity"]
         proceeds = book.convert(item["proceeds"], item["proceeds_currency"], "USD", item["date"])
         acquired = item["acquired_on"]
         basis = None
-        if item["basis"] is not None and acquired is not None:
+        if item["basis"] is not None and item["basis_currency"] == "USD":
+            basis = item["basis"]  # a USD basis needs no rate, so an unknown purchase date leaves it known
+        elif item["basis"] is not None and acquired is not None:
             basis = book.convert(item["basis"], item["basis_currency"], "USD", acquired)
         extra = adjust.get(item["lot_id"])
         if extra and basis is not None:
@@ -1314,7 +1355,7 @@ def _us_rows(book: _Book) -> tuple[list[dict], list[dict], list[str]]:
                 remaining[buy["id"]] -= take
                 matched += take
                 loss_part = -gain * take / qty
-                if book.kind(buy["account_id"]) in {"ira", "roth"}:
+                if book.kind(buy["account_id"]) in {"ira", "roth", "workplace"}:
                     permanent += loss_part
                 else:
                     held = (sold - date.fromisoformat(acquired)).days if acquired else 0
@@ -1341,15 +1382,24 @@ def _us_rows(book: _Book) -> tuple[list[dict], list[dict], list[str]]:
             "gain_usd": _m(None if gain is None else gain + adjustment), "term": term, "box": box,
             "permanently_disallowed_usd": _m(permanent) if permanent else None,
             "currency": item["proceeds_currency"]})
-        if proceeds is None or (item["basis"] is not None and basis is None):
-            missing.append(_need(sid, f"fx.{item['proceeds_currency']}/USD@{item['date']}",
-                                 f"Tipo de cambio {item['proceeds_currency']}/USD del {item['date']} o de la fecha de "
-                                 "compra.", f"A {item['proceeds_currency']}/USD rate for {item['date']} or the purchase "
-                                            "date."))
-        if item["basis"] is None or acquired is None:
+        if term is None and gain is not None:
+            rows[-1]["note"] = ("Acquisition date unknown: the gain is known but its term (short or long) is not. "
+                                "Form 8949 accepts VARIOUS in column (b) only for lots bought on several dates.")
+        if proceeds is None or (item["basis"] is not None and basis is None and acquired is not None):
+            pair = item["proceeds_currency"] if proceeds is None else item["basis_currency"]
+            missing.append(_need(sid, f"fx.{pair}/USD@{item['date'] if proceeds is None else acquired}",
+                                 f"Tipo de cambio {pair}/USD del {item['date']} o de la fecha de compra.",
+                                 f"A {pair}/USD rate for {item['date']} or the purchase date."))
+        if item["basis"] is None:
             missing.append(_need(sid, f"lots.{item['lot_id']}.cost_basis",
                                  f"Costo y fecha de compra del lote {item['lot_id']}.",
                                  f"Cost basis and purchase date of lot {item['lot_id']}."))
+        elif acquired is None:
+            missing.append(_need(sid, f"lots.{item['lot_id']}.acquired_on",
+                                 f"Fecha de compra del lote {item['lot_id']} (corto o largo plazo"
+                                 + ("" if basis is not None else "; y el tipo de cambio de ese día") + ").",
+                                 f"Purchase date of lot {item['lot_id']} (short or long term"
+                                 + ("" if basis is not None else ", and that day's exchange rate") + ")."))
         if permanent:
             warnings.append(f"{rows[-1]['description']} sold {item['date']}: replaced in an IRA/Roth; "
                             f"{_m(permanent)} USD of loss is permanently disallowed (Rev. Rul. 2008-5).")
@@ -1375,6 +1425,11 @@ def _us_8949(book: _Book) -> tuple[dict, dict]:
     unknown_term = [r for r in rows if r["term"] is None]
     if unknown_term:
         totals["short"]["gain"] = totals["long"]["gain"] = None
+        # The gain itself may be known: shown apart so the pack says how much awaits a term.
+        totals["unknown_term"] = {"proceeds": _sum(_d(r["proceeds_usd"]) for r in unknown_term),
+                                  "cost": _sum(_d(r["cost_usd"]) for r in unknown_term),
+                                  "adjustments": sum((_d(r["adjustment_usd"]) or ZERO for r in unknown_term), ZERO),
+                                  "gain": _sum(_d(r["gain_usd"]) for r in unknown_term), "count": len(unknown_term)}
     recon = []
     for doc in book.constancias:
         block = doc.get("form_1099_b")
@@ -1450,6 +1505,8 @@ def _us_schedule_d(book: _Book, totals: dict, cap_gain_distributions: Decimal | 
     summary: dict[str, Any] = {"short_term_before_carryover_usd": _m(st), "long_term_before_carryover_usd": _m(lt_all),
                                "capital_gain_distributions_usd": _m(cap_gain_distributions),
                                "loss_limit_usd": _m(limit)}
+    if totals.get("unknown_term"):
+        summary["unknown_term_gain_usd"] = _m(totals["unknown_term"]["gain"])
     if st is None or lt_all is None or st_carry is None or lt_carry is None:
         summary.update(net_short_term_usd=None, net_long_term_usd=None, net_capital_gain_or_loss_usd=None,
                        deductible_loss_usd=None, carryover_to_next_year=None)
@@ -1483,7 +1540,7 @@ def _us_accounts(book: _Book, person_scope: bool) -> set[str]:
     """US-reportable taxable accounts: all of a US person's accounts (worldwide income), else US-country ones."""
     out = set()
     for account_id in book.accounts:
-        if book.kind(account_id) in {"ira", "roth", "hsa", "mx_retirement", "liability"}:
+        if book.kind(account_id) in _TAX_SHELTERED:
             continue
         if person_scope or book.country(account_id)[0] == "US":
             out.add(account_id)
@@ -1589,10 +1646,35 @@ def _us_foreign_tax(book: _Book, foreign_tax: dict[str, Decimal | None], mx_resi
     sid = "us_foreign_tax"
     rows = [{"country": country, "tax_usd": _m(amount), "category": "passive"}
             for country, amount in sorted(foreign_tax.items())]
-    missing = []
+    missing, warnings = [], []
     stated_isr = _d(book.us.get("mx_annual_isr_usd"))
-    if stated_isr is not None:
-        rows.append({"country": "MX (annual ISR, stated)", "tax_usd": _m(stated_isr), "category": "general"})
+    passive_isr = _d(book.us.get("mx_annual_isr_passive_usd"))
+    general_isr = _d(book.us.get("mx_annual_isr_general_usd"))
+    if passive_isr is not None or general_isr is not None:
+        # IRC 904(d): passive (interest, dividends, Art. 129 gains) and general (wages) baskets are separate.
+        for label, amount, category in (("MX annual ISR on interest, dividends and gains (stated)", passive_isr,
+                                         "passive"),
+                                        ("MX annual ISR on wages and other income (stated)", general_isr, "general")):
+            if amount is not None:
+                rows.append({"country": label, "tax_usd": _m(amount), "category": category})
+                foreign_tax = {**foreign_tax, label: amount}
+        if stated_isr is not None and passive_isr is not None and general_isr is not None \
+                and abs(passive_isr + general_isr - stated_isr) > CENT:
+            warnings.append("The passive and general parts of the Mexican ISR do not add to the stated total.")
+    elif stated_isr is not None:
+        passive_income = _mx_passive_income(book)
+        if passive_income:
+            rows.append({"country": "MX (annual ISR, stated)", "tax_usd": _m(stated_isr), "category": "unsplit"})
+            warnings.append("The Mexican annual ISR covers wages and investment income (interest, dividends, Art. 129 "
+                            "gains): Form 1116 needs it split between the passive and general categories (IRC "
+                            "904(d)), apportioned by income. It is left unsplit here.")
+            missing.append(_need(sid, f"tax.{book.year}.us.mx_annual_isr_passive_usd",
+                                 "Parte del ISR anual mexicano que corresponde a intereses, dividendos y ganancias "
+                                 "(categoría pasiva del 1116); el resto es general.",
+                                 "The part of the Mexican annual ISR on interest, dividends and gains (Form 1116 "
+                                 "passive category); the rest is general."))
+        else:
+            rows.append({"country": "MX (annual ISR, stated)", "tax_usd": _m(stated_isr), "category": "general"})
         foreign_tax = {**foreign_tax, "MX (annual ISR, stated)": stated_isr}
     elif mx_resident:
         missing.append(_need(sid, f"tax.{book.year}.us.mx_annual_isr_usd",
@@ -1603,7 +1685,8 @@ def _us_foreign_tax(book: _Book, foreign_tax: dict[str, Decimal | None], mx_resi
                     currency="USD", summary={"total_usd": _m(_sum(foreign_tax.values())) if foreign_tax else _m(ZERO)},
                     columns=_cols(("country", "País", "Country"), ("tax_usd", "Impuesto USD", "Tax USD"),
                                   ("category", "Categoría", "Category")),
-                    rows=rows, missing=missing, status="not_applicable" if not rows and not missing else None,
+                    rows=rows, missing=missing, warnings=warnings,
+                    status="not_applicable" if not rows and not missing else None,
                     sources=[SRC_1116],
                     assumptions=["Withholding on dividends and interest from foreign accounts or foreign issuers is "
                                  "passive-category foreign tax, converted at the payment-date rate.",
@@ -1611,12 +1694,66 @@ def _us_foreign_tax(book: _Book, foreign_tax: dict[str, Decimal | None], mx_resi
                                  "refund claim, not a credit."])
 
 
+def _rmd_start(birth: int, year: int, params: Any) -> tuple[Any, bool | None, str | None]:
+    """(applicable age, whether an RMD is due for ``year``, note) under IRC 401(a)(9)(C) as amended.
+
+    SECURE Act sec. 114 (2019): 72 for those who reach 70½ after 2019 (born July 1, 1949 or later);
+    SECURE 2.0 sec. 107: 73 for those born 1951-1959 and 75 from 1960.  Born before July 1, 1949: 70½.
+    The first RMD is for the year the age is reached; None when a birth year alone cannot tell."""
+    if birth >= 1951:
+        age = retirement.rmd_age(birth, params)
+        return age, (None if age is None else year - birth >= age), None
+    if birth == 1950:
+        return 72, year - birth >= 72, "Born in 1950: RMD age 72 (SECURE Act sec. 114)."
+    # Born 1949: 70½ if born before July 1 (first RMD year 2019), else 72 (first RMD year 2021).
+    # Born 1948 or earlier: 70½, reached in the year of the 70th or 71st birthday.
+    first_early, first_late = (2019, 2021) if birth == 1949 else (birth + 70, birth + 71)
+    due = True if year >= first_late else (False if year < first_early else None)
+    note = ("Born in 1949: RMD age 70½ if born before July 1, 1949, else 72; either way RMDs are due from 2021."
+            if birth == 1949 else f"Born in {birth}: RMD age 70½ (born before July 1, 1949).")
+    return (70.5 if birth <= 1948 else None), due, note
+
+
+def _deferral_limit(book: _Book, age: int | None) -> tuple[Decimal | None, str | None, dict | None]:
+    """IRC 402(g)(1) plus the 414(v) catch-up for the year: (limit, catch-up basis, source)."""
+    override = book.parameters.get("us_402g_deferral_limit")
+    table = US_DEFERRAL_LIMITS.get(book.year) or {}
+    if isinstance(override, dict) and _d(override.get("value")) is not None:
+        base, source = _d(override["value"]), {"title": str(override.get("source") or "caller-supplied")}
+    elif table:
+        base, source = Decimal(table["deferral"]), table["source"]
+    else:
+        return None, None, None
+    if age is None:
+        return None, None, source
+    if 60 <= age <= 63 and table.get("catch_up_60_63"):
+        return base + Decimal(table["catch_up_60_63"]), "ages 60-63 (IRC 414(v)(2)(E))", source
+    if age >= 50 and table.get("catch_up_50"):
+        return base + Decimal(table["catch_up_50"]), "age 50+ (IRC 414(v)(2)(B))", source
+    if age >= 50:
+        return None, None, source
+    return base, "not eligible (under 50)", source
+
+
+def _mx_passive_income(book: _Book) -> bool:
+    """Interest, dividends or sales in a Mexican account this year: income in the 1116 passive category."""
+    return any(book.country(e["account_id"])[0] == "MX" and book.start <= e["date"] <= book.end
+               and e["kind"] in {"interest", "dividend", "sell"} and book.kind(e["account_id"]) in {"bank", "brokerage"}
+               for e in book.entries)
+
+
 def _us_retirement(book: _Book) -> dict | None:
     sid = "us_retirement"
+    # Traditional IRAs (with SEP and SIMPLE IRAs) and Roth IRAs; employer plans are their own group.
     ira = [a for a in book.accounts if book.kind(a) in {"ira", "roth"}]
+    workplace = [a for a in book.accounts if book.kind(a) == "workplace"]
+    # IRC 219(b)(5): only deposits into traditional and Roth IRAs are IRA contributions.
+    contributory = [a for a in ira if str(book.accounts[a].get("type")) in _US_IRA_ONLY]
     stated_trad, stated_roth = _d(book.us.get("ira_contributions_usd")), _d(book.us.get("roth_contributions_usd"))
+    stated_deferrals = _d(book.us.get("elective_deferrals_usd"))
     forms = [d for d in book.constancias if isinstance(d.get("form_5498"), dict)]
-    if not ira and stated_trad is None and stated_roth is None and not forms:
+    if not ira and not workplace and stated_trad is None and stated_roth is None and not forms \
+            and stated_deferrals is None:
         return None
     missing, warnings, rows, recon = [], [], [], []
     if forms:
@@ -1629,7 +1766,7 @@ def _us_retirement(book: _Book) -> dict | None:
         doc_trad, doc_roth = form_sum("ira_contributions"), form_sum("roth_contributions")
         ours = {"ira": ZERO, "roth": ZERO}
         for e in book.entries:
-            if (e["account_id"] in ira and book.start <= e["date"] <= book.end and not e.get("instrument_id")
+            if (e["account_id"] in contributory and book.start <= e["date"] <= book.end and not e.get("instrument_id")
                     and e["kind"] in {"deposit", "transfer"}):
                 amount = book.convert(_d(e.get("amount")), e.get("currency"), "USD", e["date"])
                 if amount is not None and amount > 0:
@@ -1638,30 +1775,43 @@ def _us_retirement(book: _Book) -> dict | None:
                                             ("Roth IRA contributions (5498 box 10)", "roth", stated_roth, doc_roth)):
             if theirs is None:
                 continue
-            mine = stated if stated is not None else (ours[kind] if ira else None)
+            mine = stated if stated is not None else (ours[kind] if contributory else None)
             recon.append({"item": label, "ours": _m(mine), "document": _m(theirs),
                           "difference": _m(None if mine is None else mine - theirs), "source_of_truth": "5498",
                           "document_id": ", ".join(d["id"] for d in forms)})
         stated_trad = doc_trad if doc_trad is not None else stated_trad
         stated_roth = doc_roth if doc_roth is not None else stated_roth
     ledger_contrib = {"ira": ZERO, "roth": ZERO}
-    withdrawals = {"ira": ZERO, "roth": ZERO}
+    withdrawals = {"ira": ZERO, "roth": ZERO, "workplace": ZERO}
+    plan_deposits = ZERO
+    other_ira_deposits = ZERO
     for e in book.entries:
-        if e["account_id"] not in ira or not book.start <= e["date"] <= book.end or e.get("instrument_id"):
+        if e["account_id"] not in ira and e["account_id"] not in workplace:
+            continue
+        if not book.start <= e["date"] <= book.end or e.get("instrument_id"):
             continue
         amount = book.convert(_d(e.get("amount")), e.get("currency"), "USD", e["date"])
         if amount is None:
             continue
         kind = book.kind(e["account_id"])
         if e["kind"] in {"deposit", "transfer"} and amount > 0:
-            ledger_contrib[kind] += amount
+            if kind == "workplace":
+                plan_deposits += amount
+            elif e["account_id"] in contributory:
+                ledger_contrib[kind] += amount
+            else:
+                other_ira_deposits += amount
         elif e["kind"] in {"withdrawal", "transfer"} and amount < 0:
             withdrawals[kind] += -amount
+    # IRA deposits in the ledger are the contributions; with no IRA in the ledger they are unknown, not zero.
     trad = stated_trad if stated_trad is not None else (ledger_contrib["ira"] if ira else None)
     roth = stated_roth if stated_roth is not None else (ledger_contrib["roth"] if ira else None)
-    if (stated_trad is None or stated_roth is None) and not forms:
+    if (stated_trad is None or stated_roth is None) and not forms and contributory:
         warnings.append("Contributions are read from deposits into IRA accounts; rollovers, conversions and "
                         "prior-year contributions made by April 15 must be excluded (Form 5498 is the source).")
+    if other_ira_deposits:
+        warnings.append("Deposits into SEP or SIMPLE IRAs are employer contributions or SIMPLE deferrals with their "
+                        "own limits (IRC 402(h), 408(p)); they are not counted against the IRA limit.")
     params = retirement._Params({"parameters": book.parameters})
     limit = params.get("us_ira_limit", book.year)
     birth = book.profile.get("birth_year")
@@ -1682,36 +1832,97 @@ def _us_retirement(book: _Book) -> dict | None:
     rows.append({"item": "IRA + Roth contributions", "traditional_usd": _m(trad), "roth_usd": _m(roth),
                  "combined_usd": _m(combined), "limit_usd": _m(total_limit),
                  "excess_usd": _m(None if combined is None or total_limit is None else max(combined - total_limit, ZERO))})
+    # Employer plans: elective deferrals against IRC 402(g) (401(k), 403(b); 457(b) has its own equal limit).
+    deferral_row = None
+    extra_sources: list[dict] = []
+    if workplace or stated_deferrals is not None:
+        deferral_limit, catch_basis, deferral_source = _deferral_limit(book, age)
+        if deferral_source:
+            extra_sources.append(deferral_source)
+        else:
+            missing.append(_need(sid, "parameters.us_402g_deferral_limit",
+                                 f"Límite de aportaciones diferidas {book.year} (IRC 402(g)) con su fuente.",
+                                 f"The {book.year} elective deferral limit (IRC 402(g)) with its source."))
+        if stated_deferrals is None and workplace:
+            missing.append(_need(sid, f"tax.{book.year}.us.elective_deferrals_usd",
+                                 "Aportaciones diferidas del año al 401(k)/403(b)/457(b) (W-2 casilla 12, códigos D, "
+                                 "E, G, AA, BB, EE); los depósitos del estado de cuenta incluyen las del patrón.",
+                                 "This year's elective deferrals to the 401(k)/403(b)/457(b) (W-2 box 12, codes D, E, "
+                                 "G, AA, BB, EE); plan deposits also include employer contributions."))
+        deferral_row = {"item": "Elective deferrals (401(k)/403(b)/457(b))",
+                        "plan_deposits_usd": _m(plan_deposits) if workplace else None,
+                        "deferrals_usd": _m(stated_deferrals), "limit_usd": _m(deferral_limit),
+                        "catch_up_basis": catch_basis,
+                        "excess_usd": _m(None if stated_deferrals is None or deferral_limit is None
+                                         else max(stated_deferrals - deferral_limit, ZERO)),
+                        "rule": "IRC 402(g)(1): one limit per person across all 401(k), 403(b), SARSEP and SIMPLE "
+                                "plans (traditional and Roth deferrals together); a governmental 457(b) has its own "
+                                "equal limit (IRC 457(e)(15)). Catch-up (IRC 414(v)): age 50+, or the higher amount "
+                                "at ages 60-63 (SECURE 2.0 sec. 109, from 2025). Employer contributions count only "
+                                "against IRC 415(c)."}
+        rows.append(deferral_row)
+        if book.year >= 2026:
+            warnings.append("From 2026, catch-up deferrals of employees whose prior-year FICA wages from the plan "
+                            "sponsor exceeded $150,000 must be designated Roth (IRC 414(v)(7), SECURE 2.0 sec. 603).")
+        if workplace and stated_deferrals is None and deferral_limit is not None and plan_deposits > deferral_limit:
+            warnings.append("Plan deposits exceed the deferral limit; they may include employer contributions, "
+                            "rollovers or a 457(b)'s separate limit. Confirm deferrals with the W-2.")
     rmd_age = None
     required = None
-    if isinstance(birth, int) and birth >= 1951:
-        rmd_age = retirement.rmd_age(birth, params)
-        if rmd_age is not None and age is not None and age >= rmd_age:
+    if isinstance(birth, int):
+        try:
+            rmd_age, due, rmd_note = _rmd_start(birth, book.year, params)
+        except ValueError:
+            rmd_age, due, rmd_note = None, None, None
+        if book.year == 2020:
+            due, rmd_note = False, "2020 RMDs were waived (CARES Act sec. 2203)."
+        if due and ira:
             balance = _d(book.us.get("ira_prior_year_end_balance_usd"))
             if balance is None:
                 missing.append(_need(sid, f"tax.{book.year}.us.ira_prior_year_end_balance_usd",
                                      f"Saldo de la IRA tradicional al 31 de diciembre de {book.year - 1} (para el RMD).",
                                      f"Traditional IRA balance on December 31, {book.year - 1} (for the RMD)."))
             else:
-                required = Decimal(str(retirement.rmd_amount(float(balance), age, params) or 0))
-        elif rmd_age is not None:
+                try:
+                    value = retirement.rmd_amount(float(balance), age, params)
+                except ValueError:
+                    value = None
+                required = None if value is None else Decimal(str(value))
+        elif due is False or (due and not ira):
             required = ZERO
+        elif due is None and ira:
+            missing.append(_need(sid, "client.profile.birth_date",
+                                 "Fecha de nacimiento (para saber si el RMD ya empezó: 70½ o 72 años).",
+                                 "Date of birth (whether RMDs have started: age 70½ or 72)."))
+        if rmd_note:
+            warnings.append(rmd_note)
+        if due and workplace:
+            warnings.append("Employer-plan RMDs (401(k), 403(b), 457(b)) are figured per plan and cannot be taken from "
+                            "an IRA (403(b)s may be combined among themselves); a participant still working who "
+                            "is not a 5% owner may delay them (IRC 401(a)(9)(C)). Roth 401(k)s have no lifetime RMD "
+                            "from 2024.")
     taken = _d(book.us.get("rmd_taken_usd"))
     taken = taken if taken is not None else (withdrawals["ira"] if ira else None)
     rows.append({"item": "RMD", "required_usd": _m(required), "taken_usd": _m(taken), "rmd_start_age": rmd_age,
-                 "shortfall_usd": _m(None if required is None or taken is None else max(required - taken, ZERO))})
-    if (withdrawals["roth"] or withdrawals["ira"]) and age is not None and age < 59:
+                 "shortfall_usd": _m(None if required is None or taken is None else max(required - taken, ZERO)),
+                 "accounts": "traditional, SEP and SIMPLE IRAs (aggregated); Roth IRAs have no owner RMD"})
+    if any(withdrawals.values()) and age is not None and age < 59:
         warnings.append("A withdrawal before 59½ may carry the 10% additional tax unless an exception applies.")
-    return _section(sid, "IRA / Roth: aportaciones y RMD", "IRA / Roth: contributions and RMDs", "US", currency="USD",
-                    summary={"contributions": rows[0], "rmd": rows[1]},
+    summary = {"contributions": rows[0], "rmd": rows[-1]}
+    if deferral_row:
+        summary["workplace_deferrals"] = deferral_row
+    return _section(sid, "IRA / Roth / 401(k): aportaciones y RMD", "IRA / Roth / 401(k): contributions and RMDs",
+                    "US", currency="USD", summary=summary,
                     columns=_cols(("item", "Concepto", "Item"), ("traditional_usd", "Tradicional", "Traditional"),
                                   ("roth_usd", "Roth", "Roth"), ("combined_usd", "Total", "Combined"),
+                                  ("deferrals_usd", "Diferidas (W-2)", "Deferrals (W-2)"),
                                   ("limit_usd", "Límite", "Limit"), ("excess_usd", "Exceso", "Excess"),
                                   ("required_usd", "RMD requerido", "RMD required"), ("taken_usd", "Retirado", "Taken")),
                     rows=rows, reconciliation=recon, missing=missing, warnings=warnings,
-                    sources=[SRC_590A, SRC_590B, *params.sources],
-                    assumptions=["The IRA limit is shared by traditional and Roth IRAs; income phase-outs for Roth and "
-                                 "deductibility are not applied.",
+                    sources=[SRC_590A, SRC_590B, *params.sources, *extra_sources],
+                    assumptions=["The IRA limit (IRC 219(b)(5)) is shared by traditional and Roth IRAs only; 401(k), "
+                                 "403(b) and 457(b) deferrals are measured against IRC 402(g) instead. Income "
+                                 "phase-outs for Roth and deductibility are not applied.",
                                  "Contributions need taxable compensation; excluded foreign earned income (Form 2555) "
                                  "does not count."])
 
@@ -1845,8 +2056,30 @@ def _us_fbar(book: _Book, prices: Mapping[str, Any] | None) -> dict | None:
     fbar_required = True if max_total > FBAR_THRESHOLD_USD else (False if complete else None)
     abroad = str((book.profile.get("residence") or {}).get("country") or "").upper() not in {"", "US"}
     married_joint = book.us.get("filing_status") == "married_filing_jointly"
-    end_threshold, any_threshold = FORM_8938_THRESHOLDS[("abroad" if abroad else "us", married_joint)]
-    if end_total > end_threshold or max_total > any_threshold:
+    # The higher "abroad" thresholds need a tax home abroad and bona fide residence for the whole year or
+    # 330 full days abroad in 12 months (Treas. Reg. 1.6038D-2(a)(4)); living abroad alone is not enough.
+    test = book.us.get("foreign_residence_test")
+    qualifies = True if test in {"bona_fide_residence", "physical_presence"} else (
+        False if test == "neither" or not abroad else None)
+    if qualifies is None:
+        missing.append(_need(sid, f"tax.{book.year}.us.foreign_residence_test",
+                             "Para el 8938 en el extranjero: ¿residencia de buena fe todo el año o 330 días completos "
+                             "fuera de EE.UU. en 12 meses? (bona_fide_residence, physical_presence o neither).",
+                             "For the Form 8938 abroad thresholds: bona fide residence abroad for the whole year, or "
+                             "330 full days abroad in 12 months? (bona_fide_residence, physical_presence or neither)."))
+    # Shown: the abroad thresholds when they may apply; the US ones stay in the table below.
+    end_threshold, any_threshold = FORM_8938_THRESHOLDS[("us" if qualifies is False else "abroad", married_joint)]
+    high_end, high_any = FORM_8938_THRESHOLDS[("abroad", married_joint)]
+    low_end, low_any = FORM_8938_THRESHOLDS[("us", married_joint)]
+    if qualifies is None:
+        # Unknown test: required when above even the abroad thresholds, not when complete and below the US ones.
+        if end_total > high_end or max_total > high_any:
+            form_8938 = True
+        elif complete and end_total <= low_end and max_total <= low_any:
+            form_8938 = False
+        else:
+            form_8938 = None
+    elif end_total > end_threshold or max_total > any_threshold:
         form_8938 = True
     elif complete:
         form_8938 = False
@@ -1859,7 +2092,8 @@ def _us_fbar(book: _Book, prices: Mapping[str, Any] | None) -> dict | None:
                         "rule": "Aggregate maximum value of all foreign financial accounts above $10,000 at any time in "
                                 "the calendar year (31 CFR 1010.350; FinCEN Form 114).",
                         "due": f"{book.year + 1}-04-15 (automatic extension to {book.year + 1}-10-15)"},
-               "form_8938": {"required": form_8938, "lives_abroad": abroad, "married_filing_jointly": married_joint,
+               "form_8938": {"required": form_8938, "lives_abroad": abroad, "abroad_thresholds_apply": qualifies,
+                             "foreign_residence_test": test, "married_filing_jointly": married_joint,
                              "year_end_value_usd_at_least": _m(end_total), "max_value_usd_at_least": _m(max_total),
                              "threshold_last_day_usd": _m(end_threshold), "threshold_any_time_usd": _m(any_threshold),
                              "rule": "Specified foreign financial assets above the threshold on the last day of the "
@@ -1885,7 +2119,10 @@ def _us_fbar(book: _Book, prices: Mapping[str, Any] | None) -> dict | None:
                                   ("note", "Nota", "Note")),
                     rows=table, missing=missing, warnings=warnings,
                     sources=[SRC_FBAR, SRC_FBAR_DUE, SRC_8938, SRC_TREASURY_RATES],
-                    assumptions=["Values are lower bounds: month-end ledger balances, statement balances and "
+                    assumptions=["Form 8938's abroad thresholds apply only with a tax home abroad and bona fide "
+                                 "residence for the whole year or 330 full days abroad in 12 months (Treas. Reg. "
+                                 "1.6038D-2(a)(4)); otherwise the US thresholds apply.",
+                                 "Values are lower bounds: month-end ledger balances, statement balances and "
                                  "balances you stated during the year. A lower bound above a threshold is enough to "
                                  "require the form; below it, the answer stays unknown until every value is known.",
                                  "Accounts are foreign when the statement, the institution or (failing both) the "
