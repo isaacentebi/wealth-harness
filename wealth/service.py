@@ -269,8 +269,9 @@ def _risk_free(stored: dict, currency: str | None) -> tuple[dict | None, str | N
             rate = low / 100 if unit == "percent" else low / 10000 if unit == "bps" else low
             return {"rate": str(rate), "source": value["source"], "name": value.get("name") or value["source"],
                     "as_of": value.get("as_of") or (fact.get("source") or {}).get("observed_on")}, fact["id"]
-    if currency == "MXN":
-        from .proactive import CETES_28D_REFERENCE as ref
+    if currency in ("MXN", "USD"):
+        from .proactive import CETES_28D_REFERENCE, TBILL_13W_REFERENCE
+        ref = CETES_28D_REFERENCE if currency == "MXN" else TBILL_13W_REFERENCE
         return {"rate": ref["rate"], "source": ref["source"], "name": ref["name"], "as_of": ref["as_of"]}, None
     return None, None
 
@@ -375,7 +376,8 @@ def fact_contract() -> dict:
                      "from observed_on and review_days. Past-review facts stay visible but marked stale; reconfirm "
                      "them with the person. Stale and inferred facts are excluded from calculations and decisions.",
         "default_review_on": (today + timedelta(days=DEFAULT_REVIEW_DAYS)).isoformat(),
-        "writes": "Omit expected_revision to add new keys or to update existing ones with merge=true. Pass "
+        "writes": "Omit expected_revision to add new keys or to update existing ones: an object sent for a key "
+                  "that holds an object merges into it when merge is not given. Pass merge=false with "
                   "expected_revision (the client_revision you read) to replace an existing value wholesale.",
         "merge": "merge=true applies value as a patch: object fields are updated, null removes a field, and "
                  "lists of objects with id (such as goals) are updated by id without dropping other entries.",
@@ -416,6 +418,109 @@ class _Context(dict):
     def __getitem__(self, key):
         self._track(key)
         return super().__getitem__(key)
+
+
+_MEMORY_HEADS = ("client", "income", "spending", "cash", "liability", "investment", "estate", "insurance",
+                 "property", "tax", "reserve", "goals")
+_MISSING_TOKEN = re.compile(r"^[a-z_][a-z0-9_.\[\]]*")
+
+
+def _placeholder(item) -> str:
+    if isinstance(item, dict):
+        text = item.get("detail") or item.get("reason") or item.get("key") or "value"
+    else:
+        text = str(item)
+    text = " ".join(str(text).split())
+    return "<" + (text if len(text) <= 70 else text[:67] + "...") + ">"
+
+
+def _set_path(target: dict, path: str, value) -> None:
+    parts = [p for p in path.split(".") if p]
+    for part in parts[:-1]:
+        nxt = target.get(part)
+        if not isinstance(nxt, dict):
+            nxt = target[part] = {}
+        target = nxt
+    if parts and parts[-1] not in target:
+        target[parts[-1]] = value
+
+
+def retry_example(task: str, client_id: str | None, inputs: dict, report: dict, snapshot: dict) -> dict | None:
+    """``retry_with`` for a needs_input result: the same call with the missing inputs marked <...>.
+
+    Built from the actual request (and, for a portfolio task, the saved account totals) so the host asks
+    the person for exactly the marked values and calls again, instead of answering from general knowledge.
+    """
+    missing = report.get("missing") or []
+    if not missing:
+        return None
+    filled = {k: v for k, v in inputs.items()}
+    remember: list[dict] = []
+    facts = {f["key"]: f.get("value") for f in snapshot.get("facts") or []}
+    for item in missing:
+        key = item.get("key") if isinstance(item, dict) else None
+        if key is None:
+            found = _MISSING_TOKEN.match(str(item).split(":")[0].strip())
+            key = found.group(0) if found else None
+        if not key:
+            continue
+        head, _, rest = key.partition(".")
+        if task in PORTFOLIO_TASKS and head in {"weights", "household", "current_weights", "holdings"}:
+            positions = [{"symbol": k.partition(".")[2].upper(), "value": v.get("amount"),
+                          "currency": v.get("currency"), "asset_class": "<equity|bond|cash: ask the person>"}
+                         for k, v in facts.items()
+                         if k.startswith("investment.") and isinstance(v, dict) and v.get("amount") is not None]
+            if positions:
+                currencies = {p["currency"] for p in positions if p["currency"]}
+                filled.setdefault("household", {"currency": next(iter(currencies)) if len(currencies) == 1
+                                                else "<reporting currency>", "positions": positions})
+            else:
+                filled.setdefault("weights", {"<SYMBOL>": "<fraction>", "CASH::<CUR>": "<fraction>"})
+                filled.setdefault("currency", "<ISO currency>")
+            continue
+        if task == "debt" and head == "liability" and "." in rest:
+            ident, _, field = rest.partition(".")
+            if isinstance(filled.get("liabilities"), list):  # inline debts: mark the field on that debt
+                filled["liabilities"] = [dict(row) if isinstance(row, dict) else row for row in filled["liabilities"]]
+                for row in filled["liabilities"]:
+                    if isinstance(row, dict) and str(row.get("id")) == ident:
+                        _set_path(row, field, _placeholder(item))
+                continue
+            debt = filled.get("debt") if isinstance(filled.get("debt"), dict) else {"id": ident}
+            _set_path(debt, field, _placeholder(item))
+            filled["debt"] = debt
+            continue
+        if client_id and head in _MEMORY_HEADS and rest and head != "tax":
+            fact_key = ".".join(key.split(".")[:2]) if head != "spending" else "spending.monthly"
+            field = key[len(fact_key) + 1:] or None
+            value = {}
+            if field:
+                _set_path(value, field, _placeholder(item))
+            else:
+                value = _placeholder(item)
+            remember.append({"key": fact_key, "value": value,
+                             "source": {"kind": "user", "ref": "chat", "observed_on": "<today>"}})
+            continue
+        _set_path(filled, key, _placeholder(item))
+    call = {"task": task, "inputs": filled}
+    if client_id:
+        call["client_id"] = client_id
+    out = {"wealth_run": call,
+           "note": "Ask the person for each <...> value (or take it from their own words), then call again. Never "
+                   "fill them from general knowledge or typical market figures."}
+    if remember:
+        out["wealth_remember_first"] = {"client_id": client_id, "facts": remember}
+    return out
+
+
+def client_slug(display_name) -> str | None:
+    """A client_id from a display name ("Ana López" -> "ana-lopez"), for a create without an id."""
+    import unicodedata
+    if not isinstance(display_name, str):
+        return None
+    folded = unicodedata.normalize("NFKD", display_name).encode("ascii", "ignore").decode().lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", folded).strip("-")[:48].strip("-")
+    return slug or None
 
 
 def _call(function, label: str, data: dict, **fixed):
@@ -843,6 +948,10 @@ class WealthService:
                     "confidence": "reported", "expires_on": derived_expiry}], snapshot["client"]["revision"])
             report["saved"] = {"key": save_as, "client_revision": saved["write_result"]["resulting_revision"],
                                "expires_on": derived_expiry}
+        if report.get("status") == "needs_input" and "retry_with" not in report:
+            retry = retry_example(task, client_id, inputs, report, snapshot)
+            if retry is not None:
+                report["retry_with"] = retry
         # Engine-drawn views of this result the answer may place with [[view:<id>]] (never saved with it).
         report["views"] = views_module.summaries(views_module.views_for(task, report))
         return report
@@ -1042,7 +1151,9 @@ class WealthService:
         evidence: list[str] = []
         sit = build_situation(snapshot, ledger, as_of) if stored else None
         rows = inputs.get("liabilities")
-        if isinstance(chosen, dict):
+        # debt {id, monthly_payment} for a saved liability adds the missing field to it for this run.
+        overlay = chosen if isinstance(chosen, dict) and chosen.get("id") and rows is None else None
+        if isinstance(chosen, dict) and overlay is None:
             rows = [chosen]
         if rows is None:
             rows = []
@@ -1058,6 +1169,11 @@ class WealthService:
                 rows.append(row)
                 if r["key"] in (sit or {}).get("evidence", {}):
                     evidence.append(sit["evidence"][r["key"]])
+            if overlay is not None:
+                match = next((r for r in rows if str(r.get("id")) == str(overlay["id"])), None)
+                rows = [{**match, **overlay} if match is not None else overlay]
+                if match is None:
+                    evidence = []
         elif not isinstance(rows, list):
             raise ValueError("liabilities must be a list of liability objects")
         if wanted is not None:
@@ -1340,7 +1456,9 @@ class WealthService:
         if task in estate_register.TASKS:
             report = estate_register.run_task(task, inputs, sit, snapshot)
         elif task in protection.TASKS:
-            report = protection.run_task(task, inputs, sit)
+            saved = {f["key"]: f.get("value") for f in snapshot.get("facts") or []
+                     if str(f.get("key")).startswith("estate.") and f.get("status", "active") == "active"}
+            report = protection.run_task(task, inputs, sit, saved_estate=saved)
         else:
             ips = policy.current(snapshot, as_of)
             if ips is not None:
@@ -1361,8 +1479,12 @@ class WealthService:
         if action == "list":  # ids and display names only, so a host can find the person's profile
             with WealthStore(self.db_path) as store:
                 return {"clients": store.list_clients()}
+        if not client_id and action == "create":
+            client_id = client_slug((inputs or {}).get("display_name"))
         if not client_id:
-            raise ValueError(f"client {action} needs client_id")
+            raise ValueError(f"client {action} needs client_id"
+                             + (' or inputs.display_name, e.g. {"action": "create", "inputs": {"display_name": "Ana"}}'
+                                if action == "create" else ""))
         operations = {"create": self.create, "inspect": self.inspect,
                       "export": lambda client_id: self.inspect(client_id, detail="export"),
                       "forget": self.forget, "index": self.index}

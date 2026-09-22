@@ -748,7 +748,7 @@ CATALOG: dict[str, dict[str, Any]] = {
                      "financial_system_lender, credit_udis | credit_amount_mxn + udi_value_at_origination + udi_source, "
                      "within_global_cap} (LISR Art. 151 fr. IV, as mx_deductions), inflation (MX real interest, default 4%), "
                      "expected_return {conservative, base, source}, risk_free {rate, source} (default: a saved "
-                     "cash_reference_rate, else CETES 28 days for MXN; the T-bill rate is asked), investment (a name), "
+                     "cash_reference_rate, else the dated CETES 28-day (MXN) or 13-week T-bill (USD) auction rate), investment (a name), "
                      "reserve {months, target_months} (default: the saved picture)",
                      "refinance: offer {kind refinance|balance_transfer|consolidation, annual_rate (after any promo; with a promo and "
                      "no rate given, the current rate is assumed and said), "

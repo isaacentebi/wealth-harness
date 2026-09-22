@@ -1206,6 +1206,37 @@ def stress_price_symbols(inputs: dict, context: dict) -> list[str]:
     return sorted(s for s in needed if not s.startswith(_CASH_PREFIX))
 
 
+_BROAD_SHOCK_ALIASES = ("equity_shock", "market_shock")
+
+
+def _broad_shock(scenario: dict, weights: dict, name: str, assumptions: list[str]) -> dict:
+    """``{equity_shock: -0.3}`` (or market_shock) as ``shocks {<broad equity proxy>: -0.3}``, the rest by beta.
+
+    The proxy is a broad index fund the portfolio holds (the largest), else SPY; it is the factor.
+    """
+    alias = next((a for a in _BROAD_SHOCK_ALIASES if a in scenario), None)
+    if alias is None:
+        return scenario
+    others = [a for a in _BROAD_SHOCK_ALIASES if a in scenario and a != alias]
+    if others:
+        raise ValueError(f"{name}: give one of {' or '.join(_BROAD_SHOCK_ALIASES)}, not both")
+    value = scenario[alias]
+    held = sorted((s for s in weights if str(s).upper() in _EQUITY_INDEX_PROXIES), key=lambda s: -weights[s])
+    proxy = str(held[0]).upper() if held else "SPY"
+    shocks = dict(scenario.get("shocks") or {})
+    if proxy in {str(k).upper() for k in shocks}:
+        raise ValueError(f"{name}: {alias} and shocks both set {proxy}; give one")
+    shocks[proxy] = value
+    out = {k: v for k, v in scenario.items() if k != alias}
+    out["shocks"] = shocks
+    out.setdefault("factor", proxy)
+    note = (f"{name}: {alias} {value:+.0%} is applied to {proxy} as the broad equity market; every other holding "
+            "moves by its beta to it." if isinstance(value, (int, float)) and not isinstance(value, bool) else None)
+    if note and note not in assumptions:
+        assumptions.append(note)
+    return out
+
+
 def _stress(inputs: dict, context: dict) -> dict:
     weights, info, missing = _portfolio(inputs, context)
     if missing:
@@ -1236,7 +1267,8 @@ def _stress(inputs: dict, context: dict) -> dict:
     for index, scenario in enumerate(scenarios):
         if not isinstance(scenario, dict):
             raise ValueError(f"scenarios[{index}] must be an object")
-        name = _text(scenario.get("name"), f"scenarios[{index}].name")
+        name = _text(scenario.get("name") or f"scenario {index + 1}", f"scenarios[{index}].name")
+        scenario = _broad_shock(scenario, weights, name, assumptions)
         if "shocks" in scenario or "fx_shocks" in scenario:
             shocks = scenario.get("shocks") or {}
             if not isinstance(shocks, dict):

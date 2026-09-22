@@ -390,6 +390,43 @@ def _status(value: Any) -> str:
     return _YES.get(str(value).lower(), "unknown")
 
 
+_ESTATE_ITEMS = {
+    # item: (English noun phrase, Spanish noun phrase, plural?) for the status sentence
+    "testamento": ("a will (testamento)", "testamento", False),
+    "beneficiarios_afore": ("beneficiaries registered at your AFORE", "beneficiarios registrados en tu AFORE", True),
+    "beneficiarios_seguros": ("beneficiaries on your insurance policies", "beneficiarios en tus pólizas de seguro", True),
+    "beneficiarios_cuentas": ("beneficiaries on your bank and brokerage accounts",
+                              "beneficiarios en tus cuentas de banco y casa de bolsa", True),
+    "poder_notarial": ("a poder notarial", "poder notarial", False),
+    "voluntad_anticipada": ("a documento de voluntad anticipada", "documento de voluntad anticipada", False),
+    "regimen_matrimonial": ("your marital regime on record", "tu régimen matrimonial registrado", False),
+    "will": ("a will", "testamento", False),
+    "beneficiaries_retirement": ("beneficiaries on your 401(k)/IRA", "beneficiarios en tu 401(k)/IRA", True),
+    "beneficiaries_insurance": ("beneficiaries on your life insurance", "beneficiarios en tu seguro de vida", True),
+    "transfer_on_death": ("TOD/POD designations on your accounts", "designaciones TOD/POD en tus cuentas", True),
+    "power_of_attorney": ("a durable power of attorney", "poder notarial duradero", False),
+    "healthcare_proxy": ("a healthcare proxy", "representante médico", False),
+    "revocable_trust": ("a revocable trust", "fideicomiso revocable", False),
+}
+_REGISTER_ITEMS = {"testamento", "beneficiarios_afore", "beneficiarios_seguros", "beneficiarios_cuentas",
+                   "regimen_matrimonial", "will", "beneficiaries_retirement", "beneficiaries_insurance",
+                   "transfer_on_death"}
+
+
+def _status_text(status: str, en: str, es: str, plural: bool) -> dict:
+    """What we know about one item, said plainly: unknown is never "you don't have"."""
+    if status == "unknown":
+        return {"en": f"I don't know whether you have {en}.", "es": f"No sé si tienes {es}."}
+    if status == "missing":
+        return {"en": f"You told me you don't have {en}.", "es": f"Me dijiste que no tienes {es}."}
+    if status == "review":
+        return {"en": f"{en[0].upper() + en[1:]} {'are' if plural else 'is'} due for review.",
+                "es": f"Conviene revisar tu {es}." if not plural else f"Conviene revisar tus {es}."}
+    if status == "done":
+        return {"en": f"You have {en}.", "es": f"Ya tienes {es}."}
+    return {"en": "Does not apply.", "es": "No aplica."}
+
+
 def estate_checklist(situation: Mapping[str, Any], estate: Mapping[str, Any] | None = None,
                      country: str | None = None, as_of: date | None = None) -> dict:
     """A document checklist with a status per item; never legal drafting."""
@@ -505,6 +542,13 @@ def estate_checklist(situation: Mapping[str, Any], estate: Mapping[str, Any] | N
                                 "US estate-tax range.",
                           "es": "Tienes valores domiciliados en EE.UU.; revisa la exposición al impuesto sucesorio de "
                                 "EE.UU. (tarea estate).", "refer": None, "task": "estate"})
+    for item in items:
+        what = _ESTATE_ITEMS.get(item["item"])
+        if what is None:
+            continue
+        item["status_text"] = _status_text(item["status"], *what)
+        if item["item"] in _REGISTER_ITEMS:
+            item["task"] = "estate_register"  # who would receive each account, the intestate split and the gaps
     order = {"missing": 0, "review": 1, "unknown": 2, "done": 3, "not_applicable": 4}
     items.sort(key=lambda i: order.get(i["status"], 5))
     return {"jurisdiction": country, "items": items, "us_situs": situs,
@@ -830,7 +874,28 @@ def life_event(kind: str, when: str | date | None = None, details: Mapping[str, 
 TASKS = ("protection_review", "life_event")
 
 
-def run_task(task: str, inputs: Mapping[str, Any], situation: Mapping[str, Any]) -> dict:
+def _saved_estate(saved: Mapping[str, Any]) -> dict:
+    """The checklist's ``estate`` answers from the saved estate.* facts (what the person told us)."""
+    out: dict[str, Any] = {}
+    will = saved.get("estate.will")
+    if isinstance(will, Mapping) and isinstance(will.get("exists"), bool):
+        out["will"] = will["exists"]
+        if will.get("date"):
+            out["will_date"] = will["date"]
+    family = saved.get("estate.family")
+    if isinstance(family, Mapping):
+        status = family.get("marital_status")
+        if status in ("married", "free_union"):
+            out["married"] = True
+        elif status in ("single", "divorced", "widowed"):
+            out["married"] = False
+        if family.get("marital_regime"):
+            out["marital_regime"] = family["marital_regime"]
+    return out
+
+
+def run_task(task: str, inputs: Mapping[str, Any], situation: Mapping[str, Any],
+             saved_estate: Mapping[str, Any] | None = None) -> dict:
     if task not in TASKS:
         raise ValueError(f"protection tasks are {', '.join(TASKS)}")
     inputs = dict(inputs)
@@ -840,7 +905,25 @@ def run_task(task: str, inputs: Mapping[str, Any], situation: Mapping[str, Any])
         if unknown:
             raise ValueError(f"protection_review inputs: unknown {unknown}; expected {{policies?, life?, disability?, "
                              "health?, estate?, jurisdiction?, facts?, as_of?}")
+        saved_estate = saved_estate or {}
+        stated = _saved_estate(saved_estate)
+        if stated:
+            inputs["estate"] = {**stated, **dict(inputs.get("estate") or {})}
         result = protection_review(situation, inputs)
+        profile = situation.get("profile") or {}
+        family_known = bool(saved_estate) or bool(profile.get("dependents")) or bool(profile.get("dependent_ages"))
+        result["estate"]["next_step"] = (
+            {"task": "estate_register",
+             "en": "Family or estate facts are saved: run wealth_run(task=estate_register) with the client_id for who "
+                   "would receive each account, the intestate split and the gaps, before answering about the estate.",
+             "es": "Hay datos de familia o sucesión guardados: corre estate_register para ver quién recibiría cada "
+                   "cuenta, el reparto intestamentario y los huecos."}
+            if family_known else
+            {"task": "estate_register",
+             "en": "Ask who is in the family (spouse, marital regime, children) and whether there is a will, save it "
+                   "(estate.family, estate.will), then run estate_register for who would receive each account.",
+             "es": "Pregunta por la familia (cónyuge, régimen, hijos) y si hay testamento, guárdalo y corre "
+                   "estate_register."})
         status = "partial" if result["missing"] else "ready"
         sources = [_src(k) for k in ("life_method", "disability_replacement", "hsa_limit_2026", "mes_del_testamento",
                                      "mx_gmm_premium_deductible")]

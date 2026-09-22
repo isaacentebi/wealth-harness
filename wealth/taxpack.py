@@ -2173,9 +2173,40 @@ def _deadlines(book: _Book, jurisdictions: list[str], us_person: bool) -> list[d
         items.append({"date": f"{y + 1}-10-15", "jurisdiction": "US", "es": f"FBAR {y} con prórroga",
                       "en": f"{y} FBAR, extended", "basis": "31 CFR 1010.306(c)"})
     today = date.fromisoformat(book.today)
+    filings = {f"{y} annual return (personas físicas)": ("la declaración anual {y}", "The {y} annual return"),
+               f"{y} federal return (Form 1040) and payment": ("la declaración federal {y} (Form 1040)",
+                                                               "The {y} federal return (Form 1040)"),
+               f"{y} FBAR, extended": ("el FBAR {y}", "The {y} FBAR")}
+    extension = next((i for i in items if i["en"].startswith(f"Automatic {y} Form 1040 extension")), None)
+    if extension is not None:
+        # Abroad, the 1040 is late only after the automatic June 15 extension.
+        filings[extension["en"]] = filings.pop(f"{y} federal return (Form 1040) and payment")
     for item in items:
-        item["days_until"] = (date.fromisoformat(item["date"]) - today).days
-    return sorted(items, key=lambda i: (i["date"], i["jurisdiction"]))
+        day = date.fromisoformat(item["date"])
+        item["days_until"] = (day - today).days
+        filing = filings.get(item["en"])
+        if item["days_until"] >= 0:
+            item["status"] = "upcoming"
+        elif filing is not None:
+            es, en = (s.format(y=y) for s in filing)
+            surcharge = "hay recargos" if item["jurisdiction"] == "MX" else "hay recargos e intereses"
+            item["status"] = "overdue"
+            item["overdue_es"] = f"{es[0].upper() + es[1:]} venció el {_fecha_es(day)}; presenta cuanto antes, {surcharge}."
+            item["overdue_en"] = (f"{en} was due {day:%B} {day.day}, {day.year}; file as soon as possible, "
+                                  + ("surcharges and inflation updates (recargos) accrue."
+                                     if item["jurisdiction"] == "MX" else "penalties and interest accrue."))
+        else:
+            item["status"] = "passed"
+    rank = {"overdue": 0, "upcoming": 1, "passed": 2}
+    return sorted(items, key=lambda i: (rank[i["status"]], i["date"], i["jurisdiction"]))
+
+
+_MESES = ("enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre",
+          "noviembre", "diciembre")
+
+
+def _fecha_es(day: date) -> str:
+    return f"{day.day} de {_MESES[day.month - 1]} de {day.year}"
 
 
 # ----------------------------------------------------------------- the task
@@ -2196,8 +2227,9 @@ def _jurisdictions(inputs: Mapping[str, Any], book: _Book) -> tuple[list[str], s
     codes = [c for c in (profile.get("tax_residence") or []) if c in {"MX", "US"}]
     basis = "stated tax residence"
     if not codes:
-        country = (profile.get("residence") or {}).get("country")
-        if country in {"MX", "US"}:
+        country = (profile.get("residence") or {}).get("country") or profile.get("country")
+        if isinstance(country, str) and country.upper() in {"MX", "US"}:
+            country = country.upper()
             codes, basis = [country], "country of residence (tax residence assumed there)"
     if profile.get("us_person") is True and "US" not in codes:
         codes.append("US")
@@ -2213,6 +2245,8 @@ def run_task(inputs: Mapping[str, Any], snapshot: Mapping[str, Any], ledger: Map
              today: str) -> dict:
     """Service entry for ``tax_pack``: one year's working papers for the contador or CPA."""
     inputs = dict(inputs)
+    if "year" in inputs and "tax_year" not in inputs:  # the natural name for it
+        inputs["tax_year"] = inputs.pop("year")
     unknown = sorted(set(inputs) - ALLOWED_INPUTS)
     if unknown:
         raise ValueError(f"tax_pack inputs: unknown {unknown}; allowed {sorted(ALLOWED_INPUTS)}")
@@ -2286,6 +2320,10 @@ def run_task(inputs: Mapping[str, Any], snapshot: Mapping[str, Any], ledger: Map
                    "institution's constancia or 1099 was saved it is the source of truth and the difference is shown.",
                    "Unknown is never zero: a figure that cannot be computed is empty and listed under Pendientes."]
     language = inputs.get("language") or book.profile.get("language") or ("es" if "MX" in jurisdictions else "en")
+    overdue = [d[f"overdue_{'es' if language == 'es' else 'en'}"] for d in deadlines if d["status"] == "overdue"]
+    warnings = overdue + warnings
+    if overdue:
+        year_basis += "; its return deadline has passed, so it is due now (overdue unless already filed)"
     result = {"tax_year": year, "tax_year_basis": year_basis, "jurisdictions": jurisdictions,
               "jurisdiction_basis": jurisdiction_basis, "us_person": us_person, "language": language,
               "person": book.profile.get("name"), "prepared_on": today,

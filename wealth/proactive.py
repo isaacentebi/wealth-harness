@@ -77,6 +77,13 @@ CETES_28D_REFERENCE = {
     "source": "Banxico, subasta primaria de valores gubernamentales del 2026-09-15 (CETES 28 dias 6.25%); "
               "https://www.banxico.org.mx/mercados/resultados-subastas-valores-g.html",
 }
+# The USD counterpart: the 13-week Treasury bill auction of 2026-09-21 (reopening, issued 2026-09-24), high
+# investment rate (bond-equivalent yield) 4.113% (discount rate 4.015%), from Treasury Fiscal Data.
+TBILL_13W_REFERENCE = {
+    "rate": "0.04113", "as_of": "2026-09-21", "checked_on": "2026-09-22", "name": "US Treasury bill 13 weeks",
+    "source": "U.S. Treasury, 13-week bill auction of 2026-09-21 (high investment rate 4.113%); "
+              "https://fiscaldata.treasury.gov/datasets/treasury-securities-auctions-data/",
+}
 REFERENCE_RATE_STALE_DAYS = 30
 IDLE_YIELD_MIN_LOST = {"MXN": Decimal(1000), "USD": Decimal(50)}  # below this a year, not worth a nudge
 STALE_KEYS_THAT_MATTER = ("client.profile", "income.", "spending.monthly", "cash.", "liability.", "investment.",

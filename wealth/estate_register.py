@@ -235,16 +235,21 @@ class _Family:
         # Concubinato (CCF Art. 1635) has no marital regime: nothing is shared by law.
         self.free_union = status == "free_union"
         self.children: list[dict] = []
-        for child in self.raw.get("children") or []:
-            if isinstance(child, dict) and isinstance(child.get("name"), str):
+        for index, child in enumerate(self.raw.get("children") or []):
+            if isinstance(child, dict):
                 born = _date(child.get("birth_date"))
-                self.children.append({"name": child["name"], "born": born,
-                                      "age": _age(born, child.get("birth_year"), today),
+                name = child.get("name") if isinstance(child.get("name"), str) and child["name"].strip() else None
+                # A child saved without a name ({"minor": true} or a birth year) still counts as an heir.
+                self.children.append({"name": name or f"Hijo/a {index + 1}", "named": name is not None,
+                                      "born": born, "age": _age(born, child.get("birth_year"), today),
+                                      "minor": child.get("minor"),
                                       "born_year": born.year if born else child.get("birth_year")})
         profile = sit.get("profile") or {}
         ages = [a for a in profile.get("dependent_ages") or [] if isinstance(a, int)]
         self.children_known = bool(self.children) or "children" in self.raw
-        self.minor_children = [c for c in self.children if c["age"] is not None and c["age"] < ADULT_AGE]
+        self.minor_children = [c for c in self.children
+                               if (c["age"] is not None and c["age"] < ADULT_AGE)
+                               or (c["age"] is None and c["minor"] is True)]
         # Dependants under 18 from the profile count as minors when the family names no children.
         self.minors = len(self.minor_children) if self.children_known else sum(1 for a in ages if a < ADULT_AGE)
         self.minors_known = self.children_known or bool(ages) or profile.get("dependents") == 0
@@ -267,6 +272,8 @@ class _Family:
     def child_age(self, name: str) -> int | None:
         for child in self.children:
             if _fold(child["name"]) == _fold(name):
+                if child["age"] is None and child["minor"] is True:
+                    return 0  # said to be a minor, age not given
                 return child["age"]
         return None
 

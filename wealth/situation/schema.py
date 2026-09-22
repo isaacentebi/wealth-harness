@@ -73,7 +73,8 @@ SCHEMA: dict[str, dict[str, str]] = {
         "name?": "their words", "approximate?": "true when they said 'about'",
     },
     "spending.monthly": {
-        "essential?": "number", "discretionary?": "number", "total?": "number (at least one of the three)",
+        "essential?": "number", "discretionary?": "number",
+        "total?": "number (at least one of the three; amount is read as total)",
         "currency": "ISO 4217", "approximate?": "true|false",
         "partial?": "true when essential (or discretionary) is only the items named (rent alone); a total is "
                     "always the whole",
@@ -148,7 +149,8 @@ SCHEMA: dict[str, dict[str, str]] = {
                            "marriage is already the spouse's)",
         "spouse?": "name", "divorce_date?": "YYYY-MM-DD",
         "spouse_assets?": "{amount, currency}: what the spouse owns in their own name (CCF Art. 1624); 0 when none",
-        "ex_spouses?": "list of names", "children?": "list of {name, birth_date? | birth_year?}",
+        "ex_spouses?": "list of names", "children?": "list of {name?, birth_date? | birth_year?, minor?}; the name is "
+                                                     "optional ({\"minor\": true} counts a child)",
         "parents_living?": "0-2", "siblings_living?": "number of living brothers and sisters (0 when none)",
         "deceased?": "list of names of people who died (to catch stale beneficiaries)",
     },
@@ -689,13 +691,15 @@ def _family(value: dict, key: str) -> None:
     children = value.get("children")
     if children is not None:
         if not isinstance(children, list):
-            _fail(f"{key}.children", "must be a list of {name, birth_date? | birth_year?}")
+            _fail(f"{key}.children", 'must be a list of {name?, birth_date? | birth_year?, minor?}, e.g. '
+                  '[{"name": "Sofía", "birth_year": 2017}, {"minor": true}]')
         for index, child in enumerate(children):
             path = f"{key}.children[{index}]"
-            _object(child, path, {"name", "birth_date", "birth_year"})
-            _text(child.get("name"), f"{path}.name", required=True, limit=80)
+            _object(child, path, {"name", "birth_date", "birth_year", "minor"})
+            _text(child.get("name"), f"{path}.name", limit=80)
             _iso_date(child.get("birth_date"), f"{path}.birth_date")
             _year_of_birth(child.get("birth_year"), f"{path}.birth_year")
+            _bool(child.get("minor"), f"{path}.minor")
 
 
 ESTATE_VALIDATORS: dict[str, Callable[[Any, str], None]] = {
@@ -1035,5 +1039,59 @@ def validate(key: str, value: Any) -> list[str]:
     return warnings
 
 
-__all__ = ["SCHEMA", "SchemaError", "validate", "MAX_AMOUNT", "out_of_range", "country_code", "COUNTRIES", "ONBOARDING_STEPS", "LANGUAGES", "FREQUENCIES", "INCOME_KINDS",
+ALIASES: dict[str, dict[str, str]] = {"spending.monthly": {"amount": "total"}}
+"""Field names a model writes naturally, read as the canonical field (only when that field is absent)."""
+
+
+def normalize(key: str, value: Any) -> tuple[Any, list[str]]:
+    """Rename aliased fields to their canonical names; returns the value and notes for the receipt."""
+    if key == "client.profile" and isinstance(value, dict) and value.get("residence") is None \
+            and country_code(value.get("country")) is not None:
+        # {"country": "MX"} is how people say where they live: it is the residence country.
+        out = {k: v for k, v in value.items() if k != "country"}
+        out["residence"] = {"country": country_code(value["country"])}
+        return out, ["client.profile.country was saved as client.profile.residence.country"]
+    if key == "estate.family" and isinstance(value, dict) and isinstance(value.get("children"), list) and any(
+            isinstance(c, dict) and "relationship" in c for c in value["children"]):
+        # Everyone in children is a child: a relationship field there says nothing more.
+        children = [{k: v for k, v in c.items() if k != "relationship"} if isinstance(c, dict) else c
+                    for c in value["children"]]
+        return {**value, "children": children}, []
+    aliases = ALIASES.get(key)
+    if not aliases or not isinstance(value, dict):
+        return value, []
+    out, notes = dict(value), []
+    for alias, canonical in aliases.items():
+        if alias in out and canonical not in out:
+            out[canonical] = out.pop(alias)
+            notes.append(f"{key}.{alias} was saved as {key}.{canonical}")
+    return out, notes
+
+
+EXAMPLES: dict[str, Any] = {
+    "client.profile": {"name": "Ana", "birth_year": 1990, "residence": {"country": "MX", "region": "CDMX"},
+                       "language": "es"},
+    "income.": {"amount": 70000, "currency": "MXN", "frequency": "monthly", "net": True},
+    "spending.monthly": {"total": 45000, "currency": "MXN"},
+    "cash.": {"amount": 150000, "currency": "MXN", "institution": "Nu"},
+    "liability.": {"kind": "card", "balance": 25000, "currency": "MXN", "annual_rate": 0.42},
+    "investment.": {"amount": 200000, "currency": "MXN", "institution": "GBM"},
+    "estate.family": {"marital_status": "married", "spouse": "Luis", "marital_regime": "sociedad_conyugal",
+                      "children": [{"name": "Mateo", "birth_year": 2018}, {"minor": True}]},
+    "estate.will": {"exists": False},
+    "estate.guardianship": {"guardian": "Luis"},
+    "goals": [{"id": "house-2028", "name": "Casa", "target_amount": 800000, "currency": "MXN",
+               "target_date": "2028-12-31"}],
+}
+"""A valid value per key (or key prefix), quoted in validation errors as the corrected shape."""
+
+
+def example(key: str) -> Any | None:
+    if key in EXAMPLES:
+        return EXAMPLES[key]
+    head = key.partition(".")[0] + "."
+    return EXAMPLES.get(head) if head != key else None
+
+
+__all__ = ["SCHEMA", "SchemaError", "validate", "normalize", "example", "ALIASES", "MAX_AMOUNT", "out_of_range", "country_code", "COUNTRIES", "ONBOARDING_STEPS", "LANGUAGES", "FREQUENCIES", "INCOME_KINDS",
            "LIABILITY_KINDS", "GOAL_ACTIONS", "TITLINGS", "RELATIONSHIPS", "PLAN_TYPES", "DESIGNATION_FIELDS", "designation_key", "THREAD_KINDS", "THREAD_STATUSES", "DROP_REACTIONS", "EXPERIENCE"]

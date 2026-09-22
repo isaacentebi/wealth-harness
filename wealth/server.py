@@ -62,7 +62,7 @@ class Fact(BaseModel):
     source: Source
     confidence: Literal["confirmed", "reported", "inferred"] = "reported"
     expires_on: str | None = None
-    merge: bool = False
+    merge: bool | None = None  # unset: an object merges into an existing object; false replaces
     valid_from: str | None = None
 
 
@@ -89,7 +89,7 @@ def _safe_reason(error: Exception) -> str:
     reason = " ".join(str(error).split())
     unknown = _UNKNOWN_TASK.match(reason)
     if unknown:  # the full task list does not fit; point at discovery instead of truncating it
-        hint = (" The fact contract (every key's schema) comes with wealth_context(client_id, intent=<task>) or "
+        hint = (" The fact contract (every key's schema) comes with wealth_context(client_id, intent=remember) or "
                 "detail=full.") if "fact" in unknown.group(1) or "schema" in unknown.group(1) else ""
         return f"unknown task {unknown.group(1)}; call wealth_context without client_id to list tasks.{hint}"
     return (reason or "Input failed the operation contract; check field names and types.")[:600]
@@ -473,10 +473,15 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = False,
             return situation_brief(result)
         if client_id is None:
             return _task_index(result) if intent == "overview" else _task_schema(result)
-        if not saves_facts:
-            # The fact contract (~9k characters) is for writing facts; a host without wealth_remember
-            # (a Wealth conversation turn) would re-read it at every step for nothing.
+        # The fact contract (~16k characters) is for writing facts, and wealth_remember's description
+        # already carries the compact form: a task read returns a one-line pointer instead, so a model
+        # that reads context before each run does not re-read the whole schema every time.
+        if intent not in {"remember", "fact_contract"} or not saves_facts:
             result.pop("fact_contract", None)
+            if saves_facts:
+                result["fact_contract_pointer"] = (
+                    "Every field of every memory key: wealth_context(client_id, intent=remember). "
+                    "wealth_remember's description has the common keys.")
         return result
 
     @tool(annotations=WRITE)
@@ -488,8 +493,9 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = False,
     ) -> dict[str, Any]:
         """Atomically record sourced facts; returns a receipt (keys, new revision, needs_user, warnings).
 
-        New keys and merge=true updates need no expected_revision. Replacing an
-        existing value wholesale needs the client_revision you read. valid_from:
+        New keys and updates need no expected_revision: an object sent for a key that
+        already holds one merges into it (only the fields you send change). Replacing a
+        value wholesale needs merge=false with expected_revision (the client_revision you read). valid_from:
         when it became true ("went up in March"). value null forgets a key.
         Evidence never overwrites what the person said: those writes come back in
         needs_user. Ask with each item's question; never pick a side silently.
@@ -500,7 +506,7 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = False,
         amount with an ISO currency, rates are decimals (0.45). E.g. income.salary {"amount":60000,"currency":"MXN","frequency":"monthly",
         "net":true}; liability.card {"kind":"card","balance":30000,"currency":"MXN","annual_rate":0.45};
         source {"kind":"user","ref":"chat","observed_on":"YYYY-MM-DD"}. Every field of every key:
-        wealth_context(client_id, intent=<task>) returns fact_contract.
+        wealth_context(client_id, intent=remember) returns fact_contract.
         """
         items = [item.model_dump() for item in facts]
         warnings = vet_facts(client_id, items)
@@ -513,6 +519,10 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = False,
                 "Saved: every key in written is stored and every key in unchanged already held this value. "
                 + ("Items in needs_user were held for the person to decide. " if receipt.get("needs_user") else "")
                 + "Warnings are notes for the conversation, not errors; do not resend these facts.")
+        if any(str(w.get("key", "")).startswith("estate.") for w in receipt.get("written") or []):
+            receipt["next_step"] = ((receipt.get("next_step") or "") + " Estate facts changed: answer from "
+                                    "wealth_run(task=estate_register, client_id), which shows who would receive each "
+                                    "account, the intestate split and the gaps, not from general rules.").strip()
         return receipt
 
     @tool(annotations=RUN)
@@ -711,7 +721,8 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = False,
         """Find, set up or index the person's profile.
 
         list: the saved profiles' client_id and display_name (no client_id needed); use it when you do
-        not know the person's client_id. create: inputs.display_name; call once, when the host first provisions this person
+        not know the person's client_id. create: inputs.display_name (client_id is derived from it when
+        omitted: "Ana López" -> ana-lopez); call once, when the host first provisions this person
         (fails with ClientExistsError if the profile exists). index: inputs.fact_id (from
         wealth_inspect), embedding (list of numbers the host computed for that fact) and model (its
         name), so wealth_recall can rank by query_embedding. Deleting a profile is not a tool;

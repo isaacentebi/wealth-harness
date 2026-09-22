@@ -150,7 +150,8 @@ def test_situation_brief_is_the_small_per_turn_read_and_the_contract_moved_to_re
     brief = _call(server, "wealth_context", {"client_id": "ana", "intent": "situation", "detail": "brief"})
     assert brief["brief"] == summary["brief"] and brief["figures"]["income_monthly"] == 60000
     assert len(json.dumps(brief, ensure_ascii=False)) < 2_000 < len(json.dumps(summary, ensure_ascii=False))
-    assert "fact_contract" in _call(server, "wealth_context", {"client_id": "ana", "intent": "plan"})
+    assert "fact_contract" not in _call(server, "wealth_context", {"client_id": "ana", "intent": "plan"})
+    assert "fact_contract" in _call(server, "wealth_context", {"client_id": "ana", "intent": "remember"})
 
     tools = {tool.name: tool for tool in asyncio.run(server.list_tools())}
     remember = tools["wealth_remember"].description
