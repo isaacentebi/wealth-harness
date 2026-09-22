@@ -71,7 +71,7 @@ Surfaces
 | `behavior.py`, `instructions.md` | The shared conversation policy, and the compact contract the MCP server gives other hosts |
 | `catalog.py` | Task catalog: purpose, inputs and a runnable example per task; connectors |
 | `onboarding.py` | Deterministic onboarding cards that write canonical facts |
-| `profile.py` | Read model and fact edits for the You page |
+| `profile/` | Read model and fact edits for the You page: `classify` (fact groups and rows), `overviews`, `perf`, `memory`, `writes` (fact payloads), `surfaces` (profile, today, review, connections), `picture` (chart figures) |
 | `views.py` | Engine-drawn view specs (ticket, allocation, series, comparison, payoff) and SVG/PNG rendering |
 
 Memory and the picture
