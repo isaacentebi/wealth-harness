@@ -223,9 +223,17 @@ def test_the_card_reprices_in_place_when_the_price_moved():
     assert "n.code !== 'price_moved'" in card and "movedBy.get(line.index)" in card
     assert "if (movedBy.size) problem.textContent = O.priceMoved;" in card
     for field in ("order_qty", "limit_price", "estimated_amount"):
-        assert f"moved.includes('{field}')" in line
-    assert "el('span', 'moved', text)" in line
+        assert f"fields.includes('{field}')" in line
+    # A re-priced figure reads was → now; the sum is arithmetic (4 × $523.50 = $2,094.00); one line names the old total.
+    assert "el('span', 'moved', text)" in line and "el('s', 'was', before), ' → ', now" in line
+    assert "' × '" in line and "el('span', 'eq', '=')" in line
+    assert "O.priceMovedFrom(orderUsd(shownTotal + unchanged))" in card
+    # One order, one verb: "Enviar orden" for a single line, "Enviar órdenes" for more.
+    assert "(ticket.lines || []).length === 1 ? O.place1 : O.place" in card
     css = PAGE[PAGE.index("/* Order card"):PAGE.index("/* Engine-drawn views")]
     assert ".order .moved { color: var(--ink); font-weight: 600; }" in css
-    for text in ("The price moved; review and confirm again.", "El precio cambió; revisa y confirma de nuevo."):
+    for text in ("The price moved; review and confirm again.", "El precio cambió; revisa y confirma de nuevo.",
+                 "place1: 'Place order'", "place1: 'Enviar orden'"):
         assert text in PAGE
+    # Never two filled vermilion buttons: while an order card waits, the send arrow is drawn in ink outline.
+    assert ".app:has(.order .primary:not(:disabled)) .send:not(:disabled):not(.stopping) { background: transparent;" in PAGE

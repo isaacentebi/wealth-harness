@@ -22,13 +22,15 @@
       --hairline: #D9CEC6;
       --sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       --mono: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+      /* Type scale: seven sizes plus the headline; every font-size names one. */
+      --fs-1: 12px; --fs-2: 13px; --fs-3: 15px; --fs-4: 16px; --fs-5: 20px; --fs-6: 24px; --fs-7: 32px;
       color-scheme: light;
     }
     * { box-sizing: border-box; }
     html { background: var(--canvas); }
     body {
       margin: 0; background: var(--canvas); color: var(--ink);
-      font: 400 15px/24px var(--sans); -webkit-font-smoothing: antialiased; font-variant-numeric: tabular-nums;
+      font: 400 var(--fs-3)/24px var(--sans); -webkit-font-smoothing: antialiased; font-variant-numeric: tabular-nums;
     }
     button { font: inherit; color: inherit; }
     a { color: inherit; }
@@ -41,23 +43,23 @@
     .back { display: inline-flex; align-items: center; min-height: 44px; font-weight: 500; text-decoration: none; color: var(--ink-2); }
     .back:hover { color: var(--ink); }
     .lang { display: flex; }
-    .lang button { min-width: 44px; min-height: 44px; border: 0; background: none; cursor: pointer; font: 500 13px var(--mono); color: var(--muted); }
+    .lang button { min-width: 44px; min-height: 44px; border: 0; background: none; cursor: pointer; font: 500 var(--fs-2) var(--mono); color: var(--muted); }
     .lang button[aria-pressed="true"] { color: var(--ink); text-decoration: underline; text-underline-offset: 6px; text-decoration-thickness: 1.5px; }
 
     /* ------------------------------------------------ letterhead */
-    .origin { margin: 32px 0 0; font: 400 12px/16px var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+    .origin { margin: 32px 0 0; font: 400 var(--fs-2)/20px var(--sans); color: var(--muted); }
     h1 { margin: 8px 0 0; font: 700 44px/48px var(--sans); letter-spacing: -.045em; }
     .controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0 24px; margin-top: 16px; padding-bottom: 8px; border-bottom: 1.5px solid var(--ink); }
     .quarters { display: flex; flex-wrap: wrap; margin-left: -8px; }
     .quarters a {
       display: inline-flex; align-items: center; min-height: 44px; padding: 0 8px; text-decoration: none;
-      font: 400 13px var(--mono); color: var(--muted);
+      font: 400 var(--fs-2) var(--mono); color: var(--muted);
     }
     .quarters a:hover { color: var(--ink); }
     .quarters a[aria-current="page"] { color: var(--ink); font-weight: 500; text-decoration: underline; text-underline-offset: 6px; text-decoration-thickness: 1.5px; }
     .txt {
       display: inline-flex; align-items: center; min-height: 44px; padding: 0; border: 0; background: none; cursor: pointer;
-      font: 500 15px var(--sans); color: var(--ink); text-decoration: underline; text-decoration-color: var(--hairline);
+      font: 500 var(--fs-3) var(--sans); color: var(--ink); text-decoration: underline; text-decoration-color: var(--hairline);
       text-underline-offset: 4px; text-decoration-thickness: 1px;
     }
     .txt:hover { text-decoration-color: currentColor; }
@@ -66,14 +68,14 @@
 
     /* ------------------------------------------------ the letter */
     .letter { margin-top: 32px; }
-    .salute { margin: 0 0 8px; font: 400 20px/28px var(--sans); letter-spacing: -.015em; }
-    .letter p.body { margin: 0; font: 400 20px/30px var(--sans); letter-spacing: -.015em; text-wrap: pretty; max-width: 34em; }
+    .salute { margin: 0 0 8px; font: 400 var(--fs-5)/28px var(--sans); letter-spacing: -.015em; }
+    .letter p.body { margin: 0; font: 400 var(--fs-5)/30px var(--sans); letter-spacing: -.015em; text-wrap: pretty; max-width: 34em; }
     .letter p.body + p.body { margin-top: 12px; }
 
     section.part { position: relative; margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--hairline); break-inside: avoid; }
-    .num { position: absolute; left: -72px; top: 18px; font: 400 12px/20px var(--mono); color: var(--muted); }
-    .part h2 { margin: 0 0 12px; font: 600 17px/24px var(--sans); letter-spacing: -.01em; }
-    .note { margin: 8px 0 0; font-size: 13px; line-height: 20px; color: var(--muted); }
+    .num { position: absolute; left: -72px; top: 18px; font: 400 var(--fs-1)/20px var(--mono); color: var(--muted); }
+    .part h2 { margin: 0 0 12px; font: 600 var(--fs-4)/24px var(--sans); letter-spacing: -.01em; }
+    .note { margin: 8px 0 0; font-size: var(--fs-2); line-height: 20px; color: var(--muted); }
     .quiet { color: var(--muted); }
 
     /* ruled rows (the ticket primitive) */
@@ -82,8 +84,10 @@
     .row:first-child { border-top: 0; }
     .row dt, .row .k { min-width: 0; color: var(--ink-2); }
     .row dd { margin: 0; text-align: right; white-space: nowrap; }
-    .row .sub { display: block; font: 400 12px/16px var(--mono); color: var(--muted); margin-top: 2px; }
-    .v { font: 400 15px/24px var(--mono); white-space: nowrap; }
+    .row .sub { display: block; font: 400 var(--fs-1)/16px var(--mono); color: var(--muted); margin-top: 2px; }
+    .row .sub .part { white-space: nowrap; }
+    @media (max-width: 480px) { .row .sub .part { white-space: normal; } }
+    .v { font: 400 var(--fs-3)/24px var(--mono); white-space: nowrap; }
     .row.total { border-top: 1.5px solid var(--ink); }
     .row.total dt, .row.total .v { color: var(--ink); font-weight: 600; }
     .row.total .v { font-weight: 500; }
@@ -98,15 +102,15 @@
     .track::before { content: ""; position: absolute; left: 0; right: 0; top: 7px; border-top: 1px solid var(--hairline); }
     .bar { position: absolute; left: 0; top: 5px; height: 5px; min-width: 2px; background: var(--ink); print-color-adjust: exact; -webkit-print-color-adjust: exact; }
     .tick { position: absolute; top: 0; width: 1.5px; height: 16px; margin-left: -.75px; background: var(--muted); print-color-adjust: exact; -webkit-print-color-adjust: exact; }
-    .sleeve .sub { font: 400 12px/16px var(--mono); color: var(--muted); margin-top: 2px; }
+    .sleeve .sub { font: 400 var(--fs-1)/16px var(--mono); color: var(--muted); margin-top: 2px; }
     .sleeve .out { color: var(--ink); font-weight: 500; }
 
     /* cash flow: this quarter against the one before */
     table.flow { width: 100%; border-collapse: collapse; }
     table.flow th, table.flow td { padding: 12px 0; border-top: 1px solid var(--hairline); text-align: right; font-weight: 400; vertical-align: baseline; }
-    table.flow thead th { border-top: 0; padding-top: 0; font: 400 12px/16px var(--mono); color: var(--muted); }
+    table.flow thead th { border-top: 0; padding-top: 0; font: 400 var(--fs-1)/16px var(--mono); color: var(--muted); }
     table.flow tbody th { text-align: left; color: var(--ink-2); }
-    table.flow td { font: 400 15px/24px var(--mono); white-space: nowrap; padding-left: 16px; }
+    table.flow td { font: 400 var(--fs-3)/24px var(--mono); white-space: nowrap; padding-left: 16px; }
     table.flow td.prior { color: var(--muted); }
     table.flow tr.total th, table.flow tr.total td { border-top: 1.5px solid var(--ink); color: var(--ink); }
     table.flow tr.total th { font-weight: 600; }
@@ -116,7 +120,7 @@
     .item:first-child { border-top: 0; }
     .item .line { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
     .item .what { min-width: 0; overflow-wrap: anywhere; }
-    .item .sub { font: 400 12px/18px var(--mono); color: var(--muted); margin-top: 2px; }
+    .item .sub { font: 400 var(--fs-1)/18px var(--mono); color: var(--muted); margin-top: 2px; }
     .fill { position: relative; height: 5px; margin-top: 8px; background: none; }
     .fill::before { content: ""; position: absolute; left: 0; right: 0; top: 2px; border-top: 1px solid var(--hairline); }
     .fill span { position: absolute; left: 0; top: 0; height: 5px; min-width: 2px; background: var(--ink); print-color-adjust: exact; -webkit-print-color-adjust: exact; }
@@ -125,12 +129,12 @@
     ol.next { list-style: none; margin: 0; padding: 0; counter-reset: n; }
     ol.next li { display: grid; grid-template-columns: 32px minmax(0, 1fr); gap: 0 8px; padding: 16px 0; border-top: 1px solid var(--hairline); }
     ol.next li:first-child { border-top: 0; padding-top: 4px; }
-    ol.next .n { font: 500 15px/28px var(--mono); color: var(--muted); }
-    ol.next .title { margin: 0; font: 600 20px/28px var(--sans); letter-spacing: -.015em; text-wrap: pretty; }
-    ol.next .value { margin-top: 2px; font: 400 13px/20px var(--mono); color: var(--ink-2); }
+    ol.next .n { font: 500 var(--fs-3)/28px var(--mono); color: var(--muted); }
+    ol.next .title { margin: 0; font: 600 var(--fs-5)/28px var(--sans); letter-spacing: -.015em; text-wrap: pretty; }
+    ol.next .value { margin-top: 2px; font: 400 var(--fs-2)/20px var(--mono); color: var(--ink-2); }
     ol.next .txt { margin-top: 4px; }
 
-    .empty { margin-top: 40px; font: 400 20px/30px var(--sans); max-width: 30em; }
+    .empty { margin-top: 40px; font: 400 var(--fs-5)/30px var(--sans); max-width: 30em; }
     .printed { display: none; }
 
     @media (min-width: 1000px) {
@@ -139,8 +143,8 @@
     @media (max-width: 999px) { .num { display: none; } }
     @media (max-width: 420px) {
       h1 { font-size: 36px; line-height: 40px; }
-      .letter p.body, .salute { font-size: 18px; line-height: 28px; }
-      ol.next .title { font-size: 18px; line-height: 26px; }
+      .letter p.body, .salute { font-size: var(--fs-5); line-height: 28px; }
+      ol.next .title { font-size: var(--fs-5); line-height: 26px; }
       ol.next li { grid-template-columns: 24px minmax(0, 1fr); }
     }
 
@@ -203,6 +207,7 @@
         taxPeriod: 'This quarter', taxYtd: 'Year to date', j_MX: 'Mexico', j_US: 'United States',
         paid: 'Paid this quarter', annual: 'Annual cost', bps: '{a}–{b} bp a year', bp1: '{a} bp a year',
         talk: 'Talk about this', noNext: 'Nothing stands out for next quarter.', feesUnknown: 'The cost of your holdings is not known yet.',
+        noPolicy: 'There is no accepted investment policy yet, so there are no ranges to check against.',
         printed: 'Prepared {d} by Wealth from your statements and saved picture.',
         ac_cash: 'Cash', ac_equity: 'Equity', ac_fixed_income: 'Fixed income', ac_fund: 'Funds', ac_unknown: 'Unclassified'
       },
@@ -226,6 +231,7 @@
         taxPeriod: 'Este trimestre', taxYtd: 'En lo que va del año', j_MX: 'México', j_US: 'Estados Unidos',
         paid: 'Pagadas este trimestre', annual: 'Costo anual', bps: '{a}–{b} pb al año', bp1: '{a} pb al año',
         talk: 'Hablar de esto', noNext: 'Nada destaca para el próximo trimestre.', feesUnknown: 'Aún no se conoce el costo de tus inversiones.',
+        noPolicy: 'Aún no hay una política de inversión aceptada; por eso no hay rangos con los que comparar.',
         printed: 'Preparado el {d} por Wealth con tus estados de cuenta y tu panorama guardado.',
         ac_cash: 'Efectivo', ac_equity: 'Acciones', ac_fixed_income: 'Renta fija', ac_fund: 'Fondos', ac_unknown: 'Sin clasificar'
       }
@@ -293,7 +299,7 @@
     }
     function row(label, value, { sub, total, sign } = {}) {
       return h('div', { class: 'row' + (total ? ' total' : '') },
-        h('dt', {}, label, sub ? h('span', { class: 'sub', text: sub }) : null),
+        h('dt', {}, label, sub ? h('span', { class: 'sub' }, sub) : null),
         h('dd', {}, sign && value !== '—' ? h('span', { class: 'sign', 'aria-hidden': 'true', text: sign }) : null, h('span', { class: 'v', text: value })));
     }
     // "Talk about this": the chat opens with the prompt in the composer, not sent (the person sends it).
@@ -313,9 +319,13 @@
     }
     // The benchmark is drawn from its parts (weight + index name, both in the page language), never from a free-text name.
     function composition(parts) {
-      // Each part stays on one line ("35% CETES 364 días"); the parts wrap between each other.
-      return (parts || []).map(p => `${V(p.weight, { places: 'auto' })} ${L(p.index)}`.replace(/ /g, '\u00a0'))
-        .filter(x => !x.startsWith('—')).join(' + ') || null;
+      // Each part keeps to one line where the column allows ("35% CETES 364 días"); the parts wrap between each
+      // other, and on a phone a long part wraps inside itself rather than running off the page.
+      const names = (parts || []).map(p => `${V(p.weight, { places: 'auto' })} ${L(p.index)}`).filter(x => !x.startsWith('—'));
+      if (!names.length) return null;
+      const out = [];
+      names.forEach((name, i) => { if (i) out.push(' + '); out.push(h('span', { class: 'part', text: name })); });
+      return out;
     }
     function performance(s) {
       const diff = n(s.difference?.v);
@@ -328,6 +338,10 @@
     }
     function allocation(s) {
       const sleeves = s.sleeves || [];
+      // Without an accepted policy there are no ranges to hold the weights against: one line says so, no bars.
+      const bands = sleeves.some(x => n(x.min?.v) !== null || n(x.max?.v) !== null);
+      const weighed = sleeves.some(x => n(x.weight?.v) !== null);
+      if (!bands || !weighed) return note(s.note) || h('p', { class: 'quiet', style: { margin: 0 }, text: t('noPolicy') });
       const top = Math.min(1, Math.max(0.1, ...sleeves.map(x => Math.max(n(x.weight?.v) ?? 0, n(x.max?.v) ?? 0))) * 1.15);
       const at = v => `${Math.min(100, (v / top) * 100).toFixed(2)}%`;
       return [h('div', {}, sleeves.map(x => {
@@ -393,9 +407,16 @@
       const bps = lo === null ? null : hi === null || Math.round(lo) === Math.round(hi) ? t('bp1', { a: fmt(lo) }) : t('bps', { a: fmt(lo), b: fmt(hi) });
       // The floor note describes a known floor; when the annual cost itself is unknown it says so instead.
       const annualUnknown = V(s.annual) === '—';
-      return [h('dl', { class: 'ticket' }, row(t('paid'), V(s.paid)), row(t('annual'), V(s.annual), { sub: bps })),
+      // A zero paid while some costs are unknown is not a real zero: it reads "—".
+      const paid = n(s.paid?.v) === 0 && !s.complete ? '—' : V(s.paid);
+      return [h('dl', { class: 'ticket' }, row(t('paid'), paid), row(t('annual'), V(s.annual), { sub: bps })),
         annualUnknown ? h('p', { class: 'note', text: '— ' + t('feesUnknown') }) : note(s.note)];
     }
+    // Sections with nothing to say leave the letter: no decisions, no tax and no fee are not findings.
+    const zeroOrUnknown = value => { const x = n(value?.v); return x === null || x === 0; };
+    const hasDecisions = s => (s.items || []).length > 0 || Number(s.open_before) > 0;
+    const hasTaxes = s => !(zeroOrUnknown(s.period) && zeroOrUnknown(s.ytd));
+    const hasFees = s => !(zeroOrUnknown(s.paid) && V(s.annual) === '—');
     function next(s) {
       const items = s.items || [];
       if (!items.length) return h('p', { class: 'quiet', style: { margin: 0 }, text: t('noNext') });
@@ -435,8 +456,9 @@
       const shown = [
         ['net_worth', netWorth(s.net_worth)], ['performance', performance(s.performance)],
         ['allocation', allocation(s.allocation)], ['cash_flow', cashFlow(s.cash_flow, prev)], ['goals', goals(s.goals)],
-        ['decisions', decisions(s.decisions)], ['dca', dca(s.dca)], ['taxes', taxes(s.taxes)],
-        ['fees', unknown(s.fees.paid) && unknown(s.fees.annual) ? null : fees(s.fees)],
+        ['decisions', hasDecisions(s.decisions) ? decisions(s.decisions) : null], ['dca', dca(s.dca)],
+        ['taxes', hasTaxes(s.taxes) ? taxes(s.taxes) : null],
+        ['fees', unknown(s.fees.paid) && unknown(s.fees.annual) ? null : hasFees(s.fees) ? fees(s.fees) : null],
         ['next', (s.next_quarter.items || []).length ? next(s.next_quarter) : null]].filter(([, body]) => body !== null);
       const letter = data.letter || {};
       const narrative = letter.narrative && letter.narrative[lang];

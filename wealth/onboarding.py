@@ -933,10 +933,15 @@ def _risk_writer(answer: dict, ctx: dict) -> list[tuple[str, Any]]:
     return [("preference.risk", value)]
 
 
+_DROP_SAID = {"es": {"sell": "venderías", "hold": "esperarías", "buy_more": "comprarías más"},
+              "en": {"sell": "you would sell", "hold": "you would hold", "buy_more": "you would buy more"}}
+
+
 def _risk_summary(answer: dict, lang: str, ctx: dict) -> str:
-    drop = {o["id"]: o["label"][lang] for o in _DROP}.get(answer.get("drop_reaction"), "")
+    # Their stated reaction, said back to them ("Si cae 20%: venderías"), not a label.
+    drop = _DROP_SAID[lang].get(answer.get("drop_reaction"), "")
     exp = {o["id"]: o["label"][lang] for o in _EXPERIENCE}.get(answer.get("experience"))
-    head = f"Ante una caída de 20%: {drop.lower()}" if lang == "es" else f"After a 20% fall: {drop.lower()}"
+    head = f"Si cae 20%: {drop}" if lang == "es" else f"If it falls 20%: {drop}"
     if exp:
         head += (f" · experiencia: {exp[:1].lower() + exp[1:]}" if lang == "es" else f" · experience: {exp.lower()}")
     return head

@@ -200,16 +200,22 @@ def test_explain_with_legs_returns_the_payoff_without_a_verdict():
 
 
 @pytest.mark.parametrize("variant", ["write_uncovered_puts", "vertical_spread_payoff", "leveraged_crypto_payoff"])
-def test_catalog_payoff_variants_draw_two_tickets(tmp_path, variant):
+def test_catalog_payoff_variants_draw_the_pnl_chart_and_the_limits(tmp_path, variant):
     report = WealthService(tmp_path / "w.sqlite3").run(
         "speculation_check", inputs=CATALOG["speculation_check"]["variants"][variant])
     assert report["status"] in {"ready", "partial"}
     assert report["result"]["payoff"]["grid"]
-    assert [v["kind"] for v in report["views"]] == ["ticket", "ticket"]
+    # The payoff draws as a P&L chart over the price (x = price, y = P&L at expiry), then the limits ticket.
+    assert [v["kind"] for v in report["views"]] == ["pnl", "ticket"]
     specs = views.views_for("speculation_check", report)
     for spec in specs:
         views.validate(spec)
         assert views.render_svg(spec, "es").startswith("<svg")
-    envelope_numbers = {row["pnl"] for row in report["result"]["payoff"]["grid"]}
-    assert {row["value"]["v"] for row in specs[0]["data"]["rows"]} <= envelope_numbers
+    pay = report["result"]["payoff"]
+    envelope_numbers = {row["pnl"] for row in pay["grid"]}
+    chart = specs[0]["data"]
+    assert {p["y"] for p in chart["points"]} <= envelope_numbers and {p["x"] for p in chart["points"]} <= {row["price"] for row in pay["grid"]}
+    assert chart["spot"] == pay["spot"] and chart["breakevens"] == pay["breakevens"][:4]
+    assert chart["loss"] == {"v": pay["max_loss"], "unbounded": pay["max_loss_unbounded"]}
+    assert chart["gain"] == {"v": pay["max_gain"], "unbounded": pay["max_gain_unbounded"]}
     assert any("expiry" in a or "leveraged" in a for a in report["assumptions"])

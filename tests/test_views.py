@@ -215,7 +215,7 @@ def test_svg_escapes_text_and_draws_only_known_primitives():
     svg = views.render_svg(spec, "es")
     assert "<script" not in svg and "&lt;script&gt;" in svg
     assert svg.startswith("<svg") and "href" not in svg and "foreignObject" not in svg
-    assert "Cargos recurrentes" in svg and "GASTOS" in svg
+    assert "Cargos recurrentes" in svg and ">Gastos<" in svg  # the source line reads in sentence case
     for name in EXPECTED:
         for spec in _specs(name):
             for lang in ("en", "es"):
