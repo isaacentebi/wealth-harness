@@ -274,7 +274,10 @@ def test_launcher_supplies_behavior_once_and_preserves_standalone_mcp_contract(t
     paths = [tomllib.loads(value)["model_instructions_file"] for value in command
              if value.startswith("model_instructions_file=")]
     assert len(paths) == 1
-    assert Path(paths[0]).read_text(encoding="utf-8") == ASSISTANT_CONTRACT
+    policy = Path(paths[0]).read_text(encoding="utf-8")
+    # The whole policy, then how the tools look in Codex (so the model never hunts for them).
+    assert policy.startswith(ASSISTANT_CONTRACT.rstrip()) and "## Tool calls" in policy
+    assert "mcp__wealth__wealth_remember" in policy and "no file, shell or resource tool" in policy
     assert "project_doc_max_bytes=0" in command
     assert not any(value.startswith("developer_instructions=") for value in command)
     assert ASSISTANT_CONTRACT not in prompt

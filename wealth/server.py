@@ -95,10 +95,18 @@ def _task_index(catalog: dict) -> dict:
     index["tasks"] = {name: {"purpose": spec.get("purpose", ""), "required": spec.get("required", [])}
                       for name, spec in catalog["tasks"].items()}
     index["connectors"] = {name: spec.get("purpose", "") for name, spec in (catalog.get("connectors") or {}).items()}
-    index["next_step"] = ("Call wealth_context with intent=<task name> (no client_id) for that task's optional "
+    index["next_step"] = ("Call wealth_context with intent=<task name> (no client_id) for that task's schema: optional "
                           "inputs, notes and a runnable example; with client_id for the facts it uses and the "
                           "fact contract wealth_remember expects; or detail=full for every schema at once.")
     return index
+
+
+def _task_schema(catalog: dict) -> dict:
+    """Discovery for one task: its schema and example only (connectors and the fact contract are detail=full)."""
+
+    return {"release": catalog.get("release"), "tasks": catalog["tasks"],
+            "next_step": ("Run it with wealth_run(task, inputs, client_id). detail=full adds the whole catalog, "
+                          "connectors and the fact contract.")}
 
 
 CONSENT_TOOLS = _consent.CONSENT_TOOLS
@@ -196,6 +204,7 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = False,
     # leave in a query); the launcher turns search off for turns and threads that read files.
     search_live = turn.session is not None and environ.get("WEALTH_TURN_WEB_SEARCH") == "1"
     confirmations = _consent.Confirmations()
+    saves_facts = tools is None or "wealth_remember" in tools  # else the fact contract is dead weight
 
     def require(kind: str, allowed: bool, subject: tuple[Any, str] | None = None,
                 confirm: bool = False, code: str | None = None) -> dict[str, Any] | None:
@@ -398,16 +407,22 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = False,
         detail: Literal["summary", "full"] = "summary",
     ) -> dict[str, Any]:
         """Without client_id: task discovery. intent=overview lists every task with its purpose and
-        required inputs; intent=<task name> returns that task's full schema and a runnable example
-        (detail=full returns every task's full schema, which is large).
+        required inputs; intent=<task name> returns that task's schema and a runnable example
+        (detail=full returns the whole catalog, which is large).
 
         With client_id: the facts relevant to that task, marked fresh or stale; intent=situation
         returns the whole picture. intent is a task name such as plan, exposure, tax or spending,
         not free text.
         """
         result = service.context(client_id=client_id, intent=intent, query=query)
-        if client_id is None and intent == "overview" and detail == "summary":
-            return _task_index(result)
+        if detail == "full":
+            return result
+        if client_id is None:
+            return _task_index(result) if intent == "overview" else _task_schema(result)
+        if not saves_facts:
+            # The fact contract (~9k characters) is for writing facts; a host without wealth_remember
+            # (a Wealth conversation turn) would re-read it at every step for nothing.
+            result.pop("fact_contract", None)
         return result
 
     @tool(annotations=WRITE)
@@ -440,7 +455,16 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = False,
         save_as: str | None = None,
         expires_on: str | None = None,
     ) -> dict[str, Any]:
-        """Run one catalog task (schemas: wealth_context without client_id).
+        """Run one catalog task. Common inputs (full schema: wealth_context(intent=<task>), no client_id):
+        research {symbol, live_fetch: true}; value {symbol, sources, scenarios};
+        plan, today, protection_review, policy_draft: client_id alone;
+        order_ticket {orders [{symbol, side: buy|sell, qty | notional USD}], rationale} with client_id
+        (prepares a ticket for the person to confirm; never places an order);
+        policy_check {proposal {kind: trade, action, symbol, amount}} with client_id;
+        speculation_check {proposal {action, instrument, amount}};
+        sic_premium {sic_symbol (.MX), fetch_missing: true}; debt_payoff {monthly_amount};
+        estate {year, decedent {us_citizen, green_card, us_domiciled}, assets [{id, type, value_usd, custody}]};
+        tax {jurisdiction: US|MX_ARTICLE_129, household, ...}. Other tasks: wealth_context overview.
 
         client_id adds remembered facts and the ledger; inputs override them for this call only.
         Without save_as the result is not saved to memory; save_as (analysis.<name>,

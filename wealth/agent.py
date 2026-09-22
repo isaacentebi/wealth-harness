@@ -50,6 +50,10 @@ MAX_SUMMARY_ITEMS = 8
 MAX_SUMMARY_ITEM_CHARS = 160
 DEFAULT_TIMEOUT_SECONDS = 300.0
 REASONING_LEVELS = ("low", "medium", "high")
+# Codex's priority processing: faster responses at a higher price, so it is opt-in
+# (``--service-tier fast`` or ``WEALTH_SERVICE_TIER=fast``); unset keeps the account default.
+SERVICE_TIERS = ("fast",)
+_service_tier: str | None = None
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # Codex features that are on by default but have no place in a financial
@@ -169,6 +173,24 @@ def configured_codex_model() -> str | None:
     return model if isinstance(model, str) and model.strip() else None
 
 
+def set_service_tier(value: str | None) -> None:
+    """Choose the service tier for every later Codex call in this process (None: WEALTH_SERVICE_TIER)."""
+
+    global _service_tier
+    if value is not None and value not in SERVICE_TIERS:
+        raise ValueError(f"service tier must be one of {', '.join(SERVICE_TIERS)}")
+    _service_tier = value
+
+
+def service_tier() -> str | None:
+    """The opted-in service tier, or None for the account default (an unknown env value is ignored)."""
+
+    if _service_tier is not None:
+        return _service_tier
+    value = os.environ.get("WEALTH_SERVICE_TIER", "").strip().lower()
+    return value if value in SERVICE_TIERS else None
+
+
 def resolve_model(value: str | None) -> str:
     if not value or value.lower() == DEFAULT_MODEL:
         return configured_codex_model() or FALLBACK_MODEL
@@ -183,7 +205,8 @@ def _config_overrides(db_path: str | Path, *, web_search: bool, reasoning: str,
     values = [
         f"model_reasoning_effort={_toml(reasoning)}",
         'model_verbosity="low"',
-        f"model_instructions_file={_toml(str(instructions or INSTRUCTIONS_PATH))}",
+        *([f"service_tier={_toml(service_tier())}"] if service_tier() else []),
+        f"model_instructions_file={_toml(str(instructions or codex_instructions()))}",
         "project_doc_max_bytes=0",
         'sandbox_mode="read-only"',
         *(f"features.{name}=false" for name in DISABLED_FEATURES),
@@ -350,6 +373,21 @@ def situation_brief(db_path: str | Path, client_id: str, user_prompt: str = "",
     sit = WealthService(db_path).situation(client_id, since_revision=since_revision)
     language = sit["profile"].get("language") or guess_language(user_prompt)
     return situation.brief(sit, language), sit["revision"]
+
+
+def situation_context(db_path: str | Path, client_id: str, user_prompt: str = "",
+                      since_revision: int | None = None) -> tuple[str, int | None, list[dict[str, Any]]]:
+    """The brief, its revision and the offered views from one build of the situation (it prices holdings)."""
+
+    from . import situation
+
+    sit = WealthService(db_path).situation(client_id, since_revision=since_revision)
+    language = sit["profile"].get("language") or guess_language(user_prompt)
+    try:
+        offered = _views.views_for("situation", sit)
+    except (StoreError, ClientNotFoundError, OSError, ValueError, KeyError, TypeError):
+        offered = []
+    return situation.brief(sit, language), sit["revision"], offered
 
 
 def situation_views(db_path: str | Path, client_id: str) -> list[dict[str, Any]]:
@@ -960,6 +998,24 @@ person; when done, reply with the single word: done. The exchange and
 """
 
 
+def _tools_note(tools: Iterable[str]) -> str:
+    """How the tools look to a Codex model, so it never spends a step hunting for them (Codex hosts only)."""
+
+    names = ", ".join(f"mcp__wealth__{name}" for name in sorted(tools))
+    return f"""## Tool calls
+
+Your tools are {names} and, when web search is on, web search (web__run). In a
+code cell they are tools.mcp__wealth__<name>(...) and tools.web__run(...). There
+is no file, shell or resource tool, and nothing to list first: call the tool you
+need on your first step. Put independent calls in one step (Promise.all in a
+code cell): a task schema and a search together, several queries in one
+search_query list, several pages in one open. Search with response_length
+"short" unless you need a page's detail. The common tasks and their inputs
+are in the wealth_run description; wealth_context(intent=<task>) without
+client_id returns one task's full schema.
+"""
+
+
 def _split_sections(text: str) -> list[tuple[str | None, str]]:
     parts: list[tuple[str | None, str]] = []
     for index, chunk in enumerate(text.split("\n## ")):
@@ -1019,13 +1075,21 @@ def _derived(source: Path, kind: str) -> Path:
     sections = _split_sections(text)
     if kind == "conversation":
         kept = [body for title, body in sections if title not in _MEMORY_SECTIONS]
-        derived = "\n".join(kept).rstrip() + "\n\n" + _DEFERRED_NOTE
+        derived = ("\n".join(kept).rstrip() + "\n\n" + _DEFERRED_NOTE + "\n"
+                   + _tools_note(WEALTH_TOOLS - {"wealth_remember"}))
+    elif kind == "codex":
+        derived = text.rstrip() + "\n\n" + _tools_note(WEALTH_TOOLS)
     else:
         derived = _MEMORY_PREAMBLE + "\n".join(body for title, body in sections if title in _MEMORY_SECTIONS)
     digest = hashlib.sha256(derived.encode()).hexdigest()[:16]
     path = instructions_cache_dir() / f"{kind}-{digest}.md"
     _write_private(path, derived)
     return path
+
+
+def codex_instructions() -> Path:
+    """The full policy plus how the tools look in Codex (a turn that saves facts itself)."""
+    return _derived(INSTRUCTIONS_PATH, "codex")
 
 
 def conversation_instructions() -> Path:
@@ -1170,7 +1234,11 @@ def stream_turn(
             parser = _TurnParser()
             return_code, stderr = -1, ""
             marked: set[str] = set()
-            for kind, *rest in _stream_process(command, prompt, timeout, control, PROJECT_ROOT):
+            if resume is not None:
+                _await_reaper(resume)  # the previous turn's process has finished writing this session
+            stream = _stream_process(command, prompt, timeout, control, PROJECT_ROOT)
+            early = False
+            for kind, *rest in stream:
                 if kind == "line":
                     events = parser.feed(rest[0])
                     thread = parser.thread_id or resume
@@ -1178,8 +1246,16 @@ def stream_turn(
                         _mark_thread_read_files(db_path, thread)  # before the answer: a cancelled turn counts too
                         marked.add(thread)
                     yield from events
+                    if parser.completed and parser.messages and not parser.failures:
+                        # The answer is final at turn.completed; Codex takes another second or so to exit.
+                        # Answer now and let a background thread drain and reap the process.
+                        early = True
+                        break
                 else:
                     return_code, stderr = rest
+            if early:
+                _reap_later(stream, parser.thread_id or resume)
+                return_code = 0
             result = parser.result()
             try:
                 answer = _conclude(result, return_code, stderr)
@@ -1192,6 +1268,44 @@ def stream_turn(
             yield TurnEvent("answer", answer, {"thread_id": result.thread_id or resume, "resumed": resume is not None})
             return
     raise AgentError(None, "other")  # pragma: no cover - loop always returns or raises
+
+
+_reapers: dict[str, threading.Thread] = {}
+_reapers_lock = threading.Lock()
+REAP_WAIT_SECONDS = 15.0
+
+
+def _reap_later(stream: Iterator[tuple], thread_id: str | None) -> threading.Thread:
+    """Drain a finished turn's process in the background; its generator kills it on timeout or at the end."""
+
+    def drain() -> None:
+        try:
+            for _ in stream:
+                pass
+        except Exception:  # noqa: BLE001 - the answer is already out; a late exit error changes nothing
+            pass
+        finally:
+            stream.close()
+            if thread_id:
+                with _reapers_lock:
+                    if _reapers.get(thread_id) is threading.current_thread():
+                        del _reapers[thread_id]
+
+    worker = threading.Thread(target=drain, daemon=True, name="wealth-reap")
+    if thread_id:
+        with _reapers_lock:
+            _reapers[thread_id] = worker
+    worker.start()
+    return worker
+
+
+def _await_reaper(thread_id: str) -> None:
+    """Before resuming a session, let the process that last wrote it exit (bounded)."""
+
+    with _reapers_lock:
+        worker = _reapers.get(thread_id)
+    if worker is not None and worker is not threading.current_thread():
+        worker.join(timeout=REAP_WAIT_SECONDS)
 
 
 _FILE_THREADS_SUFFIX = ".file-threads"
@@ -1391,6 +1505,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="seconds allowed per turn"
     )
+    parser.add_argument("--service-tier", choices=SERVICE_TIERS, default=None,
+                        help="fast: Codex priority processing, quicker answers at a higher cost "
+                             "(default: your account's tier; also WEALTH_SERVICE_TIER=fast)")
     return parser
 
 
@@ -1399,6 +1516,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error("--timeout must be positive")
+    if args.service_tier:
+        set_service_tier(args.service_tier)
     if args.demo:
         client_id = args.client or DEMO_CLIENT_ID
     elif args.client:

@@ -42,7 +42,7 @@ def test_restart_shows_the_same_messages_and_continues_the_same_thread(tmp_path,
     _stub(monkeypatch, threads)
     db = tmp_path / "w.sqlite3"
     first = web.Chat(db, "personal")
-    _ask(first, "hola")
+    _ask(first, "hola, gano 50 mil")  # a bare "hola" skips the memory step
     assert first.thread_id == "0199-thread-a"
     before = first.state()["messages"]
     assert [m["role"] for m in before] == ["user", "assistant"]
@@ -56,7 +56,7 @@ def test_restart_shows_the_same_messages_and_continues_the_same_thread(tmp_path,
     _ask(restarted, "y ahora?")
     assert threads == [None, "0199-thread-a"]  # the second turn resumed the stored thread
     assert [m["content"] for m in web.Chat(db, "personal").messages] == [
-        "hola", "Answer to hola", "y ahora?", "Answer to y ahora?"]
+        "hola, gano 50 mil", "Answer to hola, gano 50 mil", "y ahora?", "Answer to y ahora?"]
 
 
 def test_new_conversation_keeps_history_and_starts_fresh(tmp_path, monkeypatch):
