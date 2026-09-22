@@ -1276,7 +1276,7 @@ CATALOG: dict[str, dict[str, Any]] = {
                    "BMV), fees and FX that the person marks 'Ya la puse' once placed. Wealth stores the exact orders with pre-trade checks (tradable/fractionable, cash buying "
                    "power, the accepted IPS, live per-order and daily limits, duplicates, market hours, a limit price "
                    "collared around the last trade, estimated tax and cost) and returns a ticket id and a summary. It "
-                   "never places an order: the person reviews and confirms the card in the app. inputs {ticket_id} "
+                   "never places an order: the person confirms its card in the Wealth web app (wealth-chat). inputs {ticket_id} "
                    "alone reads a stored ticket's state instead.",
         "required": ["orders [{symbol, side: buy|sell, qty | notional (USD)}] (a rebalance trade's instrument_id, "
                      "quantity and estimated_amount are accepted)",

@@ -226,6 +226,52 @@ def test_confirmation_codes_expire_and_are_bound_to_what_they_cover():
     assert codes.redeem("a", code) and not codes.redeem("a", code)
 
 
+def test_a_code_issued_by_one_server_process_is_redeemed_by_the_next(service):
+    """Hosts that start wealth-mcp for every turn: the yes arrives at a new process, which must honour the code."""
+    proposal_id = attacker_proposal(service)
+    confirm = {"client_id": "ana", "action": "confirm",
+               "inputs": {"proposal_id": proposal_id, "acknowledge_discrepancies": True}}
+    first_turn = build_server(str(service.db_path), environ={})
+    code = call(first_turn, "wealth_ingest", confirm)["result"]["confirmation_code"]
+    with WealthStore(service.db_path) as store:
+        pending = store.auxiliary("ana", "consent")
+        assert len(pending) == 1 and code.replace("-", "") not in json.dumps(pending)  # only a salted hash is kept
+        assert set(next(iter(pending.values()))) == {"code_hash", "expires", "client"}
+        assert "consent" not in store.export_client("ana")["auxiliary"]
+
+    # A wrong code at the next process still cancels it; a fresh code then goes through there.
+    second_turn = build_server(str(service.db_path), environ={})
+    with pytest.raises(ToolError, match="ConsentRequired"):
+        call(second_turn, "wealth_ingest", {**confirm, "confirm": True, "confirmation_code": "AAA-AAA"})
+    with pytest.raises(ToolError, match="ConsentRequired"):
+        call(build_server(str(service.db_path), environ={}), "wealth_ingest",
+             {**confirm, "confirm": True, "confirmation_code": code})
+    assert not _accounts(service)
+
+    code = call(build_server(str(service.db_path), environ={}), "wealth_ingest", confirm)["result"]["confirmation_code"]
+    saved = call(build_server(str(service.db_path), environ={}), "wealth_ingest",
+                 {**confirm, "confirm": True, "confirmation_code": code})
+    assert saved["status"] == "saved" and _accounts(service)
+    with WealthStore(service.db_path) as store:
+        assert store.auxiliary("ana", "consent") == {}  # single use across processes too
+
+
+def test_persisted_codes_expire_after_ten_minutes_and_belong_to_one_client():
+    now, stored = [1_000.0], {}
+
+    def persist(client, update):
+        stored[client] = update(dict(stored.get(client) or {}))
+
+    codes = consent.Confirmations(clock=lambda: now[0], persist=persist)
+    code = codes.issue("a", "ana")
+    assert not consent.Confirmations(clock=lambda: now[0], persist=persist).redeem("a", code, "bob")
+    code = codes.issue("a", "ana")
+    now[0] += 601
+    assert not consent.Confirmations(clock=lambda: now[0], persist=persist).redeem("a", code, "ana")
+    code = codes.issue("a", "ana")
+    assert consent.Confirmations(clock=lambda: now[0], persist=persist).redeem("a", code, "ana")
+
+
 def test_hosts_that_confirm_natively_opt_out_and_strict_hosts_fail_closed(service):
     proposal_id = attacker_proposal(service)
     confirm = {"client_id": "ana", "action": "confirm",

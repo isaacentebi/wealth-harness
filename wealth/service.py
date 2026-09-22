@@ -62,6 +62,10 @@ EXECUTION_TASKS = frozenset({"order_ticket"})
 TAX_PACK_TASKS = frozenset({"tax_pack"})
 # Facts that go stale (warned about); tax.<year> and constancia.<id> are dated documents and do not.
 TAX_PACK_FACT_KEYS = ("client.profile", "income.", "cash.", "investment.")
+# Portfolio tasks that value "the portfolio": with client_id and no weights/household in inputs, the
+# person's saved holdings (statements, synced accounts) supply it.
+PORTFOLIO_TASKS = frozenset({"stress", "analyze", "compare", "factors", "construct", "exposure", "rebalance"})
+_PORTFOLIO_INPUTS = frozenset({"weights", "current_weights", "household", "holdings", "ledger", "tickers"})
 TASKS = (*TASK_MODULES, *SERVICE_TASKS)
 # Tasks whose module reads the client's transaction ledger from context["ledger"].
 LEDGER_TASKS = frozenset({"ledger", "performance", "spending", "dca", "rebalance"})
@@ -197,7 +201,7 @@ def current_ledger(ledger: dict | None) -> dict | None:
 
 
 def build_situation(snapshot: dict, ledger: dict | None, today, *, since_revision: int | None = None,
-                    market: dict | None = None) -> dict:
+                    market: dict | None = None, holding_rows: bool = False) -> dict:
     """``situation.build`` that one bad fact cannot take down.
 
     Facts with numbers no reader can handle are left out up front; if the
@@ -207,7 +211,8 @@ def build_situation(snapshot: dict, ledger: dict | None, today, *, since_revisio
     clean, invalid = usable_snapshot(snapshot)
     ledger = current_ledger(ledger)
     try:
-        sit = situation_module.build(clean, ledger, today, since_revision=since_revision, market=market)
+        sit = situation_module.build(clean, ledger, today, since_revision=since_revision, market=market,
+                                     holding_rows=holding_rows)
     except Exception:
         bad = []
         for fact in clean.get("facts") or []:
@@ -219,7 +224,8 @@ def build_situation(snapshot: dict, ledger: dict | None, today, *, since_revisio
         if not bad:
             raise
         clean = {**clean, "facts": [f for f in clean["facts"] if f["id"] not in bad]}
-        sit = situation_module.build(clean, ledger, today, since_revision=since_revision, market=market)
+        sit = situation_module.build(clean, ledger, today, since_revision=since_revision, market=market,
+                                     holding_rows=holding_rows)
     sit["invalid_facts"] = invalid
     return sit
 
@@ -285,7 +291,7 @@ def capabilities() -> dict:
         "memory": "Sourced facts, revisions, correction history, bounded keyword/concept recall and optional host-supplied semantic vectors.",
         "privacy": "Local plaintext SQLite. Retrieved context may reach the host's model provider. No credentials are stored.",
         "execution": "Wealth never trades on its own. order_ticket prepares an order ticket (Alpaca; paper by default) "
-                     "with pre-trade checks; only the person can place it, by confirming its card in the app. No "
+                     "with pre-trade checks; only the person can place it, on its card in the Wealth web app (wealth-chat). No "
                      "transfers or external messaging.",
         "tax_scope": "US federal (2025/2026 brackets, LTCG stacking, NIIT, lots, wash sales, harvesting); Mexico "
                      "(Art. 129 BMV/SIC, real interest, deductions/PPR, foreign securities outside the SIC, calendar); "
@@ -298,6 +304,34 @@ def capabilities() -> dict:
         "monitoring": "Saved opt-in rules evaluated by the host or wealth watch. Unchanged checks stay quiet; no process starts automatically.",
         "fact_contract": fact_contract(),
     }
+
+
+def situation_brief(context: dict) -> dict:
+    """``wealth_context(intent=situation, detail=brief)``: the ~1k-character brief and the key figures.
+
+    The per-turn read for hosts; the full picture (every account, position and rule) stays one
+    ``detail=summary`` call away.
+    """
+    sit = context.get("situation") or {}
+    net, flow, reserve = sit.get("net_worth") or {}, sit.get("cash_flow") or {}, sit.get("reserve") or {}
+    held = sit.get("holdings") or {}
+    figures = {
+        "currency": sit.get("currency"), "as_of": sit.get("as_of"),
+        "net_worth": net.get("total"), "liquid": net.get("liquid"), "debts": net.get("liabilities"),
+        "income_monthly": flow.get("income"), "spending_monthly": flow.get("spending"),
+        "surplus_monthly": flow.get("surplus"), "reserve": reserve.get("amount"), "reserve_months": reserve.get("months"),
+        "reserve_target_months": reserve.get("target_months"), "invested": held.get("total"),
+        "positions": held.get("positions"), "goals": len(sit.get("goals") or []),
+    }
+    return {"client_id": context.get("client_id"), "client_revision": context.get("client_revision"),
+            "language": (sit.get("profile") or {}).get("language"), "brief": context.get("brief"),
+            "figures": figures,
+            "unknowns": [u.get("field") or u.get("code") for u in sit.get("unknowns") or []][:8],
+            "missing_for_onboarding": context.get("missing_for_onboarding"),
+            "next_step": ("The brief is written in the profile's language; reply in the language of the person's "
+                          "current message. Figures for a question come from wealth_run with client_id (it reads "
+                          "the saved picture; how net worth changed: quarterly_review {period_start, period_end}). detail=summary returns every "
+                          "account, position and debt.")}
 
 
 def _canonical_resources(value) -> bool:
@@ -431,12 +465,13 @@ class WealthService:
                     "pending": [], "stale_prices": [], "offline": None, "as_of": str(today)}
 
     def _priced_situation(self, snapshot: dict, ledger: dict | None, today, *, since_revision: int | None = None,
-                          budget: float | None = SITUATION_PRICE_BUDGET) -> dict:
+                          budget: float | None = SITUATION_PRICE_BUDGET, holding_rows: bool = False) -> dict:
         """The picture, with ledger-only accounts valued at cached (or briefly fetched) provider prices."""
-        sit = build_situation(snapshot, ledger, today, since_revision=since_revision)
+        sit = build_situation(snapshot, ledger, today, since_revision=since_revision, holding_rows=holding_rows)
         market = self._ledger_market(ledger, sit, today, budget)
         if market is not None:
-            sit = build_situation(snapshot, ledger, today, since_revision=since_revision, market=market)
+            sit = build_situation(snapshot, ledger, today, since_revision=since_revision, market=market,
+                                  holding_rows=holding_rows)
             sit["market"] = _market_summary(market)
         return sit
 
@@ -537,7 +572,8 @@ class WealthService:
                     "brief": situation_module.brief(sit, sit["profile"].get("language")),
                     "situation": {k: v for k, v in sit.items() if k not in {"meta", "evidence"}},
                     "missing_for_onboarding": situation_module.missing_for_onboarding(sit),
-                    "fact_contract": fact_contract(),
+                    # The fact contract is for writing facts: wealth_remember's description carries the
+                    # compact form, wealth_context(client_id, intent=<task>) the full one.
                     "views": views_module.summaries(views_module.views_for("situation", sit))}
         if client_id is None:
             catalog = capabilities()
@@ -652,6 +688,18 @@ class WealthService:
             context.overridden.add(planning_key)
         context["_evidence"] = {f["key"]: {k: f.get(k) for k in ("id", "source", "expires_on")} for f in eligible}
         derived_evidence: list[str] = []
+        holdings_note = None
+        if (client_id and task in PORTFOLIO_TASKS and not set(inputs) & _PORTFOLIO_INPUTS
+                and dict.get(context, "household") is None and dict.get(context, "portfolio.snapshot") is None):
+            jc = inputs.get("jurisdiction_context") if isinstance(inputs.get("jurisdiction_context"), dict) else {}
+            ledger_priced = task == "rebalance" and ledger is not None and ("prices" in inputs or bool(
+                (inputs.get("as_of") or jc.get("trade_date")) and (inputs.get("currency") or jc.get("currency"))))
+            saved = None if ledger_priced else self._saved_holdings(
+                snapshot, ledger, client_id, today, market_symbols=TASK_MODULES.get(task) == "market")
+            if saved is not None:
+                context["household"], holdings_keys, holdings_note = saved
+                context.used.update(k for k in holdings_keys if k in context)
+                context.pop("ledger", None)  # rebalance: the valued holdings stand in for an unpriced ledger
         if task == "debt_payoff":
             report = self._debt_payoff(inputs, snapshot, ledger, today)
             derived_evidence = report.pop("_evidence", [])
@@ -735,6 +783,8 @@ class WealthService:
                 report["market_data"] = market
                 if isinstance(report.get("sources"), list):
                     report["sources"] = report["sources"] + _price_sources(market.get("prices") or [])
+        if holdings_note is not None:
+            report.setdefault("assumptions", []).append(holdings_note)
         if task in {"plan", "calendar", "debt_payoff", "debt"} or task in POLICY_TASKS or task in PROACTIVE_TASKS \
                 or task in REVIEW_TASKS or task in GUARDRAIL_TASKS or task in TAX_PACK_TASKS:
             used_ids = set(packet["evidence_ids"] if task in {"plan", "calendar"} else []) | set(derived_evidence)
@@ -871,6 +921,75 @@ class WealthService:
             return inputs, {"prices": [], "missing": [{"symbol": "*", "reason": f"{type(exc).__name__}: {exc}"}],
                             "stale_prices": []}
         return inputs, None
+
+    def _saved_holdings(self, snapshot: dict, ledger: dict | None, client_id: str, today: str, *,
+                        market_symbols: bool = False) -> tuple[dict, list[str], str] | None:
+        """The person's saved holdings as a canonical household in the reporting currency, or None.
+
+        Statement and synced positions come from the situation (converted at the statement or
+        ledger FX); stated bank cash outside those accounts is not part of it.
+        """
+        if ledger is None:
+            with WealthStore(self.db_path) as store:
+                ledger = current_ledger(store.ledger(client_id))
+        sit = self._priced_situation(snapshot, ledger, today, holding_rows=True)
+        held = sit.get("holdings") or {}
+        currency, rows = sit.get("currency"), held.get("rows") or []
+        if not currency or not rows:
+            return None
+        accounts: dict[str, dict] = {}
+        positions: dict[tuple[str, str], dict] = {}
+        inferred: list[str] = []
+        for row in rows:
+            if row.get("value") is None or not row.get("symbol"):
+                continue
+            account = str(row["account"])
+            accounts.setdefault(account, {"id": account, "owner_id": "self", "type": row.get("account_type") or "brokerage",
+                                          "currency": currency, "institution": row.get("institution") or account})
+            cash = row.get("asset_class") == "cash"
+            instrument = f"CASH:{row.get('currency') or currency}" if cash else str(row.get("instrument_id") or row["symbol"])
+            key = (account, instrument)
+            if key in positions:
+                positions[key]["value"] += row["value"]
+                positions[key]["quantity"] += row.get("quantity") or 0
+                continue
+            symbol, asset_class = str(row["symbol"]), row.get("asset_class")
+            if not asset_class:  # statements often leave listed shares and funds unclassed
+                asset_class = "fixed_income" if prices_module.is_mx_fixed_income(symbol, None, row.get("currency")) \
+                    else "equity"
+                inferred.append(f"{symbol} {asset_class}")
+            elif asset_class in {"fund", "etf"} and situation_module.model.underlying_of(symbol):
+                # A known index fund (IVV, CSPX, NAFTRAC, BND): its index says what it holds.
+                bonds = "bond" in situation_module.model.underlying_of(symbol).lower()
+                asset_class = "bond_fund" if bonds else "equity_fund"
+                inferred.append(f"{symbol} {asset_class}")
+            if market_symbols and not cash:  # price history is looked up by the provider's ticker (AMXB.MX)
+                found, _ = prices_module.provider_symbol(symbol, venue=row.get("venue"), asset_class=asset_class,
+                                                         currency=row.get("listing_currency") or row.get("currency"))
+                symbol = found or re.sub(r"[^A-Z0-9._-]", "", symbol.upper()) or symbol
+            position = {"id": f"{account}:{instrument}", "account_id": account, "instrument_id": instrument,
+                        "symbol": symbol, "quantity": row.get("quantity") or 0, "value": row["value"],
+                        "currency": currency, "asset_class": str(asset_class)}
+            native = str(row.get("currency") or "").upper()
+            if re.fullmatch(r"[A-Z]{3}", native) and native != currency:
+                position["economic_currency"] = native
+            positions[key] = position
+        if not positions:
+            return None
+        household = {"currency": currency, "as_of": str(sit.get("as_of") or today)[:10], "complete": False,
+                     "scope": "saved holdings", "people": [{"id": "self"}], "accounts": list(accounts.values()),
+                     "positions": list(positions.values()), "lots": [], "liabilities": [],
+                     "unknown_sections": ["external_assets", "income_exposures", "fund_holdings"],
+                     "external_assets": [], "income_exposures": [], "fund_holdings": []}
+        keys = sorted(k for k in (sit.get("evidence") or {}) if k.startswith(("account.", "household")))
+        unvalued = held.get("unvalued") or 0
+        total = sum(p["value"] for p in positions.values())
+        note = (f"Holdings come from the person's saved accounts: {len(positions)} positions worth {currency} "
+                f"{total:,.0f}, valued in {currency} at the statement FX. Cash they stated outside these accounts "
+                "is not included; pass weights to include it."
+                + (f" Asset class not on the statement, taken as: {', '.join(inferred)}." if inferred else "")
+                + (f" {unvalued} position(s) without a value were left out." if unvalued else ""))
+        return household, keys, note
 
     def _debt_payoff(self, inputs: dict, snapshot: dict, ledger, today: str) -> dict:
         """Payoff dates for a monthly debt budget: stored liabilities unless ``liabilities`` is supplied."""
@@ -1219,8 +1338,13 @@ class WealthService:
         report["_evidence"] = sorted(i for i in read if i and not str(i).startswith("request:"))
         return report
 
-    def client(self, action: str, client_id: str, inputs: dict | None = None) -> dict:
-        """CLI client actions. MCP exposes create/index here and reads via wealth_inspect."""
+    def client(self, action: str, client_id: str | None = None, inputs: dict | None = None) -> dict:
+        """CLI client actions. MCP exposes list/create/index here and reads via wealth_inspect."""
+        if action == "list":  # ids and display names only, so a host can find the person's profile
+            with WealthStore(self.db_path) as store:
+                return {"clients": store.list_clients()}
+        if not client_id:
+            raise ValueError(f"client {action} needs client_id")
         operations = {"create": self.create, "inspect": self.inspect,
                       "export": lambda client_id: self.inspect(client_id, detail="export"),
                       "forget": self.forget, "index": self.index}

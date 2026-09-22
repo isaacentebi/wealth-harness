@@ -290,6 +290,8 @@ def test_missing_user_agent_is_refused_before_any_request(monkeypatch, tmp_path)
     assert calls == []
     service = WealthService(tmp_path / "db.sqlite3").run("manager_holdings", inputs={"cik": CIK})
     assert service["status"] == "needs_input" and service["missing"] == [managers.SEC_UA_ENV]
+    # The host is told the one-line fix, for the person to make (not the model).
+    assert f'{managers.SEC_UA_ENV}="' in service["result"]["fix"] and "restart" in service["result"]["fix"]
 
 
 def test_disk_cache_serves_repeat_reads_and_stale_copies_on_outage(tmp_path, monkeypatch):

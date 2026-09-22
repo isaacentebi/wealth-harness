@@ -52,7 +52,7 @@ returns every schema at once (large).
 | Tool | What it does | Example arguments |
 | --- | --- | --- |
 | `wealth_context` | Task schemas without `client_id`; with it, the facts relevant to a task, or the whole picture with `intent="situation"` | `{"intent": "debt_payoff"}` |
-| `wealth_client` | `create` the profile once; `index` a host-supplied embedding for a fact | `{"action": "create", "client_id": "ana", "inputs": {"display_name": "Ana"}}` |
+| `wealth_client` | `list` the profiles (ids and names); `create` the profile once; `index` a host-supplied embedding for a fact | `{"action": "create", "client_id": "ana", "inputs": {"display_name": "Ana"}}` |
 | `wealth_remember` | Save sourced facts, corrections or `merge` patches atomically; returns a receipt with `needs_user` | `{"client_id": "ana", "facts": [{"key": "spending.monthly", "value": {"total": 30000, "currency": "MXN"}, "source": {"kind": "user", "ref": "conversation", "observed_on": "2026-09-21"}}]}` |
 | `wealth_recall` | Search all remembered facts | `{"client_id": "ana", "query": "spending"}` |
 | `wealth_run` | Run one task; optional `save_as` with `expires_on` | `{"task": "debt_payoff", "inputs": {"monthly_amount": 3000, "liabilities": [{"id": "card", "balance": 18000, "annual_rate": 0.42, "monthly_payment": 1200, "currency": "MXN"}]}}` |
@@ -91,7 +91,7 @@ after the person has agreed; piped stdin alone is refused.
 | Command | MCP equivalent | What it does |
 | --- | --- | --- |
 | `context` | `wealth_context` | Task schemas or relevant facts |
-| `client` | `wealth_client`, `wealth_inspect` | `create`, `inspect`, `export`, `index`; `forget` in a terminal only |
+| `client` | `wealth_client`, `wealth_inspect` | `list`, `create`, `inspect`, `export`, `index`; `forget` in a terminal only |
 | `remember` | `wealth_remember` | Save facts |
 | `recall` | `wealth_recall` | Search facts |
 | `run` | `wealth_run` | Run a task |

@@ -256,7 +256,7 @@ CONVERSATION_LIMIT = 100  # messages of the current conversation loaded on start
 _ORDER_EVENTS = frozenset({"ticket", "checks", "confirm", "blocked", "request", "response", "status",
                            "cancel", "fill_posted", "live_acknowledged", "discarded", "nonce_rejected", "error",
                            "reply_blocked", "placed_manually", "reconciled", "withdrawn"})
-_AUXILIARY = frozenset({"embeddings", "monitor", "ingest", "execution"})
+_AUXILIARY = frozenset({"embeddings", "monitor", "ingest", "execution", "consent"})
 # The base tables of a new database (version 3 without the ledger and contradictions).
 _BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS metadata (
@@ -1187,6 +1187,13 @@ class WealthStore:
         else:
             if owns_transaction and self._db.in_transaction:
                 self._db.execute("COMMIT")
+
+    def list_clients(self) -> list[dict[str, str]]:
+        """Every profile's id and display name (nothing else), oldest first."""
+        with self._lock:
+            with self._read_transaction():
+                return [{"client_id": row["id"], "display_name": row["display_name"]} for row in self._db.execute(
+                    "SELECT id, display_name FROM clients ORDER BY created_at, id")]
 
     def _client_row(self, client_id: str) -> sqlite3.Row:
         row = self._db.execute(
@@ -2218,7 +2225,7 @@ class WealthStore:
                         row["namespace"]: _exportable(row["namespace"], json.loads(row["value_json"]))
                         for row in self._db.execute(
                             "SELECT namespace, value_json FROM auxiliary WHERE client_id = ?", (client_id,)
-                        )
+                        ) if row["namespace"] != "consent"  # pending confirmation codes are not history
                     },
                     "ledger": self._ledger_rows(client_id, include_batches=True),
                     "orders": self._order_rows(client_id),

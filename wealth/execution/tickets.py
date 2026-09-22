@@ -1095,7 +1095,16 @@ def _issue_nonces(store: Any, client_id: str, ticket_ids: list[str], now: dateti
     return issued
 
 
-def _summary(view: Mapping[str, Any]) -> str:
+def in_wealth_app(environ: Mapping[str, str] | None = None) -> bool:
+    """Whether this server runs under the Wealth launcher, whose chat shows the order card."""
+    return (os.environ if environ is None else environ).get("WEALTH_BEHAVIOR_IN_HOST") == "1"
+
+
+_ELSEWHERE = ("The ticket is stored; placing it needs the Wealth web app (`wealth-chat`), where the person reviews "
+              "and confirms it; no other host or tool can place it")
+
+
+def _summary(view: Mapping[str, Any], app: bool = True) -> str:
     total = view["total"]["amount"]
     currency = view["total"].get("currency") or "USD"
     count = len(view["lines"])
@@ -1115,8 +1124,9 @@ def _summary(view: Mapping[str, Any]) -> str:
         return (text + f" Wealth cannot send orders to {view.get('broker_label')}: the card shows exactly what to "
                 "place there, and the person taps 'Ya la puse / I placed it' afterwards; the next statement or sync "
                 "confirms it. It expires at " + view["expires_at"] + ".")
-    return (text + " Nothing has been sent. The person reviews it on the order card in the Wealth app and taps "
-            "to place it; it expires at " + view["expires_at"] + ".")
+    where = ("The person reviews it on the order card in the Wealth app and taps to place it" if app
+             else _ELSEWHERE)
+    return text + " Nothing has been sent. " + where + "; it expires at " + view["expires_at"] + "."
 
 
 def _audit(store: Any, client_id: str, ticket: Mapping[str, Any], event: str, payload: Mapping[str, Any],
@@ -1278,13 +1288,17 @@ def create_ticket(store: Any, client_id: str | None, inputs: Mapping[str, Any], 
     unknown_facts = [c for c in checks if c["status"] == "unknown"]
     if store is None:
         view["id"] = None
-    summary = _summary(view) if store is not None else "Preview only; nothing was stored or sent."
+    app = in_wealth_app(environ)
+    summary = _summary(view, app) if store is not None else "Preview only; nothing was stored or sent."
     label = view["broker_label"]
-    next_step = ("Explain the ticket briefly and tell the person to place it at " + label + " exactly as the card "
-                 "shows, then tap 'Ya la puse / I placed it'. Never say it was placed or filled until its line state "
-                 "says so." if kind == "manual" else
-                 "Explain the ticket briefly and tell the person to review and confirm it on the order card. Never "
-                 "say an order was placed or filled until order status says so.")
+    if kind == "manual":
+        next_step = ("Explain the ticket briefly and tell the person to place it at " + label + " exactly as the "
+                     "card shows, then tap 'Ya la puse / I placed it'. Never say it was placed or filled until its "
+                     "line state says so.")
+    else:
+        next_step = (("Explain the ticket briefly and tell the person to review and confirm it on the order card."
+                      if app else f"Explain the ticket briefly. Tell the person: {_ELSEWHERE}.")
+                     + " Never say an order was placed or filled until order status says so.")
     sources = []
     if broker is not None:
         sources = [{"title": f"{label} account, instruments and latest trades", "mode": mode}] if kind != "manual" \

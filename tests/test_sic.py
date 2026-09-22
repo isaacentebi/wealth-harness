@@ -108,7 +108,8 @@ def test_premium_negative_via_run_task():
     assert out["result"]["premium"] == pytest.approx(-0.01)
     assert out["result"]["premium_bps"] == pytest.approx(-100.0)
     assert out["result"]["direction"] == "discount"
-    assert set(out) == {"status", "result", "missing", "warnings", "sources", "assumptions"}
+    assert set(out) == {"status", "result", "missing", "warnings", "sources", "assumptions", "next_step"}
+    assert "mx_foreign" in out["next_step"]  # the tax side of SIC vs a foreign broker is its own task
 
 
 def test_missing_inputs_name_the_fields_and_are_not_zero():

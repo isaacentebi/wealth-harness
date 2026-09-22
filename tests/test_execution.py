@@ -259,6 +259,16 @@ def test_ticket_stores_orders_checks_and_a_short_summary(db, paper):
     assert ticket["expires_at"] == "2026-09-21T15:10:00Z"
 
 
+def test_outside_the_wealth_app_the_ticket_says_where_it_can_be_placed(db, paper, monkeypatch):
+    monkeypatch.delenv("WEALTH_BEHAVIOR_IN_HOST", raising=False)
+    elsewhere = make_ticket(db, [{"symbol": "VTI", "side": "buy", "notional": 500}])["result"]
+    assert "wealth-chat" in elsewhere["summary"] and "order card in the Wealth app" not in elsewhere["summary"]
+    assert "wealth-chat" in elsewhere["next_step"] and "order card" not in elsewhere["next_step"]
+    monkeypatch.setenv("WEALTH_BEHAVIOR_IN_HOST", "1")  # the Wealth launcher: its chat shows the card
+    in_app = make_ticket(db, [{"symbol": "VTI", "side": "buy", "notional": 500}])["result"]
+    assert "order card in the Wealth app" in in_app["summary"] and "order card" in in_app["next_step"]
+
+
 def test_hard_checks_block_tradable_fractional_buying_power_collar_and_sells(db, paper):
     paper.assets["ODD"] = {"symbol": "ODD", "tradable": False, "fractionable": False, "status": "active"}
     paper.prices["ODD"] = "5.00"
