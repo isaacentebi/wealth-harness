@@ -61,7 +61,10 @@ saved facts. Relevant explicit facts and corrections are remembered automaticall
 you can ask not to save a detail. In the browser chat the answering turn cannot
 write facts: after each answer is shown, a separate short Codex run with only
 the memory tools records what the exchange established, so saving never delays
-an answer. The terminal agent saves during the turn. Hypothetical scenarios are not personal facts.
+an answer, and the next message does not wait for it either: saves queue in the
+background and run one at a time, in order. A bare greeting or thanks ("hola",
+"gracias", no numbers) states nothing and skips the step; anything else, even
+"ok" or "sí", goes through it. The terminal agent saves during the turn. Hypothetical scenarios are not personal facts.
 The browser transcript lasts only for the running server session.
 
 `--db` selects a database; otherwise `WEALTH_DB` or the default local data directory
@@ -123,13 +126,32 @@ a response ends the whole Codex process group, including the Wealth MCP server.
 coding instructions; inherited AGENTS files are disabled for this assistant.
 The standalone MCP server gives other hosts a compact contract instead and
 appends this full policy only with `WEALTH_BEHAVIOR_IN_SERVER=1`; the launcher
-sets `WEALTH_BEHAVIOR_IN_HOST=1` so the policy reaches the model exactly once. Low response verbosity is independent
+sets `WEALTH_BEHAVIOR_IN_HOST=1` so the policy reaches the model exactly once.
+The launcher appends a short note naming the tools as Codex shows them
+(`mcp__wealth__wealth_run`, `web__run`), saying there is no file or shell tool
+and asking for independent calls in one step; the common tasks and their inputs
+are in `wealth_run`'s description, and `wealth_context(intent=<task>)` returns
+just that task's schema (`detail=full` for the whole catalog). Low response verbosity is independent
 of reasoning effort; explicit requests for detail can still receive long answers.
 
 The browser server binds only to a loopback address (`127.0.0.1`, or `::1` with
 `--host ::1`), checks the Host and Origin headers, requires a session token on
 every request that reads a turn or changes state, and sends no referrer. This is
 a local personal interface, not a hosted multi-user service.
+
+## Speed
+
+Most of a turn is model steps, so the launcher keeps them few and small: the
+situation is built once per turn, discovery results are summaries by default (a
+turn that cannot save facts never receives the ~9k-character fact contract),
+and the answer is shown as soon as Codex reports `turn.completed`, while the
+process exits in the background. `codex exec --json` sends each message whole
+(no partial-text events), so the answer appears at once rather than streaming.
+
+`--service-tier fast` on `wealth-chat` or `wealth-agent`, or
+`WEALTH_SERVICE_TIER=fast`, asks Codex for its fast tier (priority processing)
+for every Wealth turn and memory step. It is off by default because it costs
+more; without it Codex uses your account's default tier.
 
 ## Other model providers
 

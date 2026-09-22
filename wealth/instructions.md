@@ -325,13 +325,40 @@ most one thread write per turn.
 
 ## Mexico residents buying foreign securities
 
-Before recommending how a Mexican resident buys US exposure, weigh each point in
-docs/mexico-investing-facts.md: the SIC listing (not the broker) decides the 10%
-rate; US-domiciled funds and stocks are US-situs for estate tax, Irish UCITS such
-as CSPX are not; distributing vs accumulating; commission plus IVA; whole shares
-on the SIC vs fractions through GBM Trading USA; and the SIC premium. Say
-"contested" for SIC-listed ETFs sold through a foreign broker. Name the one that
-decides their case; do not recite the list.
+Facts for a Mexican resident buying US exposure (verified 2026-09-21; these are
+the whole reference, there is no other file to read):
+- Capital gains: the SIC listing of the security (BMV or BIVA), not the broker,
+  decides the 10% definitive rate (LISR Art. 129 fr. I), including through a
+  foreign broker such as IBKR or GBM Trading USA (SAT criterio 37/ISR/N).
+  Securities not listed in the SIC and sold abroad are taxed at progressive
+  rates (Arts. 119-124). SIC-listed equity ETFs through a foreign broker are
+  contested (criterio 37 names shares; the ETF route relies on fr. II);
+  non-equity ETFs that way are doubtful. A Mexican broker issues the
+  constancia; with a foreign broker there is no withholding or constancia and
+  the person computes the MXN gain (average cost, INPC update) for April.
+- Dividends: US withholding 10% with a W-8BEN (30% without); Mexico adds them to
+  annual income with a credit and an additional definitive 10% (Art. 142 fr.
+  V), withheld by the intermediary through the SIC, due by the 17th of the next
+  month through a foreign broker. Irish accumulating UCITS (CSPX, in the SIC as
+  CSPXN) distribute nothing until sale.
+- US estate tax: US-domiciled stocks and ETFs (IVV, VOO) are US-situs for a
+  non-US person wherever held, SIC included: exemption US$60k, rates up to 40%,
+  no US-Mexico estate treaty. Irish UCITS such as CSPX are not US-situs.
+- GBM Trading MX (BMV and SIC): whole shares only, 0.25% commission (up to MXN
+  1M invested over 3 months, tiering to 0.10% above MXN 10M) plus 16% IVA. A SIC
+  price should be the home price x FX; the SIC premium is the gap, so use limit
+  orders near that value. GBM Trading USA:
+  fractions from US$1, 0.25% per trade, USD from Smart Cash, unpublished FX
+  spread, no CFDI. Most SIC tickers cost far less than MXN 10k a share: check
+  the price before saying "save for a whole share".
+
+Weigh the SIC listing, US-situs estate exposure, distributing vs accumulating,
+commission plus IVA, lot size and the SIC premium. Name the one that decides
+their case; do not recite the list. When the question is which route or broker,
+also state in a clause each: the 10% Art. 129 rate follows the SIC listing;
+through a foreign broker it is contested for ETFs and the person files it
+themselves; a US-domiciled fund (VOO, IVV) carries US estate-tax exposure above
+US$60k that an Irish UCITS such as CSPX avoids.
 
 ## Investment policy
 
