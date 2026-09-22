@@ -71,7 +71,7 @@ wealth context` prints every task with its inputs and a runnable example.
 | Money in and out | Where money goes and what is investable, cash calendars, projections, withdrawal and liability matching, debt payoff, the debt engine (amortization, prepay vs invest, refinance offers, payoff strategies), reserves and goals (`spending`, `calendar`, `income`, `project`, `ladder`, `debt_payoff`, `debt`, `plan`) |
 | What you own | Holdings, lots, gains and income from a transaction ledger, returns, exposure and overlap, household import, SIC premium (`ledger`, `performance`, `exposure`, `import`, `sic_premium`) |
 | Investing | Investment policy, tax-aware rebalancing, asset location, recurring investing, portfolio analysis and construction, company and fund research (`policy_draft`, `policy_check`, `rebalance`, `asset_location`, `dca`, `compare`, `construct`, `analyze`, `factors`, `stress`, `research`, `value`) |
-| Tax | US federal lots, wash sales and harvesting; Mexico Art. 129, real interest, deductions and PPR, foreign securities, tax calendar; US estate exposure for non-residents (`tax`, `mx_holdings`, `mx_interest`, `mx_deductions`, `mx_foreign`, `mx_calendar`, `estate`) |
+| Tax | US federal lots, wash sales and harvesting; Mexico Art. 129, real interest, deductions and PPR, foreign securities, tax calendar; US estate exposure for non-residents; the annual tax pack for your contador or CPA (`tax`, `mx_holdings`, `mx_interest`, `mx_deductions`, `mx_foreign`, `mx_calendar`, `estate`, `tax_pack`) |
 | Retirement | IMSS Ley 73/97, AFORE and Modalidad 40; Social Security, contribution limits and withdrawal order; a readiness range (`retirement_mx`, `retirement_us`, `retirement_readiness`) |
 | Protection | Insurance and estate gaps, life events, and guardrails for speculation, panic selling and scams (`protection_review`, `life_event`, `speculation_check`, `panic_check`, `scam_check`) |
 | Reviews and nudges | What needs attention today, a weekly letter, a quarterly review, a fee audit, opt-in monitor rules (`today`, `weekly`, `quarterly_review`, `fee_audit`, `monitor`) |
@@ -105,6 +105,7 @@ after the person has agreed; piped stdin alone is refused.
 | `prices` | none | Market-data cache: `status`, or `refresh` now |
 | `forget` | none | Delete a profile; interactive terminal only |
 | `watch` | none | Foreground monitor polling |
+| `tax-pack` | `wealth_run` `task=tax_pack` | Write the annual tax pack: JSON, one CSV per section, printable HTML |
 | `onboarding`, `today`, `view` | none | Text-channel helpers ([openclaw.md](openclaw.md)) |
 
 **context**, with no client, returns the catalog; name one task for its inputs
@@ -294,6 +295,15 @@ events; it runs in the foreground until stopped (`--interval` seconds, default
 
 ```sh
 uv run wealth watch --client ana --once
+```
+
+**tax-pack** runs `tax_pack` for a client (or `--input` inputs with facts and
+a ledger) and writes `tax-pack-<year>.json`, one `tax-pack-<year>-<section>.csv`
+per section (plus pendientes, deadlines and reconciliation) and a printable,
+bilingual `tax-pack-<year>.html`; print the page to PDF from the browser:
+
+```sh
+uv run wealth tax-pack --client ana --year 2025 --lang es --out /tmp/wealth-demo/tax-pack
 ```
 
 **onboarding, today, view** print person-facing text for text channels. Exit
@@ -637,6 +647,62 @@ taxes `social_security_annual_benefit_usd` under IRC 86 (25k/34k single,
 32k/44k joint; fixed nominal thresholds deflated at `threshold_inflation`). It
 charges IRMAA from the 2026 CMS table on MAGI from two years earlier. Other
 years use the latest table with a dated warning.
+
+## Tax pack
+
+`tax_pack` is the document a person hands their contador (Mexico) or CPA (US)
+for one year: working papers, not a return. Inputs are `tax_year` (default: the
+last completed year) and `jurisdiction` (`MX`, `US` or `MX,US`; default: the
+profile's tax residence, plus `US` for a US person). It reads the ledger and
+three kinds of saved facts:
+
+- `tax.<year>`: what the person stated for the year. `mx`: Art. 129
+  `article_129_loss_carryforwards` (`[]` = none), `total_income_mxn`,
+  `accumulable_income_mxn`, `deductions` (`medical_mxn`,
+  `insurance_premiums_mxn`, `ppr_mxn`, `art185_mxn`, `mortgage`...),
+  `aguinaldo_mxn`/`ptu_mxn`, `sic_listed`, `inpc` (`{"YYYY-MM": value,
+  "source"}`). `us`: `filing_status`, `capital_loss_carryover`,
+  `ira_contributions_usd`, `roth_contributions_usd`, `rmd_taken_usd`,
+  `ira_prior_year_end_balance_usd`, `treasury_rate_per_usd`,
+  `mx_annual_isr_usd`.
+- `constancia.<id>`: an institution's annual document as printed, with
+  `tax_year`, `institution`, `account_id?` and blocks `enajenacion`
+  (`gain`, `loss`, `net`), `intereses` (`nominal`, `real`, `real_loss`,
+  `isr_withheld`), `dividendos`, `form_1099_b`, `form_1099_div`,
+  `form_1099_int`. Save it with `wealth_remember` (`source.kind: document`)
+  after reading the PDF with the person.
+- `client.profile` (residence, tax residence, `us_person`, birth year).
+
+Sections, each with `status`, `summary`, a `table` (`columns` in es/en,
+`rows`), `reconciliation`, `missing`, `warnings`, `sources` and `assumptions`:
+
+| Section | What it holds |
+| --- | --- |
+| `mx_enajenacion` | Art. 129 per broker: average cost updated by INPC (CFF Art. 17-A), gains, losses, net, carryforwards, the 10% |
+| `mx_extranjero` | Foreign broker: SIC-listed at 10% (criterio 37/ISR/N), others progressive, foreign dividends and the Art. 5 credit (via `mx_foreign`) |
+| `mx_intereses` | Nominal and real interest per institution, ISR withheld; debt-security sale gains are interest |
+| `mx_dividendos` | Domestic (the additional 10%) and foreign dividends with withholding |
+| `mx_deducciones` | Art. 151/185 caps and room (via `mx_deductions`) and the CFDI checklist (uso D01-D10) |
+| `mx_aguinaldo_ptu` | Exempt parts (30 and 15 daily UMA), only when stated |
+| `us_8949` | Lots sold: boxes A-F, code W and the wash-sale adjustment |
+| `us_schedule_d` | Short/long totals, carryover in and out, the $3,000 limit |
+| `us_1099` | 1099-DIV/INT per account: ordinary vs qualified, interest |
+| `us_foreign_tax` | Foreign tax paid by country (Form 1116 inputs) |
+| `us_retirement` | IRA/Roth contributions vs the limit, RMD required and taken |
+| `us_fbar_8938` | FBAR ($10,000 aggregate maximum, 31 CFR 1010.350) and Form 8938 (from $50,000/$75,000 single in the US to $400,000/$600,000 joint abroad, Instructions for Form 8938) |
+
+Every pack also has `pendientes` (each missing constancia, INPC month, price,
+rate, cost basis or stated figure, in Spanish and English) and `deadlines`
+(April 30 annual return in Mexico, February 15 constancias, April 15 US return,
+IRA contributions and FBAR, June 15 abroad, October 15 FBAR extended).
+
+Unknown is never zero: a figure that cannot be computed is `null` (an empty
+CSV cell, "unknown" on the page). A saved constancia or 1099 is the source of
+truth: each section's `reconciliation` shows our computation, the document and
+the difference, and the declared figure is the document's. The web app serves
+`/api/tax-pack?year=YYYY&format=json|html|csv&section=<id>&lang=es|en`; the You
+page has a link to the printable page. `exports: ["csv", "html"]` returns both
+inside the result for MCP hosts.
 
 ## Facts
 

@@ -415,7 +415,8 @@ def test_delete_my_data_is_one_folded_line_and_the_hoy_value_is_bold_whole():
     # One quiet line; the Terminal command and its copy button stay folded until the line is tapped.
     assert "'aria-expanded': 'false', 'aria-controls': 'erase-how'" in data and "hidden: true" in data
     assert "text: t('copy')" in data and "navigator.clipboard.writeText(command)" in data
-    assert data.count("class: 'data-row'") == 2 and ".erase-how[hidden] { display: none; }" in page
+    # Three quiet lines: the tax pack, the export, and the folded delete.
+    assert data.count("class: 'data-row'") == 3 and ".erase-how[hidden] { display: none; }" in page
     assert "eraseLine: 'Only from the Terminal, so nothing does it by accident.'" in script
     # The emphasis span is snapped to the value it lands on, on both pages, with the same rule.
     chat = Path(web.__file__).with_name("chat.html").read_text(encoding="utf-8")

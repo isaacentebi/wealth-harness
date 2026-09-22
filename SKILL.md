@@ -77,7 +77,7 @@ before answering.
 | Money in and out | `spending`, `calendar`, `income`, `project`, `ladder`, `debt_payoff`, `debt`, `plan` |
 | What they own | `ledger`, `performance`, `exposure`, `import`, `sic_premium` |
 | Investing | `policy_draft`, `policy_check`, `rebalance`, `asset_location`, `dca`, `compare`, `construct`, `analyze`, `factors`, `stress`, `research`, `value` |
-| Tax | `tax`, `mx_holdings`, `mx_interest`, `mx_deductions`, `mx_foreign`, `mx_calendar`, `estate` |
+| Tax | `tax`, `mx_holdings`, `mx_interest`, `mx_deductions`, `mx_foreign`, `mx_calendar`, `estate`, `tax_pack` (the year's pack for the contador or CPA) |
 | Retirement | `retirement_mx`, `retirement_us`, `retirement_readiness` |
 | Reviews and nudges | `today`, `weekly`, `quarterly_review`, `fee_audit`, `monitor` |
 | Protection and guardrails | `protection_review`, `life_event`, `speculation_check`, `panic_check`, `scam_check` |

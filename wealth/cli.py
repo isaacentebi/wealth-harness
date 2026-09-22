@@ -94,6 +94,50 @@ def _command(argv: list[str]) -> str | None:
     return None
 
 
+def _tax_pack(argv: list[str]) -> int:
+    """``wealth tax-pack``: run the tax_pack task and write JSON, one CSV per section and printable HTML."""
+    parser = argparse.ArgumentParser(prog="wealth tax-pack",
+                                     description="Write the annual tax pack for a contador or CPA (JSON, CSV, HTML)")
+    parser.add_argument("command", choices=("tax-pack",))
+    parser.add_argument("--db", help="SQLite path (default WEALTH_DB or user data directory)")
+    parser.add_argument("--client", help="client identifier (reads its ledger and saved facts)")
+    parser.add_argument("--input", help="JSON file of tax_pack inputs ('-' reads stdin); needed without --client")
+    parser.add_argument("--year", type=int, help="tax year (default: the last completed year)")
+    parser.add_argument("--jurisdiction", help="MX, US or MX,US (default: from the profile)")
+    parser.add_argument("--lang", choices=("es", "en"), help="language of the CSV headers and the page")
+    parser.add_argument("--out", default=".", help="folder to write into (default: the current folder)")
+    parser.add_argument("--format", action="append", choices=("json", "csv", "html"),
+                        help="what to write (repeatable; default all three)")
+    args = parser.parse_args(argv)
+    try:
+        inputs: dict = {}
+        if args.input:
+            raw = sys.stdin.read() if args.input == "-" else Path(args.input).read_text(encoding="utf-8")
+            inputs = json.loads(raw, parse_constant=_reject_constant) if raw.strip() else {}
+            if not isinstance(inputs, dict):
+                raise ValueError("tax-pack --input must be a JSON object of tax_pack inputs")
+        elif not args.client:
+            raise ValueError("tax-pack needs --client, or --input with facts and a ledger")
+        if args.year is not None:
+            inputs["tax_year"] = args.year
+        if args.jurisdiction:
+            inputs["jurisdiction"] = args.jurisdiction
+        if args.lang:
+            inputs["language"] = args.lang
+        from .taxpack import write_exports
+        report = WealthService(args.db).run("tax_pack", inputs=inputs, client_id=args.client)
+        files = write_exports(report, args.out, args.lang, args.format or ("json", "csv", "html"))
+        result = report.get("result") or {}
+        print(json.dumps({"status": report["status"], "tax_year": result.get("tax_year"),
+                          "jurisdictions": result.get("jurisdictions"), "files": files,
+                          "pendientes": len(result.get("pendientes") or [])}, ensure_ascii=False, indent=2),
+              flush=True)
+        return 0
+    except (ValueError, TypeError, KeyError, OSError, sqlite3.Error) as exc:
+        print(json.dumps({"error": str(exc), "error_type": type(exc).__name__}), file=sys.stderr)
+        return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the CLI; a reader that closes the pipe early (``wealth context | head``) ends it quietly."""
     try:
@@ -116,9 +160,11 @@ def _main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else list(argv)
     if _command(argv) in TEXT_COMMANDS:  # text-channel helpers, see docs/openclaw.md
         return text_main(argv)
+    if _command(argv) == "tax-pack":
+        return _tax_pack(argv)
     parser = argparse.ArgumentParser(description="Wealth JSON CLI: one JSON object in (stdin or --input), JSON out")
     parser.add_argument("operation", choices=(*OPERATIONS, "watch"),
-                        help=" | ".join((*OPERATIONS, "watch")) + " "
+                        help=" | ".join((*OPERATIONS, "watch", "tax-pack")) + " "
                              "(text channels: onboarding | today | view, see docs/openclaw.md)")
     parser.add_argument("--db", help="SQLite path (default WEALTH_DB or user data directory)")
     parser.add_argument("--input", default="-", help="JSON argument file; '-' reads stdin")

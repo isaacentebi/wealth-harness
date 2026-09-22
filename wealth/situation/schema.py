@@ -127,6 +127,30 @@ SCHEMA: dict[str, dict[str, str]] = {
         "buckets?": "list", "return_requirement?": "{value, goal_id}", "residence?": "object",
         "missing?": "list", "evidence?": "{fact key: fact id}",
     },
+    "tax.<YYYY>": {
+        "note": "the person's stated tax facts for one year (read by tax_pack); merge by field",
+        "jurisdiction?": "list of MX|US (default: the profile's tax residence, plus US for a US person)",
+        "account_countries?": "{ledger account id: ISO-2} when a statement does not say where an account is",
+        "mx?": "{article_129_loss_carryforwards: [{origin_year, available_updated_mxn, updated_through}] ([] = none), "
+               "total_income_mxn, accumulable_income_mxn, taxable_income_before_mxn|marginal_rate, "
+               "deductions {medical_mxn, insurance_premiums_mxn, funeral_mxn, donations_mxn, tuition_mxn, "
+               "school_transport_mxn, ppr_mxn, art185_mxn, mortgage {...}}, aguinaldo_mxn, ptu_mxn, "
+               "sic_listed {instrument: true|false}, w8ben_on_file, inpc {\"YYYY-MM\": value}, inpc_source}",
+        "us?": "{filing_status, capital_loss_carryover {short_term, long_term} (0 = none), ira_contributions_usd, "
+               "roth_contributions_usd, rmd_taken_usd, ira_prior_year_end_balance_usd, "
+               "treasury_rate_per_usd {MXN: rate, source}}",
+    },
+    "constancia.<id>": {
+        "note": "an institution's annual tax document (constancia, 1099) as printed; the source of truth in tax_pack",
+        "tax_year": "YYYY", "institution": "GBM, BBVA, Charles Schwab...", "account_id?": "ledger account id",
+        "currency?": "ISO 4217", "issued_on?": "YYYY-MM-DD",
+        "enajenacion?": "{gain, loss, net} Art. 129 share sales (MXN)",
+        "intereses?": "{nominal, real, real_loss, isr_withheld} (MXN)",
+        "dividendos?": "{domestic_gross, foreign_gross, isr_withheld, isr_creditable} (MXN)",
+        "form_1099_b?": "{short_term_gain, long_term_gain, wash_sale_disallowed} (USD)",
+        "form_1099_div?": "{ordinary, qualified, capital_gain_distributions, foreign_tax_paid} (USD)",
+        "form_1099_int?": "{interest, foreign_tax_paid} (USD)",
+    },
     "follow.<cik>": {
         "note": "a 13F manager the person follows; <cik> is the 10-digit SEC CIK (find it with manager_search)",
         "cik": "the same 10-digit CIK", "name": "the manager as EDGAR names it",
@@ -625,6 +649,59 @@ def _constraint(value: Any, key: str) -> None:
                    "(merge=true), not as a constraint")
 
 
+CONSTANCIA_BLOCKS = {
+    "enajenacion": ("gain", "loss", "net", "isr_withheld"),
+    "intereses": ("nominal", "real", "real_loss", "isr_withheld"),
+    "dividendos": ("domestic_gross", "foreign_gross", "isr_withheld", "isr_creditable", "foreign_tax_withheld"),
+    "form_1099_b": ("proceeds", "cost_basis", "short_term_gain", "long_term_gain", "wash_sale_disallowed"),
+    "form_1099_div": ("ordinary", "qualified", "capital_gain_distributions", "foreign_tax_paid"),
+    "form_1099_int": ("interest", "foreign_tax_paid"),
+}
+
+
+def _tax_year_value(value: Any, path: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or not 2000 <= value <= 2100:
+        _fail(path, f"must be a four-digit year, not {_shown(value)}")
+
+
+def _constancia(value: dict, key: str) -> None:
+    fields = {"tax_year", "institution", "account_id", "currency", "issued_on", "note", *CONSTANCIA_BLOCKS}
+    _object(value, key, fields)
+    _tax_year_value(value.get("tax_year"), f"{key}.tax_year")
+    _text(value.get("institution"), f"{key}.institution", required=True)
+    _text(value.get("account_id"), f"{key}.account_id")
+    _currency(value.get("currency"), f"{key}.currency", required=False)
+    _iso_date(value.get("issued_on"), f"{key}.issued_on")
+    blocks = [name for name in CONSTANCIA_BLOCKS if value.get(name) is not None]
+    if not blocks:
+        _fail(key, "needs at least one block: " + ", ".join(CONSTANCIA_BLOCKS))
+    for name in blocks:
+        block = _object(value[name], f"{key}.{name}", set(CONSTANCIA_BLOCKS[name]))
+        for field, number in block.items():
+            _number(number, f"{key}.{name}.{field}", required=False, minimum=None)
+
+
+def _tax_facts(value: dict, key: str) -> None:
+    _tax_year_value(int(key.partition(".")[2]), key)
+    _object(value, key, {"jurisdiction", "account_countries", "mx", "us", "note"})
+    jurisdiction = value.get("jurisdiction")
+    if jurisdiction is not None and (not isinstance(jurisdiction, list)
+                                     or any(j not in ("MX", "US") for j in jurisdiction)):
+        _fail(f"{key}.jurisdiction", "must be a list of MX and/or US")
+    for part in ("mx", "us", "account_countries"):
+        if value.get(part) is not None and not isinstance(value[part], dict):
+            _fail(f"{key}.{part}", "must be an object")
+    carries = (value.get("mx") or {}).get("article_129_loss_carryforwards")
+    if carries is not None:
+        if not isinstance(carries, list):
+            _fail(f"{key}.mx.article_129_loss_carryforwards", "must be a list ([] when there are none)")
+        for index, item in enumerate(carries):
+            path = f"{key}.mx.article_129_loss_carryforwards[{index}]"
+            item = _object(item, path, {"origin_year", "available_updated_mxn", "updated_through"})
+            _tax_year_value(item.get("origin_year"), f"{path}.origin_year")
+            _number(item.get("available_updated_mxn"), f"{path}.available_updated_mxn")
+
+
 def _validator(key: str) -> Callable[[Any, str], None] | None:
     if key == "policy.ips":
         return _policy_ips
@@ -643,10 +720,12 @@ def _validator(key: str) -> Callable[[Any, str], None] | None:
     head, _, rest = key.partition(".")
     if not rest or "." in rest:
         return None
+    if head == "tax":
+        return _tax_facts if re.fullmatch(r"\d{4}", rest) else None
     if head == "income" and key not in LEGACY_KEYS:
         return _income
     return {"cash": _cash, "liability": _liability, "investment": _investment, "thread": _thread,
-            "follow": _follow, "constraint": _constraint}.get(head)
+            "follow": _follow, "constraint": _constraint, "constancia": _constancia}.get(head)
 
 
 def out_of_range(value: Any, path: str = "value") -> str | None:
