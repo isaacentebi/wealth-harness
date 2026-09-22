@@ -927,34 +927,12 @@ def _index_of(meta: Mapping[str, Any]) -> str | None:
     return meta.get("index")
 
 
-def audit(holdings: Sequence[Mapping[str, Any]], instruments: Mapping[str, Mapping[str, Any]],
-          accounts: Sequence[Mapping[str, Any]], ledger: Mapping[str, Any] | None = None, *, currency: str,
-          as_of: str, window_start: str | None = None, residence: str | None = None,
-          advisory: Sequence[Mapping[str, Any]] = (), cash_reference_rate: Mapping[str, Any] | None = None,
-          cash_yield: Any = None, alternatives: Sequence[Mapping[str, Any]] = (),
-          return_range: Sequence[Any] = ("0.04", "0.07"), afore: Sequence[Mapping[str, Any]] = ()) -> dict:
-    """All-in annual cost of the portfolio (see module docstring).
-
-    ``holdings``: ``[{account_id, instrument_id, value, kind?: position|cash}]`` in ``currency`` (value None =
-    unknown).  ``instruments``: ``{id: {symbol, underlying_symbol?, issuer_domicile?, venue?, expense_ratio?:
-    {value, unit?, source}, expense_ratio_source?}}``.  ``accounts``: ``[{id, type, afore_name?, institution?}]``.
-    ``ledger`` supplies commission and IVA fee entries between ``window_start`` (default one year before
-    ``as_of``) and ``as_of``.
-    """
-    _date(as_of, "as_of")
-    window_start = window_start or (date.fromisoformat(as_of) - timedelta(days=364)).isoformat()
-    _date(window_start, "window_start")
-    window_days = (date.fromisoformat(as_of) - date.fromisoformat(window_start)).days + 1
-    annualize = Decimal(365) / Decimal(window_days)
-    account_meta = {a["id"]: a for a in accounts if isinstance(a, Mapping) and a.get("id")}
-    fx = FxTable((ledger or {}).get("fx", []), 5)
-    missing: list[dict] = []
-    sources: list[dict] = []
-    components: list[dict] = []
+def _audit_funds(holdings: Sequence[Mapping[str, Any]], instruments: Mapping[str, Mapping[str, Any]],
+                 account_meta: Mapping[str, Mapping[str, Any]], missing: list[dict], sources: list[dict],
+                 ) -> tuple[dict, list[dict], list[Mapping[str, Any]], Decimal, Decimal, bool]:
+    """Fund expense ratios: the component, its rows, the portfolio holdings, idle cash and the assessed value."""
     assessed = ZERO
     assessed_known = True
-
-    # fund expense ratios
     fund_cost, fund_complete, fund_rows = ZERO, True, []
     idle_cash = ZERO
     portfolio: list[Mapping[str, Any]] = []
@@ -990,10 +968,14 @@ def audit(holdings: Sequence[Mapping[str, Any]], instruments: Mapping[str, Mappi
         fund_rows.append({"account_id": holding.get("account_id"), "instrument_id": instrument,
                           "symbol": meta.get("symbol") or instrument, "value": money(value),
                           "expense_ratio": _ratio(rate), "annual_cost": money(cost), "source": source})
-    components.append({"id": "fund_expenses", "name": "Fund expense ratios", "annual_low": money(fund_cost),
-                       "annual_high": money(fund_cost), "complete": fund_complete, "detail": fund_rows})
+    component = {"id": "fund_expenses", "name": "Fund expense ratios", "annual_low": money(fund_cost),
+                 "annual_high": money(fund_cost), "complete": fund_complete, "detail": fund_rows}
+    return component, fund_rows, portfolio, idle_cash, assessed, assessed_known
 
-    # broker commissions and IVA from the ledger
+
+def _audit_trading(ledger: Mapping[str, Any] | None, account_meta: Mapping[str, Mapping[str, Any]], fx: FxTable,
+                   window_start: str, as_of: str, currency: str, annualize: Decimal, missing: list[dict]) -> dict:
+    """Broker commissions and IVA from the ledger's investment-account fee lines, scaled to a year."""
     commission = iva = ZERO
     trading_rows, trading_complete = [], ledger is not None
     if ledger is None:
@@ -1029,14 +1011,17 @@ def audit(holdings: Sequence[Mapping[str, Any]], instruments: Mapping[str, Mappi
             trading_rows.append({"entry_id": entry["id"], "date": entry["date"], "kind": "iva" if is_iva else "commission",
                                  "amount": money(value)})
     trading_annual = (commission + iva) * annualize
-    components.append({"id": "trading", "name": "Broker commissions + IVA", "paid_in_window": money(commission + iva),
-                       "commission": money(commission), "iva": money(iva), "window": [window_start, as_of],
-                       "annual_low": money(trading_annual) if ledger is not None else None,
-                       "annual_high": money(trading_annual) if ledger is not None else None,
-                       "complete": trading_complete, "detail": trading_rows})
+    return {"id": "trading", "name": "Broker commissions + IVA", "paid_in_window": money(commission + iva),
+            "commission": money(commission), "iva": money(iva), "window": [window_start, as_of],
+            "annual_low": money(trading_annual) if ledger is not None else None,
+            "annual_high": money(trading_annual) if ledger is not None else None,
+            "complete": trading_complete, "detail": trading_rows}
 
-    # AFORE comisión
-    year = int(as_of[:4])
+
+def _audit_afore(holdings: Sequence[Mapping[str, Any]], accounts: Sequence[Mapping[str, Any]],
+                 afore: Sequence[Mapping[str, Any]], year: int, assessed: Decimal, missing: list[dict],
+                 sources: list[dict]) -> tuple[dict | None, list[dict], Decimal]:
+    """AFORE comisión on each AFORE balance (listed, or found among the accounts); adds the balances to ``assessed``."""
     afore_rows, afore_cost, afore_complete = [], ZERO, True
     afore_items = list(afore)
     listed = {a.get("account_id") for a in afore_items}
@@ -1063,11 +1048,17 @@ def audit(holdings: Sequence[Mapping[str, Any]], instruments: Mapping[str, Mappi
             afore_cost += cost
         afore_rows.append({"account_id": item.get("account_id"), "afore": item.get("name"), "balance": money(balance),
                            "commission": _ratio(rate), "annual_cost": money(cost)})
+    component = None
     if afore_rows:
-        components.append({"id": "afore", "name": "AFORE comisión", "annual_low": money(afore_cost),
-                           "annual_high": money(afore_cost), "complete": afore_complete, "detail": afore_rows})
+        component = {"id": "afore", "name": "AFORE comisión", "annual_low": money(afore_cost),
+                     "annual_high": money(afore_cost), "complete": afore_complete, "detail": afore_rows}
+    return component, afore_rows, assessed
 
-    # advisory / wrap
+
+def _audit_advisory(advisory: Sequence[Mapping[str, Any]], portfolio: list[Mapping[str, Any]],
+                    ledger: Mapping[str, Any] | None, fx: FxTable, window_start: str, as_of: str, currency: str,
+                    annualize: Decimal, missing: list[dict]) -> dict | None:
+    """Advisory / wrap fees: stated rates on the accounts they name, else advisory fee lines in the ledger."""
     advisory_rows, advisory_cost, advisory_complete = [], ZERO, True
     for index, item in enumerate(advisory):
         rate, source, problem = parse_rate(item.get("rate"), f"advisory[{index}].rate", item.get("source"))
@@ -1093,12 +1084,15 @@ def audit(holdings: Sequence[Mapping[str, Any]], instruments: Mapping[str, Mappi
                 advisory_cost += value * annualize
                 advisory_rows.append({"entry_id": entry["id"], "date": entry["date"], "paid": money(value)})
     if advisory_rows:
-        components.append({"id": "advisory", "name": "Advisory / wrap fees", "annual_low": money(advisory_cost),
-                           "annual_high": money(advisory_cost), "complete": advisory_complete, "detail": advisory_rows})
+        return {"id": "advisory", "name": "Advisory / wrap fees", "annual_low": money(advisory_cost),
+                "annual_high": money(advisory_cost), "complete": advisory_complete, "detail": advisory_rows}
+    return None
 
-    # cash drag
+
+def _audit_cash_drag(idle_cash: Decimal, cash_reference_rate: Mapping[str, Any] | None, cash_yield: Any,
+                     missing: list[dict], sources: list[dict], rate_warnings: list[str]) -> dict | None:
+    """Idle cash priced against a sourced reference rate: a range from what it may already earn to nothing."""
     drag_low = drag_high = None
-    rate_warnings: list[str] = []
     if idle_cash > 0:
         if cash_reference_rate is None:
             missing.append(_miss("cash_reference_rate", "A reference rate {low, high, source} (e.g. CETES 28 days) is "
@@ -1124,22 +1118,18 @@ def audit(holdings: Sequence[Mapping[str, Any]], instruments: Mapping[str, Mappi
                     drag_low, drag_high = ZERO, idle_cash * max(low, high)
                 else:
                     drag_low, drag_high = idle_cash * max(min(low, high) - earned, ZERO), idle_cash * max(max(low, high) - earned, ZERO)
-        components.append({"id": "cash_drag", "name": "Idle cash vs reference rate", "idle_cash": money(idle_cash),
-                           "annual_low": money(drag_low), "annual_high": money(drag_high),
-                           "complete": drag_low is not None,
-                           "note": "A range: low if the cash already earns the reference rate, high if it earns nothing."
-                           if cash_yield is None else "Reference rate minus the stated cash yield."})
+        return {"id": "cash_drag", "name": "Idle cash vs reference rate", "idle_cash": money(idle_cash),
+                "annual_low": money(drag_low), "annual_high": money(drag_high),
+                "complete": drag_low is not None,
+                "note": "A range: low if the cash already earns the reference rate, high if it earns nothing."
+                if cash_yield is None else "Reference rate minus the stated cash yield."}
+    return None
 
-    known_low = sum((_d(c["annual_low"]) or ZERO for c in components), ZERO)
-    known_high = sum((_d(c["annual_high"]) or ZERO for c in components), ZERO)
-    complete = all(c["complete"] for c in components) and assessed_known
-    ranked = sorted((c for c in components if c.get("annual_high") is not None),
-                    key=lambda c: (-(_d(c["annual_low"]) + _d(c["annual_high"])) / 2, c["id"]))
-    top = [{"id": c["id"], "name": c["name"], "annual_low": c["annual_low"], "annual_high": c["annual_high"],
-            "bps_low": _bps(_d(c["annual_low"]), assessed), "bps_high": _bps(_d(c["annual_high"]), assessed)}
-           for c in ranked if (_d(c["annual_high"]) or ZERO) > 0][:3]
 
-    # cheaper equivalents (neutral)
+def _audit_equivalents(fund_rows: list[dict], instruments: Mapping[str, Mapping[str, Any]],
+                       alternatives: Sequence[Mapping[str, Any]], residence: str | None,
+                       missing: list[dict]) -> tuple[list[dict], Decimal]:
+    """Cheaper equivalents (neutral): same index at a lower sourced expense ratio, and UCITS for MX residents."""
     suggestions, gap = [], ZERO
     alt_rows = []
     for index, alt in enumerate(alternatives):
@@ -1188,7 +1178,12 @@ def audit(holdings: Sequence[Mapping[str, Any]], instruments: Mapping[str, Mappi
     for alt in alt_rows:
         if alt["problem"] and alt["problem"]["reason"] != "missing":
             missing.append(alt["problem"])
+    return suggestions, gap
 
+
+def _audit_compounding(assessed: Decimal, suggestions: list[dict], gap: Decimal, known_low: Decimal,
+                       known_high: Decimal, complete: bool, return_range: Sequence[Any]) -> dict:
+    """What the fee gap and the known fees cost over 10 and 20 years, at the low and high return assumptions."""
     returns = tuple(Decimal(str(r)) for r in return_range)
     if len(returns) != 2:
         raise ValueError("return_range must be [low, high]")
@@ -1207,6 +1202,62 @@ def audit(holdings: Sequence[Mapping[str, Any]], instruments: Mapping[str, Mappi
     if compounding["fee_gap"] is None:
         compounding["fee_gap_note"] = ("No same-exposure alternative with a sourced lower expense ratio was supplied, "
                                        "so the fee gap is unknown, not zero.")
+    return compounding
+
+
+def audit(holdings: Sequence[Mapping[str, Any]], instruments: Mapping[str, Mapping[str, Any]],
+          accounts: Sequence[Mapping[str, Any]], ledger: Mapping[str, Any] | None = None, *, currency: str,
+          as_of: str, window_start: str | None = None, residence: str | None = None,
+          advisory: Sequence[Mapping[str, Any]] = (), cash_reference_rate: Mapping[str, Any] | None = None,
+          cash_yield: Any = None, alternatives: Sequence[Mapping[str, Any]] = (),
+          return_range: Sequence[Any] = ("0.04", "0.07"), afore: Sequence[Mapping[str, Any]] = ()) -> dict:
+    """All-in annual cost of the portfolio (see module docstring).
+
+    ``holdings``: ``[{account_id, instrument_id, value, kind?: position|cash}]`` in ``currency`` (value None =
+    unknown).  ``instruments``: ``{id: {symbol, underlying_symbol?, issuer_domicile?, venue?, expense_ratio?:
+    {value, unit?, source}, expense_ratio_source?}}``.  ``accounts``: ``[{id, type, afore_name?, institution?}]``.
+    ``ledger`` supplies commission and IVA fee entries between ``window_start`` (default one year before
+    ``as_of``) and ``as_of``.
+    """
+    _date(as_of, "as_of")
+    window_start = window_start or (date.fromisoformat(as_of) - timedelta(days=364)).isoformat()
+    _date(window_start, "window_start")
+    window_days = (date.fromisoformat(as_of) - date.fromisoformat(window_start)).days + 1
+    annualize = Decimal(365) / Decimal(window_days)
+    account_meta = {a["id"]: a for a in accounts if isinstance(a, Mapping) and a.get("id")}
+    fx = FxTable((ledger or {}).get("fx", []), 5)
+    missing: list[dict] = []
+    sources: list[dict] = []
+    components: list[dict] = []
+
+    fund_component, fund_rows, portfolio, idle_cash, assessed, assessed_known = _audit_funds(
+        holdings, instruments, account_meta, missing, sources)
+    components.append(fund_component)
+    components.append(_audit_trading(ledger, account_meta, fx, window_start, as_of, currency, annualize, missing))
+    year = int(as_of[:4])
+    afore_component, afore_rows, assessed = _audit_afore(holdings, accounts, afore, year, assessed, missing, sources)
+    if afore_component is not None:
+        components.append(afore_component)
+    advisory_component = _audit_advisory(advisory, portfolio, ledger, fx, window_start, as_of, currency, annualize,
+                                         missing)
+    if advisory_component is not None:
+        components.append(advisory_component)
+    rate_warnings: list[str] = []
+    drag_component = _audit_cash_drag(idle_cash, cash_reference_rate, cash_yield, missing, sources, rate_warnings)
+    if drag_component is not None:
+        components.append(drag_component)
+
+    known_low = sum((_d(c["annual_low"]) or ZERO for c in components), ZERO)
+    known_high = sum((_d(c["annual_high"]) or ZERO for c in components), ZERO)
+    complete = all(c["complete"] for c in components) and assessed_known
+    ranked = sorted((c for c in components if c.get("annual_high") is not None),
+                    key=lambda c: (-(_d(c["annual_low"]) + _d(c["annual_high"])) / 2, c["id"]))
+    top = [{"id": c["id"], "name": c["name"], "annual_low": c["annual_low"], "annual_high": c["annual_high"],
+            "bps_low": _bps(_d(c["annual_low"]), assessed), "bps_high": _bps(_d(c["annual_high"]), assessed)}
+           for c in ranked if (_d(c["annual_high"]) or ZERO) > 0][:3]
+
+    suggestions, gap = _audit_equivalents(fund_rows, instruments, alternatives, residence, missing)
+    compounding = _audit_compounding(assessed, suggestions, gap, known_low, known_high, complete, return_range)
     notes = []
     if afore_rows and year in AFORE_COMMISSIONS:
         notes.append("AFORE commissions for 2026 are 0.54% at nine AFOREs and 0.52% at PensionISSSTE (CONSAR); "
