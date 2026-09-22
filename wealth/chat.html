@@ -982,7 +982,7 @@
     <header class="topbar">
       <div class="column">
         <h1 class="wordmark">Wealth</h1>
-        <a class="text-control" id="profile-link" href="/profile" hidden>Profile</a>
+        <a class="text-control" id="profile-link" href="/profile" hidden>You</a>
         <button class="text-control" id="new-chat" type="button" disabled>New conversation</button>
       </div>
     </header>
@@ -1935,7 +1935,9 @@
       s.setAttribute('viewBox', '0 0 1000 1000'); s.setAttribute('preserveAspectRatio', 'none'); s.setAttribute('aria-hidden', 'true');
       const shape = (tag, attrs) => { const n = document.createElementNS(SVG_NS, tag); Object.entries(attrs).forEach(([k, v]) => n.setAttribute(k, v)); s.append(n); return n; };
       const zero = Y(0);
-      shape('rect', { x: 0, y: zero.toFixed(1), width: 1000, height: (1000 - zero).toFixed(1), fill: 'var(--blush)' });
+      // Shade only where the position loses: between the line and the zero rule.
+      const under = points.map(([x, y]) => `${X(x).toFixed(1)},${Y(Math.min(y, 0)).toFixed(1)}`);
+      shape('polygon', { points: [`${X(x0).toFixed(1)},${zero.toFixed(1)}`, ...under, `${X(x1).toFixed(1)},${zero.toFixed(1)}`].join(' '), fill: 'var(--blush)' });
       shape('line', { x1: 0, y1: zero.toFixed(1), x2: 1000, y2: zero.toFixed(1), stroke: 'var(--muted)', 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke' });
       shape('polyline', { points: points.map(([x, y]) => `${X(x).toFixed(1)},${Y(y).toFixed(1)}`).join(' '), fill: 'none', stroke: 'var(--ink)',
         'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round', 'vector-effect': 'non-scaling-stroke' });
@@ -1958,8 +1960,12 @@
         // Named beside its own point: inside the plot when the floor sits in the left half, at the right edge otherwise.
         const inside = X(xs[floorAt]) < 500;
         const tag = el('span', `tag quiet num${inside ? ' inplot' : ''}`, floorText);
-        tag.style.top = `${(Y(ys[floorAt]) / 10).toFixed(2)}%`;
-        if (inside) tag.style.left = `calc(${(X(xs[floorAt]) / 10).toFixed(2)}% + 12px)`;
+        // At the floor's height, but where the line has already climbed clear of it, so it never crosses the text.
+        const floorY = Y(ys[floorAt]);
+        let clear = floorAt;
+        while (clear < xs.length - 1 && floorY - Y(ys[clear]) < 260) clear += 1;
+        tag.style.top = `calc(${(floorY / 10).toFixed(2)}% - 16px)`;
+        if (inside) tag.style.left = `calc(${(X(xs[clear]) / 10).toFixed(2)}% + 12px)`;
         plot.append(tag);
       }
       if (gain.unbounded) { const tag = el('span', 'tag quiet num', S.noCeiling); tag.style.top = '2%'; plot.append(tag); }

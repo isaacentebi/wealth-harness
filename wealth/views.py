@@ -615,8 +615,8 @@ def _speculation(result: Mapping, envelope: Mapping, task: str) -> list[dict]:
         grid = [grid[round(i * step)] for i in range(MAX_POINTS)]
     name = _name(pay.get("symbol")) if pay.get("symbol") else ""
     caption = L("At expiry for options; before costs and taxes", "Al vencimiento en opciones; antes de costos e impuestos")
-    title = L(f"{name} profit or loss by price".strip().capitalize() if name else "Profit or loss by price",
-              f"Ganancia o pérdida de {name} según el precio" if name else "Ganancia o pérdida según el precio")
+    title = L(f"{name}: profit or loss by price" if name else "Profit or loss by price",
+              f"{name}: ganancia o pérdida según el precio" if name else "Ganancia o pérdida según el precio")
     out: list[dict] = []
     if len(grid) >= 2:
         # The chart: x is the underlying price, y the P&L; the zero line, breakevens, the floor and today's price.
