@@ -466,9 +466,12 @@ def build_proposal(
                  "description": redact_text(str(item.get("label") or "Income")), "currency": income_ccy}
         if amount is not None:
             entry["annual_amount"] = out(amount)
-        for field in ("sector", "country"):
+        for field in ("sector", "country", "frequency"):
             if item.get(field):
                 entry[field] = item[field]
+        per_period = parse_amount(item.get("per_period"), decimal_comma=comma)
+        if per_period is not None and item.get("frequency"):
+            entry["per_period"] = out(per_period)  # as the person said it ("85 mil al mes"), beside the year's figure
         fragment["income_exposures"].append(entry)
 
     fragment["unknown_sections"] = sorted(

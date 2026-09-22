@@ -16,6 +16,7 @@ Item shape (unknown fields are omitted, never zero)::
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal
 import re
 from typing import Any
 
@@ -53,18 +54,109 @@ def _canonical(item: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _annual(item: dict[str, Any]) -> tuple[Any, str | None]:
-    """An income amount per year: "gano 85 mil al mes" is 1,020,000 a year, never 85,000."""
+def _annual(item: dict[str, Any]) -> tuple[Any, str | None, str | None]:
+    """An income amount per year, the note saying so, and the period it was said in.
+
+    "gano 85 mil al mes" is 1,020,000 a year, never 85,000."""
     amount = parse_amount(item.get("amount"))
     if amount is None:
-        return item.get("amount"), None
+        return item.get("amount"), None, None
     period = str(item.get("frequency") or item.get("period") or "").strip().lower()
     factor = _PERIODS.get(period)
     if factor is None and _MONTHLY_WORDS.search(str(item.get("quote") or "")):
         factor, period = 12, "monthly"
     if factor is None or factor == 1:
-        return item.get("amount"), None
-    return str(amount * factor), f"{item.get('label') or 'Income'}: {amount} {period} was saved as {amount * factor} a year."
+        return item.get("amount"), None, "annual" if factor == 1 else None
+    canonical = {"month": "monthly", "mensual": "monthly", "quincenal": "biweekly"}.get(period, period)
+    note = f"{item.get('label') or 'Income'}: {amount} {period} was saved as {amount * factor} a year."
+    return str(amount * factor), note, canonical if canonical in ("monthly", "biweekly") else None
+
+
+_LIABILITY_WORDS = ((re.compile(r"(?i)\b(hipoteca|mortgage|infonavit|fovissste)\b"), "mortgage"),
+                    (re.compile(r"(?i)\b(auto|coche|carro|car)\b"), "auto"),
+                    (re.compile(r"(?i)\b(tarjeta|card|tdc)\b"), "card"),
+                    (re.compile(r"(?i)\b(student|educativo|estudiantil)\b"), "student"),
+                    (re.compile(r"(?i)\b(personal|n[oó]mina)\b"), "personal"))
+_INVESTMENT_KINDS = {"brokerage": "brokerage", "afore": "afore", "ira": "retirement", "roth_ira": "retirement",
+                     "401k": "retirement", "ppr": "retirement", "hsa": "retirement"}
+
+
+def stated_facts(proposal: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """What the person said, as the facts the rest of Wealth reads for stated balances.
+
+    ``cash.<name>``, ``investment.<name>``, ``liability.<name>`` and ``income.<name>`` (source ``user``) are what a
+    statement later covers: its figure replaces the stated one and the difference is shown ("you said 400,000;
+    the statement shows 398,365.82").  Saving them as statement records instead left "BBVA 60,000 (stated)" beside
+    "BBVA 76,581.87 (statement)" and counted both.  Returns None when the person named holdings (symbols and
+    quantities), which only an account record can hold.
+    """
+    from .classify import detect_institution
+
+    result = proposal.get("result") or {}
+    household = result.get("household") or {}
+    provenance = result.get("provenance") or {}
+    source = {"kind": "user", "ref": str(provenance.get("ref") or "conversation"), "observed_on": result.get("as_of")}
+    facts: list[dict[str, Any]] = []
+    keys: set[str] = set()
+
+    def add(prefix: str, name: str, value: dict[str, Any]) -> None:
+        base, counter = slug(name or prefix, 24), 2
+        key = f"{prefix}.{base}"
+        while key in keys:
+            key, counter = f"{prefix}.{base}-{counter}", counter + 1
+        keys.add(key)
+        facts.append({"key": key, "value": value, "source": source, "confidence": "reported"})
+
+    totals: dict[str, list[dict[str, Any]]] = {}
+    for row in result.get("unresolved") or []:
+        if row.get("reason") == "quantity not printed" and row.get("value") is not None:
+            totals.setdefault(row["account_id"], []).append(row)  # "Tengo 400k en GBM": a stated total
+    for account in household.get("accounts") or []:
+        rows = [p for p in household.get("positions") or [] if p.get("account_id") == account["id"]]
+        if any(p.get("asset_class") != "cash" for p in rows):
+            return None
+        name = account.get("name") or account["id"]
+        institution = detect_institution(name)[1]
+        if rows:
+            value: dict[str, Any] = {"amount": float(sum(Decimal(p["value"]) for p in rows)),
+                                     "currency": account["currency"], "name": name}
+            if institution:
+                value["institution"] = institution
+            if account.get("interest_rate") is not None:
+                value["annual_rate"] = float(account["interest_rate"])
+            add("cash", name, value)
+        for row in totals.get(account["id"], []):
+            value = {"amount": float(Decimal(row["value"])), "currency": row.get("currency") or account["currency"],
+                     "institution": institution or name, "name": name,
+                     "kind": _INVESTMENT_KINDS.get(account.get("type") or "", "other")}
+            add("investment", name, value)
+    for liability in household.get("liabilities") or []:
+        if liability.get("account_id"):
+            return None
+        if liability.get("value") is None:
+            continue
+        name = liability.get("name") or "Debt"
+        kind = next((k for pattern, k in _LIABILITY_WORDS if pattern.search(name)), "other")
+        value = {"kind": kind, "balance": float(Decimal(liability["value"])), "currency": liability["currency"],
+                 "name": name}
+        lender = detect_institution(name)[1]
+        if lender:
+            value["lender"] = lender
+        if liability.get("interest_rate") is not None:
+            value["annual_rate"] = float(liability["interest_rate"])
+        if liability.get("monthly_payment") is not None:
+            value.update(payment=float(liability["monthly_payment"]), payment_frequency="monthly")
+        add("liability", name, value)
+    for income in household.get("income_exposures") or []:
+        if income.get("annual_amount") is None:
+            continue
+        name = income.get("description") or "Income"
+        per_period, frequency = income.get("per_period"), income.get("frequency")
+        value = {"amount": float(Decimal(per_period if per_period and frequency else income["annual_amount"])),
+                 "currency": income["currency"], "frequency": frequency if per_period and frequency else "annual",
+                 "name": name}
+        add("income", name, value)
+    return facts or None
 
 
 def _verify(item: dict[str, Any], index: int) -> list[dict[str, Any]]:
@@ -111,10 +203,11 @@ def proposal_from_chat(items: list[dict[str, Any]], *, as_of: str | None = None,
         kind = item["kind"]
         ccy = item.get("currency") or currency
         if kind == "income":
-            annual, note = _annual(item)
+            annual, note, period = _annual(item)
             if note:
                 notes.append(note)
-            income.append({"label": item.get("label") or "Income", "annual_amount": annual, "currency": ccy})
+            income.append({"label": item.get("label") or "Income", "annual_amount": annual, "currency": ccy,
+                           **({"frequency": period, "per_period": item.get("amount")} if period else {})})
             if item.get("amount") in (None, ""):
                 missing.append({"key": f"items[{index}].amount", "reason": "missing", "detail": "Annual amount was not stated."})
             continue

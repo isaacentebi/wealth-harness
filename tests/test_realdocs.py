@@ -365,3 +365,75 @@ def test_a_thread_summary_is_saved_as_its_text(service):
     assert receipt["written"][0]["key"] == "thread.idle_cash"
     stored = service.inspect("mariana", key="thread.idle_cash")["facts"][0]["value"]
     assert stored["text"].startswith("Move surplus pesos")
+
+
+def test_balances_said_in_chat_are_refined_by_statements_not_counted_beside_them(service):
+    """Before: "400k en GBM, 60 mil en BBVA, debo 20 mil en Banorte" saved as statement records (GBM worth 0,
+    its total an unresolved row); with the statements saved, BBVA and the card debt were counted twice."""
+    chat = service.ingest("mariana", "chat", {"currency": "MXN", "items": [
+        {"kind": "investment", "label": "GBM", "amount": 400000, "quote": "Tengo 400k en GBM"},
+        {"kind": "cash", "label": "BBVA", "amount": 60000, "quote": "como 60 mil en mi cuenta de BBVA"},
+        {"kind": "liability", "label": "Tarjeta Banorte", "amount": 20000,
+         "quote": "debo unos 20 mil en la tarjeta Banorte"},
+        {"kind": "income", "label": "Sueldo", "amount": 85000, "quote": "gano 85 mil al mes neto"}]})
+    saved = service.ingest("mariana", "confirm", {"proposal_id": chat["result"]["proposal_id"],
+                                                  "acknowledge_discrepancies": True})
+    assert sorted(saved["result"]["saved"]["keys"]) == ["cash.bbva", "income.sueldo", "investment.gbm",
+                                                        "liability.tarjeta-banorte"]
+    facts = {f["key"]: f["value"] for f in service.inspect("mariana")["facts"]}
+    assert facts["investment.gbm"]["amount"] == 400000 and facts["liability.tarjeta-banorte"]["lender"] == "Banorte"
+    assert (facts["income.sueldo"]["amount"], facts["income.sueldo"]["frequency"]) == (85000, "monthly")
+    before = service.situation("mariana")["net_worth"]
+    assert (before["liquid"], before["liabilities"]) == (460000, 20000)
+    for name in (GBM, BBVA, CARD):
+        proposal = service.ingest("mariana", "file", {"path": name})
+        service.ingest("mariana", "confirm", {"proposal_id": proposal["result"]["proposal_id"]})
+    worth = service.situation("mariana")["net_worth"]
+    assert money(worth["liquid"]) == money(TRUTH[GBM]["total"]) + money(TRUTH[BBVA]["closing"])
+    assert money(worth["liabilities"]) == money(TRUTH[CARD]["saldo_deudor_total"])
+
+
+def test_a_large_task_example_is_shown_by_its_shape(tmp_path):
+    """Before: wealth_context(intent=tax_pack) returned ~28k characters (a whole example ledger) every turn."""
+    pytest.importorskip("mcp")
+    from wealth import server
+
+    srv = server.build_server(str(tmp_path / "w.sqlite3"))
+    text = "".join(c.text for c in asyncio.run(srv.call_tool("wealth_context", {"intent": "tax_pack"})).content)
+    assert len(text) < 6000 and "detail=full shows it" in text
+    full = asyncio.run(srv.call_tool("wealth_context", {"intent": "tax_pack", "detail": "full"})).structured_content
+    assert isinstance(full["tasks"]["tax_pack"]["example"]["ledger"], dict)
+
+
+def test_estate_register_with_facts_in_inputs_keeps_ledger_accounts(service):
+    """Before: facts passed in inputs left the statements' ledger accounts without a key and the task crashed
+    with no message ("Error executing tool wealth_run")."""
+    for name in (GBM, BBVA):
+        proposal = service.ingest("mariana", "file", {"path": name})
+        service.ingest("mariana", "confirm", {"proposal_id": proposal["result"]["proposal_id"]})
+    report = service.run("estate_register", client_id="mariana", inputs={"facts": [
+        {"key": "investment.fidelity", "value": {"institution": "Fidelity", "kind": "retirement", "plan_type": "roth_ira",
+                                                 "balance_unknown": True}}]})
+    keys = {row["key"] for row in report["result"]["rows"]}
+    assert {"investment.fidelity", "ledger.gbm-7832", "ledger.bbva-7365"} <= keys
+
+
+def test_an_account_without_a_balance_names_balance_unknown(service):
+    """Before: the refusal said to leave the fact out, so a host could not record that the Roth IRA exists."""
+    from wealth.store import ValidationError
+
+    said = {"kind": "user", "ref": "chat", "observed_on": "2026-09-01"}
+    with pytest.raises(ValidationError, match="balance_unknown: true"):
+        service.remember("mariana", [{"key": "investment.fidelity", "value": {"institution": "Fidelity"},
+                                      "source": said}])
+    service.remember("mariana", [{"key": "investment.fidelity", "value": {"institution": "Fidelity", "currency": "USD",
+                                                                          "balance_unknown": True}, "source": said}])
+
+
+def test_a_us_citizen_is_a_us_person_without_saying_so(service):
+    said = {"kind": "user", "ref": "chat", "observed_on": "2026-09-01"}
+    service.remember("mariana", [{"key": "client.profile", "value": {"residence": {"country": "MX"},
+                                                                     "citizenship": ["MX", "US"]}, "source": said}])
+    assert service.situation("mariana")["profile"]["us_person"] is True
+    report = service.run("tax_pack", inputs={"tax_year": 2025}, client_id="mariana")
+    assert report["result"]["jurisdictions"] == ["MX", "US"] and report["result"]["us_person"] is True

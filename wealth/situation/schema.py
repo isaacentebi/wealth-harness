@@ -285,10 +285,12 @@ def _shown(value: Any) -> str:
 
 
 def _number(value: Any, path: str, *, required: bool = True, minimum: float | None = 0,
-            maximum: float = MAX_AMOUNT) -> None:
+            maximum: float = MAX_AMOUNT, unknown_flag: str | None = None) -> None:
     if value is None:
         if required:
-            _fail(path, "is required (a number; leave the whole fact out if unknown, never 0)")
+            _fail(path, "is required (a number; " + (f"send {unknown_flag}: true when they have it but the amount "
+                                                     "is not known, never 0)" if unknown_flag else
+                                                     "leave the whole fact out if unknown, never 0)"))
         return
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         _fail(path, f"must be a number, not {_shown(value)}")
@@ -449,7 +451,8 @@ def _cash(value: dict, key: str) -> None:
     _designation(value, key)
     _rate(value.get("annual_rate"), f"{key}.annual_rate")
     _bool(value.get("balance_unknown"), f"{key}.balance_unknown")
-    _number(value.get("amount"), f"{key}.amount", required=value.get("balance_unknown") is not True)
+    _number(value.get("amount"), f"{key}.amount", required=value.get("balance_unknown") is not True,
+            unknown_flag="balance_unknown")
     _currency(value.get("currency"), f"{key}.currency")
     _text(value.get("institution"), f"{key}.institution", limit=80)
     _purpose(value.get("purpose"), f"{key}.purpose")
@@ -529,7 +532,8 @@ def _investment(value: dict, key: str) -> None:
     if days is not None and (isinstance(days, bool) or not isinstance(days, int) or not 0 <= days <= 36600):
         _fail(f"{key}.liquidity_days", "must be a whole number of days")
     _bool(value.get("balance_unknown"), f"{key}.balance_unknown")
-    _number(value.get("amount"), f"{key}.amount", required=value.get("balance_unknown") is not True)
+    _number(value.get("amount"), f"{key}.amount", required=value.get("balance_unknown") is not True,
+            unknown_flag="balance_unknown")
     _currency(value.get("currency"), f"{key}.currency")
     _text(value.get("institution"), f"{key}.institution", limit=80)
     _enum(value.get("kind"), f"{key}.kind", ("brokerage", "retirement", "afore", "fund", "other"))

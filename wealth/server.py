@@ -114,10 +114,42 @@ def _task_index(catalog: dict) -> dict:
                           "inputs and a runnable example; detail=full returns every schema at once.")}
 
 
+_EXAMPLE_CHARS = 2500  # an example larger than this is shown by its shape; detail=full has it whole
+_FIELD_CHARS = 300
+
+
+def _compact_example(example: Any) -> Any:
+    """A large runnable example (a whole ledger, a year of facts) by its keys, small values kept.
+
+    With client_id the saved facts and ledger supply those inputs; a host reading the task before each run
+    was re-reading ~28k characters of tax_pack example every turn."""
+    import json
+
+    if not isinstance(example, dict) or len(json.dumps(example, default=str)) <= _EXAMPLE_CHARS:
+        return example
+    out = {}
+    for key, value in example.items():
+        size = len(json.dumps(value, default=str))
+        if size <= _FIELD_CHARS:
+            out[key] = value
+        else:
+            count = f"{len(value)} items, " if isinstance(value, (list, dict)) else ""
+            out[key] = f"<{count}{size} characters: detail=full shows it; with client_id the saved data supplies it>"
+    return out
+
+
 def _task_schema(catalog: dict) -> dict:
     """Discovery for one task: its schema and example only (connectors and the fact contract are detail=full)."""
 
-    return {"release": catalog.get("release"), "tasks": catalog["tasks"],
+    tasks = {}
+    for name, spec in catalog["tasks"].items():
+        spec = dict(spec)
+        if "example" in spec:
+            spec["example"] = _compact_example(spec["example"])
+        if isinstance(spec.get("variants"), dict):
+            spec["variants"] = {k: _compact_example(v) for k, v in spec["variants"].items()}
+        tasks[name] = spec
+    return {"release": catalog.get("release"), "tasks": tasks,
             "next_step": ("Run it with wealth_run(task, inputs, client_id). detail=full adds the whole catalog, "
                           "connectors and the fact contract.")}
 

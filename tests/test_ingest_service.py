@@ -96,16 +96,19 @@ def test_files_outside_the_upload_dir_are_refused(service, tmp_path):
     assert service.ingest("ana", "file", {"path": "../outside.pdf"})["status"] == "rejected"
 
 
-def test_chat_items_need_the_persons_words_and_confirm_posts_cash(service):
+def test_chat_items_need_the_persons_words_and_confirm_saves_them_as_stated(service):
     item = {"kind": "cash", "label": "HYSA", "account_type": "savings", "amount": "40000", "currency": "USD"}
     with pytest.raises(ValueError, match=r"items\[0\]\.quote"):
         service.ingest("ana", "chat", {"items": [item]})
     proposal = service.ingest("ana", "chat", {"items": [dict(item, quote="I have $40k in a HYSA")], "as_of": "2026-09-01"})
     assert proposal["status"] == "ready_to_confirm"
     saved = service.ingest("ana", "confirm", {"proposal_id": proposal["result"]["proposal_id"]})
-    assert saved["result"]["ledger"]["posted"] == 1
-    cash = service.run("ledger", {"view": "holdings", "as_of": "2026-09-01"}, client_id="ana")["result"]["cash"]
-    assert [c["balance"] for c in cash] == ["40000.00"]
+    # What the person said is a stated balance (a statement later covers it), never a statement record or
+    # ledger lines that a real statement for the same bank would be counted beside.
+    assert saved["result"]["saved"]["keys"] == ["cash.hysa"] and "ledger" not in saved["result"]
+    fact = service.inspect("ana", key="cash.hysa")["facts"][0]
+    assert (fact["value"]["amount"], fact["value"]["currency"], fact["source"]["kind"]) == (40000, "USD", "user")
+    assert not service.run("ledger", {"view": "holdings", "as_of": "2026-09-01"}, client_id="ana")["result"]["cash"]
 
 
 def test_extraction_validates_against_the_stored_request(service):

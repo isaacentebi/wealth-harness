@@ -1711,6 +1711,10 @@ class WealthService:
         record = (state.get("pending") or {}).get(proposal_id) or (state.get("confirmed") or {}).get(proposal_id)
         if (((record or {}).get("proposal") or {}).get("result") or {}).get("kind") == "tax_document":
             return self._ingest_confirm_tax(client_id, proposal_id, acknowledge_discrepancies, expires_on)
+        if (((record or {}).get("proposal") or {}).get("result") or {}).get("source_kind") == "user":
+            from .ingest.chat import stated_facts
+            if stated_facts(record["proposal"]):
+                return self._ingest_confirm_stated(client_id, proposal_id, acknowledge_discrepancies)
         today = datetime.now(timezone.utc).date()
         with WealthStore(self.db_path) as store:
             with store.atomic():
@@ -1806,6 +1810,63 @@ class WealthService:
                 report["result"]["upload_removed"] = bool(purge_uploads(client_id, self.db_path, sha256=sha))
             except OSError:
                 report["result"]["upload_removed"] = False
+        return report
+
+    def _ingest_confirm_stated(self, client_id: str, proposal_id: str, acknowledge_discrepancies: bool) -> dict:
+        """Save balances the person stated in conversation as the stated facts a statement later refines.
+
+        ``cash.<name>``, ``investment.<name>``, ``liability.<name>`` and ``income.<name>`` (source ``user``), never
+        statement records and never ledger lines: a statement for the same institution covers them (its figure
+        wins and the difference is shown) instead of being counted beside them.
+        """
+        from .ingest import proposal_to_facts
+        from .ingest.chat import stated_facts
+        with WealthStore(self.db_path) as store:
+            with store.atomic():
+                state = store.auxiliary(client_id, "ingest")
+                done = (state.get("confirmed") or {}).get(proposal_id)
+                if done is not None:
+                    return {**done["report"], "replayed": True}
+                stored = (state.get("pending") or {}).get(proposal_id)
+                if stored is None:
+                    raise ValueError("proposal_id is unknown or expired; ingest the chat again and show the summary")
+                proposal = stored["proposal"]
+                packet = proposal_to_facts(proposal, confirmed=True, proposal_id=proposal_id,
+                                           acknowledge_discrepancies=acknowledge_discrepancies)
+                if packet["status"] != "ready":
+                    return packet
+                facts = stated_facts(proposal) or []
+                snapshot = store.snapshot(client_id)
+                before = build_situation(snapshot, store.ledger(client_id), datetime.now(timezone.utc).date())
+                saved = store.remember(client_id, facts, None, packet["result"]["request_id"])
+                after = build_situation(store.snapshot(client_id), store.ledger(client_id),
+                                        datetime.now(timezone.utc).date())
+                written = [w["key"] for w in saved["written"]]
+                report = {
+                    "status": "saved",
+                    "result": {
+                        "summary": (f"Saved what the person said as {', '.join(f['key'] for f in facts)}. A statement "
+                                    "for the same institution will replace these figures and show the difference."),
+                        "saved": {"keys": written, "client_revision": saved["client"]["revision"]},
+                        "needs_user": saved["needs_user"],
+                        "picture_after": situation_module.picture_delta(before, after,
+                                                                        after["profile"].get("language")),
+                    },
+                    "missing": [], "warnings": packet["warnings"] + saved.get("warnings", []),
+                    "sources": packet["sources"], "assumptions": packet["assumptions"],
+                }
+                now = datetime.now(timezone.utc).isoformat()
+
+                def update(old):
+                    state = {k: dict(old.get(k) or {}) for k in ("pending", "extractions", "confirmed")}
+                    state["pending"].pop(proposal_id, None)
+                    state["confirmed"][proposal_id] = {"proposal": proposal, "created_at": now, "batch": None,
+                                                       "held": [], "report": report}
+                    state["confirmed"] = dict(sorted(state["confirmed"].items(),
+                                                     key=lambda item: item[1].get("created_at", ""))[-_KEEP_PROPOSALS:])
+                    return state
+
+                store.update_auxiliary(client_id, "ingest", update)
         return report
 
     def _ingest_confirm_tax(self, client_id: str, proposal_id: str, acknowledge_discrepancies: bool,

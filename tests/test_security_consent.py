@@ -147,7 +147,7 @@ def test_injected_confirm_is_refused_without_the_persons_yes(service):
     with pytest.raises(ToolError, match="ConsentRequired"):
         call(refused, "wealth_ingest", {"client_id": "ana", "action": "confirm",
                                         "inputs": {"proposal_id": proposal_id, "acknowledge_discrepancies": True}})
-    assert not [f for f in service.inspect("ana")["facts"] if f["key"].startswith("account.")]
+    assert not _accounts(service)
 
     agreed = build_server(str(service.db_path), environ=chat_env("Sí, guárdalo"))
     saved = call(agreed, "wealth_ingest", {"client_id": "ana", "action": "confirm",
@@ -167,7 +167,8 @@ def test_the_memory_step_can_never_confirm_resolve_or_accept(service):
 
 
 def _accounts(service):
-    return [f for f in service.inspect("ana")["facts"] if f["key"].startswith("account.")]
+    # A statement saves account.<id>; balances said in conversation save cash.<id> or investment.<id>.
+    return [f for f in service.inspect("ana")["facts"] if f["key"].startswith(("account.", "cash.", "investment."))]
 
 
 def test_a_host_without_a_turn_session_needs_two_steps_to_save(service):
@@ -821,7 +822,7 @@ def test_the_real_stdio_server_reads_the_turn_from_its_environment(service):
     assert failed and "ConsentRequired" in text
     failed, text = asyncio.run(attempt("sí"))
     assert not failed
-    assert [f for f in service.inspect("ana")["facts"] if f["key"].startswith("account.")]
+    assert _accounts(service)
 
 
 @pytest.mark.parametrize("value, said", [

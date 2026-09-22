@@ -370,8 +370,12 @@ def _accounts(sit: Mapping[str, Any], facts: dict[str, dict], convert: _Converte
             continue
         if (account.get("type") or "").lower() in ("credit_card", "loan", "mortgage", "line_of_credit"):
             continue
-        out.append({"key": account["key"], "value": {}, "row": account, "amount": D(account.get("value")),
-                    "statement_keys": [account["key"]], "statement_only": True})
+        # An account the ledger alone knows (facts passed in inputs replace the saved ones) has no fact key.
+        key = account.get("key") or (f"ledger.{account['id']}" if account.get("id") else None)
+        if key is None:
+            continue
+        out.append({"key": key, "value": {}, "row": account, "amount": D(account.get("value")),
+                    "statement_keys": [key], "statement_only": True})
     for key, fact in sorted(facts.items()):
         value = fact.get("value")
         if not isinstance(value, dict) or key.count(".") != 1:
