@@ -400,6 +400,10 @@ def _accounts(sit: Mapping[str, Any], facts: dict[str, dict], convert: _Converte
             designations[value["account"]] = (key, {k: v for k, v in value.items() if k not in ("account", "note")})
     for entry in out:
         found = designations.pop(entry["key"], None)
+        for covered in entry.get("statement_keys") or []:
+            # A stated balance its statement covers (investment.gbm valued by account.gbm-7832) is one account:
+            # a designation saved on either key belongs to it.
+            found = found or designations.pop(covered, None)
         if found:
             entry["designation_key"] = found[0]
             entry["value"] = {**entry["value"], **found[1]}

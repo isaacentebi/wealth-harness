@@ -545,7 +545,7 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = False,
         New keys and updates need no expected_revision: an object sent for a key that
         already holds one merges into it (only the fields you send change). Replacing a
         value wholesale needs merge=false with expected_revision (the client_revision you read). valid_from:
-        when it became true ("went up in March"). value null forgets a key.
+        when it became true ("went up in March"). value null with merge=true forgets a key.
         Evidence never overwrites what the person said: those writes come back in
         needs_user. Ask with each item's question; never pick a side silently.
 

@@ -405,6 +405,26 @@ def test_a_large_task_example_is_shown_by_its_shape(tmp_path):
     assert isinstance(full["tasks"]["tax_pack"]["example"]["ledger"], dict)
 
 
+def test_a_designation_on_the_statement_key_reaches_the_stated_account_it_covers(service):
+    """Before: with "400k en GBM" saved and GBM's statement covering it, a designation saved on
+    account.gbm-7832 was "not in the picture" and investment.gbm showed no beneficiary; the host moved it
+    by hand, tripping over the forget rule twice."""
+    said = {"kind": "user", "ref": "chat", "observed_on": "2026-09-01"}
+    service.remember("mariana", [{"key": "investment.gbm", "value": {"amount": 400000, "currency": "MXN",
+                                                                     "institution": "GBM"}, "source": said}])
+    proposal = service.ingest("mariana", "file", {"path": GBM})
+    service.ingest("mariana", "confirm", {"proposal_id": proposal["result"]["proposal_id"]})
+    service.remember("mariana", [{"key": "estate.designation.account-gbm-7832", "value": {
+        "account": "account.gbm-7832", "beneficiaries": [{"name": "Diego", "relationship": "spouse", "share": 1}]},
+        "source": said}])
+    report = service.run("estate_register", client_id="mariana")
+    rows = {r["key"]: r for r in report["result"]["rows"]}
+    assert "account.gbm-7832" not in rows and not any("not in the picture" in w for w in report["warnings"])
+    gbm = rows["investment.gbm"]
+    assert gbm["mechanism"] == "beneficiary" and [h["name"] for h in gbm["heirs"]] == ["Diego"]
+    assert money(gbm["value"]) == money(TRUTH[GBM]["total"])
+
+
 def test_estate_register_with_facts_in_inputs_keeps_ledger_accounts(service):
     """Before: facts passed in inputs left the statements' ledger accounts without a key and the task crashed
     with no message ("Error executing tool wealth_run")."""
