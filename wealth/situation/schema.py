@@ -16,10 +16,12 @@ from typing import Any, Callable
 # ------------------------------------------------------------------ the contract
 
 LANGUAGES = ("es", "en")
-FREQUENCIES = ("monthly", "biweekly", "annual", "one_off")
+# weekly 52, biweekly (catorcenal, every 14 days) 26, semimonthly (quincenal, twice a month) 24 a year:
+# finmath.per_month is the one place those counts live.
+FREQUENCIES = ("monthly", "semimonthly", "biweekly", "weekly", "annual", "one_off")
 INCOME_KINDS = ("salary", "aguinaldo", "ptu", "bonus", "rent", "business", "pension", "other")
 LIABILITY_KINDS = ("auto", "mortgage", "card", "personal", "student", "other")
-PAYMENT_FREQUENCIES = ("monthly", "biweekly", "annual")
+PAYMENT_FREQUENCIES = ("monthly", "semimonthly", "biweekly", "weekly", "annual")
 GOAL_PRIORITIES = ("high", "medium", "low")
 GOAL_STATUSES = ("active", "paused", "done", "dropped")
 GOAL_ACTIONS = ("invest", "save", "buy", "pay_off", "retire", "education", "other")

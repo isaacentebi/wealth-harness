@@ -35,9 +35,27 @@ _KIND_ALIASES = {
     "card": ("liability", None), "credit_card": ("liability", None), "mortgage": ("liability", None),
     "salary": ("income", None), "wage": ("income", None), "holding": ("position", None),
 }
-_PERIODS = {"monthly": 12, "month": 12, "mensual": 12, "biweekly": 26, "quincenal": 24, "weekly": 52,
-            "annual": 1, "yearly": 1, "anual": 1}
-_MONTHLY_WORDS = re.compile(r"(?i)\b(al mes|mensual(es)?|por mes|cada mes|a month|per month|monthly|/mes|/mo)\b")
+# (times a year, the saved frequency or None when Wealth keeps no such frequency: then the year's figure is saved).
+# Quincenal is twice a month (24 a year, "semimonthly"); catorcenal is every 14 days (26, "biweekly").
+_PERIODS = {
+    "weekly": (52, "weekly"), "semanal": (52, "weekly"), "week": (52, "weekly"),
+    "biweekly": (26, "biweekly"), "catorcenal": (26, "biweekly"), "fortnightly": (26, "biweekly"),
+    "semimonthly": (24, "semimonthly"), "quincenal": (24, "semimonthly"), "twice_monthly": (24, "semimonthly"),
+    "monthly": (12, "monthly"), "month": (12, "monthly"), "mensual": (12, "monthly"),
+    "bimonthly": (6, None), "bimestral": (6, None), "quarterly": (4, None), "trimestral": (4, None),
+    "semiannual": (2, None), "semestral": (2, None),
+    "annual": (1, "annual"), "yearly": (1, "annual"), "anual": (1, "annual"), "year": (1, "annual"),
+}
+# The period said in the person's words when the model did not name one (most specific first).
+_QUOTE_PERIODS = (
+    (re.compile(r"(?i)\b(quincenal(es)?|a la quincena|por quincena|cada quincena|twice a month)\b"), "quincenal"),
+    (re.compile(r"(?i)\b(catorcenal(es)?|cada catorce d[ií]as|every two weeks|biweekly|fortnightly)\b"), "catorcenal"),
+    (re.compile(r"(?i)\b(semanal(es)?|a la semana|por semana|cada semana|a week|per week|weekly)\b"), "semanal"),
+    (re.compile(r"(?i)\b(bimestral(es)?|cada dos meses|al bimestre|por bimestre)\b"), "bimestral"),
+    (re.compile(r"(?i)(\bal mes\b|\bmensual(es)?\b|\bpor mes\b|\bcada mes\b|\ba month\b|\bper month\b|"
+                r"\bmonthly\b|/mes\b|/mo\b)"), "mensual"),
+    (re.compile(r"(?i)\b(al a[nñ]o|anual(es)?|por a[nñ]o|a year|per year|yearly|annual)\b"), "anual"),
+)
 
 
 def _canonical(item: dict[str, Any]) -> dict[str, Any]:
@@ -55,21 +73,22 @@ def _canonical(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _annual(item: dict[str, Any]) -> tuple[Any, str | None, str | None]:
-    """An income amount per year, the note saying so, and the period it was said in.
+    """An income amount per year, the note saying so, and the frequency to save it with.
 
-    "gano 85 mil al mes" is 1,020,000 a year, never 85,000."""
+    "gano 85 mil al mes" is 1,020,000 a year, never 85,000; "10 mil a la quincena" is 240,000 (24 a year).
+    The frequency is None when Wealth keeps none for that period (bimestral): the year's figure is saved."""
     amount = parse_amount(item.get("amount"))
     if amount is None:
         return item.get("amount"), None, None
-    period = str(item.get("frequency") or item.get("period") or "").strip().lower()
-    factor = _PERIODS.get(period)
-    if factor is None and _MONTHLY_WORDS.search(str(item.get("quote") or "")):
-        factor, period = 12, "monthly"
+    period = str(item.get("frequency") or item.get("period") or "").strip().lower().replace("-", "_")
+    if period not in _PERIODS:
+        period = next((name for pattern, name in _QUOTE_PERIODS if pattern.search(str(item.get("quote") or ""))),
+                      period)
+    factor, frequency = _PERIODS.get(period, (None, None))
     if factor is None or factor == 1:
         return item.get("amount"), None, "annual" if factor == 1 else None
-    canonical = {"month": "monthly", "mensual": "monthly", "quincenal": "biweekly"}.get(period, period)
     note = f"{item.get('label') or 'Income'}: {amount} {period} was saved as {amount * factor} a year."
-    return str(amount * factor), note, canonical if canonical in ("monthly", "biweekly") else None
+    return str(amount * factor), note, frequency
 
 
 _LIABILITY_WORDS = ((re.compile(r"(?i)\b(hipoteca|mortgage|infonavit|fovissste)\b"), "mortgage"),

@@ -121,8 +121,10 @@ _KIND = {"es": {"auto": "auto", "mortgage": "hipoteca", "card": "tarjeta", "pers
                 "student": "student", "other": "loan"}}
 
 
-_FREQUENCY = {"es": {"monthly": " al mes", "biweekly": " cada dos semanas", "annual": " al año", "weekly": " a la semana"},
-              "en": {"monthly": " a month", "biweekly": " every two weeks", "annual": " a year", "weekly": " a week"}}
+_FREQUENCY = {"es": {"monthly": " al mes", "semimonthly": " a la quincena", "biweekly": " cada dos semanas",
+                     "annual": " al año", "weekly": " a la semana"},
+              "en": {"monthly": " a month", "semimonthly": " twice a month", "biweekly": " every two weeks",
+                     "annual": " a year", "weekly": " a week"}}
 _KEY_NAMES = {"es": {"income": "ingreso", "spending": "gasto mensual", "client.profile": "perfil", "goals": "metas",
                      "reserve": "reserva", "cash": "efectivo", "investment": "inversión", "liability": "deuda",
                      "policy.ips": "política de inversión", "planning.dca": "plan de inversión periódica",
@@ -486,8 +488,10 @@ def sentences(sit: Mapping[str, Any], language: str | None = None) -> list[dict]
     for item in income["items"]:
         amount = _amount(item["amount"], item["currency"], True)
         approx = about(item["approximate"])
-        if item["frequency"] == "biweekly":
-            period_es, period_en = "cada dos semanas", "every two weeks"
+        if item["frequency"] in ("biweekly", "semimonthly", "weekly"):
+            period_es, period_en = {"biweekly": ("cada dos semanas", "every two weeks"),
+                                    "semimonthly": ("a la quincena", "twice a month"),
+                                    "weekly": ("a la semana", "a week")}[item["frequency"]]
         else:
             period_es, period_en = "al mes", "a month"
         if item["net"] is False:

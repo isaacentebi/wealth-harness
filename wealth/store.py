@@ -364,6 +364,12 @@ _V1_REVIEW_DAYS: tuple[tuple[str, int], ...] = (
 )
 # Facts that set financial policy; document/web sources cannot establish them.
 _POLICY_KEYS = frozenset({"goals", "client.profile", "tax.profile", "monitor.rules"})
+_PERIOD_TEXT = {
+    "en": {"monthly": " a month", "month": " a month", "semimonthly": " twice a month",
+           "biweekly": " every two weeks", "weekly": " a week", "annual": " a year", "year": " a year"},
+    "es": {"monthly": " al mes", "month": " al mes", "semimonthly": " a la quincena",
+           "biweekly": " cada dos semanas", "weekly": " a la semana", "annual": " al año", "year": " al año"},
+}
 _HELD_KEY = re.compile(r"^(cash|investment)\.[^.]+$")  # a stated account: its balance may be unknown
 _POLICY_PREFIXES = ("preference.", "constraint.")
 _SENSITIVE_FIELDS = frozenset({
@@ -627,10 +633,7 @@ def describe(value: Any) -> str:
             if isinstance(amount, (int, float)) and not isinstance(amount, bool):
                 text = f"{value.get('currency') or ''} {fmt(amount)}".strip()
                 period = value.get("frequency") or value.get("period")
-                if period in {"monthly", "month"}:
-                    text += " a month"
-                elif period in {"annual", "year"}:
-                    text += " a year"
+                text += _PERIOD_TEXT["en"].get(period, "")
                 return text
     if isinstance(value, list):
         return f"{len(value)} item{'s' if len(value) != 1 else ''}"
@@ -726,10 +729,7 @@ def _say(value: Any, lang: str, show_code: bool) -> str:
             if isinstance(amount, (int, float)) and not isinstance(amount, bool):
                 text = _money(amount, value.get("currency"), show_code)
                 period = value.get("frequency") or value.get("period")
-                if period in {"monthly", "month"}:
-                    text += " al mes" if lang == "es" else " a month"
-                elif period in {"annual", "year"}:
-                    text += " al año" if lang == "es" else " a year"
+                text += _PERIOD_TEXT["es" if lang == "es" else "en"].get(period, "")
                 return text
     return describe(value)
 

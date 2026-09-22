@@ -1278,7 +1278,9 @@ def _mx_dividendos(book: _Book) -> dict:
                             "basis": "constancia" if stated_credit is not None else "computed (assumes CUFIN)"},
                         "constancia": None if not block else {k: _m(_d(v)) for k, v in block.items()},
                         "basis": "constancia" if bucket.get("ledger") is False else "ledger"})
-        if block and bucket.get("ledger") is not False:
+        if block and bucket.get("ledger") is False:
+            pass  # only the constancia: its figures are the year's, nothing to compare them with or to ask for
+        elif block:
             for label, ours, key in (("dividendos nacionales / domestic dividends", bucket["domestic"], "domestic_gross"),
                                      ("dividendos extranjeros / foreign dividends", bucket["foreign"], "foreign_gross"),
                                      ("ISR retenido (sin retenciones del extranjero) / Mexican ISR withheld",

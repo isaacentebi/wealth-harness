@@ -1870,7 +1870,8 @@ _TRACKS = {**dict.fromkeys(("CSPX", "CSPXN", "VOO", "IVV", "SPY", "VUSA", "VUAA"
            **dict.fromkeys(("CNDX", "EQQQ", "QQQ", "QQQM"), "Nasdaq-100"),
            **dict.fromkeys(("VWRA", "VWRL", "VT", "ACWI", "SSAC"), "MSCI ACWI"),
            **dict.fromkeys(("VTI", "ITOT"), "US total market"), **dict.fromkeys(("NAFTRAC",), "S&P/BMV IPC")}
-_CADENCE = {"weekly": ("{x} weekly", "{x} semanal"), "biweekly": ("{x} fortnightly", "{x} quincenal"),
+# A DCA "biweekly" plan buys every 14 days: catorcenal, not quincenal (twice a month).
+_CADENCE = {"weekly": ("{x} weekly", "{x} semanal"), "biweekly": ("{x} every two weeks", "{x} cada dos semanas"),
             "monthly": ("{x} monthly", "{x} mensual"), "quarterly": ("{x} quarterly", "{x} trimestral")}
 # Fixture and provenance notes some inputs carry in a name, e.g. "(fictional levels)": never shown.
 _ANNOTATION = re.compile(r"\s*\((?:[^)]*\b(?:fictional|ficticio|ficticia|example|ejemplo|levels|niveles|demo|test|sample)\b[^)]*)\)",

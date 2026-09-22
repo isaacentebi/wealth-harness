@@ -278,7 +278,10 @@ def test_the_tax_pack_uses_constancia_dividends_and_reports_1099_figures(service
     report = service.run("tax_pack", inputs={"tax_year": 2025}, client_id="mariana")
     sections = report["result"]["sections"]
     broker = sections["mx_dividendos"]["summary"]["brokers"][0]
-    assert sections["mx_dividendos"]["status"] != "not_applicable"
+    # The constancia is the whole year's dividends: nothing is missing (before: "partial", asking for the very
+    # constancia it was reading).
+    assert sections["mx_dividendos"]["status"] == "ready" and not sections["mx_dividendos"]["missing"]
+    assert not any(p["key"].endswith(".dividendos") for p in report["result"]["pendientes"])
     assert (broker["domestic_gross_mxn"], broker["foreign_gross_mxn"], broker["basis"]) == ("1245.60", "1580.34",
                                                                                             "constancia")
     assert broker["art140"]["corporate_isr_credit_mxn"] == "533.83"
@@ -463,3 +466,34 @@ def test_a_us_citizen_is_a_us_person_without_saying_so(service):
     assert service.situation("mariana")["profile"]["us_person"] is True
     report = service.run("tax_pack", inputs={"tax_year": 2025}, client_id="mariana")
     assert report["result"]["jurisdictions"] == ["MX", "US"] and report["result"]["us_person"] is True
+
+
+@pytest.mark.parametrize("said, amount, frequency, annual, monthly", [
+    ("gano 10 mil a la quincena", 10000, "semimonthly", "240000", 20000),   # quincenal: 24 a year
+    ("me pagan 10 mil catorcenal", 10000, "biweekly", "260000", 21666.67),  # every 14 days: 26 a year
+    ("gano 5 mil a la semana", 5000, "weekly", "260000", 21666.67),
+    ("gano 85 mil al mes", 85000, "monthly", "1020000", 85000),
+    ("cobro 30 mil bimestral de rentas", 30000, "annual", "180000", None),  # no bimonthly frequency: the year's
+    ("gano 900 mil al año", 900000, "annual", "900000", None),
+])
+def test_chat_income_keeps_its_pay_period(service, said, amount, frequency, annual, monthly):
+    """Before: "quincenal" was annualized at 24 but saved as biweekly (26 a year), so 10,000 a quincena read as
+    21,666.67 a month instead of 20,000."""
+    chat = service.ingest("mariana", "chat", {"currency": "MXN", "items": [
+        {"kind": "income", "label": "Ingreso", "amount": amount, "quote": said}]})
+    assert chat["result"]["household"]["income_exposures"][0]["annual_amount"] == annual
+    service.ingest("mariana", "confirm", {"proposal_id": chat["result"]["proposal_id"],
+                                          "acknowledge_discrepancies": True})
+    fact = service.inspect("mariana", key="income.ingreso")["facts"][0]["value"]
+    assert fact["frequency"] == frequency
+    assert fact["amount"] == (int(annual) if frequency == "annual" else amount)
+    got = service.situation("mariana")["income"]["monthly"]
+    assert (round(got, 2) if got is not None else None) == monthly
+
+
+def test_a_quincenal_payment_is_counted_twice_a_month(service):
+    said = {"kind": "user", "ref": "chat", "observed_on": "2026-09-01"}
+    service.remember("mariana", [{"key": "liability.auto", "value": {
+        "kind": "auto", "balance": 100000, "currency": "MXN", "annual_rate": 0.12, "payment": 2500,
+        "payment_frequency": "semimonthly"}, "source": said}])
+    assert service.situation("mariana")["liabilities"][0]["monthly_payment"] == 5000
