@@ -424,6 +424,60 @@ def _call(srv, name, arguments):
     return asyncio.run(srv.call_tool(name, arguments)).structured_content
 
 
+def test_a_confirmation_code_covers_exactly_the_options_that_execute(service):
+    """SECURITY: a code issued for a plain save was redeemable with settle_differences="false" (a truthy string the
+    hash read as False and the save read as True), letting a statement settle contradictions the person never
+    approved.  Options are now validated strictly and the call runs with the very options that were hashed."""
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    srv = _server(service)
+    said = {"kind": "user", "ref": "chat", "observed_on": "2026-09-01"}
+    service.remember("mariana", [{"key": "investment.gbm", "value": {"amount": 400000, "currency": "MXN",
+                                                                     "institution": "GBM"}, "source": said}])
+    proposal = _call(srv, "wealth_ingest", {"client_id": "mariana", "action": "file", "inputs": {"path": GBM}})
+    pid, code = proposal["result"]["proposal_id"], proposal["result"]["confirmation"]["confirmation_code"]
+    for bad in ({"settle_differences": "false"}, {"acknowledge_discrepancies": "yes"}, {"expires_on": "soon"},
+                {"settle": True}):
+        with pytest.raises(ToolError, match="ValidationError"):
+            _call(srv, "wealth_ingest", {"client_id": "mariana", "action": "confirm", "confirm": True,
+                                         "confirmation_code": code, "inputs": {"proposal_id": pid, **bad}})
+    with pytest.raises(ValueError, match="settle_differences must be true or false"):
+        service.ingest("mariana", "confirm", {"proposal_id": pid, "settle_differences": "false"})
+    # A real True is a different save: the code issued for the plain one does not cover it.
+    with pytest.raises(ToolError, match="ConsentRequired"):
+        _call(srv, "wealth_ingest", {"client_id": "mariana", "action": "confirm", "confirm": True,
+                                     "confirmation_code": code, "inputs": {"proposal_id": pid,
+                                                                           "settle_differences": True}})
+    assert not service.inspect("mariana", key="account.gbm-7832")["facts"]
+    # The person's own wording of the difference is kept: the plain save leaves it for them to answer.
+    fresh = _call(srv, "wealth_ingest", {"client_id": "mariana", "action": "confirm", "inputs": {"proposal_id": pid}})
+    saved = _call(srv, "wealth_ingest", {"client_id": "mariana", "action": "confirm", "confirm": True,
+                                         "confirmation_code": fresh["result"]["confirmation_code"],
+                                         "inputs": {"proposal_id": pid}})
+    assert saved["status"] == "saved" and not saved["result"].get("settled_by_confirmation")
+
+
+def test_a_second_chat_in_another_currency_never_overwrites_the_first(service):
+    """Before: "USD 100 in Wallet", then in a later message "MXN 1,000 in Wallet", both became cash.wallet and the
+    second replaced the first."""
+    for amount, currency, quote in ((100, "USD", "tengo 100 dólares en Wallet"),
+                                    (1000, "MXN", "y 1,000 pesos en Wallet")):
+        chat = service.ingest("mariana", "chat", {"items": [
+            {"kind": "cash", "label": "Wallet", "amount": amount, "currency": currency, "quote": quote}]})
+        service.ingest("mariana", "confirm", {"proposal_id": chat["result"]["proposal_id"]})
+    facts = {f["key"]: f["value"] for f in service.inspect("mariana")["facts"]}
+    assert (facts["cash.wallet"]["amount"], facts["cash.wallet"]["currency"]) == (100, "USD")
+    assert (facts["cash.wallet-mxn"]["amount"], facts["cash.wallet-mxn"]["currency"]) == (1000, "MXN")
+
+
+def test_expires_on_is_honoured_when_saving_what_the_person_said(service):
+    """Before: expires_on on a chat confirmation was dropped (statement confirmations kept it)."""
+    chat = service.ingest("mariana", "chat", {"as_of": "2026-09-01", "items": [
+        {"kind": "cash", "label": "Wallet", "amount": 100, "currency": "USD", "quote": "tengo 100 dólares en Wallet"}]})
+    service.ingest("mariana", "confirm", {"proposal_id": chat["result"]["proposal_id"], "expires_on": "2026-12-31"})
+    assert service.inspect("mariana", key="cash.wallet")["facts"][0]["expires_on"] == "2026-12-31"
+
+
 def test_a_proposal_carries_its_code_so_one_yes_saves_it(service):
     """Before: the code came only from a first confirm call, so a person who had said yes to the figures was
     asked again, and a host that moved on left every statement unsaved."""
@@ -632,15 +686,15 @@ def test_cash_said_to_be_at_a_broker_is_replaced_by_its_statement(service):
 
 
 def test_a_stated_key_never_merges_two_institutions():
-    from wealth.service import _separate_institutions
+    from wealth.service import _separate_accounts
 
     snapshot = {"facts": [{"key": "cash.wallet", "value": {"amount": 1, "currency": "MXN", "institution": "Nu"}}]}
     facts = [{"key": "cash.wallet", "value": {"amount": 2, "currency": "MXN", "institution": "BBVA"}},
              {"key": "cash.nu", "value": {"amount": 3, "currency": "MXN", "institution": "Nu"}}]
-    _separate_institutions(facts, snapshot)
+    _separate_accounts(facts, snapshot)
     assert [f["key"] for f in facts] == ["cash.wallet-2", "cash.nu"]
     same = [{"key": "cash.wallet", "value": {"amount": 4, "currency": "MXN", "institution": "Nu México"}}]
-    _separate_institutions(same, snapshot)
+    _separate_accounts(same, snapshot)
     assert same[0]["key"] == "cash.wallet"  # the same firm: an update, not a new account
 
 
