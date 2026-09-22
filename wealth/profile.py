@@ -2618,9 +2618,12 @@ def _flow(sit: dict) -> dict:
     left = income - sum(s["value"] for s in segments)
     segments.append({"id": "unallocated", "value": round(left, 2)})
     saved = income - spent - debt
+    # When the model cannot say what is left each month (an unknown payment, or one that may already sit inside
+    # the stated spending), the savings rate is unknown too, never a figure built on a guess.
+    known = cf.get("surplus") is not None or "surplus" not in cf
     return {**base, "status": "ready", "missing": [], "segments": segments,
             "committed": [{"name": c.get("name"), "kind": c.get("kind"), "value": _r(c.get("monthly"))} for c in committed_items],
-            "savings_rate": round(saved / income, 4) if income > 0 else None}
+            "savings_rate": round(saved / income, 4) if income > 0 and known else None}
 
 
 def _spending_months(sit: dict, ledger: dict | None) -> dict | None:
