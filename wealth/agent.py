@@ -1208,10 +1208,10 @@ def stream_turn(
     """
 
     history = list(history)
-    tainted = bool(attachments) or bool(thread_id and not ephemeral and _thread_read_files(db_path, thread_id))
-    if tainted:
-        web_search = False
     said = user_prompt if person_message is None else person_message
+    tainted = bool(attachments) or bool(thread_id and not ephemeral and _thread_read_files(db_path, thread_id))
+    if tainted or asks_to_sync(said or ""):
+        web_search = False  # an account sync reads private text, like a file
     views = [dict(v) for v in views]
     if views:
         yield TurnEvent("view", data={"views": views})
@@ -1310,6 +1310,15 @@ def _await_reaper(thread_id: str) -> None:
 
 _FILE_THREADS_SUFFIX = ".file-threads"
 _MAX_FILE_THREADS = 500
+_SYNC_WORDS = re.compile(r"\b(sincroniza\w*|actualiza\w*\s+(mis\s+)?(cuentas|saldos|posiciones)|sync\w*|refresh\s+(my\s+)?"
+                         r"(accounts|balances|positions)|conecta\w*\s+(mi|mis)\s+(cuenta|cuentas|broker|banco))\b", re.I)
+
+
+def asks_to_sync(message: str) -> bool:
+    """Whether the person asks to sync or connect accounts, so the turn runs without web search."""
+    return bool(_SYNC_WORDS.search(message))
+
+
 _file_threads_lock = threading.Lock()
 
 

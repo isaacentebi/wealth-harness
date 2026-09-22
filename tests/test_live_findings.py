@@ -311,3 +311,18 @@ def test_idle_yield_lets_cetes_fill_the_reserve_first():
                                                         "name": "CETES"}})["idle_yield"]["data"]
     # CETES hold 100,000 of the 120,000 reserve: only 20,000 has to sit in checking; the CETES are not idle.
     assert with_cetes["idle"] == 180000 and with_cetes["kept"]["reserve_in_instruments"] == 100000
+
+
+def test_a_goal_linked_to_a_replaced_estimate_counts_the_statement_balance():
+    from datetime import date
+    from decimal import Decimal
+    from wealth.situation import model as m
+    goal = {"id": "casa", "accounts": ["cash.gbm"], "currency": "MXN"}
+    rows = [
+        {"key": "cash.gbm", "amount": 400000, "currency": "MXN", "value": 400000, "counted": False,
+         "covered_by": ["account.gbm-1234"]},
+        {"key": "account.gbm-1234", "amount": 425000, "currency": "MXN", "value": 425000, "purpose": "goal"},
+    ]
+    m._goal_funding([goal], rows, m._FX(date(2026, 9, 21)), "MXN")
+    assert Decimal(str(goal["funded"])) == Decimal("425000")
+    assert goal["funded_sources"] == ["account.gbm-1234"]

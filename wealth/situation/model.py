@@ -1161,11 +1161,21 @@ def _goal_funding(goals: list[dict], rows: Iterable[dict], fx: "_FX", currency: 
             goal["funded"], goal["funded_basis"] = goal["funded_amount"], "stated"
             continue
         total, known, found = Decimal(0), True, False
-        for row in rows:
+        by_key = {r.get("key"): r for r in rows}
+        # A stated account a statement replaced counts through that statement: the current balance, once.
+        chosen: dict[Any, dict] = {}
+        for row in by_key.values():
             key = row.get("key")
-            listed = key in goal["accounts"]
-            if row.get("purpose") != f"goal:{goal['id']}" and not listed:
+            if row.get("purpose") != f"goal:{goal['id']}" and key not in goal["accounts"]:
                 continue
+            if row.get("counted") is False and row.get("covered_by"):
+                for cover in row["covered_by"]:
+                    if cover in by_key:
+                        chosen[cover] = by_key[cover]
+                continue
+            chosen[key] = row
+        for row in chosen.values():
+            key = row.get("key")
             found = True
             goal["funded_sources"].append(key)
             amount, cur = D(row.get("amount")), row.get("currency")

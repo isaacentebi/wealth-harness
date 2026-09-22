@@ -219,3 +219,14 @@ def test_catalog_payoff_variants_draw_the_pnl_chart_and_the_limits(tmp_path, var
     assert chart["loss"] == {"v": pay["max_loss"], "unbounded": pay["max_loss_unbounded"]}
     assert chart["gain"] == {"v": pay["max_gain"], "unbounded": pay["max_gain_unbounded"]}
     assert any("expiry" in a or "leveraged" in a for a in report["assumptions"])
+
+
+def test_a_credit_spread_bought_by_amount_is_still_sized_by_what_it_can_lose():
+    # A put credit spread: 10 x (short 180 / long 120). The premium in is small; the loss is up to 60 a share.
+    legs = [_put("short", 180, 5, 10), _put("long", 120, 1, 10)]
+    out = g.speculation_check({"action": "buy", "side": "long", "instrument": "options", "currency": "MXN",
+                               "spot": 185, "amount": 4000, "legs": legs,
+                               "sleeve": {"value": 0}}, _sit())
+    worst = out["payoff"]["max_loss"]
+    assert worst > 4000
+    assert out["limits"]["sleeve_after"] == pytest.approx(worst)

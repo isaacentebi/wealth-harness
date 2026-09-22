@@ -786,3 +786,17 @@ def test_a_figure_restated_from_what_the_person_said_is_still_theirs(value, said
 def test_a_figure_the_person_never_said_is_not_theirs():
     from wealth.consent import supported
     assert supported(777777, ["gano 85 mil al mes"]) == [777777.0]
+
+
+def test_accounts_do_not_sync_in_a_turn_with_web_search(service):
+    live = build_server(str(service.db_path), environ={**chat_env("¿cómo voy?"), "WEALTH_TURN_WEB_SEARCH": "1"})
+    with pytest.raises(ToolError, match="SearchIsOn"):
+        call(live, "wealth_ingest", {"client_id": "ana", "action": "connector", "inputs": {"connector": "alpaca"}})
+
+
+@pytest.mark.parametrize("message, sync", [
+    ("sincroniza mis cuentas", True), ("sync my accounts", True), ("actualiza mis saldos", True),
+    ("conecta mi broker", True), ("¿cómo voy?", False), ("¿qué opinas de ASML?", False),
+])
+def test_a_request_to_sync_runs_without_web_search(message, sync):
+    assert agent.asks_to_sync(message) is sync

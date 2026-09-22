@@ -987,6 +987,8 @@ def speculation_check(proposal: Mapping[str, Any], situation: Mapping[str, Any] 
     else:
         worst, unbounded, how = _worst_loss(work, kind)
     short_exposure = writing or (kind == "options" and side == "short") or instrument == "short"
+    if payoff_out is not None and any(leg.get("side") == "short" for leg in payoff_out.get("legs") or ()):
+        short_exposure = True  # a spread or any written leg is sized by what it can lose, not by the premium
 
     # -- the cap on liquid net worth
     liquid = _num((sit.get("net_worth") or {}).get("liquid"))

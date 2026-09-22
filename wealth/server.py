@@ -562,6 +562,10 @@ def build_server(db_path: str | None = None, *, include_behavior: bool = False,
         elif action in {"file", "extraction"} and search_live:
             raise ToolError("SearchIsOn: statements are read only in a turn without web search, so nothing from a "
                             "file can leave in a search query. Ask the person to attach the file to their message.")
+        elif action == "connector" and search_live:
+            raise ToolError("SearchIsOn: accounts sync only in a turn without web search, so nothing read from them "
+                            "can leave in a search query. Ask the person to ask for the sync in its own message "
+                            "(e.g. 'sincroniza mis cuentas' / 'sync my accounts').")
         return service.ingest(client_id=client_id, action=action, inputs=inputs)
 
     @tool(annotations=READ)
