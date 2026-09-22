@@ -2,13 +2,15 @@
 
     python openclaw_config.py json   --home H --db D --uploads U --views V   # print the two JSON values
     python openclaw_config.py merge  --config C --home H --db D --uploads U --views V [--no-mcp] [--dry-run]
+    (json, snippet and merge take --sec-user-agent "Name email" for the 13F manager tasks)
     python openclaw_config.py remove --config C [--dry-run] [--no-backup]
 
 ``merge`` and ``remove`` edit only ``mcp.servers.wealth`` and ``skills.entries.wealth``,
 back the file up first (``<config>.wealth-backup-<timestamp>``) and keep every other
-entry.  They handle strict JSON only: OpenClaw's config is JSON5, so a file with
-comments or trailing commas is left untouched (exit 3) and the snippet is printed
-for a manual edit.  install.sh prefers ``openclaw mcp set`` / ``openclaw config set``
+entry (a ``WEALTH_SEC_USER_AGENT`` or ``WEALTH_HOST_HANDLES_CONSENT`` already set
+on the server is kept unless a new value is given).  They handle strict JSON only:
+OpenClaw's config is JSON5, so a file with comments or trailing commas is left
+untouched (exit 3) and the snippet is printed for a manual edit.  install.sh prefers ``openclaw mcp set`` / ``openclaw config set``
 when the openclaw CLI is on PATH, which understand JSON5.
 """
 from __future__ import annotations
@@ -27,10 +29,16 @@ SKILL = "wealth"
 JSON5_ONLY = 3
 
 
-def server_entry(home: str, db: str, uploads: str) -> dict:
+# Server env the person set themselves; a rerun keeps it.
+KEPT_ENV = ("WEALTH_SEC_USER_AGENT", "WEALTH_HOST_HANDLES_CONSENT")
+
+
+def server_entry(home: str, db: str, uploads: str, sec_user_agent: str | None = None) -> dict:
     """The stdio MCP server definition for ``mcp.servers.wealth``."""
-    return {"command": "uv", "args": ["--directory", home, "run", "wealth-mcp"],
-            "env": {"WEALTH_DB": db, "WEALTH_UPLOAD_DIR": uploads}}
+    env = {"WEALTH_DB": db, "WEALTH_UPLOAD_DIR": uploads}
+    if sec_user_agent:
+        env["WEALTH_SEC_USER_AGENT"] = sec_user_agent  # SEC fair access: who is asking EDGAR for 13F filings
+    return {"command": "uv", "args": ["--directory", home, "run", "wealth-mcp"], "env": env}
 
 
 def skill_env(home: str, db: str, uploads: str, views: str) -> dict:
@@ -38,10 +46,11 @@ def skill_env(home: str, db: str, uploads: str, views: str) -> dict:
     return {"WEALTH_HOME": home, "WEALTH_DB": db, "WEALTH_UPLOAD_DIR": uploads, "WEALTH_VIEW_DIR": views}
 
 
-def snippet(home: str, db: str, uploads: str, views: str, mcp: bool = True) -> str:
+def snippet(home: str, db: str, uploads: str, views: str, mcp: bool = True,
+            sec_user_agent: str | None = None) -> str:
     config: dict = {}
     if mcp:
-        config["mcp"] = {"servers": {SERVER: server_entry(home, db, uploads)}}
+        config["mcp"] = {"servers": {SERVER: server_entry(home, db, uploads, sec_user_agent)}}
     config["skills"] = {"entries": {SKILL: {"enabled": True, "env": skill_env(home, db, uploads, views)}}}
     return json.dumps(config, indent=2)
 
@@ -97,11 +106,19 @@ def _section(config: dict, *keys: str) -> dict:
     return node
 
 
-def merge(config: dict, home: str, db: str, uploads: str, views: str, mcp: bool = True) -> dict:
+def merge(config: dict, home: str, db: str, uploads: str, views: str, mcp: bool = True,
+          sec_user_agent: str | None = None) -> dict:
     """A copy of ``config`` with Wealth's entries set and everything else kept."""
     out = json.loads(json.dumps(config))
     if mcp:
-        _section(out, "mcp", "servers")[SERVER] = server_entry(home, db, uploads)
+        servers = _section(out, "mcp", "servers")
+        old = servers.get(SERVER) if isinstance(servers.get(SERVER), dict) else {}
+        old_env = old.get("env") if isinstance(old.get("env"), dict) else {}
+        entry = server_entry(home, db, uploads, sec_user_agent)
+        for name in KEPT_ENV:
+            if name in old_env and name not in entry["env"]:
+                entry["env"][name] = old_env[name]
+        servers[SERVER] = entry
     entry = _section(out, "skills", "entries", SKILL)
     entry.setdefault("enabled", True)
     env = entry.get("env")
@@ -142,16 +159,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-mcp", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-backup", action="store_true", help="the caller already backed the file up")
+    parser.add_argument("--sec-user-agent", default=None, help="'Name email' for SEC EDGAR (13F manager tasks)")
     args = parser.parse_args(argv)
     values = (args.home, args.db, args.uploads, args.views)
     if args.command in ("json", "snippet", "merge") and not all(values):
         parser.error("--home, --db, --uploads and --views are required")
     if args.command == "json":
-        print(json.dumps(server_entry(args.home, args.db, args.uploads)))
+        print(json.dumps(server_entry(args.home, args.db, args.uploads, args.sec_user_agent)))
         print(json.dumps(skill_env(*values)))
         return 0
     if args.command == "snippet":
-        print(snippet(*values, mcp=not args.no_mcp))
+        print(snippet(*values, mcp=not args.no_mcp, sec_user_agent=args.sec_user_agent))
         return 0
     if not args.config:
         parser.error("--config is required")
@@ -162,9 +180,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{path.name} is not strict JSON ({exc}); left untouched. Add this by hand, or install the "
               f"openclaw CLI and rerun:", file=sys.stderr)
         if args.command == "merge":
-            print(snippet(*values, mcp=not args.no_mcp), file=sys.stderr)
+            print(snippet(*values, mcp=not args.no_mcp, sec_user_agent=args.sec_user_agent), file=sys.stderr)
         return JSON5_ONLY
-    updated = merge(config, *values, mcp=not args.no_mcp) if args.command == "merge" else remove(config)
+    updated = (merge(config, *values, mcp=not args.no_mcp, sec_user_agent=args.sec_user_agent)
+               if args.command == "merge" else remove(config))
     if updated == config:
         print(f"{path.name}: already up to date")
         return 0

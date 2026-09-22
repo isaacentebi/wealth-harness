@@ -360,6 +360,16 @@ def test_partial_weights_are_never_silently_rescaled():
                                      "proposed_weights": {"AAPL": 0.5}}, {})
     assert compare["status"] == "needs_input"
     assert compare["missing"][0].startswith("proposed_weights summing to 1")
+    # Hand-rounded weights (within 1%) are rescaled, with a note; nothing else is.
+    rounded = market.run("analyze", {**base, "weights": {"AAPL": 0.4999, "MSFT": 0.4999}}, {})
+    assert rounded["result"]["portfolio"]["weights"] == pytest.approx({"AAPL": 0.5, "MSFT": 0.5})
+    assert any("within rounding of 1" in w for w in rounded["warnings"])
+    assert market.run("analyze", {**base, "weights": {"AAPL": 0.5, "MSFT": 0.489}}, {})["status"] == "needs_input"
+    shape = market.run("stress", {"scenarios": [{"name": "crash", "shocks": {"AAPL": -0.3}}]}, {})["missing"][0]
+    assert '"weights": {' in shape and "positions: [{symbol, value" in shape and "client_id" in shape
+    with pytest.raises(ValueError, match=r"needs shocks \{SYMBOL: return\}.*\['equity_shock'\]"):
+        market.run("stress", {"currency": "USD", "weights": {"AAPL": 1.0},
+                              "scenarios": [{"name": "crash", "equity_shock": -0.3}]}, {})
 
 
 def test_stress_window_and_regime_table_use_the_same_close_to_close_convention(monkeypatch):

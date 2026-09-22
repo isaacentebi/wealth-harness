@@ -42,6 +42,13 @@ The installer:
    without it, it edits the file directly when it is strict JSON, and otherwise
    prints the snippet below for you to paste.
 
+At a terminal it also asks for the name and e-mail the SEC requires of anyone
+fetching 13F filings (the manager tasks, "copy this fund manager"), saved as
+`WEALTH_SEC_USER_AGENT` in the server's env; press Enter to skip. Without a
+terminal it never asks: pass `--sec-user-agent "Your Name you@example.com"` (or
+set `WEALTH_SEC_USER_AGENT`) instead. Without it the manager tasks say how to
+add it and never call EDGAR.
+
 Rerunning is safe. `--uninstall` removes the skill and both config entries and
 keeps your data. `--no-mcp` skips the server and leaves the claw on the CLI.
 `OPENCLAW_STATE_DIR` and `OPENCLAW_CONFIG_PATH` are honored.
@@ -194,8 +201,20 @@ The claw never says it bought, sold or moved anything, and asks "¿Lo guardo?"
 - OpenClaw is a host without the Wealth launcher, so it gets `needs_person`
   plus a `confirmation_code`; the claw must show the summary and code, and
   send the second call (`confirm: true` plus the code) only on the person's
-  yes. `WEALTH_HOST_HANDLES_CONSENT=1` is only for hosts that confirm
-  natively.
+  yes. Pending codes live in the database for 10 minutes (single use; a wrong
+  code cancels it), so a gateway that starts `wealth-mcp` for every message
+  can still finish the second call.
+- `WEALTH_HOST_HANDLES_CONSENT=1` (in `mcp.servers.wealth.env`) drops the
+  code, for a setup where OpenClaw's own tool approval is the consent: the
+  person approves each `wealth_ingest` confirm, `wealth_decision` accept and
+  `wealth_resolve_contradiction` call themselves. The trade-off: the code
+  proves the yes came from the person after seeing the summary; with the flag,
+  a model that calls the tool on its own (say, after reading instructions
+  planted in a statement) is stopped only by that approval step. Leave it off
+  when Wealth's tools are auto-approved, which is the usual claw setup. The
+  installer never sets it. When it edits `openclaw.json` itself a rerun keeps
+  it (and `WEALTH_SEC_USER_AGENT`); `openclaw mcp set` replaces the whole
+  entry, so after a rerun with the CLI set it again.
 
 ## Permissions
 

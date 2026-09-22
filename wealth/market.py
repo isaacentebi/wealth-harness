@@ -47,6 +47,11 @@ _TASKS = {"analyze", "stress", "compare", "construct", "factors", "sic_premium"}
 _METHODS = {"equal", "invvol", "minvar", "riskparity", "hrp", "cvar", "black_litterman"}
 _CASH_PREFIX = "CASH::"
 _WEIGHT_TOLERANCE = 1e-6
+_ROUNDING_TOLERANCE = 0.01  # hand-rounded weights (0.9998) are rescaled with a note; larger gaps need weights_residual
+# The exact portfolio shape a needs_input names, so one retry can supply it.
+_PORTFOLIO_SHAPE = ("weights {SYMBOL: fraction} summing to 1, with currency, e.g. {\"currency\": \"MXN\", \"weights\": "
+                    "{\"IVV\": 0.6, \"CASH::MXN\": 0.4}}; or household {currency, positions: [{symbol, value, currency, "
+                    "asset_class}]}; or client_id with saved statements or synced accounts (their holdings are used)")
 _DEFAULT_BENCHMARKS = {
     "USD": ("VTI", "Vanguard Total Stock Market ETF, a broad US equity market proxy"),
 }
@@ -89,6 +94,9 @@ def _complete_weights(raw: Any, field: str, currency: str, policy: Any,
         raise ValueError("weights_residual must be 'cash' or 'normalize'")
     total = sum(weights.values())
     if abs(total - 1.0) <= _WEIGHT_TOLERANCE:
+        return {k: v / total for k, v in weights.items()}, []
+    if abs(total - 1.0) < _ROUNDING_TOLERANCE and policy is None:
+        warnings.append(f"{field} summed to {total:.6g}, within rounding of 1; rescaled proportionally to 1.")
         return {k: v / total for k, v in weights.items()}, []
     if policy == "normalize":
         warnings.append(f"{field} summed to {total:.6g}; rescaled proportionally to 1 at the caller's "
@@ -754,13 +762,17 @@ def sic_premium(sic_symbol: str, home_symbol: str | None = None, *,
 def _sic_premium_task(inputs: dict, context: dict) -> dict:
     if "sic_symbol" not in inputs:
         return _envelope("needs_input", missing=["sic_symbol"])
-    return sic_premium(
+    report = sic_premium(
         inputs["sic_symbol"], inputs.get("home_symbol"),
         sic_price_mxn=inputs.get("sic_price_mxn"), sic_price_as_of=inputs.get("sic_price_as_of"),
         home_price=inputs.get("home_price"), home_price_as_of=inputs.get("home_price_as_of"),
         usdmxn=inputs.get("usdmxn"), usdmxn_as_of=inputs.get("usdmxn_as_of"),
         source=inputs.get("price_source"), fetch_missing=inputs.get("fetch_missing", False),
         sic_underlyings=inputs.get("sic_underlyings"))
+    report["next_step"] = ("This is the price side only. For the tax side of SIC vs a foreign broker (the 10% "
+                           "Art. 129 rate vs progressive income, MXN gains including FX, foreign dividends and "
+                           "credit), run mx_foreign.")
+    return report
 
 
 # --------------------------------------------------------------------------
@@ -874,7 +886,7 @@ def _analysis(inputs: dict, context: dict) -> dict:
     if missing:
         return _envelope("needs_input", missing=missing)
     if weights is None:
-        return _envelope("needs_input", missing=["weights or household/portfolio.snapshot"])
+        return _envelope("needs_input", missing=[_PORTFOLIO_SHAPE])
     currency = info["currency"]
     warnings = list(info.get("warnings", []))
     assumptions = ["Historical statistics are descriptive and are not forecasts.", *info.get("assumptions", [])]
@@ -1199,7 +1211,7 @@ def _stress(inputs: dict, context: dict) -> dict:
     if missing:
         return _envelope("needs_input", missing=missing)
     if weights is None:
-        return _envelope("needs_input", missing=["weights or household/portfolio.snapshot"])
+        return _envelope("needs_input", missing=[_PORTFOLIO_SHAPE])
     scenarios = inputs.get("scenarios")
     if not isinstance(scenarios, list) or not scenarios:
         return _envelope("needs_input", missing=["scenarios"])
@@ -1237,6 +1249,10 @@ def _stress(inputs: dict, context: dict) -> dict:
             rows.append(row)
             missing_inputs.extend(m for m in row_missing if m not in missing_inputs)
         else:
+            if "start" not in scenario:
+                raise ValueError(f"scenarios[{index}] needs shocks {{SYMBOL: return}} (e.g. {{\"name\": \"crash\", "
+                                 f"\"shocks\": {{\"SPY\": -0.3}}}}; other holdings follow by beta) or a dated "
+                                 f"window {{name, start, end}}; unknown fields: {sorted(set(scenario) - {'name'})}")
             start = pd.Timestamp(_text(scenario.get("start"), f"scenarios[{index}].start"))
             end = pd.Timestamp(_text(scenario.get("end"), f"scenarios[{index}].end"))
             if start >= end:
@@ -1270,7 +1286,7 @@ def _compare(inputs: dict, context: dict) -> dict:
     if missing:
         return _envelope("needs_input", missing=missing)
     if current is None:
-        return _envelope("needs_input", missing=["current_weights or household/portfolio.snapshot"])
+        return _envelope("needs_input", missing=["current_" + _PORTFOLIO_SHAPE])
     if "proposed_weights" not in inputs:
         return _envelope("needs_input", missing=["proposed_weights"])
     warnings = list(info.get("warnings", []))

@@ -54,7 +54,7 @@ Nine MCP tools. Each instance serves one person: use the host's profile ID as
 
 | Tool | Use |
 | --- | --- |
-| `wealth_context` | Without `client_id`: every task's purpose and required inputs (`intent="overview"`), or one task's full schema and runnable example (`intent="<task>"`). With it: relevant facts, fresh or stale; `intent="situation"` returns the whole picture |
+| `wealth_context` | Without `client_id`: every task with a one-line purpose (`intent="overview"`), or one task's full schema and runnable example (`intent="<task>"`). With it: relevant facts, fresh or stale; `intent="situation"` with `detail="brief"` is the short per-turn read, and `detail="summary"` the whole picture |
 | `wealth_run` | Run one task; `client_id` adds saved facts and the ledger; direct inputs override them for that call |
 | `wealth_remember` | Save sourced facts, corrections and merge patches |
 | `wealth_recall` | Search all remembered facts for an open question; exact keys go to `wealth_inspect` |
@@ -62,7 +62,7 @@ Nine MCP tools. Each instance serves one person: use the host's profile ID as
 | `wealth_resolve_contradiction` | Save the person's answer to a contradiction |
 | `wealth_ingest` | Statements, stated balances and connector syncs into a proposal; `confirm` saves it |
 | `wealth_decision` | Propose, accept or dismiss an evidence-bound decision |
-| `wealth_client` | `create` the profile, or `index` a host-supplied embedding |
+| `wealth_client` | `list` the profiles (ids and names), `create` one, or `index` a host-supplied embedding |
 
 Deleting a profile is not available to you; the person runs `wealth client`
 with action `forget` in their own terminal.

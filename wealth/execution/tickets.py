@@ -901,7 +901,16 @@ def _issue_nonces(store: Any, client_id: str, ticket_ids: list[str], now: dateti
     return issued
 
 
-def _summary(view: Mapping[str, Any]) -> str:
+def in_wealth_app(environ: Mapping[str, str] | None = None) -> bool:
+    """Whether this server runs under the Wealth launcher, whose chat shows the order card."""
+    return (os.environ if environ is None else environ).get("WEALTH_BEHAVIOR_IN_HOST") == "1"
+
+
+_ELSEWHERE = ("The ticket is stored; placing it needs the Wealth web app (`wealth-chat`), where the person reviews "
+              "and confirms it; no other host or tool can place it")
+
+
+def _summary(view: Mapping[str, Any], app: bool = True) -> str:
     total = view["total"]["amount"]
     count = len(view["lines"])
     parts = [f"{'LIVE' if view['mode'] == 'live' else 'PAPER'} ticket {view['id']}: {count} order(s)"]
@@ -913,8 +922,9 @@ def _summary(view: Mapping[str, Any]) -> str:
     text = ", ".join(parts) + "."
     if notes:
         text += f" {len(notes)} issue(s) would stop it: " + "; ".join(n["message"] for n in notes[:3])
-    return (text + " Nothing has been sent. The person reviews it on the order card in the Wealth app and taps "
-            "to place it; it expires at " + view["expires_at"] + ".")
+    where = ("The person reviews it on the order card in the Wealth app and taps to place it" if app
+             else _ELSEWHERE)
+    return text + " Nothing has been sent. " + where + "; it expires at " + view["expires_at"] + "."
 
 
 def _audit(store: Any, client_id: str, ticket: Mapping[str, Any], event: str, payload: Mapping[str, Any],
@@ -995,11 +1005,13 @@ def create_ticket(store: Any, client_id: str | None, inputs: Mapping[str, Any], 
     unknown_facts = [c for c in checks if c["status"] == "unknown"]
     if store is None:
         view["id"] = None
-    summary = _summary(view) if store is not None else "Preview only; nothing was stored or sent."
+    app = in_wealth_app(environ)
+    summary = _summary(view, app) if store is not None else "Preview only; nothing was stored or sent."
+    next_step = ("Explain the ticket briefly and tell the person to review and confirm it on the order card." if app
+                 else f"Explain the ticket briefly. Tell the person: {_ELSEWHERE}.")
     return {"status": "partial" if unknown_facts or store is None else "ready",
             "result": {"ticket": view, "summary": summary,
-                       "next_step": "Explain the ticket briefly and tell the person to review and confirm it on the "
-                                    "order card. Never say an order was placed or filled until order status says so."},
+                       "next_step": next_step + " Never say an order was placed or filled until order status says so."},
             "missing": [], "warnings": warnings,
             "sources": [{"title": "Alpaca account, assets and latest trades", "mode": mode}] if broker else [],
             "assumptions": [f"Limit prices default to within {limits(environ)['collar'] * 50:.1f}% of the last trade; "
