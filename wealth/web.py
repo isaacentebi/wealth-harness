@@ -777,15 +777,23 @@ class Chat:
 # --------------------------------------------------------------------------- HTTP
 
 
-SECURITY_HEADERS = (
-    ("Cache-Control", "no-store"),
-    ("X-Content-Type-Options", "nosniff"),
-    ("Referrer-Policy", "no-referrer"),
-    ("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; "
-     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; "
-     "img-src 'self' data:; connect-src 'self'; "
-     "frame-ancestors 'none'; base-uri 'none'; form-action 'self'"),
-)
+def _security_headers(script_src: str) -> tuple[tuple[str, str], ...]:
+    return (
+        ("Cache-Control", "no-store"),
+        ("X-Content-Type-Options", "nosniff"),
+        ("Referrer-Policy", "no-referrer"),
+        ("Content-Security-Policy", f"default-src 'self'; script-src {script_src}; "
+         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; "
+         "img-src 'self' data:; connect-src 'self'; "
+         "frame-ancestors 'none'; base-uri 'none'; form-action 'self'"),
+    )
+
+
+# The pages run only their /static scripts: no inline script anywhere they are served.
+SECURITY_HEADERS = _security_headers("'self'")
+# The tax pack's printable page is one self-contained file, opened from disk, so its print button and language
+# toggle are inline; its download alone keeps inline script allowed.
+PRINTABLE_SECURITY_HEADERS = _security_headers("'self' 'unsafe-inline'")
 
 
 def _error_payload(kind: str, message: str | None = None, detail: str = "") -> dict[str, Any]:
@@ -1145,7 +1153,7 @@ def create_server(chat, port=8765, host="127.0.0.1"):
             self.send_header("Content-Type", kind + "; charset=utf-8")
             self.send_header("Content-Disposition", f'attachment; filename="{name}"')
             self.send_header("Content-Length", str(len(data)))
-            for header, value in SECURITY_HEADERS:
+            for header, value in PRINTABLE_SECURITY_HEADERS if fmt == "html" else SECURITY_HEADERS:
                 self.send_header(header, value)
             self.end_headers()
             self.wfile.write(data)

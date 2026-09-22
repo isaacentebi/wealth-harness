@@ -398,10 +398,15 @@ def test_web_endpoint_needs_the_token_and_serves_json_html_and_csv(tmp_path):
         with urlopen(Request(base + "/api/tax-pack?year=2025&format=html&lang=en", headers=headers), timeout=20) as r:
             assert r.headers.get_content_type() == "text/html"
             assert "tax-pack-2025.html" in r.headers["Content-Disposition"]
-            assert b"Tax pack 2025" in r.read()
+            page = r.read()
+            assert b"Tax pack 2025" in page
+            # A self-contained file with its toggle inline: only this download keeps inline script allowed.
+            assert b"<script>" in page and b'onclick="window.print()"' in page
+            assert "script-src 'self' 'unsafe-inline';" in r.headers["Content-Security-Policy"]
         with urlopen(Request(base + "/api/tax-pack?year=2025&format=csv&section=pendientes", headers=headers),
                      timeout=20) as r:
             assert r.headers.get_content_type() == "text/csv"
+            assert "script-src 'self';" in r.headers["Content-Security-Policy"]
         with pytest.raises(HTTPError) as bad:
             urlopen(Request(base + "/api/tax-pack?year=25", headers=headers), timeout=20)
         assert bad.value.code == 400

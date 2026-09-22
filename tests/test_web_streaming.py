@@ -229,6 +229,11 @@ def test_security_headers_and_socket_timeout(tmp_path):
         csp = response.headers["Content-Security-Policy"]
         assert "frame-ancestors 'none'" in csp
         assert "font-src https://fonts.gstatic.com" in csp and "https://fonts.googleapis.com" in csp
+        for path in ("/", "/profile", "/review"):
+            directives = dict(d.strip().split(" ", 1) for d in
+                              urlopen(base + path, timeout=5).headers["Content-Security-Policy"].split(";"))
+            assert directives["script-src"] == "'self'"  # the pages run only their /static scripts
+            assert "'unsafe-inline'" in directives["style-src"]
         assert server.RequestHandlerClass.timeout == 30
     with pytest.raises(ValueError):
         web.create_server(chat, 0, "0.0.0.0")
@@ -276,6 +281,14 @@ def test_every_static_reference_in_the_pages_is_served():
         referenced |= set(re.findall(r'(?:href|src)="/static/([^"]+)"', (root / page).read_text(encoding="utf-8")))
     assert referenced == set(web.STATIC_FILES)  # every reference is served, and nothing is served unreferenced
     assert all((web.STATIC_DIR / name).is_file() for name in web.STATIC_FILES)
+
+
+@pytest.mark.parametrize("page", ["chat.html", "profile.html", "review.html"])
+def test_pages_carry_no_inline_script_for_the_policy_to_block(page):
+    from pathlib import Path
+    html = Path(web.__file__).with_name(page).read_text(encoding="utf-8")
+    assert re.findall(r"<script\b[^>]*>", html) == [f'<script src="/static/{page.removesuffix(".html")}.js">']
+    assert not re.search(r"\son[a-z]+\s*=", html) and "javascript:" not in html
 
 
 def test_page_never_injects_html_from_model_text():
