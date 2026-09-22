@@ -239,17 +239,8 @@ def _concentration(equity: list[dict[str, Any]]) -> dict[str, Any]:
             "largest": _r(weights[0], 4) if weights else None}
 
 
-def profile_from_history(quarters: list[Mapping[str, Any]], *, sectors: Mapping[str, Any] | None = None,
-                         manager: Mapping[str, Any] | None = None,
-                         split_history: SplitLookup | None = None) -> dict[str, Any]:
-    """Interpretation from consecutive quarters (oldest first); each has period, filing_date and ``book``.
-
-    ``split_history`` returns a ticker's splits (see :data:`SplitLookup`); it is asked only about lines whose
-    share and price changes could be a split.  Without it, or when it returns None, the offline rules apply.
-    """
-    quarters = [q for q in quarters if not q.get("notice")]
-    quarters.sort(key=lambda q: q["period"])
-    sectors = sectors or {}
+def _quarter_series(quarters: list[Mapping[str, Any]], sectors: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Per quarter: values, concentration, option shares and sector weights."""
     series = []
     for q in quarters:
         book = q["book"]
@@ -264,6 +255,11 @@ def profile_from_history(quarters: list[Mapping[str, Any]], *, sectors: Mapping[
                        "calls_share": _r(book["calls"] / total, 4) if total else None,
                        "puts_share": _r(book["puts"] / total, 4) if total else None,
                        "sectors": {k: _r(v, 4) for k, v in sorted(sector_weights.items(), key=lambda kv: -kv[1])}})
+    return series
+
+
+def _follow_identifiers(quarters: list[Mapping[str, Any]]) -> tuple[dict[str, str], list[dict[str, Any]], list[str]]:
+    """``(canon, identifier_changes, caveats)``: CUSIP changes followed to the line they continue."""
     # A CUSIP that changes (reorganisation, redomicile) is followed through FIGI or a confident ticker; without
     # either, an exit and a new line with the same issuer name become a caveat.
     canon: dict[str, str] = {}
@@ -289,11 +285,20 @@ def profile_from_history(quarters: list[Mapping[str, Any]], *, sectors: Mapping[
             elif any(_norm_name(before[k]["issuer"]) == _norm_name(p["issuer"]) for k in gone):
                 caveats.append(f"{p['issuer']} appears under a new CUSIP in {quarters[i]['period']} with no FIGI or "
                                "confident ticker to link it; it is counted as a sale and a new purchase.")
+    return canon, identifier_changes, caveats
+
+
+def _transitions(quarters: list[Mapping[str, Any]], key: Callable[[Mapping[str, Any]], str], numbers: list[int],
+                 split_history: SplitLookup | None) -> tuple[list[dict], dict[str, dict[str, Any]], list[dict],
+                                                              list[dict], list[str], dict[tuple[str, int], float]]:
+    """Turnover between consecutive filings, with splits taken out of the share changes.
+
+    Returns ``(transitions, entries, splits, possible_splits, fallback_splits, split_factor)``.
+    """
     transitions = []
     entries: dict[str, dict[str, Any]] = {}   # key -> entry info for names that appear inside the window
     splits, possible_splits, fallback_splits = [], [], []
     split_factor: dict[tuple[str, int], float] = {}   # (key, transition index) -> share ratio of a split
-    numbers = [_quarter_number(q["period"]) for q in quarters]
     for i in range(1, len(quarters)):
         before = {key(p): p for p in quarters[i - 1]["book"]["equity"]}
         after = {key(p): p for p in quarters[i]["book"]["equity"]}
@@ -363,6 +368,12 @@ def profile_from_history(quarters: list[Mapping[str, Any]], *, sectors: Mapping[
             "buying_into_existing_share": _r(add_value / (add_value + new_value), 4) if add_value + new_value else None,
             "new_position_weights": [_r(p["weight"], 4) for p in sorted(new_names, key=lambda p: -(p["weight"] or 0))],
         })
+    return transitions, entries, splits, possible_splits, fallback_splits, split_factor
+
+
+def _turnover_rate(transitions: list[dict], fallback_splits: list[str], possible_splits: list[dict],
+                   caveats: list[str]) -> tuple[float | None, float | None]:
+    """``(quarterly, annual)`` turnover over the quarters elapsed; gap and split caveats are added to ``caveats``."""
     # Each transition's turnover is spread over the quarters it spans (a missed filing or a 13F-NT leaves a gap),
     # so the quarterly rate is total turnover / total quarters elapsed.
     counted = [(float(t["turnover"]), t["quarters_elapsed"]) for t in transitions if t["turnover"] is not None]
@@ -380,6 +391,12 @@ def profile_from_history(quarters: list[Mapping[str, Any]], *, sectors: Mapping[
         caveats.append("Share counts of " + ", ".join(f"{x['issuer']} ({x['period']})" for x in possible_splits) +
                        " changed by a common split ratio, but nothing corroborates a split, so they are counted as "
                        "trades.")
+    return quarterly, annual
+
+
+def _holding_runs(quarters: list[Mapping[str, Any]], key: Callable[[Mapping[str, Any]], str],
+                  numbers: list[int]) -> tuple[list[int], list[int]]:
+    """``(runs, completed)``: holding periods in calendar quarters, all and those that ended inside the window."""
     # holding periods: runs of consecutive quarters per CUSIP
     presence: dict[str, list[int]] = {}
     for i, q in enumerate(quarters):
@@ -398,6 +415,12 @@ def profile_from_history(quarters: list[Mapping[str, Any]], *, sectors: Mapping[
                 completed.append(length)
             if j is not None:
                 start = prev = j
+    return runs, completed
+
+
+def _build_up(quarters: list[Mapping[str, Any]], entries: dict[str, dict[str, Any]], key: Callable[[Mapping[str, Any]], str],
+              split_factor: dict[tuple[str, int], float]) -> list[dict[str, Any]]:
+    """For names first bought inside the window: entry weight, peak weight and whether shares were built up."""
     # build-up of names first bought inside the window
     build = []
     for k, info in entries.items():
@@ -419,6 +442,32 @@ def profile_from_history(quarters: list[Mapping[str, Any]], *, sectors: Mapping[
                       "peak_weight": _r(peak["weight"], 4),
                       "quarters_to_peak": held.index(peak) + 1 if (peak["weight"] or 0) > (info["weight"] or 0) else 0,
                       "built_up": float(held[-1]["shares"]) > adjusted * 1.1})
+    return build
+
+
+def profile_from_history(quarters: list[Mapping[str, Any]], *, sectors: Mapping[str, Any] | None = None,
+                         manager: Mapping[str, Any] | None = None,
+                         split_history: SplitLookup | None = None) -> dict[str, Any]:
+    """Interpretation from consecutive quarters (oldest first); each has period, filing_date and ``book``.
+
+    ``split_history`` returns a ticker's splits (see :data:`SplitLookup`); it is asked only about lines whose
+    share and price changes could be a split.  Without it, or when it returns None, the offline rules apply.
+    """
+    quarters = [q for q in quarters if not q.get("notice")]
+    quarters.sort(key=lambda q: q["period"])
+    sectors = sectors or {}
+    series = _quarter_series(quarters, sectors)
+    canon, identifier_changes, caveats = _follow_identifiers(quarters)
+
+    def key(line: Mapping[str, Any]) -> str:
+        return canon.get(line["cusip"], line["cusip"])
+
+    numbers = [_quarter_number(q["period"]) for q in quarters]
+    transitions, entries, splits, possible_splits, fallback_splits, split_factor = _transitions(
+        quarters, key, numbers, split_history)
+    quarterly, annual = _turnover_rate(transitions, fallback_splits, possible_splits, caveats)
+    runs, completed = _holding_runs(quarters, key, numbers)
+    build = _build_up(quarters, entries, key, split_factor)
     initial = [w for t in transitions for w in t["new_position_weights"] if w is not None]
     first, last = (series[0], series[-1]) if series else ({}, {})
     drift = None
