@@ -26,6 +26,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date
 import math
+import re
 from pathlib import Path
 import threading
 from typing import Any, Callable
@@ -50,6 +51,7 @@ _DEFAULT_BENCHMARKS = {
     "USD": ("VTI", "Vanguard Total Stock Market ETF, a broad US equity market proxy"),
 }
 _MIN_PAIR_OVERLAP = 60
+_TRUNCATION_SLACK_DAYS = 21  # one trading month, matching the 30 calendar days of slack in the date test
 
 
 def _currency(value: Any, field: str = "currency") -> str:
@@ -304,7 +306,10 @@ def _common_window(px: pd.DataFrame, requested_years: int | None, warnings: list
         requested_start = px.index.max() - pd.Timedelta(days=int(round(365.25 * requested_years)))
         short_days = (start - requested_start).days
         detail["requested_years"] = requested_years
-        if short_days > 30:
+        # 252 x years observations is a full sample by the annualization convention, even though 252 business
+        # days span only about 353 calendar days; allow the same month of slack in observations as in days.
+        full_sample = len(px) >= legacy.TRADING_DAYS * requested_years - _TRUNCATION_SLACK_DAYS
+        if short_days > 30 and not full_sample:
             detail["truncated_by"] = limited
             warnings.insert(0, f"TRUNCATED SAMPLE: the common window starts {start.date()}, about "
                                f"{short_days / 365.25:.1f} years short of the requested {requested_years}y, "
@@ -761,6 +766,109 @@ def _sic_premium_task(inputs: dict, context: dict) -> dict:
 # --------------------------------------------------------------------------
 # descriptive tasks
 # --------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# tail risk of the current book: historical and parametric VaR / CVaR
+# --------------------------------------------------------------------------
+VAR_CONFIDENCE = 0.95
+VAR_HORIZONS = {"1d": 1, "1m": 21}  # trading days
+# Fewest daily returns before the historical estimate is given: a year for one day (about 13 tail days),
+# two years for one month (overlapping 21-day windows, about 24 independent months).
+HISTORICAL_MIN_RETURNS = {"1d": 250, "1m": 500}
+PARAMETRIC_MIN_RETURNS = 60
+_Z95, _PHI_Z95 = 1.6448536269514722, 0.10313564037537128  # standard normal quantile and density at it
+
+
+def tail_risk(px: pd.DataFrame, weights: dict[str, float], total_value: float | None,
+              currency: str) -> dict:
+    """Historical and parametric 95% VaR / CVaR, one day and one month, with each position's contribution.
+
+    Losses are positive shares of the portfolio's value; amounts need the portfolio's total value. The
+    current weights are applied to the whole price sample, rebalanced daily.
+    """
+    confidence = VAR_CONFIDENCE
+    names = [w for w in weights if w in px.columns]
+    w = np.array([weights[n] for n in names], dtype=float)
+    rets = legacy.daily_returns(px[names])
+    matrix = rets.to_numpy(float)
+    port = matrix @ w
+    n = int(len(port))
+    out: dict[str, Any] = {
+        "confidence": confidence, "currency": currency, "portfolio_value": total_value,
+        "n_daily_returns": n, "window": {"start": str(rets.index.min().date()), "end": str(rets.index.max().date())},
+        "convention": "losses are positive shares of today's portfolio value; the 1-month horizon is 21 trading days",
+        "historical": {}, "parametric": {}, "by_position": [],
+        "assumptions": ["VaR and CVaR apply today's weights to the whole price sample, rebalanced daily; they "
+                        "describe that sample's tails, not a forecast, and a worse day than any in it can happen."],
+    }
+
+    def amount(share: float | None) -> float | None:
+        return None if share is None or total_value is None else round(share * total_value, 2)
+
+    def pack(var: float | None, cvar: float | None, **extra: Any) -> dict:
+        return {"var": None if var is None else round(var, 6), "cvar": None if cvar is None else round(cvar, 6),
+                "var_amount": amount(var), "cvar_amount": amount(cvar), **extra}
+
+    tail_mask = None
+    for label, days in VAR_HORIZONS.items():
+        need = HISTORICAL_MIN_RETURNS[label]
+        if n < need:
+            out["historical"][label] = pack(None, None, reason=f"needs at least {need} daily returns; the sample "
+                                                                 f"has {n}")
+            continue
+        if days == 1:
+            horizon = port
+        else:
+            growth = pd.Series(1.0 + port).rolling(days).apply(np.prod, raw=True).dropna().to_numpy()
+            horizon = growth - 1.0
+        losses = -horizon
+        var = float(np.quantile(losses, confidence))
+        cvar = historical_cvar(losses, confidence)
+        extra = {"n_windows": int(len(losses))}
+        if days > 1:
+            extra["windows"] = "overlapping 21-day windows (neighbours share days, so the tail is thinner than it looks)"
+        else:
+            tail_mask = losses >= var
+        out["historical"][label] = pack(var, cvar, **extra)
+    if total_value is None:
+        out["amounts_reason"] = "the portfolio's total value is unknown, so only shares are given"
+    if n < PARAMETRIC_MIN_RETURNS:
+        for label in VAR_HORIZONS:
+            out["parametric"][label] = pack(None, None, reason=f"needs at least {PARAMETRIC_MIN_RETURNS} daily "
+                                                                f"returns; the sample has {n}")
+        return out
+    mu_i = matrix.mean(axis=0)
+    cov = np.cov(matrix, rowvar=False, ddof=1).reshape(len(names), len(names))
+    mu, sigma = float(w @ mu_i), float(math.sqrt(max(w @ cov @ w, 0.0)))
+    tail_z = _PHI_Z95 / (1 - confidence)
+    marginal = cov @ w / sigma if sigma > 0 else np.zeros(len(names))
+    for label, days in VAR_HORIZONS.items():
+        m, s = mu * days, sigma * math.sqrt(days)
+        out["parametric"][label] = pack(_Z95 * s - m, tail_z * s - m,
+                                        mean=round(m, 6), volatility=round(s, 6))
+    out["assumptions"].append("Parametric figures assume normal, independent daily returns (one month = 21 days, "
+                              "volatility scaled by the square root of time); real tails are usually fatter.")
+    for i, name in enumerate(names):
+        param = {label: round(float(w[i] * (_Z95 * marginal[i] * math.sqrt(d) - mu_i[i] * d)), 6)
+                 for label, d in VAR_HORIZONS.items()}
+        hist = None if tail_mask is None else round(float(-(w[i] * matrix[tail_mask, i]).mean()), 6)
+        total_hist = out["historical"]["1d"]["cvar"]
+        out["by_position"].append({
+            "symbol": name, "weight": round(float(w[i]), 6),
+            "historical_cvar_1d": hist, "historical_cvar_1d_amount": amount(hist),
+            "share_of_historical_cvar_1d": None if hist is None or not total_hist else round(hist / total_hist, 4),
+            "parametric_var_1d": param["1d"], "parametric_var_1m": param["1m"],
+            "parametric_var_1d_amount": amount(param["1d"]),
+            "share_of_parametric_var_1d": (round(param["1d"] / out["parametric"]["1d"]["var"], 4)
+                                           if out["parametric"]["1d"]["var"] else None),
+        })
+    out["contribution_method"] = ("historical: each position's average loss on the sample's worst 5% of days "
+                                  "(they add up to the 1-day CVaR); parametric: Euler allocation of normal VaR "
+                                  "(they add up to the parametric VaR)")
+    if tail_mask is None:
+        out["contribution_reason"] = "historical contributions need the 1-day historical estimate"
+    return out
+
+
 def _analysis(inputs: dict, context: dict) -> dict:
     weights, info, missing = _portfolio(inputs, context)
     if missing:
@@ -787,6 +895,8 @@ def _analysis(inputs: dict, context: dict) -> dict:
                                   str(inputs.get("rebalance", "annual")),
                                   risk_free=prices.rf, risk_free_label=prices.rf_label)
     warnings = result["warnings"]
+    result["tail_risk"] = tail_risk(prices.px, weights, info.get("total_value"), currency)
+    assumptions.extend(result["tail_risk"]["assumptions"])
     result["benchmark"] = {"symbol": benchmark, "basis": basis}
     result["scope"] = info["scope"]
     result["portfolio_total_value"] = info["total_value"]
@@ -796,6 +906,292 @@ def _analysis(inputs: dict, context: dict) -> dict:
         warnings.append("Stored portfolio is not marked complete; statistics cover only supplied positions.")
     return _envelope(status, result, warnings=warnings, sources=prices.sources,
                      assumptions=[*assumptions, *prices.assumptions])
+
+
+# --------------------------------------------------------------------------
+# stress: partial shocks propagate by beta; FX shocks reach the reporting value
+# --------------------------------------------------------------------------
+_BETA_MIN_RETURNS = _MIN_PAIR_OVERLAP
+# Beta to a broad equity index, used only when there is no price history. Round conventions, not estimates:
+# they are stated in the result and replaced by a history beta whenever prices allow one.
+ASSET_CLASS_BETAS = {
+    "equity": 1.0, "stock": 1.0, "equity_fund": 1.0, "etf_equity": 1.0, "reit": 0.8, "real_estate": 0.8,
+    "bond": 0.1, "fixed_income": 0.1, "bond_fund": 0.1, "commodity": 0.2, "gold": 0.0, "crypto": 1.5,
+    "cash": 0.0, "money_market": 0.0,
+}
+_EQUITY_CLASSES = {"equity", "stock", "equity_fund", "etf_equity", "index", "equity_index"}
+# Broad equity index funds treated as an equity factor when the factor's asset class is not given.
+_EQUITY_INDEX_PROXIES = {"SPY", "VOO", "IVV", "VTI", "ITOT", "SCHB", "ACWI", "VT", "QQQ", "IWM", "VEA", "EFA",
+                         "VWO", "EEM", "^GSPC", "^IXIC", "NAFTRAC.MX", "^MXX"}
+_FX_PAIR = re.compile(r"^[A-Z]{3}[A-Z]{3}$")
+
+
+def _price_rows_frame(spec: Any, field: str) -> tuple[pd.DataFrame, dict]:
+    """``{rows: [{date, SYMBOL: price|null}], source, currency?, currencies?}`` as a frame (gaps kept)."""
+    if not isinstance(spec, dict):
+        raise ValueError(f"{field} must be an object")
+    rows = spec.get("rows")
+    if not isinstance(rows, list) or len(rows) < 3:
+        raise ValueError(f"{field}.rows must contain at least three observations")
+    frame = pd.DataFrame(rows)
+    if "date" not in frame:
+        raise ValueError(f"{field}.rows require a date field")
+    frame.index = pd.to_datetime(frame.pop("date"), errors="raise")
+    frame.columns = [str(c).upper() for c in frame.columns]
+    frame = frame.sort_index().apply(pd.to_numeric, errors="coerce")
+    frame = frame.where(frame > 0)
+    source = {"kind": "supplied_rows" if field == "prices" else field, "ref": str(spec.get("source") or field),
+              "window": {"start": str(frame.index.min().date()), "end": str(frame.index.max().date()),
+                         "n_prices": int(len(frame))}}
+    if spec.get("currency"):
+        source["currency"] = spec["currency"]
+    return frame, source
+
+
+class _BetaContext:
+    """Where betas come from: explicit ``betas``, price history (``beta_prices``, ``prices``, ``price_csv`` or
+    the history a historical window loaded), else asset-class defaults for an equity factor."""
+
+    def __init__(self, inputs: dict, context: dict, weights: dict, px: pd.DataFrame | None, info: dict):
+        self.warnings: list[str] = []
+        self.assumptions: list[str] = []
+        self.sources: list[dict] = []
+        self.frames: list[tuple[pd.DataFrame, dict]] = []
+        self.attributes = _asset_attributes(inputs, context, weights)
+        for key in ("beta_prices", "prices"):
+            if key in inputs:
+                frame, source = _price_rows_frame(inputs[key], key)
+                currencies = inputs[key].get("currencies") if isinstance(inputs[key].get("currencies"), dict) else {}
+                source["currencies"] = {str(k).upper(): v for k, v in currencies.items()}
+                self.frames.append((frame, source))
+        if "price_csv" in inputs and inputs.get("price_source"):
+            frame = pd.read_csv(Path(str(inputs["price_csv"])).expanduser(), index_col=0, parse_dates=True)
+            frame.columns = [str(c).upper() for c in frame.columns]
+            self.frames.append((frame.sort_index(), {"kind": "supplied_csv", "ref": str(inputs["price_source"])}))
+        if px is not None:
+            self.frames.append((px, {"kind": "stress_history", "ref": str(px.attrs.get("source") or "loaded prices")}))
+        explicit = inputs.get("betas")
+        self.explicit: dict[str, float] = {}
+        if explicit is not None:
+            if not isinstance(explicit, dict):
+                raise ValueError("betas must be an object of {SYMBOL: beta}")
+            self.explicit_source = _text(inputs.get("beta_source"), "beta_source")
+            self.explicit = {str(k).upper(): _number(v, f"betas.{k}") for k, v in explicit.items()}
+        self._cache: dict[tuple[str, str], dict] = {}
+        self.used_frames: list[dict] = []
+
+    def history_beta(self, asset: str, factor: str) -> dict:
+        key = (asset, factor)
+        if key in self._cache:
+            return self._cache[key]
+        best = {"beta": None, "reason": f"no price history with both {asset} and {factor}"}
+        for frame, source in self.frames:
+            if asset not in frame.columns or factor not in frame.columns:
+                continue
+            rets = frame[[asset, factor]].astype(float).pct_change(fill_method=None).dropna(how="any")
+            if len(rets) < _BETA_MIN_RETURNS:
+                best = {"beta": None, "reason": f"only {len(rets)} overlapping daily returns of {asset} and {factor} "
+                                                f"(at least {_BETA_MIN_RETURNS} needed)"}
+                continue
+            variance = float(rets[factor].var())
+            if not variance > 0:
+                continue
+            beta = float(rets[asset].cov(rets[factor]) / variance)
+            corr = float(rets[asset].corr(rets[factor]))
+            best = {"beta": round(beta, 4), "basis": "history", "n_returns": int(len(rets)),
+                    "window": {"start": str(rets.index.min().date()), "end": str(rets.index.max().date())},
+                    "r_squared": round(corr * corr, 4), "source": source.get("ref")}
+            if source not in self.sources:
+                self.sources.append({k: v for k, v in source.items() if k != "currencies"})
+            break
+        self._cache[key] = best
+        return best
+
+    def factor_is_equity(self, factor: str) -> bool:
+        cls = (self.attributes.get(factor) or {}).get("asset_class")
+        return (cls in _EQUITY_CLASSES) if cls else factor in _EQUITY_INDEX_PROXIES
+
+    def native_currency(self, symbol: str, reporting: str) -> str | None:
+        attrs = self.attributes.get(symbol) or {}
+        if attrs.get("currency"):
+            return attrs["currency"]
+        if symbol.startswith(_CASH_PREFIX):
+            return symbol[len(_CASH_PREFIX):]
+        if is_sic_symbol(symbol):
+            return None  # a SIC line trades in MXN but its value follows its home-market currency
+        for _, source in self.frames:
+            found = (source.get("currencies") or {}).get(symbol)
+            if found:
+                return str(found).upper()
+        return None
+
+
+def _asset_attributes(inputs: dict, context: dict, weights: dict) -> dict[str, dict]:
+    """Asset class and native (quote) currency per symbol: household positions, then explicit inputs."""
+    out: dict[str, dict] = {}
+    household = inputs.get("household") or context.get("household") or context.get("portfolio.snapshot")
+    if isinstance(household, dict) and "weights" not in inputs:
+        for position in household.get("positions") or []:
+            if not isinstance(position, dict) or not position.get("symbol"):
+                continue
+            is_cash = str(position.get("asset_class", "")).lower() == "cash"
+            symbol = f"{_CASH_PREFIX}{household.get('currency')}" if is_cash else str(position["symbol"]).upper()
+            entry = out.setdefault(symbol, {})
+            if position.get("asset_class"):
+                entry["asset_class"] = str(position["asset_class"]).lower()
+            native = position.get("native_currency") or position.get("quote_currency") or position.get("listing_currency")
+            if native:
+                entry["currency"] = _currency(native, f"positions[{symbol}].native_currency")
+    for key, field, parse in (("asset_classes", "asset_class", lambda v, f: _text(v, f).lower()),
+                              ("asset_currencies", "currency", _currency)):
+        raw = inputs.get(key)
+        if raw is None:
+            continue
+        if not isinstance(raw, dict):
+            raise ValueError(f"{key} must be an object of {{SYMBOL: value}}")
+        for symbol, value in raw.items():
+            out.setdefault(str(symbol).upper(), {})[field] = parse(value, f"{key}.{symbol}")
+    return out
+
+
+def _fx_factor(native: str, reporting: str, fx_shocks: dict[str, float]) -> tuple[float | None, str | None]:
+    """Multiplier on (1 + local return) from the FX shocks, and the pair used; (1, None) when none applies."""
+    if native == reporting:
+        return 1.0, None
+    direct, inverse = native + reporting, reporting + native
+    if direct in fx_shocks:
+        return 1.0 + fx_shocks[direct], direct
+    if inverse in fx_shocks:
+        return 1.0 / (1.0 + fx_shocks[inverse]), inverse
+    return None, None
+
+
+def _shock_scenario(name: str, scenario: dict, shocks: dict[str, float], weights: dict[str, float],
+                    info: dict, ctx: _BetaContext) -> tuple[dict, list[str]]:
+    """One explicit-shock scenario: given shocks, beta-propagated returns for the rest, then FX."""
+    reporting = info["currency"]
+    fx_raw = scenario.get("fx_shocks") or {}
+    if not isinstance(fx_raw, dict):
+        raise ValueError(f"{name}: fx_shocks must be an object like {{'USDMXN': 0.15}}")
+    fx_shocks: dict[str, float] = {}
+    for pair, value in fx_raw.items():
+        code = str(pair).upper().replace("/", "")
+        if not _FX_PAIR.match(code) or code[:3] == code[3:]:
+            raise ValueError(f"{name}: fx_shocks keys are currency pairs like USDMXN (MXN per USD)")
+        fx_shocks[code] = _number(value, f"{name}.fx_shocks.{pair}", minimum=-0.99)
+    missing: list[str] = []
+    factor = scenario.get("factor")
+    factor = str(factor).upper() if factor else next(iter(shocks), None)
+    if factor is not None and factor not in shocks:
+        raise ValueError(f"{name}: factor {factor} needs a shock in shocks")
+    local: dict[str, float | None] = {}
+    how: dict[str, dict] = {}
+    for asset in weights:
+        if asset in shocks:
+            local[asset], how[asset] = shocks[asset], {"basis": "shocked"}
+        elif asset.startswith(_CASH_PREFIX):
+            local[asset], how[asset] = 0.0, {"basis": "cash", "beta": 0.0}
+        elif factor is None:  # an FX-only scenario: local prices held, only the translation moves
+            local[asset], how[asset] = 0.0, {"basis": "held", "beta": None}
+        elif asset in ctx.explicit:
+            beta = ctx.explicit[asset]
+            local[asset], how[asset] = beta * shocks[factor], {"basis": "supplied", "beta": beta,
+                                                               "source": ctx.explicit_source}
+        else:
+            found = ctx.history_beta(asset, factor)
+            if found["beta"] is not None:
+                local[asset], how[asset] = found["beta"] * shocks[factor], dict(found)
+            else:
+                cls = (ctx.attributes.get(asset) or {}).get("asset_class")
+                default = ASSET_CLASS_BETAS.get(cls) if cls else None
+                if default is not None and ctx.factor_is_equity(factor):
+                    local[asset] = default * shocks[factor]
+                    how[asset] = {"basis": "asset_class_default", "beta": default, "asset_class": cls,
+                                  "history": found["reason"]}
+                else:
+                    why = (f"{found['reason']}, and " +
+                           (f"asset class {cls!r} has no default beta" if cls and default is None else
+                            "its asset class is unknown" if not cls else
+                            f"class defaults are betas to an equity index and {factor} is not one"))
+                    local[asset], how[asset] = None, {"basis": "unknown", "beta": None, "reason": why}
+                    missing.append(f"{name}: a beta for {asset} to {factor} (price history, betas, or asset_classes)")
+        if local[asset] is not None and local[asset] < -1.0:
+            how[asset]["clipped_from"] = round(local[asset], 6)
+            local[asset] = -1.0  # a long holding cannot lose more than all of it
+    returns: dict[str, float | None] = dict(local)
+    fx_detail: dict[str, Any] | None = None
+    if fx_shocks:
+        applied, unknown = {}, []
+        for asset, value in local.items():
+            native = ctx.native_currency(asset, reporting)
+            if native is None:
+                unknown.append(asset)
+                returns[asset] = None
+                continue
+            multiplier, pair = _fx_factor(native, reporting, fx_shocks)
+            if multiplier is None:
+                returns[asset] = value  # no shock given for this currency pair: the rate is held fixed
+                applied[asset] = {"currency": native, "pair": None}
+                continue
+            applied[asset] = {"currency": native, "pair": pair}
+            returns[asset] = None if value is None else (1.0 + value) * multiplier - 1.0
+        missing += [f"{name}: the currency {a} is priced in (asset_currencies or positions[].native_currency)"
+                    for a in unknown]
+        fx_detail = {"shocks": fx_shocks, "reporting_currency": reporting, "assets": applied,
+                     "unknown_currency": unknown,
+                     "note": "Shocks and betas are in each asset's own currency; the FX shock converts them into "
+                             f"{reporting}." + (" No price shock was given, so local prices are held and only "
+                                                "the translation moves." if factor is None else "")}
+    unresolved = sorted(a for a, v in returns.items() if v is None)
+    portfolio_return = None if unresolved else sum(weights[a] * returns[a] for a in weights)
+    row: dict[str, Any] = {"name": name, "kind": "explicit_shock", "asset_returns": returns,
+                           "portfolio_return": portfolio_return}
+    if portfolio_return is None:
+        row["portfolio_return_reason"] = f"unknown return for {', '.join(unresolved)}"
+    total = info.get("total_value")
+    if total is not None:
+        row["portfolio_change"] = None if portfolio_return is None else round(total * portfolio_return, 2)
+    if factor is not None and any(h["basis"] not in ("shocked", "cash") for h in how.values()):
+        row["propagation"] = {"factor": factor, "factor_shock": shocks[factor], "assets": how,
+                              "method": "return = beta x factor shock (linear, no idiosyncratic move), floored "
+                                        "at -100%"}
+        if any(h["basis"] == "asset_class_default" for h in how.values()):
+            line = ("Assets without enough price history take a round asset-class beta to an equity index "
+                    f"({', '.join(f'{k} {v:g}' for k, v in sorted(ASSET_CLASS_BETAS.items()))}); a convention, "
+                    "not an estimate.")
+            if line not in ctx.assumptions:
+                ctx.assumptions.append(line)
+        if any(h["basis"] == "history" for h in how.values()):
+            line = ("History betas are OLS slopes of daily returns on the shocked factor's daily returns; a large "
+                    "shock can move assets further than their everyday beta suggests.")
+            if line not in ctx.assumptions:
+                ctx.assumptions.append(line)
+    if fx_detail is not None:
+        row["local_returns"] = local
+        row["fx"] = fx_detail
+    return row, missing
+
+
+def stress_price_symbols(inputs: dict, context: dict) -> list[str]:
+    """Symbols a partial-shock stress needs betas for (holdings and factors); [] when betas are not needed."""
+    scenarios = inputs.get("scenarios")
+    if not isinstance(scenarios, list) or any(k in inputs for k in ("prices", "price_csv", "beta_prices")):
+        return []
+    try:
+        weights, _, _ = _portfolio(inputs, context)
+    except ValueError:
+        return []
+    if not weights:
+        return []
+    needed: set[str] = set()
+    for scenario in scenarios:
+        shocks = scenario.get("shocks") if isinstance(scenario, dict) else None
+        if not isinstance(shocks, dict) or not shocks:
+            continue
+        keys = [str(k).upper() for k in shocks]
+        if set(weights) - set(keys):
+            needed |= set(weights) | {str(scenario.get("factor") or keys[0]).upper()}
+    return sorted(s for s in needed if not s.startswith(_CASH_PREFIX))
 
 
 def _stress(inputs: dict, context: dict) -> dict:
@@ -823,22 +1219,23 @@ def _stress(inputs: dict, context: dict) -> dict:
         px = prices.px
         assumptions.extend(prices.assumptions)
     rows = []
+    beta_ctx: _BetaContext | None = None
+    missing_inputs: list[str] = []
     for index, scenario in enumerate(scenarios):
         if not isinstance(scenario, dict):
             raise ValueError(f"scenarios[{index}] must be an object")
         name = _text(scenario.get("name"), f"scenarios[{index}].name")
-        if "shocks" in scenario:
-            shocks = scenario["shocks"]
+        if "shocks" in scenario or "fx_shocks" in scenario:
+            shocks = scenario.get("shocks") or {}
             if not isinstance(shocks, dict):
                 raise ValueError(f"scenarios[{index}].shocks must be an object")
-            shocks = _combined_shocks(shocks, inputs, name)
-            missing_assets = sorted(set(weights) - set(shocks))
-            if missing_assets:
-                raise ValueError(f"{name}: shocks missing portfolio assets: {', '.join(missing_assets)}")
-            asset_returns = {asset: _number(shocks[asset], f"{name}.{asset}") for asset in weights}
-            portfolio_return = sum(weights[a] * asset_returns[a] for a in weights)
-            rows.append({"name": name, "kind": "explicit_shock", "asset_returns": asset_returns,
-                         "portfolio_return": portfolio_return})
+            shocks = {str(k).upper(): _number(v, f"{name}.{k}", minimum=-1.0)
+                      for k, v in _combined_shocks(shocks, inputs, name).items()}
+            if beta_ctx is None:
+                beta_ctx = _BetaContext(inputs, context, weights, px, info)
+            row, row_missing = _shock_scenario(name, scenario, shocks, weights, info, beta_ctx)
+            rows.append(row)
+            missing_inputs.extend(m for m in row_missing if m not in missing_inputs)
         else:
             start = pd.Timestamp(_text(scenario.get("start"), f"scenarios[{index}].start"))
             end = pd.Timestamp(_text(scenario.get("end"), f"scenarios[{index}].end"))
@@ -856,9 +1253,16 @@ def _stress(inputs: dict, context: dict) -> dict:
                          "asset_returns": {k: float(v) for k, v in asset_returns.items()},
                          "portfolio_return": portfolio_return})
     result = {"currency": info["currency"], "scope": info["scope"], "weights": weights,
-              "scenarios": rows, "input_complete": info["complete"]}
-    status = "ready" if info["complete"] else "partial"
-    return _envelope(status, result, warnings=warnings, sources=sources, assumptions=assumptions)
+              "scenarios": rows, "input_complete": info["complete"],
+              "portfolio_total_value": info.get("total_value")}
+    if beta_ctx is not None:
+        warnings.extend(w for w in beta_ctx.warnings if w not in warnings)
+        assumptions.extend(a for a in beta_ctx.assumptions if a not in assumptions)
+        sources = sources + [s for s in beta_ctx.sources if s not in sources]
+    unresolved = [r["name"] for r in rows if r.get("portfolio_return") is None]
+    status = "ready" if info["complete"] and not unresolved else "partial"
+    return _envelope(status, result, warnings=warnings, sources=sources, assumptions=assumptions,
+                     missing=missing_inputs)
 
 
 def _compare(inputs: dict, context: dict) -> dict:

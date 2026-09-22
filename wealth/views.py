@@ -137,6 +137,7 @@ TASK_LABELS = {
     "manager_holdings": L("13F holdings", "Posiciones 13F"), "manager_profile": L("Manager profile", "Perfil del administrador"),
     "manager_compare": L("Manager comparison", "Comparación de administradores"),
     "manager_mirror": L("Mirror a manager", "Replicar a un administrador"),
+    "speculation_check": L("Play-money check", "Revisión de dinero de juego"),
 }
 
 
@@ -579,6 +580,49 @@ def _debt_payoff(result: Mapping, envelope: Mapping, task: str) -> list[dict]:
                   envelope, result)]
 
 
+def _price_label(value: Any) -> str:
+    number = _dec(value)
+    return "—" if number is None else f"{number:,.2f}".rstrip("0").rstrip(".")
+
+
+def _speculation(result: Mapping, envelope: Mapping, task: str) -> list[dict]:
+    """The payoff sandbox: P&L at a spread of prices, then the limits (max loss, gain, breakevens, sizing)."""
+    pay = result.get("payoff")
+    if not isinstance(pay, Mapping) or not pay.get("grid"):
+        return []
+    cur = (pay.get("sizing") or {}).get("currency") or pay.get("currency")
+    grid = [g for g in pay["grid"] if isinstance(g, Mapping)]
+    if len(grid) > MAX_ROWS:
+        step = (len(grid) - 1) / (MAX_ROWS - 1)
+        grid = [grid[round(i * step)] for i in range(MAX_ROWS)]
+    name = f"{_name(pay.get('symbol'))} " if pay.get("symbol") else ""
+    rows = [{"label": L(f"{name}at {_price_label(g.get('price'))}", f"{name}a {_price_label(g.get('price'))}"),
+             "value": money(g.get("pnl"), pay.get("currency"))} for g in grid]
+    out = [_spec(task, "ticket", L("What it makes or loses at each price", "Cuánto gana o pierde a cada precio"),
+                 {"rows": rows, "total": None}, envelope, result,
+                 caption=L("At expiry for options; before costs and taxes",
+                           "Al vencimiento en opciones; antes de costos e impuestos"))]
+    no_ceiling = {"t": "text", "v": L("No ceiling", "Sin techo")}
+    summary = [
+        {"label": L("Most you can lose", "Lo más que puedes perder"),
+         "value": no_ceiling if pay.get("max_loss_unbounded") else money(pay.get("max_loss"), pay.get("currency"))},
+        {"label": L("Most you can make", "Lo más que puedes ganar"),
+         "value": no_ceiling if pay.get("max_gain_unbounded") else money(pay.get("max_gain"), pay.get("currency"))},
+    ]
+    for price in (pay.get("breakevens") or [])[:2]:
+        summary.append({"label": L("Breakeven price", "Precio de equilibrio"), "value": money(price, pay.get("currency"))})
+    sizing = pay.get("sizing") if isinstance(pay.get("sizing"), Mapping) else {}
+    if sizing:
+        summary += [{"label": L("Capital at risk", "Capital en riesgo"), "value": money(sizing.get("capital_at_risk"), cur)},
+                    {"label": L("Share of net worth", "Parte de tu patrimonio"),
+                     "value": ratio(sizing.get("share_of_net_worth"))},
+                    {"label": L("Share of the play-money budget", "Parte del presupuesto de juego"),
+                     "value": ratio(sizing.get("share_of_speculation_budget"))}]
+    out.append(_spec(task, "ticket", L("Limits of this position", "Límites de esta posición"),
+                     {"rows": summary[:MAX_ROWS], "total": None}, envelope, result))
+    return out
+
+
 def _tax(result: Mapping, envelope: Mapping, task: str) -> list[dict]:
     cur = result.get("currency")
     mode = result.get("mode")
@@ -809,7 +853,7 @@ BUILDERS: dict[str, Callable[[Mapping, Mapping, str], list[dict]]] = {
     "stress": _stress, "debt_payoff": _debt_payoff, "tax": _tax, "rebalance": _rebalance,
     "asset_location": _asset_location,
     "manager_holdings": _manager_holdings, "manager_profile": _manager_profile, "manager_compare": _manager_compare,
-    "manager_mirror": _manager_mirror,
+    "manager_mirror": _manager_mirror, "speculation_check": _speculation,
 }
 
 

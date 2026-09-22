@@ -389,7 +389,8 @@ CATALOG: dict[str, dict[str, Any]] = {
         "example": {"household": _HOUSEHOLD, "targets": {"asset_class": {"equity": 0.6}}, "evaluation_date": "2026-09-20"},
     },
     "analyze": {
-        "purpose": "Describe historical return, drawdown, volatility, beta, correlation, and concentration on one common sample.",
+        "purpose": "Describe historical return, drawdown, volatility, beta, correlation, and concentration on one common sample, "
+                   "plus tail_risk: historical and parametric 95% VaR/CVaR (1 day, 1 month) with each position's contribution.",
         "required": ["household or weights (or stored household/portfolio.snapshot)", "a price source"],
         "optional": [_BENCHMARK, "years", *_MARKET_COMMON],
         "example": {"currency": "USD", "weights": {"SPY": 0.6, "BND": 0.4}, "benchmark": "SPY", "years": 5},
@@ -401,10 +402,31 @@ CATALOG: dict[str, dict[str, Any]] = {
         },
     },
     "stress": {
-        "purpose": "Apply explicit shocks or dated historical windows to supplied holdings; scenarios are arithmetic, not forecasts.",
-        "required": ["household or weights", "scenarios: [{name, shocks {SYMBOL: return}} or {name, start, end}]"],
-        "optional": _MARKET_COMMON,
+        "purpose": "Apply explicit shocks or dated historical windows to supplied holdings; scenarios are arithmetic, not forecasts. "
+                   "Partial shocks reach the other holdings by beta; fx_shocks reach the reporting-currency value.",
+        "required": ["household or weights", "scenarios: [{name, shocks {SYMBOL: return}, factor?, fx_shocks? {USDMXN: change}} "
+                     "or {name, start, end}]"],
+        "optional": [*_MARKET_COMMON, "beta_prices {source, rows, currencies?} (history for betas only; the service "
+                     "fills it from the price cache)", "betas {SYMBOL: beta} with beta_source",
+                     "asset_classes {SYMBOL: equity|bond|reit|commodity|gold|crypto|cash} (else household asset_class)",
+                     "asset_currencies {SYMBOL: USD} (else positions[].native_currency)"],
+        "notes": "Holdings without a shock move by beta to the factor (default: the first shocked symbol): a history "
+                 "beta from at least 60 overlapping daily returns, else betas, else a stated asset-class default when "
+                 "the factor is an equity index; otherwise the return is null with a reason. Each row's propagation "
+                 "says which. With fx_shocks, shocks are in each holding's own currency.",
         "example": {"currency": "USD", "weights": {"SPY": 0.7, "BND": 0.3}, "scenarios": [{"name": "equity shock", "shocks": {"SPY": -0.2, "BND": 0.02}}]},
+        "variants": {
+            "partial_shock_by_beta": {"currency": "USD", "weights": {"VTI": 0.6, "BND": 0.4},
+                                      "asset_classes": {"VTI": "equity", "BND": "bond"},
+                                      "scenarios": [{"name": "S&P 500 -25%", "shocks": {"SPY": -0.25}}]},
+            "peso_household_fx_shock": {"household": {**_HOUSEHOLD, "currency": "MXN", "positions": [
+                {"id": "pos-1", "account_id": "a1", "instrument_id": "SPY", "symbol": "SPY", "quantity": 10,
+                 "value": 120000, "currency": "MXN", "native_currency": "USD", "asset_class": "equity"},
+                {"id": "pos-2", "account_id": "a1", "instrument_id": "MXN", "symbol": "MXN", "value": 30000,
+                 "currency": "MXN", "asset_class": "cash"}]},
+                "scenarios": [{"name": "US selloff, peso weaker", "shocks": {"SPY": -0.25},
+                               "fx_shocks": {"USDMXN": 0.15}}]},
+        },
     },
     "compare": {
         "purpose": "Compare current and proposed weights on the same price sample and convention.",
@@ -979,12 +1001,24 @@ CATALOG: dict[str, dict[str, Any]] = {
                    "call, and action=explain always explains.",
         "required": ["proposal {action: buy|sell|explain, instrument: options|crypto|margin|cfd|future|perp|"
                      "leveraged_etf|short|stock|fintech_yield, amount?, currency?, leverage?, side?: long|short, "
-                     "option_type?, covered?, strike?, contracts?, negative_balance_protection?, "
-                     "sleeve?: {value, peak}}", "client_id (or facts [{key, value}])"],
+                     "position_effect?: open|close, option_type?, covered?, strike?, contracts?, premium? (per "
+                     "share), entry_price?, negative_balance_protection?, sleeve?: {value, peak}}",
+                     "client_id (or facts [{key, value}])"],
         "optional": ["policy {cap_share (<= 0.10), max_position_loss_share, drawdown_stop} (else preference.speculation, "
                      "else defaults)", "ips (else the accepted policy.ips)",
                      "context {now: ISO date-time, timezone: IANA, last_move: {size, at}, udi_value} for the cool-off "
-                     "flag", "as_of"],
+                     "flag", "as_of",
+                     "proposal.legs [{type: call|put, side, strike, premium, contracts, cash_secured?} | {type: "
+                     "stock|crypto, side, entry_price, quantity|amount} | {type: leveraged, side, entry_price, margin, "
+                     "leverage, negative_balance_protection?}] for a multi-leg payoff",
+                     "proposal.spot, proposal.grid [prices]", "proposal.fx_rate (1 proposal currency in the picture's)"],
+        "notes": "A sell of an option writes it (sell to open) unless position_effect is close; writing is sized by "
+                 "the capital it puts at risk (an uncovered put: strike x 100 x contracts less premium; an "
+                 "uncovered call has no ceiling). With legs, or strike, contracts and premium (entry_price and "
+                 "leverage for leveraged or crypto), result.payoff has the P&L grid at expiry, max_loss / "
+                 "max_gain (null with *_unbounded), breakevens, capital_at_risk and sizing {share_of_net_worth, "
+                 "share_of_speculation_budget} (null with a reason when unknown), plus an en/es explanation; "
+                 "action=explain returns the payoff without a verdict.",
         "example": {"as_of": "2026-09-21", "facts": _GUARD_FACTS,
                     "proposal": {"action": "buy", "instrument": "options", "amount": 3000, "currency": "MXN",
                                  "sleeve": {"value": 10000, "peak": 12000}},
@@ -995,6 +1029,23 @@ CATALOG: dict[str, dict[str, Any]] = {
                                                    "annual_rate": 0.45, "payment": 5000, "payment_frequency": "monthly"}}],
                 "proposal": {"action": "buy", "instrument": "crypto", "amount": 5000, "currency": "MXN"}},
             "explain_mechanics": {"proposal": {"action": "explain", "instrument": "cfd"}},
+            "write_uncovered_puts": {"as_of": "2026-09-21", "facts": _GUARD_FACTS,
+                                     "proposal": {"action": "sell", "instrument": "options", "symbol": "AAPL",
+                                                  "option_type": "put", "covered": False, "strike": 180,
+                                                  "contracts": 2, "premium": 3.5, "currency": "MXN",
+                                                  "sleeve": {"value": 0, "peak": 0}}},
+            "vertical_spread_payoff": {"as_of": "2026-09-21", "facts": _GUARD_FACTS,
+                                       "proposal": {"action": "explain", "instrument": "options", "symbol": "SPY",
+                                                    "currency": "MXN", "spot": 650, "legs": [
+                                                        {"type": "call", "side": "long", "strike": 650,
+                                                         "premium": 12, "contracts": 1},
+                                                        {"type": "call", "side": "short", "strike": 670,
+                                                         "premium": 5, "contracts": 1}]}},
+            "leveraged_crypto_payoff": {"as_of": "2026-09-21", "facts": _GUARD_FACTS,
+                                        "proposal": {"action": "buy", "instrument": "perp", "symbol": "BTC",
+                                                     "amount": 2000, "leverage": 5, "entry_price": 60000,
+                                                     "negative_balance_protection": True, "currency": "MXN",
+                                                     "sleeve": {"value": 0, "peak": 0}}},
         },
     },
     "panic_check": {
