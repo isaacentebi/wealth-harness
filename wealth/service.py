@@ -536,7 +536,7 @@ class WealthService:
             catalog = capabilities()
             if intent != "overview":
                 if intent not in catalog["tasks"]:
-                    raise ValueError("unknown task intent; use overview for discovery")
+                    raise ValueError(f"unknown task {intent!r} as intent; use overview for discovery")
                 catalog["tasks"] = {intent: catalog["tasks"][intent]}
             return catalog
         routing = {
