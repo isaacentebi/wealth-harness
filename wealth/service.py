@@ -927,7 +927,7 @@ class WealthService:
         if market is not None:
             result["stale_prices"] = sit.get("stale_prices") or []
         return {"status": "ready", "result": result, "missing": [], "warnings": [],
-                "sources": [{"title": "Wealth proactive rules (wealth/proactive.py; docs/scope.md sections 2-3)"}]
+                "sources": [{"title": "Wealth proactive rules (wealth/proactive.py; docs/notes/scope.md sections 2-3)"}]
                 + _price_sources(sit.get("prices") or []),
                 "assumptions": ["Triggers read only known data; a trigger with missing inputs is listed under "
                                 "result.unknown and does not fire.",

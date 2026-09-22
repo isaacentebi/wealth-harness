@@ -170,11 +170,15 @@ exercise it.
 
 - **The model** (Codex locally, or any MCP host) reads context, runs tasks,
   saves sourced facts, proposes decisions and prepares ingest proposals and
-  order tickets. It may call `ingest action=confirm`, and the policy allows it
-  only after the person's explicit yes. It cannot delete a profile, read
-  credentials or order confirmation codes, place, confirm or cancel an order,
-  choose live trading, the broker URL or the limits, or lift a hard pre-trade
-  block. No MCP tool, CLI operation or service method submits an order.
+  order tickets. It may call `ingest action=confirm`: in a Wealth turn, the
+  server checks the person's own message; in other hosts, it needs two calls
+  with a one-time code shown to the person, unless
+  `WEALTH_HOST_HANDLES_CONSENT=1`. Document-sourced facts must match the
+  statement's figures or they are saved as inferences. It cannot delete a
+  profile, read credentials or order confirmation codes, place, confirm or
+  cancel an order, choose live trading, the broker URL or the limits, or lift
+  a hard pre-trade block. No MCP tool, CLI operation or service method submits
+  an order.
 - **The person** says yes to a proposal, accepts or dismisses decisions, edits,
   confirms or deletes facts on the You page, resolves contradictions, taps
   **Place orders** on an order card, and alone can delete a profile

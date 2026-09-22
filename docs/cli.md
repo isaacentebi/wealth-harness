@@ -83,7 +83,10 @@ wealth context` prints every task with its inputs and a runnable example.
 
 Every command reads one JSON object from stdin or `--input request.json` and
 prints JSON; `--db` overrides `WEALTH_DB`. Errors go to stderr as
-`{"error", "error_type"}` with exit code 2.
+`{"error", "error_type"}` with exit code 2. Operations that save on the
+person's yes (`ingest` confirm/confirm_duplicates, `decision` accept,
+`resolve_contradiction`) need an interactive terminal or `--yes`, passed only
+after the person has agreed; piped stdin alone is refused.
 
 | Command | MCP equivalent | What it does |
 | --- | --- | --- |
@@ -92,11 +95,11 @@ prints JSON; `--db` overrides `WEALTH_DB`. Errors go to stderr as
 | `remember` | `wealth_remember` | Save facts |
 | `recall` | `wealth_recall` | Search facts |
 | `run` | `wealth_run` | Run a task |
-| `decision` | `wealth_decision` | Propose, accept, dismiss |
-| `ingest` | `wealth_ingest` | Proposals and confirmation |
+| `decision` | `wealth_decision` | Propose, accept, dismiss; accept needs a terminal or `--yes` |
+| `ingest` | `wealth_ingest` | Proposals and confirmation; confirm needs a terminal or `--yes` |
 | `history` | `wealth_inspect` `detail=history` | One key's timeline |
 | `contradictions` | `wealth_inspect` `detail=contradictions` | Pending contradictions |
-| `resolve_contradiction` | `wealth_resolve_contradiction` | The person's answer |
+| `resolve_contradiction` | `wealth_resolve_contradiction` | The person's answer; needs a terminal or `--yes` |
 | `execution_status` | none | Trading mode, whether keys exist, limits, today's usage |
 | `order_status` | none | Order tickets and line states; `refresh` reads the broker |
 | `prices` | none | Market-data cache: `status`, or `refresh` now |
@@ -192,16 +195,21 @@ printf '%s' "{\"action\":\"propose\",\"client_id\":\"ana\",\"inputs\":{\"title\"
 printf '%s' '{"action":"export","client_id":"ana"}' | uv run wealth client > /tmp/wealth-demo/ana-export.json
 ```
 
-Accept or dismiss later with `{"action":"accept","client_id":"ana","inputs":{"decision_id":"..."}}`.
+Accept or dismiss later, after the person agreed, with `--yes`:
+
+```sh
+printf '%s' '{"action":"accept","client_id":"ana","inputs":{"decision_id":"..."}}' \
+  | uv run wealth decision --yes
+```
 
 **ingest** turns a statement or stated balances into a held proposal; confirm
-only after the person's yes:
+only after the person's yes, with `--yes`:
 
 ```sh
 PID=$(printf '%s' '{"client_id":"ana","action":"chat","inputs":{"currency":"MXN","as_of":"2026-09-21",
   "items":[{"kind":"cash","label":"Nu","amount":40000,"quote":"tengo unos 40 mil en Nu"}]}}' \
   | uv run wealth ingest | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["proposal_id"])')
-printf '%s' "{\"client_id\":\"ana\",\"action\":\"confirm\",\"inputs\":{\"proposal_id\":\"$PID\"}}" | uv run wealth ingest
+printf '%s' "{\"client_id\":\"ana\",\"action\":\"confirm\",\"inputs\":{\"proposal_id\":\"$PID\"}}" | uv run wealth ingest --yes
 ```
 
 **history** prints one key's timeline in words and entries:
@@ -220,7 +228,7 @@ printf '%s' '{"client_id":"ana","facts":[{"key":"liability.card","merge":true,"v
   "source":{"kind":"web","ref":"https://www.example.com/tarjetas/tasas","observed_on":"2026-09-21"}}]}' | uv run wealth remember
 CID=$(printf '%s' '{"client_id":"ana"}' | uv run wealth contradictions \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["contradictions"][0]["id"])')
-printf '%s' "{\"client_id\":\"ana\",\"contradiction_id\":\"$CID\",\"choice\":\"keep\"}" | uv run wealth resolve_contradiction
+printf '%s' "{\"client_id\":\"ana\",\"contradiction_id\":\"$CID\",\"choice\":\"keep\"}" | uv run wealth resolve_contradiction --yes
 ```
 
 **client index** attaches a host-computed embedding to a fact (Wealth creates
@@ -250,7 +258,8 @@ the latest closes now, for `symbols` or for what a client's ledger holds plus
 the FX into the reporting currency. Prices come from Yahoo Finance through
 yfinance and are cached in the Wealth database: 15 minutes for a latest price
 while markets are open (weekdays 13:30-21:00 UTC), 12 hours otherwise; a past
-day fetched after it closed is final. `WEALTH_OFFLINE=1`, or a failed fetch,
+day fetched after it closed is final. Price lookups happen per turn, for the
+symbols a client currently holds. `WEALTH_OFFLINE=1`, or a failed fetch,
 serves the cache labelled `cache_fallback`, or leaves the price missing; a
 price is never zero or guessed. A price more than five days older than the
 date it values is listed in `stale_prices`.
