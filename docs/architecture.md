@@ -135,7 +135,7 @@ Financial engines
 | `taxpack/` | The annual tax pack (MX and US working papers), its CSV files and printable page: `sources`, `book` (the year read once), `mx`, `us`, `deadlines`, `task` (`run_task`), `render` |
 | `proactive.py` | Today's ranked nudges, the weekly letter, the annual calendar |
 | `monitor.py` | Opt-in, caller-driven rule evaluation |
-| `managers.py` | SEC 13F search, holdings, profiles, comparison and mirror sizing |
+| `managers/` | SEC 13F search, holdings, profiles, comparison and mirror sizing: `edgar` (client and parsing), `positions`, `analytics`, `sleeve` (mirror), `follow`, `example`, `tasks` |
 | `_common.py` | Shared validators and result helpers |
 
 Execution
