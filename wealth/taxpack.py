@@ -1255,7 +1255,8 @@ def _mx_dividendos(book: _Book) -> dict:
             # Only the constancia: its figures are the year's, not zeros from a ledger that has no payments.
             bucket.update(domestic=_d(block.get("domestic_gross")) or ZERO,
                           foreign=_d(block.get("foreign_gross")) or ZERO,
-                          withheld=_d(block.get("isr_withheld")) or ZERO,
+                          # The total is both kinds, as the ledger path accumulates them.
+                          withheld=(_d(block.get("isr_withheld")) or ZERO) + (_d(block.get("foreign_tax_withheld")) or ZERO),
                           withheld_domestic=_d(block.get("isr_withheld")) or ZERO,
                           withheld_foreign=_d(block.get("foreign_tax_withheld")) or ZERO)
         domestic = bucket["domestic"] if bucket["known"] else None

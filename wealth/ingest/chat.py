@@ -40,18 +40,23 @@ _KIND_ALIASES = {
 _PERIODS = {
     "weekly": (52, "weekly"), "semanal": (52, "weekly"), "week": (52, "weekly"),
     "biweekly": (26, "biweekly"), "catorcenal": (26, "biweekly"), "fortnightly": (26, "biweekly"),
-    "semimonthly": (24, "semimonthly"), "quincenal": (24, "semimonthly"), "twice_monthly": (24, "semimonthly"),
+    "semimonthly": (24, "semimonthly"), "quincenal": (24, "semimonthly"), "twicemonthly": (24, "semimonthly"),
+    "twiceamonth": (24, "semimonthly"),
     "monthly": (12, "monthly"), "month": (12, "monthly"), "mensual": (12, "monthly"),
     "bimonthly": (6, None), "bimestral": (6, None), "quarterly": (4, None), "trimestral": (4, None),
-    "semiannual": (2, None), "semestral": (2, None),
+    "semiannual": (2, None), "semiannually": (2, None), "semestral": (2, None),
     "annual": (1, "annual"), "yearly": (1, "annual"), "anual": (1, "annual"), "year": (1, "annual"),
 }
 # The period said in the person's words when the model did not name one (most specific first).
 _QUOTE_PERIODS = (
-    (re.compile(r"(?i)\b(quincenal(es)?|a la quincena|por quincena|cada quincena|twice a month)\b"), "quincenal"),
-    (re.compile(r"(?i)\b(catorcenal(es)?|cada catorce d[ií]as|every two weeks|biweekly|fortnightly)\b"), "catorcenal"),
+    (re.compile(r"(?i)\b(quincenal(es)?|a la quincena|por quincena|cada quincena|twice a month|"
+                r"semi[- ]?monthly)\b"), "quincenal"),
+    (re.compile(r"(?i)\b(catorcenal(es)?|cada catorce d[ií]as|every two weeks|bi[- ]?weekly|fortnightly)\b"),
+     "catorcenal"),
     (re.compile(r"(?i)\b(semanal(es)?|a la semana|por semana|cada semana|a week|per week|weekly)\b"), "semanal"),
     (re.compile(r"(?i)\b(bimestral(es)?|cada dos meses|al bimestre|por bimestre)\b"), "bimestral"),
+    (re.compile(r"(?i)\b(trimestral(es)?|al trimestre|por trimestre|quarterly|a quarter)\b"), "trimestral"),
+    (re.compile(r"(?i)\b(semestral(es)?|al semestre|por semestre|semi[- ]?annual(ly)?|twice a year)\b"), "semestral"),
     (re.compile(r"(?i)(\bal mes\b|\bmensual(es)?\b|\bpor mes\b|\bcada mes\b|\ba month\b|\bper month\b|"
                 r"\bmonthly\b|/mes\b|/mo\b)"), "mensual"),
     (re.compile(r"(?i)\b(al a[nñ]o|anual(es)?|por a[nñ]o|a year|per year|yearly|annual)\b"), "anual"),
@@ -80,7 +85,8 @@ def _annual(item: dict[str, Any]) -> tuple[Any, str | None, str | None]:
     amount = parse_amount(item.get("amount"))
     if amount is None:
         return item.get("amount"), None, None
-    period = str(item.get("frequency") or item.get("period") or "").strip().lower().replace("-", "_")
+    # "semi-monthly", "semi_monthly", "Semi Monthly" and "semimonthly" are one period.
+    period = re.sub(r"[\s_-]+", "", str(item.get("frequency") or item.get("period") or "").strip().lower())
     if period not in _PERIODS:
         period = next((name for pattern, name in _QUOTE_PERIODS if pattern.search(str(item.get("quote") or ""))),
                       period)

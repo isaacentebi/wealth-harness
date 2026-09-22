@@ -669,6 +669,9 @@ def test_a_us_citizen_is_a_us_person_without_saying_so(service):
     ("gano 85 mil al mes", 85000, "monthly", "1020000", 85000),
     ("cobro 30 mil bimestral de rentas", 30000, "annual", "180000", None),  # no bimonthly frequency: the year's
     ("gano 900 mil al año", 900000, "annual", "900000", None),
+    ("I make 10,000 semi-monthly", 10000, "semimonthly", "240000", 20000),  # not "monthly" after the hyphen
+    ("I make 10,000 semimonthly", 10000, "semimonthly", "240000", 20000),
+    ("I get paid 10,000 bi-weekly", 10000, "biweekly", "260000", 21666.67),
 ])
 def test_chat_income_keeps_its_pay_period(service, said, amount, frequency, annual, monthly):
     """Before: "quincenal" was annualized at 24 but saved as biweekly (26 a year), so 10,000 a quincena read as
@@ -691,3 +694,27 @@ def test_a_quincenal_payment_is_counted_twice_a_month(service):
         "kind": "auto", "balance": 100000, "currency": "MXN", "annual_rate": 0.12, "payment": 2500,
         "payment_frequency": "semimonthly"}, "source": said}])
     assert service.situation("mariana")["liabilities"][0]["monthly_payment"] == 5000
+
+
+@pytest.mark.parametrize("frequency", ["semi-monthly", "semi_monthly", "Semi Monthly", "semimonthly", "twice-monthly"])
+def test_a_semimonthly_frequency_in_any_spelling_is_24_a_year(service, frequency):
+    chat = service.ingest("mariana", "chat", {"currency": "MXN", "items": [
+        {"kind": "income", "label": "Ingreso", "amount": 10000, "frequency": frequency,
+         "quote": "me pagan 10,000 de sueldo"}]})
+    assert chat["result"]["household"]["income_exposures"][0]["annual_amount"] == "240000"
+
+
+def test_a_constancia_only_withholding_total_includes_foreign_tax(service):
+    """Before: the form-only path totalled Mexican ISR alone while listing the foreign tax beside it."""
+    _save_all(service)
+    current = service.inspect("mariana")["facts"]
+    key = next(f["key"] for f in current if f["key"].startswith("constancia.") and "dividendos" in (f["value"] or {}))
+    fact = next(f for f in current if f["key"] == key)
+    service.remember("mariana", [{"key": key, "value": {"dividendos": {**fact["value"]["dividendos"],
+                                                                       "foreign_tax_withheld": 150}},
+                                  "source": {"kind": "user", "ref": "chat", "observed_on": "2026-09-01"}},
+                                 {"key": "client.profile", "value": {"residence": {"country": "MX"}},
+                                  "source": {"kind": "user", "ref": "chat", "observed_on": "2026-09-01"}}])
+    report = service.run("tax_pack", inputs={"tax_year": 2025}, client_id="mariana")
+    broker = report["result"]["sections"]["mx_dividendos"]["summary"]["brokers"][0]
+    assert broker["withheld_mxn"] == "432.59"  # 282.59 ISR + 150.00 abroad
