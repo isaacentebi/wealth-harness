@@ -343,6 +343,10 @@ STATIC_DIR = Path(__file__).with_name("static")
 STATIC_FILES = {
     "chat.css": "text/css",
     "chat.js": "text/javascript",
+    "profile.css": "text/css",
+    "profile.js": "text/javascript",
+    "review.css": "text/css",
+    "review.js": "text/javascript",
 }
 
 
