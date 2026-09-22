@@ -242,6 +242,33 @@ def test_a_failed_attempt_waits_three_hours_before_retrying(db):
     assert calls == 1 and rates.reference("MXN", db_path=later, on=TODAY, refresh=False)["origin"] == "fetched"
 
 
+def test_a_tenor_missing_from_a_partial_refresh_is_retried_on_its_own_schedule(db):
+    no_52 = Fake({
+        rates.FISCAL_DATA_URL: {**fixture("fiscaldata_bills.json"), "data": [
+            r for r in fixture("fiscaldata_bills.json")["data"] if r["security_term"] != "52-Week"]},
+        rates.TREASURYDIRECT_URL: [r for r in fixture("treasurydirect_bills.json") if r["securityTerm"] != "52-Week"],
+    })
+    result = seed(db, group="us", fake=no_52, now=datetime.now(timezone.utc) - timedelta(hours=4))
+    assert "us_tbill_52w" in result["failed"] and "us_tbill_13w" not in result["failed"]
+    fake = Fake()
+    rates.reference("USD", db_path=db, on=TODAY, offline=False, transport=fake)
+    rates.wait(5)
+    assert fake.calls == []  # the 13-week bill was fetched four hours ago: fresh
+    rates.reference("USD", db_path=db, on=TODAY, series="us_tbill_52w", offline=False, transport=fake)
+    rates.wait(5)
+    assert fake.calls  # the 52-week bill failed four hours ago: due again after three hours
+    assert rates.reference("USD", db_path=db, on=TODAY, series="us_tbill_52w", refresh=False)["origin"] == "fetched"
+
+
+def test_longer_cetes_without_a_token_wait_like_a_failure_instead_of_refetching_every_lookup(db):
+    result = seed(db, now=datetime.now(timezone.utc) - timedelta(hours=1))
+    assert result["failed"] == [] and set(result["needs_token"]) == {"mx_cetes_91d", "mx_cetes_182d", "mx_cetes_364d"}
+    fake = Fake()
+    ref = rates.reference("MXN", db_path=db, on=TODAY, series="mx_cetes_91d", offline=False, transport=fake)
+    rates.wait(5)
+    assert fake.calls == [] and "token" in ref["note"]
+
+
 def test_offline_never_touches_the_network(db, monkeypatch):
     fake = Fake()
     ref = rates.reference("MXN", db_path=db, on=TODAY, transport=fake)  # conftest sets WEALTH_OFFLINE=1

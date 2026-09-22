@@ -84,7 +84,7 @@ SERIES: dict[str, dict[str, str]] = {
     "mx_cetes_364d": {"currency": "MXN", "group": "mx", "name": "CETES 364 days", "sie": "SF43945", "days": "364"},
 }
 DEFAULT_SERIES = {"USD": "us_tbill_13w", "MXN": "mx_cetes_28d"}
-PRIMARY = {"us": "us_tbill_13w", "mx": "mx_cetes_28d"}  # a group is refreshed when its primary series is due
+PRIMARY = {"us": "us_tbill_13w", "mx": "mx_cetes_28d"}  # the series each group's no-token path always covers
 BUILTIN = {"us_tbill_13w": TBILL_13W_REFERENCE, "mx_cetes_28d": CETES_28D_REFERENCE}
 _TERMS = {meta["term"]: key for key, meta in SERIES.items() if "term" in meta}
 _MONTHS = {"ENE": 1, "JAN": 1, "FEB": 2, "MAR": 3, "ABR": 4, "APR": 4, "MAY": 5, "JUN": 6, "JUL": 7, "AGO": 8,
@@ -352,24 +352,25 @@ def refresh_group(db_path, group: str, *, transport: Transport | None = None, no
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     transport = transport or default_transport()
     wanted = [k for k, m in SERIES.items() if m["group"] == group]
+    token = None
     if group == "us":
         found, errors = fetch_us(transport, now.date())
     elif group == "mx":
         token = (token_loader or banxico_token)()
         found, errors = fetch_mx(transport, now.date(), token)
-        if token is None:
-            wanted = ["mx_cetes_28d"]  # the longer tenors need a SIE token
     else:
         raise ValueError("rate groups are us and mx")
     retrieved = now.isoformat(timespec="seconds")
     detail = "; ".join(errors)[:300] or "not in the provider's response"
+    no_token = group == "mx" and token is None
     # One transaction for every series: a write cut short (a daemon thread at exit) rolls back whole.
     with _store(db_path) as store, store.atomic():
         for series in wanted:
             obs, log = found.get(series), {"symbol": _symbol(series), "kind": "close", "retrieved_at": retrieved}
             if obs is None:
+                reason = "needs a Banxico SIE token" if no_token and series != PRIMARY[group] else detail
                 store.put_market([], {**log, "start": now.date().isoformat(), "end": now.date().isoformat(),
-                                      "status": "failed", "detail": detail})
+                                      "status": "failed", "detail": reason})
                 continue
             store.put_market([{"symbol": _symbol(series), "kind": "close", "date": obs["as_of"],
                                "value": _text(obs["rate"]), "currency": SERIES[series]["currency"],
@@ -377,7 +378,9 @@ def refresh_group(db_path, group: str, *, transport: Transport | None = None, no
                              {**log, "start": obs["as_of"], "end": obs["as_of"], "status": "ok"})
     return {"group": group, "fetched": {k: {"rate": _text(v["rate"]), "as_of": v["as_of"]} for k, v in found.items()
                                         if k in wanted},
-            "failed": [k for k in wanted if k not in found], "errors": errors}
+            "failed": [k for k in wanted if k not in found and not (no_token and k != PRIMARY[group])],
+            **({"needs_token": [k for k in wanted if k not in found and k != PRIMARY[group]]} if no_token else {}),
+            "errors": errors}
 
 
 _PENDING: dict[tuple[str, str], futures.Future] = {}
@@ -533,7 +536,7 @@ def reference(currency: str | None, *, fact: Mapping[str, Any] | None = None, db
         try:
             with _store(db_path) as store:
                 row = _last_row(store, series, day)
-                due = refresh and not offline and _due(store, PRIMARY[group], datetime.now(timezone.utc))
+                due = refresh and not offline and _due(store, series, datetime.now(timezone.utc))
         except Exception:  # noqa: BLE001 - the cache is optional; a turn never fails over it
             row, due = None, False
         try:
